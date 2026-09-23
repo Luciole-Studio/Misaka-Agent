@@ -23,12 +23,13 @@ from misaka.agent.types import (
     AgentTool,
     AgentToolCall,
     AgentToolResult,
+    AgentTurnContext,
     BeforeToolCallContext,
     BeforeToolCallResult,
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
-    ShouldStopAfterTurnContext,
+    PrepareRequestContext,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
@@ -38,12 +39,20 @@ from misaka.agent.types import (
 from misaka.ai.types import (
     AssistantMessage,
     Context,
+    SystemMessage,
     TextContent,
     ToolResultMessage,
     validate_message,
     validate_user_content,
 )
 from misaka.ai.utils.event_stream import EventStream, spawn_stream_task
+from misaka.ai.utils.transcript import (
+    ToolStateChanges,
+    get_current_tools,
+    get_tool_state_changes,
+    normalize_context,
+    to_tool_declaration,
+)
 from misaka.ai.utils.validation import validate_tool_arguments
 from misaka.utils.values import maybe_await, signal_aborted
 
@@ -160,18 +169,18 @@ async def run_agent_loop(
     signal: Any | None = None,
     stream_fn=None,
 ) -> list[AgentMessage]:
-    new_messages = [_copy_agent_message(prompt) for prompt in prompts]
+    initial_messages = declare_tool_changes(context, [_copy_agent_message(prompt) for prompt in prompts])
+    new_messages = [*initial_messages]
     current_context = AgentContext(
-        systemPrompt=context.systemPrompt,
-        messages=[*_copy_agent_messages(context.messages), *new_messages],
+        messages=[*_copy_agent_messages(context.messages), *initial_messages],
         tools=_copy_tools(context.tools),
     )
 
     await _emit(emit, AgentStartEvent())
     await _emit(emit, TurnStartEvent())
-    for prompt in new_messages:
-        await _emit(emit, MessageStartEvent(message=prompt))
-        await _emit(emit, MessageEndEvent(message=prompt))
+    for message in initial_messages:
+        await _emit(emit, MessageStartEvent(message=message))
+        await _emit(emit, MessageEndEvent(message=message))
 
     resolved_stream_fn = stream_fn if stream_fn is not None else get_default_stream_fn()
     await _run_loop(current_context, new_messages, config, signal, emit, resolved_stream_fn)
@@ -192,7 +201,6 @@ async def run_agent_loop_continue(
 
     new_messages: list[AgentMessage] = []
     current_context = AgentContext(
-        systemPrompt=context.systemPrompt,
         messages=_copy_agent_messages(context.messages),
         tools=_copy_tools(context.tools),
     )
@@ -212,15 +220,21 @@ async def _run_loop(
     emit: AgentEventSink,
     stream_fn,
 ) -> None:
+    """Main loop logic shared by agentLoop and agentLoopContinue."""
     current_context = initial_context
     config = initial_config
-    last_completed_turn: ShouldStopAfterTurnContext | None = None
+    last_completed_turn: AgentTurnContext | None = None
+    explicit_continuation = False
+    # Check for steering messages at start (user may have typed while waiting)
     pending_messages = list(await maybe_await(config.getSteeringMessages()) if config.getSteeringMessages else [])
 
+    # Outer loop: continues when queued follow-up messages arrive after agent would stop
     while True:
         has_more_tool_calls = True
 
+        # Inner loop: process tool calls and steering messages
         while has_more_tool_calls or pending_messages:
+            prepared_messages: list[AgentMessage] = []
             if last_completed_turn is not None:
                 next_turn_snapshot = (
                     await maybe_await(config.prepareNextTurn(last_completed_turn))
@@ -229,6 +243,7 @@ async def _run_loop(
                 )
                 if next_turn_snapshot:
                     current_context = next_turn_snapshot.context or current_context
+                    prepared_messages = list(next_turn_snapshot.messages or [])
                     config = replace(
                         config,
                         model=next_turn_snapshot.model or config.model,
@@ -241,9 +256,9 @@ async def _run_loop(
                         ),
                     )
 
-                # Preparation may take long enough for new steering to arrive. Do not
-                # drain twice when the earlier poll already yielded a message in
-                # one-at-a-time mode.
+                # Preparation can be long-running (for example, compaction). Pick up steering
+                # queued while it ran. Only poll again if the earlier poll returned nothing;
+                # otherwise one-at-a-time mode would deliver two messages in this turn.
                 if not pending_messages:
                     pending_messages = list(
                         await maybe_await(config.getSteeringMessages())
@@ -252,27 +267,69 @@ async def _run_loop(
                     )
                 await _emit(emit, TurnStartEvent())
 
-            if pending_messages:
-                for message in pending_messages:
-                    copied = _copy_agent_message(message)
-                    await _emit(emit, MessageStartEvent(message=copied))
-                    await _emit(emit, MessageEndEvent(message=copied))
-                    current_context.messages.append(copied)
-                    new_messages.append(copied)
-                pending_messages = []
+            # Process prepared and queued messages before the next assistant response.
+            for message in declare_tool_changes(
+                current_context, [_copy_agent_message(m) for m in [*prepared_messages, *pending_messages]]
+            ):
+                await _emit(emit, MessageStartEvent(message=message))
+                await _emit(emit, MessageEndEvent(message=message))
+                current_context.messages.append(message)
+                new_messages.append(message)
+            pending_messages = []
 
+            request_update = (
+                await maybe_await(
+                    config.prepareRequest(
+                        PrepareRequestContext(
+                            context=current_context,
+                            model=config.model,
+                            thinkingLevel=config.reasoning or "off",
+                        ),
+                        signal,
+                    )
+                )
+                if config.prepareRequest
+                else None
+            )
+            if request_update:
+                current_context = request_update.context or current_context
+                config = replace(
+                    config,
+                    model=request_update.model or config.model,
+                    reasoning=(
+                        config.reasoning
+                        if request_update.thinkingLevel is None
+                        else None
+                        if request_update.thinkingLevel == "off"
+                        else request_update.thinkingLevel
+                    ),
+                )
+
+            # Stream assistant response
             message = await stream_assistant_response(current_context, config, signal, emit, stream_fn)
             new_messages.append(message)
 
             if message.stopReason in {"error", "aborted"}:
+                last_completed_turn = AgentTurnContext(
+                    message=message,
+                    toolResults=[],
+                    context=current_context,
+                    newMessages=new_messages,
+                )
+                if config.finishTurn:
+                    await maybe_await(config.finishTurn(last_completed_turn, signal))
                 await _emit(emit, TurnEndEvent(message=message, toolResults=[]))
                 await _emit(emit, AgentEndEvent(messages=new_messages[:]))
                 return
 
+            # Check for tool calls
             tool_calls = [block for block in message.content if block.type == "toolCall"]
             tool_results: list[ToolResultMessage] = []
             has_more_tool_calls = False
             if tool_calls:
+                # A "length" stop means the output was cut off by the token limit, so
+                # every tool call in the message may carry truncated arguments. Fail
+                # them all instead of executing potentially borked calls.
                 executed_tool_batch = (
                     await _fail_tool_calls_from_truncated_message(tool_calls, emit)
                     if message.stopReason == "length"
@@ -287,37 +344,123 @@ async def _run_loop(
                     current_context.messages.append(result)
                     new_messages.append(result)
 
-            await _emit(emit, TurnEndEvent(message=message, toolResults=tool_results))
-
-            last_completed_turn = ShouldStopAfterTurnContext(
+            last_completed_turn = AgentTurnContext(
                 message=message,
                 toolResults=tool_results,
                 context=current_context,
                 newMessages=new_messages,
             )
-            should_stop = (
-                await maybe_await(config.shouldStopAfterTurn(last_completed_turn))
-                if config.shouldStopAfterTurn
-                else False
+            decision = (
+                await maybe_await(config.finishTurn(last_completed_turn, signal)) if config.finishTurn else None
             )
-            if should_stop:
+            await _emit(emit, TurnEndEvent(message=message, toolResults=tool_results))
+            if _decision_action(decision) == "end":
                 await _emit(emit, AgentEndEvent(messages=new_messages[:]))
                 return
+            explicit_continuation = _decision_action(decision) == "continue"
 
             pending_messages = list(
                 await maybe_await(config.getSteeringMessages()) if config.getSteeringMessages else []
             )
+            if has_more_tool_calls or pending_messages:
+                explicit_continuation = False
 
+        # Agent would stop here. Check for follow-up messages.
         follow_up_messages = list(
             await maybe_await(config.getFollowUpMessages()) if config.getFollowUpMessages else []
         )
         if follow_up_messages:
+            # Set as pending so inner loop processes them
+            explicit_continuation = False
             pending_messages = follow_up_messages
             continue
 
+        # No natural request was selected, so fulfill the continuation decision with one context-only turn.
+        if explicit_continuation:
+            explicit_continuation = False
+            continue
+
+        # No more messages, exit
         break
 
     await _emit(emit, AgentEndEvent(messages=new_messages[:]))
+
+
+def _decision_action(decision: Any) -> str | None:
+    """``decision?.action``: the decision may be a dataclass or a plain mapping."""
+    if decision is None:
+        return None
+    if isinstance(decision, dict):
+        return decision.get("action")
+    return getattr(decision, "action", None)
+
+
+def declare_tool_changes(context: AgentContext, pending_messages: list[AgentMessage]) -> list[AgentMessage]:
+    """Declare tool loadout changes to the model.
+
+    `context.tools` is what the runtime can execute; the transcript's system messages declare
+    what the model may call. Before each request the difference becomes `toolsAdded` and
+    `toolsRemoved` on a system message. When a pending system message exists, its tool fields
+    are treated as intent and replaced with the delta between the committed transcript and
+    the executable set, so replay always yields exactly `context.tools`. Otherwise a new
+    system message is inserted before the first non-system pending message.
+    """
+    system_index = -1
+    for i in range(len(pending_messages) - 1, -1, -1):
+        if _role(pending_messages[i]) == "system":
+            system_index = i
+            break
+    pending = pending_messages[system_index] if system_index >= 0 else None
+    baseline = (
+        [
+            _with_tool_changes(pending, NO_CHANGES) if index == system_index else message
+            for index, message in enumerate(pending_messages)
+        ]
+        if pending is not None
+        else pending_messages
+    )
+    changes = get_tool_state_changes(
+        get_current_tools([*context.messages, *baseline]),
+        [to_tool_declaration(tool) for tool in context.tools or []],
+    )
+    unchanged = len(changes.toolsAdded) == 0 and len(changes.toolsRemoved) == 0
+    if pending is not None:
+        # Keep the caller's message object when it already declares no tool changes.
+        if unchanged and not pending.toolsAdded and not pending.toolsRemoved:
+            return pending_messages
+        return [
+            _with_tool_changes(pending, changes) if index == system_index else message
+            for index, message in enumerate(baseline)
+        ]
+    if unchanged:
+        return pending_messages
+    update = _with_tool_changes(SystemMessage(content="", timestamp=int(time.time() * 1000)), changes)
+    insert_index = next(
+        (index for index, message in enumerate(pending_messages) if _role(message) != "system"),
+        -1,
+    )
+    index = len(pending_messages) if insert_index == -1 else insert_index
+    return [*pending_messages[:index], update, *pending_messages[index:]]
+
+
+NO_CHANGES = ToolStateChanges(toolsAdded=[], toolsRemoved=[])
+
+
+def _role(message: Any) -> Any:
+    # Custom messages (`create_custom_message`) are plain mappings; the rest are models.
+    if isinstance(message, dict):
+        return message.get("role")
+    return getattr(message, "role", None)
+
+
+def _with_tool_changes(message: SystemMessage, changes: ToolStateChanges) -> SystemMessage:
+    """Copy a system message with its tool fields replaced by `changes`; empty lists omit the field."""
+    return message.model_copy(
+        update={
+            "toolsAdded": list(changes.toolsAdded) if len(changes.toolsAdded) > 0 else None,
+            "toolsRemoved": list(changes.toolsRemoved) if len(changes.toolsRemoved) > 0 else None,
+        }
+    )
 
 
 async def stream_assistant_response(
@@ -333,11 +476,7 @@ async def stream_assistant_response(
 
     llm_messages = list(await maybe_await(config.convertToLlm(messages)))
     validated_messages = [validate_message(_model_dump(message)) for message in llm_messages]
-    llm_context = Context(
-        systemPrompt=context.systemPrompt,
-        messages=validated_messages,
-        tools=_copy_tools(context.tools),
-    )
+    llm_context = normalize_context(Context(messages=validated_messages))
     stream_function = stream_fn if stream_fn is not None else get_default_stream_fn()
     resolved_api_key = (
         await maybe_await(config.getApiKey(config.model.provider))
@@ -803,8 +942,7 @@ async def finalize_executed_tool_call(
             if after_result is not None:
                 normalized_after_result = _coerce_after_tool_call_result(after_result)
                 # pi spreads the executed result first ({...result, content, details, usage,
-                # terminate}), so every field the hook leaves undefined survives — including
-                # addedToolNames, which the hook cannot set at all.
+                # terminate}), so every field the hook leaves undefined survives.
                 result = AgentToolResult(
                     content=(
                         normalized_after_result.content
@@ -821,7 +959,6 @@ async def finalize_executed_tool_call(
                         if normalized_after_result.usage is not None
                         else result.usage
                     ),
-                    addedToolNames=result.addedToolNames,
                     terminate=(
                         normalized_after_result.terminate
                         if normalized_after_result.terminate is not None
@@ -861,7 +998,6 @@ async def emit_tool_execution_end(finalized: FinalizedToolCallOutcome, emit: Age
 
 
 def create_tool_result_message(finalized: FinalizedToolCallOutcome) -> ToolResultMessage:
-    added_tool_names = finalized.result.addedToolNames
     return ToolResultMessage(
         toolCallId=finalized.toolCall.id,
         toolName=finalized.toolCall.name,
@@ -871,9 +1007,6 @@ def create_tool_result_message(finalized: FinalizedToolCallOutcome) -> ToolResul
         content=[validate_user_content(_model_dump(block)) for block in finalized.result.content or []],
         details=finalized.result.details,
         usage=finalized.result.usage,
-        # pi only spreads the key when the list is non-empty, so an empty diff leaves the
-        # transcript entry exactly as it was before addedToolNames existed.
-        addedToolNames=list(added_tool_names) if added_tool_names else None,
         isError=finalized.isError,
         timestamp=int(time.time() * 1000),
     )
@@ -994,12 +1127,10 @@ def _coerce_agent_tool_result(value: AgentToolResult | dict[str, Any]) -> AgentT
         validate_user_content(_model_dump(block))
         for block in value.get("content") or []  # explicit `content: None` is the same as absent
     ]
-    added_tool_names = value.get("addedToolNames")
     return AgentToolResult(
         content=content,
         details=value.get("details"),
         usage=value.get("usage"),
-        addedToolNames=list(added_tool_names) if added_tool_names else None,
         terminate=value.get("terminate"),
     )
 
@@ -1039,6 +1170,7 @@ __all__ = [
     "AgentEventSink",
     "agent_loop",
     "create_tool_result_message",
+    "declare_tool_changes",
     "emit_tool_result_message",
     "execute_tool_calls",
     "run_agent_loop",

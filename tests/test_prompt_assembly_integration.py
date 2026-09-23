@@ -118,7 +118,7 @@ async def assembled(home, role, kind, *, research=False, custom=False, prompt_fl
 
 async def final_prompt(session):
     await session._prepare_agent_start([], "Offline prompt assembly check", None)
-    return session.state.systemPrompt
+    return session.systemPrompt
 
 
 @pytest.mark.parametrize(("role", "kind", "research"), [
@@ -272,7 +272,7 @@ async def test_durable_sister_real_child_flags_retain_persona_and_current_tool_g
         assert persona in text
         assert text.count(identity.COMMON_CHARTER) == text.count(identity.SISTER_ROLE) == 1
         assert text.count(RESEARCH_SISTER_DISCIPLINE) == 1
-        assert "Available tools:" in text and "## Sub-agents" in text
+        assert "<tools>" in text and "## Sub-agents" in text
         assert "office" in session.getActiveToolNames()
         for guideline in office_tool_system_prompt_contribution["guidelines"]:
             assert guideline in text
@@ -299,7 +299,7 @@ async def test_research_scope_keeps_enabled_user_questions(prompt_home, tools):
         with session.toolScope(list(names)):
             assert "AskUserQuestion" in session.getActiveToolNames()
             assert "- AskUserQuestion:" in await final_prompt(session)
-            assert "Ask only when the answer materially changes" in session.state.systemPrompt
+            assert "Ask only when the answer materially changes" in session.systemPrompt
         session.setActiveToolsByName(["read"])
         assert "AskUserQuestion" not in planner.session_tools(SimpleNamespace(session=session), allowed)
 

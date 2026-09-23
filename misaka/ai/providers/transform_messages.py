@@ -10,6 +10,7 @@ from misaka.ai.types import (
     ImageContent,
     MessageValue,
     Model,
+    SystemMessage,
     TextContent,
     ToolCall,
     ToolResultMessage,
@@ -74,7 +75,8 @@ def transform_messages(
 
     transformed: list[MessageValue] = []
     for message in image_aware_messages:
-        if isinstance(message, UserMessage):
+        # System and user messages pass through unchanged
+        if isinstance(message, SystemMessage | UserMessage):
             transformed.append(message)
             continue
 
@@ -137,29 +139,39 @@ def transform_messages(
     result: list[MessageValue] = []
     pending_tool_calls: list[ToolCall] = []
     existing_tool_result_ids: set[str] = set()
+    # System messages are transparent to tool-call accounting: one that lands between a tool
+    # call and its results is held back and emitted after the results (synthetic ones
+    # included), so it never causes a duplicate result for a call that is answered later.
+    held_system_messages: list[SystemMessage] = []
 
-    def insert_synthetic_tool_results() -> None:
+    def close_pending_tool_calls() -> None:
         nonlocal pending_tool_calls, existing_tool_result_ids
-        if not pending_tool_calls:
-            return
-        for tool_call in pending_tool_calls:
-            if tool_call.id in existing_tool_result_ids:
-                continue
-            result.append(
-                ToolResultMessage(
-                    toolCallId=tool_call.id,
-                    toolName=tool_call.name,
-                    content=[TextContent(text="No result provided")],
-                    isError=True,
-                    timestamp=time.time_ns() // 1_000_000,
+        if pending_tool_calls:
+            for tool_call in pending_tool_calls:
+                if tool_call.id in existing_tool_result_ids:
+                    continue
+                result.append(
+                    ToolResultMessage(
+                        toolCallId=tool_call.id,
+                        toolName=tool_call.name,
+                        content=[TextContent(text="No result provided")],
+                        isError=True,
+                        timestamp=time.time_ns() // 1_000_000,
+                    )
                 )
-            )
-        pending_tool_calls = []
-        existing_tool_result_ids = set()
+            pending_tool_calls = []
+            existing_tool_result_ids = set()
+        result.extend(held_system_messages)
+        held_system_messages.clear()
 
     for message in transformed:
         if isinstance(message, AssistantMessage):
-            insert_synthetic_tool_results()
+            # If we have pending orphaned tool calls from a previous assistant, insert synthetic results now
+            close_pending_tool_calls()
+            # Skip errored/aborted assistant messages entirely.
+            # These are incomplete turns that shouldn't be replayed:
+            # - May have partial content (reasoning without message, incomplete tool calls)
+            # - Tool calls from errored messages don't have results
             if message.stopReason in {"error", "aborted"}:
                 continue
             tool_calls = [block for block in message.content if block.type == "toolCall"]
@@ -174,14 +186,23 @@ def transform_messages(
             result.append(message)
             continue
 
+        if isinstance(message, SystemMessage):
+            if pending_tool_calls:
+                held_system_messages.append(message)
+            else:
+                result.append(message)
+            continue
+
         if isinstance(message, UserMessage):
-            insert_synthetic_tool_results()
+            # A new user turn interrupts tool flow - insert synthetic results for orphaned calls
+            close_pending_tool_calls()
             result.append(message)
             continue
 
         result.append(message)
 
-    insert_synthetic_tool_results()
+    # If the conversation ends with unresolved tool calls, synthesize results now.
+    close_pending_tool_calls()
     return result
 
 

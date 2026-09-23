@@ -52,9 +52,14 @@ def is_task_message(message) -> bool:
 
 def is_memory(message) -> bool:
     """Whether a message belongs in the archive: everything but a custom message its sender
-    marked ``moments.MEMORY`` False (a feed entry the model is never shown again)."""
+    marked ``moments.MEMORY`` False (a feed entry the model is never shown again), and but
+    a system message (pi 0.87: the prompt and tool declarations ride the transcript as
+    system messages; they are prompt state, not conversation, and the compaction entry
+    carries their replay -- the engine must neither archive nor replace them)."""
     from misaka.core.moments import MEMORY
 
+    if read_field(message, 'role') == 'system':
+        return False
     details = read_field(message, 'details')
     return not (isinstance(details, dict) and details.get(MEMORY) is False)
 

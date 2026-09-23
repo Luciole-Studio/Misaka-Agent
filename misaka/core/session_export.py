@@ -17,16 +17,11 @@ from misaka.utils.paths import resolve_path
 type CreateTrailingEntries = Callable[[str | None, str], Sequence[object] | None]
 
 
-def export_session_to_jsonl(
+def serialize_session_branch(
     session_manager: SessionManager,
-    output_path: str | None = None,
     create_trailing_entries: CreateTrailingEntries | None = None,
 ) -> str:
-    """Write the current branch plus optional export-only trailing entries."""
-    resolved_output = output_path or (
-        f"session-{datetime.now(UTC).isoformat(timespec='milliseconds').replace(':', '-').replace('.', '-')}.jsonl"
-    )
-    file_path = resolve_path(resolved_output, os.getcwd())
+    """Serialize the current branch and optional export-only entries as JSONL."""
     timestamp = (
         datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     )
@@ -56,15 +51,30 @@ def export_session_to_jsonl(
     if trailing_entries is not None:
         for entry in trailing_entries:
             lines.append(_dump_json(entry))
+    return "\n".join(lines) + "\n"
 
-    atomic.write_text(file_path, "\n".join(lines) + "\n")
+
+def export_session_to_jsonl(
+    session_manager: SessionManager,
+    output_path: str | None = None,
+    create_trailing_entries: CreateTrailingEntries | None = None,
+) -> str:
+    """Write the current session branch and optional export-only entries as JSONL."""
+    resolved_output = output_path or (
+        f"session-{datetime.now(UTC).isoformat(timespec='milliseconds').replace(':', '-').replace('.', '-')}.jsonl"
+    )
+    file_path = resolve_path(resolved_output, os.getcwd())
+    atomic.write_text(file_path, serialize_session_branch(session_manager, create_trailing_entries))
     return file_path
 
 
 exportSessionToJsonl = export_session_to_jsonl
+serializeSessionBranch = serialize_session_branch
 
 __all__ = [
     "CreateTrailingEntries",
     "exportSessionToJsonl",
     "export_session_to_jsonl",
+    "serializeSessionBranch",
+    "serialize_session_branch",
 ]

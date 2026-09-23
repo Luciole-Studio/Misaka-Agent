@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, Literal, TypedDict
 
 try:
@@ -51,7 +51,6 @@ from misaka.ai.providers.transform_messages import transform_messages
 from misaka.ai.types import (
     AssistantMessage,
     CacheRetention,
-    Context,
     DoneEvent,
     ErrorEvent,
     Model,
@@ -72,6 +71,7 @@ from misaka.ai.types import (
     ToolCallEndEvent,
     ToolCallStartEvent,
     ToolResultMessage,
+    TranscriptContext,
     Usage,
     UsageCost,
 )
@@ -84,6 +84,12 @@ from misaka.ai.utils.headers import (
 from misaka.ai.utils.json_parse import StreamingArgs
 from misaka.ai.utils.provider_retry import retry_provider_request
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
+from misaka.ai.utils.text import get_system_message_text, render_system_message_update
+from misaka.ai.utils.transcript import (
+    get_declared_tools,
+    resolve_transcript,
+    resolve_transcript_tools,
+)
 from misaka.ai.utils.user_agent import get_misaka_user_agent
 from misaka.utils.values import maybe_await, read_field, signal_aborted
 
@@ -230,10 +236,11 @@ def has_tool_history(messages: list[Any]) -> bool:
 
 def stream_openai_completions(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: StreamOptions | dict[str, Any] | None = None,
 ) -> AssistantMessageEventStream:
     stream = AssistantMessageEventStream()
+    normalized_context = resolve_transcript(context, get_compat(model).get("supportsMidConvoSystemMessages"))
 
     async def run() -> None:
         output = AssistantMessage(
@@ -255,14 +262,14 @@ def stream_openai_completions(
                 cache_session_id = None if cache_retention == "none" else _option(options, "sessionId")
                 client = create_client(
                     model,
-                    context,
+                    normalized_context,
                     api_key,
                     _option(options, "headers"),
                     cache_session_id,
                     compat,
                 )
 
-            params = build_params(model, context, options, compat)
+            params = build_params(model, normalized_context, options, compat)
             on_payload = _option(options, "onPayload")
             if callable(on_payload):
                 next_params = await maybe_await(on_payload(params, model))
@@ -286,7 +293,8 @@ def stream_openai_completions(
             # One JSON re-encoder per grammar tool call in flight.
             tool_call_custom_buffers: dict[int, GrammarToolInputJsonBuffer] = {}
             grammar_tool_input_properties = create_grammar_tool_input_properties(
-                context.tools, bool(get_compat(model).get("supportsOpenAIGrammarTools"))
+                get_declared_tools(normalized_context.messages),
+                bool(get_compat(model).get("supportsOpenAIGrammarTools")),
             )
 
             def content_index_for(block: TextContent | ThinkingContent | ToolCall) -> int:
@@ -536,7 +544,7 @@ def stream_openai_completions(
 
 def stream_simple_openai_completions(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: SimpleStreamOptions | None = None,
 ) -> AssistantMessageEventStream:
     api_key = _option(options, "apiKey") or get_env_api_key(model.provider)
@@ -557,7 +565,7 @@ def stream_simple_openai_completions(
 def build_request_headers(
     model: Model,
     compat: Mapping[str, Any],
-    context: Context | None = None,
+    context: TranscriptContext | None = None,
     options_headers: Mapping[str, str] | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
@@ -599,7 +607,7 @@ def build_request_headers(
 
 def create_client(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     api_key: str | None = None,
     options_headers: Mapping[str, str] | None = None,
     session_id: str | None = None,
@@ -641,7 +649,7 @@ def create_client(
 
 def build_params(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: Any = None,
     compat: Mapping[str, Any] | None = None,
     cache_retention: CacheRetention | None = None,
@@ -652,7 +660,11 @@ def build_params(
         _option(options, "env"),
     )
     grammar_tool_input_properties = create_grammar_tool_input_properties(
-        context.tools, bool(compat.get("supportsOpenAIGrammarTools"))
+        get_declared_tools(context.messages), bool(compat.get("supportsOpenAIGrammarTools"))
+    )
+    transcript_tools = resolve_transcript_tools(
+        context.messages,
+        compat.get("supportsMidConvoSystemMessages") is True and compat.get("supportsMidConvoToolAdditions") is True,
     )
     messages = convert_messages(model, context, compat, grammar_tool_input_properties)
     cache_control = get_compat_cache_control(compat, resolved_cache_retention)
@@ -704,16 +716,8 @@ def build_params(
         if value is not None and key not in params:
             params[key] = value
 
-    # Kimi delivers a deferred tool by declaring it in a system message next to the result
-    # that made it available, so it must not also appear in the request's own tool list.
-    deferred_tool_names = (
-        _deferred_tool_names(context.messages)
-        if compat.get("deferredToolsMode") == "kimi"
-        else set()
-    )
-    active_tools = [tool for tool in (context.tools or []) if tool.name not in deferred_tool_names]
-    if active_tools:
-        params["tools"] = convert_tools(active_tools, compat)
+    if len(transcript_tools.requestTools) > 0:
+        params["tools"] = convert_tools(transcript_tools.requestTools, compat)
         if compat.get("zaiToolStream"):
             _set_extra(params, "tool_stream", True)
     elif has_tool_history(context.messages):
@@ -725,6 +729,8 @@ def build_params(
     tool_choice = _option(options, "toolChoice")
     if tool_choice:
         params["tool_choice"] = tool_choice
+    if compat.get("vllmPriority") is not None:
+        _set_extra(params, "priority", compat["vllmPriority"])
 
     reasoning_effort = _option(options, "reasoningEffort")
     thinking_token_budget_field = _resolve_thinking_token_budget_field(compat)
@@ -990,20 +996,6 @@ def parse_legacy_encrypted_reasoning_detail(signature: str | None) -> dict[str, 
     return None
 
 
-def _deferred_tool_names(messages: list[Any]) -> set[str]:
-    """Tool names the transcript says became available part-way through."""
-    names: set[str] = set()
-    for message in messages:
-        if getattr(message, "role", None) == "toolResult":
-            names.update(message.addedToolNames or [])
-    return names
-
-
-def _tools_by_name(tools: list[Tool] | None, names: Iterable[str]) -> list[Tool]:
-    by_name = {tool.name: tool for tool in tools or []}
-    return [by_name[name] for name in names if name in by_name]
-
-
 def _replay_tool_call(tool_call: ToolCall, grammar_properties: Mapping[str, str]) -> dict[str, Any]:
     """One prior tool call, on whichever channel it came back from.
 
@@ -1032,10 +1024,11 @@ def _replay_tool_call(tool_call: ToolCall, grammar_properties: Mapping[str, str]
 
 def convert_messages(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     compat: Mapping[str, Any],
     grammar_tool_input_properties: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
+    normalized_context = resolve_transcript(context, compat.get("supportsMidConvoSystemMessages"))
     params: list[dict[str, Any]] = []
 
     def normalize_tool_call_id(tool_call_id: str, _target_model: Model, _source: AssistantMessage) -> str:
@@ -1046,11 +1039,12 @@ def convert_messages(
             return tool_call_id[:40]
         return tool_call_id
 
-    transformed_messages = transform_messages(context.messages, model, normalize_tool_call_id)
-
-    if context.systemPrompt:
-        role = "developer" if model.reasoning and compat.get("supportsDeveloperRole") else "system"
-        params.append({"role": role, "content": sanitize_surrogates(context.systemPrompt)})
+    transformed_messages = transform_messages(normalized_context.messages, model, normalize_tool_call_id)
+    transcript_tools = resolve_transcript_tools(
+        normalized_context.messages,
+        compat.get("supportsMidConvoSystemMessages") is True and compat.get("supportsMidConvoToolAdditions") is True,
+    )
+    instruction_role = "developer" if model.reasoning and compat.get("supportsDeveloperRole") else "system"
 
     last_role: str | None = None
     index = 0
@@ -1059,12 +1053,29 @@ def convert_messages(
         if compat.get("requiresAssistantAfterToolResult") and last_role == "toolResult" and message.role == "user":
             params.append({"role": "assistant", "content": "I have processed the tool results."})
 
+        if message.role == "system":
+            added_tools = (message.toolsAdded or []) if index > 0 and transcript_tools.anchorsAdditions else []
+            if len(added_tools) > 0:
+                # Kimi accepts a system message with tools but omits the standard content field.
+                kimi_tool_message = {"role": "system", "tools": convert_tools(added_tools, compat)}
+                params.append(kimi_tool_message)
+            text = get_system_message_text(message) if index == 0 else render_system_message_update(message)
+            if len(text) > 0:
+                params.append({"role": instruction_role, "content": sanitize_surrogates(text)})
+            last_role = message.role
+            index += 1
+            continue
+
         if message.role == "user":
             if isinstance(message.content, str):
                 params.append({"role": "user", "content": sanitize_surrogates(message.content)})
             else:
                 content: list[dict[str, Any]] = []
                 for item in message.content:
+                    if item.type == "text" and len(item.text) == 0:
+                        # An image-only message must not carry an empty text part; some
+                        # OpenAI-compatible providers reject it (pi #9797).
+                        continue
                     if item.type == "text":
                         content.append({"type": "text", "text": sanitize_surrogates(item.text)})
                     else:
@@ -1168,7 +1179,6 @@ def convert_messages(
 
         if message.role == "toolResult":
             image_blocks: list[dict[str, Any]] = []
-            turn_deferred_tool_names: set[str] = set()
             lookahead = index
             while lookahead < len(transformed_messages) and transformed_messages[lookahead].role == "toolResult":
                 tool_message = transformed_messages[lookahead]
@@ -1185,9 +1195,6 @@ def convert_messages(
                 if compat.get("requiresToolResultName") and tool_message.toolName:
                     tool_result_message["name"] = tool_message.toolName
                 params.append(tool_result_message)
-
-                if compat.get("deferredToolsMode") == "kimi":
-                    turn_deferred_tool_names.update(tool_message.addedToolNames or [])
 
                 if has_images and "image" in model.input:
                     for block in tool_message.content:
@@ -1212,13 +1219,6 @@ def convert_messages(
                 last_role = "user"
             else:
                 last_role = "toolResult"
-
-            if turn_deferred_tool_names:
-                deferred_tools = _tools_by_name(context.tools, turn_deferred_tool_names)
-                if deferred_tools:
-                    # Kimi takes a system message carrying tools and no content field --
-                    # that is how a tool that became available mid-conversation is declared.
-                    params.append({"role": "system", "tools": convert_tools(deferred_tools, compat)})
             index = lookahead
             continue
 
@@ -1314,11 +1314,11 @@ def detect_compat(model: Model) -> dict[str, Any]:
     is_cloudflare_workers_ai = provider == "cloudflare-workers-ai" or "api.cloudflare.com" in base_url
     is_cloudflare_ai_gateway = provider == "cloudflare-ai-gateway" or "gateway.ai.cloudflare.com" in base_url
     is_nvidia = provider == "nvidia" or "integrate.api.nvidia.com" in base_url
+    is_cerebras = provider == "cerebras" or "cerebras.ai" in base_url
     is_deepseek = provider == "deepseek" or "deepseek.com" in base_url.lower()
     is_non_standard = (
         is_nvidia
-        or provider == "cerebras"
-        or "cerebras.ai" in base_url
+        or is_cerebras
         or provider == "xai"
         or "api.x.ai" in base_url
         or is_together
@@ -1370,16 +1370,18 @@ def detect_compat(model: Model) -> dict[str, Any]:
         "openRouterRouting": {},
         "vercelGatewayRouting": {},
         "zaiToolStream": False,
-        "supportsStrictMode": not (is_moonshot or is_together or is_cloudflare_ai_gateway or is_nvidia),
+        # OpenAI compatibility alone does not imply strict JSON-schema tool support.
+        "supportsStrictMode": False,
+        "supportsMidConvoSystemMessages": False,
+        "supportsMidConvoToolAdditions": False,
         "cacheControlFormat": cache_control_format,
-        "sendSessionAffinityHeaders": False,
+        "sendSessionAffinityHeaders": is_openrouter,
         "sessionAffinityFormat": "openrouter" if is_openrouter else "openai",
         "chatTemplateKwargs": {},
         "chatTemplateArgs": {},
         "supportsThinkingTokenBudget": False,
         "thinkingTokenBudgetField": None,
         "supportsOpenAIGrammarTools": False,
-        "deferredToolsMode": None,
         "supportsFinishReason": True,
         "supportsLongCacheRetention": not (
             is_together or is_cloudflare_workers_ai or is_cloudflare_ai_gateway or is_nvidia
@@ -1429,7 +1431,12 @@ def get_compat(model: Model) -> dict[str, Any]:
         "supportsOpenAIGrammarTools": read_field(
             compat, "supportsOpenAIGrammarTools", detected["supportsOpenAIGrammarTools"]
         ),
-        "deferredToolsMode": read_field(compat, "deferredToolsMode", detected["deferredToolsMode"]),
+        "supportsMidConvoSystemMessages": read_field(
+            compat, "supportsMidConvoSystemMessages", detected["supportsMidConvoSystemMessages"]
+        ),
+        "supportsMidConvoToolAdditions": read_field(
+            compat, "supportsMidConvoToolAdditions", detected["supportsMidConvoToolAdditions"]
+        ),
         "supportsFinishReason": read_field(compat, "supportsFinishReason", detected["supportsFinishReason"]),
         "sendSessionAffinityHeaders": read_field(
             compat, "sendSessionAffinityHeaders", detected["sendSessionAffinityHeaders"]
@@ -1437,6 +1444,7 @@ def get_compat(model: Model) -> dict[str, Any]:
         "supportsLongCacheRetention": read_field(
             compat, "supportsLongCacheRetention", detected["supportsLongCacheRetention"]
         ),
+        "vllmPriority": read_field(compat, "vllmPriority", None),
     }
 
 

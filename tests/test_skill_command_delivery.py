@@ -131,7 +131,10 @@ async def test_streaming_skill_preserves_queue_choice(host, behavior, entry):
 
 
 async def test_skill_preserves_images_and_generated_message_origin(host):
-    image = {'type': 'image', 'data': 'aGVsbG8=', 'mimeType': 'image/png'}
+    # A real 1x1 PNG: pi 0.87 resizes prompt attachments to the model's profile before the
+    # request, and an undecodable image is dropped with a hint rather than sent.
+    image = {'type': 'image', 'mimeType': 'image/png',
+             'data': 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='}
     await host.session.prompt('/agent-reach inspect', {'images': [image], 'source': 'interactive'})
     # Keep the generated-message origin: pending /research questions ignore it.
     assert len(host.inputs) == 1 and read_field(host.inputs[0], 'source') == 'extension'

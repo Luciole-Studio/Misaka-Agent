@@ -46,8 +46,8 @@ from misaka.ai.types import (
     SimpleStreamOptions,
     StartEvent,
     StreamOptions,
+    TranscriptContext,
 )
-from misaka.ai.utils.deferred_tools import split_deferred_tools
 from misaka.ai.utils.diagnostics import (
     append_assistant_message_diagnostic,
     create_assistant_message_diagnostic,
@@ -55,6 +55,14 @@ from misaka.ai.utils.diagnostics import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
+from misaka.ai.utils.text import get_system_message_text
+from misaka.ai.utils.transcript import (
+    get_declared_tools,
+    get_initial_system_message,
+    normalize_context,
+    resolve_transcript,
+    resolve_transcript_tools,
+)
 from misaka.ai.utils.user_agent import get_misaka_user_agent
 from misaka.core.provider_attribution import CLIENT_NAME
 from misaka.utils.values import maybe_await, signal_aborted
@@ -346,7 +354,7 @@ register_session_resource_cleanup(close_openai_codex_websocket_sessions)
 
 def build_request_body(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: StreamOptions | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     text_verbosity = _option(options, "textVerbosity") or "low"
@@ -358,14 +366,9 @@ def build_request_body(
         "supportsStrictMode": True if strict_mode is None else bool(strict_mode),
         "supportsOpenAIGrammarTools": supports_grammar_tools,
     }
-    # Codex takes the same two hand-over shapes as the Responses endpoint; the three
-    # tool-search models in the catalog are all on this provider.
-    deferred_tools_mode = (
-        "additional-tools" if getattr(compat, "supportsAdditionalTools", None)
-        else "tool-search" if getattr(compat, "supportsToolSearch", None)
-        else None
-    )
-    placement = split_deferred_tools(context, deferred_tools_mode is not None)
+    supports_additional_tools = bool(getattr(compat, "supportsAdditionalTools", None))
+    supports_tool_search = bool(getattr(compat, "supportsToolSearch", None))
+    transcript_tools = resolve_transcript_tools(context.messages, supports_additional_tools or supports_tool_search)
     messages = convert_responses_messages(
         model,
         context,
@@ -373,18 +376,21 @@ def build_request_body(
         {
             "includeSystemPrompt": False,
             "grammarToolInputProperties": create_grammar_tool_input_properties(
-                context.tools, supports_grammar_tools,
+                get_declared_tools(context.messages), supports_grammar_tools,
             ),
-            "deferredTools": placement.deferred,
-            "deferredToolsMode": deferred_tools_mode,
+            "supportsMidConvoSystemMessages": bool(getattr(compat, "supportsMidConvoSystemMessages", None)),
+            "supportsAdditionalTools": supports_additional_tools,
+            "supportsToolSearch": supports_tool_search,
             "toolOptions": tool_options,
         },
     )
+    initial_system_message = get_initial_system_message(context.messages)
+    instructions = get_system_message_text(initial_system_message) if initial_system_message else ""
     body: dict[str, Any] = {
         "model": model.id,
         "store": False,
         "stream": True,
-        "instructions": context.systemPrompt or "You are a helpful assistant.",
+        "instructions": instructions or "You are a helpful assistant.",
         "input": messages,
         "text": {"verbosity": text_verbosity},
         "include": ["reasoning.encrypted_content"],
@@ -397,26 +403,36 @@ def build_request_body(
         body["temperature"] = _option(options, "temperature")
     if _option(options, "serviceTier") is not None:
         body["service_tier"] = _option(options, "serviceTier")
-    if context.tools:
-        body["tools"] = convert_responses_tools(placement.immediate, tool_options)
+    if len(transcript_tools.requestTools) > 0:
+        body["tools"] = convert_responses_tools(transcript_tools.requestTools, tool_options)
 
     reasoning_effort = _option(options, "reasoningEffort")
+    thinking_level_map = model.thinkingLevelMap or {}
     if reasoning_effort is not None:
         reasoning_summary = _option(options, "reasoningSummary")
+        # An absent `off` mapping means "none"; an explicit `null` means the model has no
+        # Off effort and no `reasoning` block is sent (`?.off === undefined` upstream).
         effort = (
-            model.thinkingLevelMap.get("off", "none")
-            if reasoning_effort == "none" and model.thinkingLevelMap
-            else model.thinkingLevelMap.get(reasoning_effort, reasoning_effort)
-            if model.thinkingLevelMap
-            else reasoning_effort
+            thinking_level_map.get("off", "none")
+            if reasoning_effort == "none"
+            else _default(thinking_level_map.get(reasoning_effort), reasoning_effort)
         )
         if effort is not None:
             body["reasoning"] = {
                 "effort": effort,
                 "summary": "auto" if reasoning_summary is None else reasoning_summary,
             }
+    elif model.reasoning and thinking_level_map.get("off", "") is not None:
+        # Send the model's Off effort instead of omitting it, while respecting an unsupported
+        # Off mapping (`null`) (pi #9191).
+        body["reasoning"] = {"effort": _default(thinking_level_map.get("off"), "none")}
 
     return {key: value for key, value in body.items() if value is not None}
+
+
+def _default(value: Any, default: Any) -> Any:
+    """``value ?? default``: only an absent field takes the default, never a false one."""
+    return default if value is None else value
 
 
 def resolve_codex_service_tier(response_service_tier: str | None, request_service_tier: str | None) -> str | None:
@@ -1107,7 +1123,7 @@ async def process_websocket_stream(
                 item
                 for item in convert_responses_messages(
                     model,
-                    Context(messages=[output]),
+                    normalize_context(Context(messages=[output])),
                     CODEX_TOOL_CALL_PROVIDERS,
                     {"includeSystemPrompt": False},
                 )
@@ -1129,10 +1145,13 @@ async def process_websocket_stream(
 
 def stream_openai_codex_responses(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: StreamOptions | dict[str, Any] | None = None,
 ) -> AssistantMessageEventStream:
     stream = AssistantMessageEventStream()
+    normalized_context = resolve_transcript(
+        context, getattr(getattr(model, "compat", None), "supportsMidConvoSystemMessages", None)
+    )
 
     async def run() -> None:
         output = AssistantMessage(
@@ -1159,7 +1178,7 @@ def stream_openai_codex_responses(
                 raise RuntimeError(f"No API key for provider: {model.provider}")
 
             account_id = extract_account_id(api_key)
-            body = build_request_body(model, context, options)
+            body = build_request_body(model, normalized_context, options)
             next_body = _option(options, "onPayload")
             if callable(next_body):
                 updated = await maybe_await(next_body(body, model))
@@ -1234,7 +1253,7 @@ def stream_openai_codex_responses(
                             error,
                             {
                                 "configuredTransport": transport,
-                                "fallbackTransport": None if websocket_state["started"] else "sse",
+                                **({} if websocket_state["started"] else {"fallbackTransport": "sse"}),
                                 "eventsEmitted": websocket_state["started"],
                                 "phase": "after_message_stream_start"
                                 if websocket_state["started"]
@@ -1336,7 +1355,7 @@ def stream_openai_codex_responses(
 
 def stream_simple_openai_codex_responses(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: SimpleStreamOptions | None = None,
 ) -> AssistantMessageEventStream:
     api_key = _option(options, "apiKey") or get_env_api_key(model.provider)

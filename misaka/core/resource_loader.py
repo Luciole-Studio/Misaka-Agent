@@ -607,15 +607,18 @@ class DefaultResourceLoader:
         if self.noPromptTemplates and not prompt_paths:
             prompts_result = {"prompts": [], "diagnostics": []}
         else:
-            prompts_result = self._dedupe_prompts(
-                load_prompt_templates(
-                    {
-                        "cwd": self.cwd,
-                        "agentDir": self.agentDir,
-                        "promptPaths": prompt_paths,
-                    }
-                )
+            loaded = load_prompt_templates(
+                {
+                    "cwd": self.cwd,
+                    "agentDir": self.agentDir,
+                    "promptPaths": prompt_paths,
+                }
             )
+            deduped = self._dedupe_prompts(loaded.templates)
+            prompts_result = {
+                "prompts": deduped["prompts"],
+                "diagnostics": [*loaded.diagnostics, *deduped["diagnostics"]],
+            }
 
         resolved = self.promptsOverride(prompts_result) if callable(self.promptsOverride) else prompts_result
         self.prompts = [

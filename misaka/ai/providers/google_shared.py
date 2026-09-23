@@ -10,14 +10,19 @@ import re
 from collections.abc import Mapping
 from typing import Any, Literal, TypeAlias
 
+from misaka.ai.models import clamp_thinking_level
 from misaka.ai.providers.constrained_sampling import (
     get_json_schema_tool_parameters,
     resolve_json_schema_strict_sampling,
 )
 from misaka.ai.providers.transform_messages import transform_messages
-from misaka.ai.types import Context, ImageContent, Model, StopReason, Tool
+from misaka.ai.types import ImageContent, Model, StopReason, Tool, TranscriptContext
 from misaka.ai.utils.provider_retry import retry_provider_request
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
+from misaka.ai.utils.transcript import (
+    collapse_system_messages,
+    without_initial_system_message,
+)
 
 GoogleThinkingLevel: TypeAlias = Literal["THINKING_LEVEL_UNSPECIFIED", "MINIMAL", "LOW", "MEDIUM", "HIGH"]
 
@@ -79,10 +84,7 @@ ResolvedGoogleThinkingLevel: TypeAlias = Literal["minimal", "low", "medium", "hi
 
 
 def resolve_google_thinking_level(model: Model, level: str) -> ResolvedGoogleThinkingLevel:
-    """Resolve a supported thinking level (or the model's own mapping) to a Google level."""
-    if level == "off":
-        return "high"
-
+    """Resolve a supported pi level or model-specific Google mapping to a standard Google level."""
     mapped = model.thinkingLevelMap.get(level) if model.thinkingLevelMap else None
     resolved = mapped.lower() if isinstance(mapped, str) else level
     if resolved in {"minimal", "low", "medium", "high"}:
@@ -90,6 +92,56 @@ def resolve_google_thinking_level(model: Model, level: str) -> ResolvedGoogleThi
     raise ValueError(
         f"Unsupported Google thinking level mapping for {model.provider}/{model.id}: {level} -> {mapped}"
     )
+
+
+def uses_google_thinking_level(model: Model) -> bool:
+    """Whether this model uses Gemini's discrete `thinkingLevel` control instead of
+    the token-based `thinkingBudget` control. Supported levels come from the
+    model's `thinkingLevelMap`; this only selects the Google wire format."""
+    model_id = model.id.lower()
+    return (
+        # Match Gemini 3 Pro/Flash IDs with or without a minor version, such as
+        # gemini-3-flash-preview, gemini-3.1-pro-preview, and gemini-3.8-flash.
+        re.search(r"gemini-3(?:\.\d+)?-(?:pro|flash)", model_id) is not None
+        or model_id == "gemini-flash-latest"
+        or model_id == "gemini-flash-lite-latest"
+        # Match both hosted Gemma 4 naming forms: gemma-4-* and gemma4-*.
+        or re.search(r"gemma-?4", model_id) is not None
+    )
+
+
+def to_google_thinking_level(level: ResolvedGoogleThinkingLevel) -> GoogleThinkingLevel:
+    if level == "minimal":
+        return "MINIMAL"
+    if level == "low":
+        return "LOW"
+    if level == "medium":
+        return "MEDIUM"
+    return "HIGH"
+
+
+def to_google_sdk_thinking_level(level: GoogleThinkingLevel) -> Any:
+    """The SDK's own enum member for a wire level, when the SDK is installed.
+
+    pi maps through `@google/genai`'s `ThinkingLevel`; the Python SDK's `types.ThinkingLevel`
+    is a `str` enum with the same members, and its config validation accepts the plain string
+    too, so the string stands in when the SDK is absent."""
+    try:
+        from google.genai import types as genai_types
+    except ImportError:  # optional extra: misaka[google]
+        return level
+    return getattr(genai_types.ThinkingLevel, level, level)
+
+
+def get_disabled_google_thinking_config(model: Model) -> dict[str, Any]:
+    if not uses_google_thinking_level(model):
+        return {"thinkingBudget": 0}
+    fallback = clamp_thinking_level(model, "off")
+    if fallback == "off":
+        return {"thinkingBudget": 0}
+    resolved_level = resolve_google_thinking_level(model, fallback)
+    api_level = to_google_thinking_level(resolved_level)
+    return {"thinkingLevel": to_google_sdk_thinking_level(api_level)}
 
 
 def requires_tool_call_id(model_id: str) -> bool:
@@ -111,7 +163,9 @@ def _supports_multimodal_function_response(model_id: str) -> bool:
     return True
 
 
-def convert_messages(model: Model, context: Context) -> list[dict[str, Any]]:
+def convert_messages(model: Model, context: TranscriptContext) -> list[dict[str, Any]]:
+    # Gemini has no mid-conversation system messages; the leading prompt is sent as systemInstruction.
+    conversation = without_initial_system_message(collapse_system_messages(context).messages)
     contents: list[dict[str, Any]] = []
 
     def normalize_tool_call_id(tool_call_id: str, _target_model: Model, _source: Any) -> str:
@@ -120,7 +174,7 @@ def convert_messages(model: Model, context: Context) -> list[dict[str, Any]]:
         normalized = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in tool_call_id)
         return normalized[:64]
 
-    transformed_messages = transform_messages(context.messages, model, normalize_tool_call_id)
+    transformed_messages = transform_messages(conversation, model, normalize_tool_call_id)
     for message in transformed_messages:
         if message.role == "user":
             if isinstance(message.content, str):
@@ -351,6 +405,7 @@ def map_stop_reason(reason: Any) -> StopReason:
         "LANGUAGE",
         "MALFORMED_FUNCTION_CALL",
         "UNEXPECTED_TOOL_CALL",
+        "TOO_MANY_TOOL_CALLS",
         "NO_IMAGE",
     }:
         return "error"

@@ -43,7 +43,6 @@ from misaka.ai.types import (
     AssistantMessage,
     AssistantMessageEvent,
     CacheRetention,
-    Context,
     DoneEvent,
     ErrorEvent,
     Model,
@@ -62,6 +61,7 @@ from misaka.ai.types import (
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    TranscriptContext,
     Usage,
     UsageCost,
 )
@@ -198,17 +198,15 @@ def _create_pi_messages_response_error(
         "url": url,
         "status": status,
         "statusText": status_text,
-        "error": error,
+        **({} if error is None else {"error": error}),
         # Upstream keeps the raw body only when it could not be parsed into ``error``.
-        "body": None if error_body else _truncate_diagnostic_string(body),
+        **({} if error_body else {"body": _truncate_diagnostic_string(body)}),
         "timestampMs": _now_ms(),
     }
-    # Upstream sets both keys and lets ``JSON.stringify`` drop the ``undefined`` one; dropping
-    # them here is what makes the serialized diagnostic come out the same.
     return PiMessagesResponseError(
         _format_pi_messages_response_error(status, status_text, body, error_body),
         code,
-        {key: value for key, value in details.items() if value is not None},
+        details,
     )
 
 
@@ -284,36 +282,38 @@ def _resolve_cache_retention(cache_retention: Any, env: Any) -> CacheRetention |
     return "long" if get_provider_env_value("PI_CACHE_RETENTION", env) == "long" else None
 
 
-def _serialize_context(context: Context | Mapping[str, Any]) -> Any:
-    """The wire form of a ``Context``.
+def _serialize_context(context: TranscriptContext | Mapping[str, Any]) -> Any:
+    """The wire form of a ``TranscriptContext``.
 
     ``exclude_none`` is what reproduces ``JSON.stringify``'s treatment of ``undefined``
-    fields. Tools are rebuilt rather than dumped because ``Tool.parameters`` may hold a
-    pydantic model *class*, which has no JSON form until ``parameters_json_schema()``
-    turns it into the schema the wire actually carries.
+    fields. The tools a system message declares are rebuilt rather than dumped because
+    ``Tool.parameters`` may hold a pydantic model *class*, which has no JSON form until
+    ``parameters_json_schema()`` turns it into the schema the wire actually carries.
     """
     if not isinstance(context, BaseModel):
         return context
     # Keep native parse diagnostics in history, not in the upstream wire protocol.
     payload = context.model_dump(mode="json", exclude_none=True, exclude={
-        "tools": True,
-        "messages": {"__all__": {"content": {"__all__": {"argumentsError"}}}},
+        "messages": {"__all__": {"content": {"__all__": {"argumentsError"}}, "toolsAdded": True}},
     })
-    tools = getattr(context, "tools", None)
-    # ``is not None``, not truthiness: upstream hands the whole context to JSON.stringify,
-    # which writes ``"tools":[]`` for an empty list and omits the key only for undefined.
-    # Dropping the key for an empty list tells the backend "no opinion" where the caller
-    # said "no tools" -- a backend that falls back to a default tool set would then get
-    # the opposite of what was asked.
-    if tools is not None:
-        payload["tools"] = [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.parameters_json_schema(),
-            }
-            for tool in tools
-        ]
+    for message, dumped in zip(context.messages, payload["messages"], strict=True):
+        tools = getattr(message, "toolsAdded", None)
+        # ``is not None``, not truthiness: upstream hands the whole context to JSON.stringify,
+        # which writes ``"toolsAdded":[]`` for an empty list and omits the key only for undefined.
+        if tools is not None:
+            dumped["toolsAdded"] = [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters_json_schema(),
+                    **({} if tool.constrainedSampling is None else {
+                        "constrainedSampling": tool.constrainedSampling
+                        if isinstance(tool.constrainedSampling, bool)
+                        else tool.constrainedSampling.model_dump(exclude_none=True)
+                    }),
+                }
+                for tool in tools
+            ]
     return payload
 
 
@@ -490,7 +490,7 @@ class _EventConverter:
 
 def stream_pi_messages(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: StreamOptions | PiMessagesOptions | None = None,
 ) -> AssistantMessageEventStream:
     event_stream = AssistantMessageEventStream()
@@ -611,7 +611,7 @@ def stream_pi_messages(
 
 def stream_simple_pi_messages(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: SimpleStreamOptions | PiMessagesOptions | None = None,
 ) -> AssistantMessageEventStream:
     # Upstream spreads the caller's options wholesale and then re-states the three it

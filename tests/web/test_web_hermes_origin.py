@@ -210,7 +210,7 @@ async def _tool_batch(session, calls, execution="sequential"):
         usage=Usage(input=0, output=0, cacheRead=0, cacheWrite=0, totalTokens=0,
                     cost={'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0, 'total': 0}),
         stopReason='toolUse', timestamp=0)
-    context = AgentContext(systemPrompt='', messages=[], tools=session.agent.state.tools)
+    context = AgentContext(messages=[], tools=session.agent.state.tools)
     cfg = AgentLoopConfig(model=None, convertToLlm=lambda messages: messages, toolExecution=execution,
                           beforeToolCall=session.agent.beforeToolCall, afterToolCall=session.agent.afterToolCall)
     events = []
@@ -408,7 +408,7 @@ async def test_duplicate_ids_are_normalized_before_final_message_is_persisted(te
         stream.push(SimpleNamespace(type='done'))
     else:
         stream.end(message)
-    context = AgentContext(systemPrompt='', messages=[], tools=[])
+    context = AgentContext(messages=[], tools=[])
     events = []
     result = await stream_assistant_response(context,
         AgentLoopConfig(model=Agent().state.model, convertToLlm=lambda m: m), None, events.append,

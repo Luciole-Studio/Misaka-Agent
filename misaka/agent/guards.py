@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from itertools import pairwise
 from typing import Any, Literal
 
-from misaka.utils.values import call_with_optional_second_arg, read_field
+from misaka.agent.types import AgentTurnDecision
+from misaka.utils.values import call_with_optional_second_arg, maybe_await, read_field
 
 
 @dataclass(frozen=True, slots=True)
@@ -496,7 +497,7 @@ class _SessionGuards:
 
         # Take and clear both flags before anything can return. A request can die
         # between arming and firing -- an errored or aborted turn returns straight out
-        # of `_run_loop` without ever consulting `shouldStopAfterTurn` -- so a flag left
+        # of `_run_loop` without ever consulting `finishTurn` -- so a flag left
         # standing would otherwise be waiting for the *next* request. Whoever reaches
         # `after_turn` first owns the flags.
         forced, self._forcing, self._forced_turn = self._forced_turn, False, False
@@ -555,7 +556,7 @@ class _SessionGuards:
         one so the wrap-up turn can be recognised in ``after_turn`` even after the
         context snapshot has moved on. Neither survives a request: a run can die
         between arming and firing -- an errored or aborted turn returns out of the loop
-        without consulting ``shouldStopAfterTurn`` -- so ``after_turn`` clears both on
+        without consulting ``finishTurn`` -- so ``after_turn`` clears both on
         entry, and the next request starts from a clean slate.
         """
         if not self._forcing:
@@ -585,8 +586,8 @@ def install_guards(
 ) -> _SessionGuards | None:
     """Install one idempotent set of pathology guards on an engine session.
 
-    Composed onto whatever ``shouldStopAfterTurn`` the session already carries, never
-    replacing it: a guard stop and a caller stop are independent reasons to end a run.
+    Composed onto whatever ``finishTurn`` the session already carries, never replacing it:
+    a guard stop and a caller stop are independent reasons to end a run.
 
     ``bookkeeping_tools`` is ``NoProgressGuard``'s vocabulary, empty by default: a caller
     that cannot say which of its tools are paperwork gets no opinion about idling rather
@@ -601,17 +602,9 @@ def install_guards(
         return existing_guards
 
     guards = _SessionGuards(session, limiter, wall_seconds, bookkeeping_tools)
-    original = agent.shouldStopAfterTurn
     original_prepare = getattr(agent, "prepareNextTurn", None)
     original_prepare_with_context = getattr(agent, "prepareNextTurnWithContext", None)
-
-    async def should_stop(context: Any, signal: Any = None) -> bool:
-        if await guards.after_turn(context):
-            return True
-        if original is None:
-            return False
-        result = call_with_optional_second_arg(original, context, signal)
-        return bool(await result if inspect.isawaitable(result) else result)
+    finish_turn = finish_turn_from_stop_predicate(guards.after_turn, getattr(agent, "finishTurn", None))
 
     async def prepare_next_turn(context: Any, signal: Any = None) -> Any:
         prepared = None
@@ -638,10 +631,31 @@ def install_guards(
             return forced
         return prepared
 
-    agent.shouldStopAfterTurn = should_stop
+    agent.finishTurn = finish_turn
     agent.prepareNextTurnWithContext = prepare_next_turn
     agent._misaka_guards = guards
     return guards
+
+
+def finish_turn_from_stop_predicate(predicate: Any, previous: Any = None) -> Any:
+    """A ``finishTurn`` from a stop-after-turn predicate (pi 0.87 removed ``shouldStopAfterTurn``).
+
+    ``finishTurn`` also receives error and aborted responses; those remain hard exits, so the
+    predicate is not consulted for them. Composed onto ``previous``: an ``end`` from either
+    side ends the run, and the previous hook's other decisions are preserved.
+    """
+
+    async def finish_turn(turn: Any, signal: Any = None) -> Any:
+        message = read_field(turn, "message")
+        if read_field(message, "stopReason") not in ("error", "aborted"):
+            stop = await maybe_await(call_with_optional_second_arg(predicate, turn, signal))
+            if stop:
+                return AgentTurnDecision(action="end")
+        if previous is None:
+            return None
+        return await maybe_await(call_with_optional_second_arg(previous, turn, signal))
+
+    return finish_turn
 
 
 __all__ = [
@@ -650,6 +664,7 @@ __all__ = [
     "NoProgressGuard",
     "RepeatedToolCallGuard",
     "TextRepetitionGuard",
+    "finish_turn_from_stop_predicate",
     "install_guards",
     "similarity",
 ]

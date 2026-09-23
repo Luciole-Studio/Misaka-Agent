@@ -63,6 +63,9 @@ def getUsageCostBreakdown(
                 usage = read_field(message, "usage")
                 if usage is not None:
                     key = "Tools/summaries"
+        elif entry_type == "usage":
+            key = f"{read_field(entry, 'provider', '')}/{read_field(entry, 'model', '')}"
+            usage = read_field(entry, "usage")
         elif entry_type in ("branch_summary", "compaction"):
             usage = read_field(entry, "usage")
             if usage is not None:

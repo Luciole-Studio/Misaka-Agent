@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
 
 from misaka.agent.agent import Agent
@@ -20,6 +21,7 @@ from misaka.config import get_agent_dir
 from misaka.core.agent_session import AgentSession
 from misaka.core.auth_guidance import format_no_models_available_message
 from misaka.core.auth_storage import AuthStorage
+from misaka.core.cache_warmer import CacheWarmer, CacheWarmingRequest
 from misaka.core.defaults import DEFAULT_THINKING_LEVEL
 from misaka.core.extensions import (
     ExtensionAPI,
@@ -347,11 +349,48 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
             final_options["maxRetryDelayMs"] = provider_retry_settings.get("maxRetryDelayMs")
         if headers is not None:
             final_options["headers"] = headers
+        request_options = ProviderStreamOptions.model_validate(final_options)
+        # Compaction and summaries use their own routing ids; only session requests
+        # replace the cache entry, so warming restarts from them. Keep warming while
+        # the current transcript still extends the request's prefix. Agent state may
+        # shallow-copy the messages array or refresh the model object without changing
+        # the provider request, so top-level object identity is not a valid cache key.
+        if resolved_stream_options.get("sessionId") == session_manager.getSessionId():
+            cache_warmer.start(
+                CacheWarmingRequest(model=request_model, context=context, options=request_options),
+                cache_context_is_current(request_model),
+            )
         return model_registry.streamSimple(
             request_model,
             context,
-            ProviderStreamOptions.model_validate(final_options),
+            request_options,
         )
+
+    def cache_context_is_current(request_model: Model[Any]) -> Callable[[], bool]:
+        messages = agent.state.messages
+
+        def is_current() -> bool:
+            current_model = agent.state.model
+            current_messages = agent.state.messages
+            return (
+                current_model is not None
+                and current_model.provider == request_model.provider
+                and current_model.id == request_model.id
+                and len(messages) <= len(current_messages)
+                and all(message is current_messages[index] for index, message in enumerate(messages))
+            )
+
+        return is_current
+
+    async def decide_cache_warming(event: dict[str, Any]) -> Any:
+        runner = extension_runner_ref.get("current")
+        if runner is None:
+            return event["action"]
+        return await runner.emit_cache_warming_decision(event)
+
+    cache_warmer = CacheWarmer(
+        model_registry, session_manager, settings_manager.getCacheWarmingMode, decide_cache_warming
+    )
 
     async def on_payload(payload: dict[str, Any], _model: Model[Any]) -> Any:
         runner = extension_runner_ref.get("current")
@@ -390,6 +429,7 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
                 "model": initial_model,
                 "thinkingLevel": thinking_level,
                 "tools": [],
+                "messages": existing_session.messages,
             },
             "convertToLlm": convert_to_llm_with_block_images,
             "streamFn": stream_fn,
@@ -407,8 +447,8 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
     if model is None:
         agent.state.model = None
 
+    # Restore missing settings metadata for older sessions.
     if has_existing_session:
-        agent.state.messages = existing_session.messages
         if not has_thinking_entry:
             session_manager.appendThinkingLevelChange(thinking_level)
     else:
@@ -431,6 +471,7 @@ async def create_agent_session(options: CreateAgentSessionOptions | None = None)
             "customTools": resolved_options.get("customTools") or [],
             "parts": parts,
             "modelRegistry": model_registry,
+            "cacheWarmer": cache_warmer,
             "initialActiveToolNames": initial_active_tool_names,
             "allowedToolNames": allowed_tool_names,
             "excludedToolNames": excluded_tool_names,

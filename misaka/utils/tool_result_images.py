@@ -9,12 +9,14 @@ from typing import Any
 
 from misaka.ai.types import ImageContent, TextContent
 from misaka.utils.image_process import ProcessImageOptions, process_image
+from misaka.utils.image_resize import ImageResizeOptions
 from misaka.utils.values import read_field
 
 
 @dataclass(slots=True)
 class NormalizeToolResultImagesOptions:
     autoResizeImages: bool | None = None
+    resizeOptions: ImageResizeOptions | None = None
 
 
 async def normalize_tool_result_images(
@@ -49,7 +51,10 @@ async def normalize_tool_result_images(
         processed = await process_image(
             image_bytes,
             mime_type,
-            ProcessImageOptions(autoResizeImages=auto_resize_images),
+            ProcessImageOptions(
+                autoResizeImages=auto_resize_images,
+                resizeOptions=options.resizeOptions if options is not None else None,
+            ),
         )
         if not processed.ok:
             normalized.append(block)

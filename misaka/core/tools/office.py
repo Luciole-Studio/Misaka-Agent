@@ -30,7 +30,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
-from misaka.core.experimental import get_experimental_tool_sampling
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools._common import abort_race
 from misaka.core.tools._office.schema import OPERATION_CONTRACT
@@ -306,7 +305,7 @@ def create_office_tool_definition(
         promptSnippet=office_tool_system_prompt_contribution["snippet"],
         promptGuidelines=list(office_tool_system_prompt_contribution["guidelines"]),
         parameters=OfficeToolInput,
-        constrainedSampling=get_experimental_tool_sampling(),
+        constrainedSampling={"type": "json_schema", "strict": "prefer"},
         execute=execute,
         renderCall=render_call,
         renderResult=render_result,

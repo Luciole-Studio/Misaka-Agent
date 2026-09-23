@@ -13,12 +13,15 @@ from misaka.agent.types import AgentMessage, StreamFn, ThinkingLevel
 from misaka.ai.stream import complete_simple
 from misaka.ai.types import (
     AssistantMessage,
+    Context,
     Model,
     SimpleStreamOptions,
+    TranscriptContext,
     Usage,
     UserMessage,
 )
 from misaka.ai.utils.retry import RetryCallbacks, RetryPolicy, retry_assistant_call
+from misaka.ai.utils.transcript import get_current_system_message, normalize_context
 from misaka.core.compaction.utils import (
     SUMMARIZATION_SYSTEM_PROMPT as _SUMMARIZATION_SYSTEM_PROMPT,
 )
@@ -37,7 +40,9 @@ from misaka.core.compaction.utils import (
 from misaka.core.messages import convertToLlm
 from misaka.core.session_manager import (
     SessionEntry,
-    build_session_context,
+    SessionProjection,
+    SessionProjectionEntry,
+    build_session_projection,
     session_entry_to_context_messages,
 )
 from misaka.utils.values import read_field
@@ -182,21 +187,22 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages."""
 
-_TURN_PREFIX_SUMMARIZATION_PROMPT = """This is the PREFIX of a turn that was too large to keep.
-The SUFFIX (recent work) is retained.
+# Clearly separates the conversation and uses continuation-oriented instructions: the
+# earlier framing was refused by Claude Fable 5.1 (pi #9908).
+_TURN_PREFIX_SUMMARIZATION_PROMPT = """The messages above are earlier context from an ongoing conversation. Later messages are stored separately and do not need to be reconstructed.
 
-Summarize the prefix to provide context for the retained suffix:
+Create a concise checkpoint of the user's request and the progress shown above. This checkpoint will be placed before the later messages so the conversation can continue with the necessary context.
 
 ## Original Request
-[What did the user ask for in this turn?]
+[What did the user ask for?]
 
-## Early Progress
-- [Key decisions and work done in the prefix]
+## Progress So Far
+- [Key decisions and work completed in these messages]
 
-## Context for Suffix
-- [Information needed to understand the retained recent work]
+## Context Needed to Continue
+- [Information from these messages needed to understand the later work]
 
-Be concise. Focus on what's needed to understand the kept suffix."""
+Only summarize information explicitly present above. Do not infer or recreate later messages."""
 
 
 def get_summarization_failure(response: AssistantMessage, label: str) -> str | None:
@@ -273,6 +279,40 @@ def estimate_context_tokens(messages: list[AgentMessage]) -> ContextUsageEstimat
     )
 
 
+def estimate_projected_context_tokens(
+    projection: SessionProjection, branch_entries: list[SessionEntry]
+) -> ContextUsageEstimate:
+    """Estimate projected context without trusting usage captured before a later edit or compaction."""
+    estimate = estimate_context_tokens(projection.messages)
+    if estimate.lastUsageIndex is not None:
+        projected_message_index = 0
+        usage_entry_id: str | None = None
+        for entry in projection.entries:
+            next_message_index = projected_message_index + len(entry.messages)
+            if estimate.lastUsageIndex < next_message_index:
+                usage_entry_id = _entry_field(entry.sourceEntry, "id")
+                break
+            projected_message_index = next_message_index
+        usage_entry_index = (
+            next((i for i, entry in enumerate(branch_entries) if _entry_field(entry, "id") == usage_entry_id), -1)
+            if usage_entry_id
+            else -1
+        )
+        latest_invalidating_entry_index = -1
+        for i in range(len(branch_entries) - 1, -1, -1):
+            if _entry_field(branch_entries[i], "type") in {"context_edit", "compaction"}:
+                latest_invalidating_entry_index = i
+                break
+        if usage_entry_index > latest_invalidating_entry_index:
+            return estimate
+    current_system = get_current_system_message(projection.messages)
+    tokens = estimate_tokens(current_system) if current_system else 0
+    for message in projection.messages:
+        if read_field(message, "role") != "system":
+            tokens += estimate_tokens(message)
+    return ContextUsageEstimate(tokens=tokens, usageTokens=0, trailingTokens=tokens, lastUsageIndex=None)
+
+
 def should_compact(context_tokens: int, context_window: int, settings: CompactionSettings) -> bool:
     return settings.enabled and context_tokens > context_window - settings.reserveTokens
 
@@ -285,6 +325,23 @@ def _utf16_length(text: str) -> int:
 def estimate_tokens(message: AgentMessage) -> int:
     role = read_field(message, "role")
     chars = 0
+
+    if role == "system":
+        content = read_field(message, "content")
+        if isinstance(content, str):
+            chars = _utf16_length(content)
+        elif isinstance(content, list):
+            for block in content:
+                text = read_field(block, "text")
+                if read_field(block, "type") == "text" and isinstance(text, str):
+                    chars += _utf16_length(text)
+        for section in (read_field(message, "sections") or {}).values():
+            if section:
+                chars += _utf16_length(section)
+        tools_added = read_field(message, "toolsAdded")
+        if tools_added:
+            chars += _utf16_length(_safe_json_stringify([_tool_payload(tool) for tool in tools_added]))
+        return max(0, math.ceil(chars / 4))
 
     if role == "user":
         content = read_field(message, "content")
@@ -473,9 +530,19 @@ def _create_summarization_options(
     return options
 
 
+def _build_summarization_context(prompt_text: str) -> TranscriptContext:
+    """Build the provider context for a standalone summary request."""
+    return normalize_context(
+        Context(
+            systemPrompt=_SUMMARIZATION_SYSTEM_PROMPT,
+            messages=[UserMessage(content=[{"type": "text", "text": prompt_text}], timestamp=_timestamp_ms())],
+        )
+    )
+
+
 async def complete_summarization(
     model: Model[Any],
-    context: dict[str, Any],
+    context: TranscriptContext | dict[str, Any],
     options: SimpleStreamOptions,
     stream_fn: StreamFn | None = None,
     retry: RetryPolicy | None = None,
@@ -578,10 +645,7 @@ async def generate_summary_with_usage(
 
     response = await complete_summarization(
         model,
-        {
-            "systemPrompt": _SUMMARIZATION_SYSTEM_PROMPT,
-            "messages": [UserMessage(content=[{"type": "text", "text": prompt_text}], timestamp=_timestamp_ms())],
-        },
+        _build_summarization_context(prompt_text),
         _create_summarization_options(
             model,
             int(max_tokens),
@@ -672,6 +736,98 @@ async def generateSummaryWithUsage(
     )
 
 
+def _is_projected_turn_start(entry: SessionProjectionEntry) -> bool:
+    if _entry_field(entry.sourceEntry, "type") == "compaction":
+        return False
+    return any(read_field(message, "role") in _TURN_START_ROLES for message in entry.messages)
+
+
+def _find_projected_turn_start_index(entries: list[SessionProjectionEntry], entry_index: int, start_index: int) -> int:
+    for i in range(entry_index, start_index - 1, -1):
+        if _is_projected_turn_start(entries[i]):
+            return i
+    return -1
+
+
+def _find_projected_cut_point(
+    entries: list[SessionProjectionEntry], start_index: int, end_index: int, keep_recent_tokens: int
+) -> CutPointResult:
+    cut_points: list[int] = []
+    for i in range(start_index, end_index):
+        entry = entries[i]
+        if _entry_field(entry.sourceEntry, "type") != "compaction" and any(
+            read_field(message, "role") in _CUT_POINT_ROLES for message in entry.messages
+        ):
+            cut_points.append(i)
+    if not cut_points:
+        return CutPointResult(firstKeptEntryIndex=start_index, turnStartIndex=-1, isSplitTurn=False)
+    accumulated_tokens = 0
+    exceeded_budget = False
+    cut_index = cut_points[0]
+    for i in range(end_index - 1, start_index - 1, -1):
+        message_tokens = sum(estimate_tokens(message) for message in entries[i].messages)
+        if message_tokens == 0:
+            continue
+        accumulated_tokens += message_tokens
+        if accumulated_tokens >= keep_recent_tokens:
+            exceeded_budget = True
+            # Prefer the closest valid cut point at or after this entry. If trailing
+            # tool results exceed the budget by themselves, keep their preceding
+            # assistant tool call instead of falling back to the first message.
+            cut_index = next((candidate for candidate in cut_points if candidate >= i), cut_points[-1])
+            break
+    # A recovery attempt and its omission edits are context-invisible after the last
+    # visible input. Advance only for a closed suffix containing an omitted assistant
+    # attempt; arbitrary metadata must not move the cut past unsent input.
+    suffix = entries[cut_index + 1 : end_index]
+
+    def is_intrinsically_visible(entry: SessionProjectionEntry) -> bool:
+        return (
+            _entry_field(entry.sourceEntry, "type") != "context_edit"
+            and len(session_entry_to_context_messages(entry.sourceEntry)) > 0
+        )
+
+    def is_omitted(entry: SessionProjectionEntry) -> bool:
+        return is_intrinsically_visible(entry) and len(entry.messages) == 0
+
+    omitted_suffix_ids = {_entry_field(entry.sourceEntry, "id") for entry in suffix if is_omitted(entry)}
+    has_external_replacement = any(
+        _entry_field(entry.sourceEntry, "type") == "context_edit"
+        and entry.sourceEntry.get("replacement") is not None
+        and _entry_field(entry.sourceEntry, "targetId") not in omitted_suffix_ids
+        for entry in suffix
+    )
+    is_recovery_omission_suffix = (
+        exceeded_budget
+        and not has_external_replacement
+        and any(
+            _entry_field(entry.sourceEntry, "type") == "message"
+            and read_field(entry.sourceEntry.get("message"), "role") == "assistant"
+            and is_omitted(entry)
+            for entry in suffix
+        )
+        and all(
+            _entry_field(entry.sourceEntry, "type") != "compaction"
+            and (not is_intrinsically_visible(entry) or is_omitted(entry))
+            for entry in suffix
+        )
+    )
+    if is_recovery_omission_suffix:
+        cut_index += 1
+    while cut_index > start_index:
+        previous = entries[cut_index - 1]
+        if _entry_field(previous.sourceEntry, "type") == "compaction" or len(previous.messages) > 0:
+            break
+        cut_index -= 1
+    starts_turn = _is_projected_turn_start(entries[cut_index])
+    turn_start_index = -1 if starts_turn else _find_projected_turn_start_index(entries, cut_index, start_index)
+    return CutPointResult(
+        firstKeptEntryIndex=cut_index,
+        turnStartIndex=turn_start_index,
+        isSplitTurn=(not starts_turn and turn_start_index != -1),
+    )
+
+
 def prepare_compaction(
     path_entries: list[SessionEntry],
     settings: CompactionSettings,
@@ -680,62 +836,74 @@ def prepare_compaction(
         return None
     if path_entries[-1].get("type") == "compaction":
         return None
-
-    previous_compaction_index = -1
-    for index in range(len(path_entries) - 1, -1, -1):
-        if path_entries[index].get("type") == "compaction":
-            previous_compaction_index = index
-            break
-
+    projection = build_session_projection(path_entries)
+    projected_entries = projection.entries
+    source_entries = [entry.sourceEntry for entry in projected_entries]
+    # The newest compaction is projected first. Older compaction entries can still
+    # occur in its retained raw range, but their projected contribution is empty.
+    prev_compaction_index = next(
+        (
+            index
+            for index, entry in enumerate(projected_entries)
+            if _entry_field(entry.sourceEntry, "type") == "compaction" and len(entry.messages) > 0
+        ),
+        -1,
+    )
     previous_summary: str | None = None
     checkpoint_messages: list[AgentMessage] = []
     boundary_start = 0
-    if previous_compaction_index >= 0:
-        previous_compaction = path_entries[previous_compaction_index]
+    if prev_compaction_index >= 0:
+        previous_compaction = projected_entries[prev_compaction_index].sourceEntry
         previous_summary = _entry_field(previous_compaction, "summary")
-        first_kept_entry_id = _entry_field(previous_compaction, "firstKeptEntryId")
-        first_kept_entry_index = next(
-            (index for index, entry in enumerate(path_entries) if _entry_field(entry, "id") == first_kept_entry_id),
-            -1,
-        )
-        boundary_start = first_kept_entry_index if first_kept_entry_index >= 0 else previous_compaction_index + 1
+        # The canonical projection has already selected the previous compaction's retained tail.
+        boundary_start = prev_compaction_index + 1
         if previous_compaction.get("contextMessages") is not None:
-            # A complete checkpoint may still contain raw backlog and a changed tail.
-            # On a native compaction, summarize that view, never its display label or
-            # the pre-checkpoint archive that it already replaced.
-            checkpoint_messages = session_entry_to_context_messages(previous_compaction)
+            # MISAKA fork: a complete checkpoint (the LCM plugin's whole-context replacement)
+            # may still contain raw backlog and a changed tail. On a native compaction,
+            # summarize that view, never its display label or the pre-checkpoint archive
+            # that it already replaced.
+            checkpoint_messages = [
+                message
+                for message in projected_entries[prev_compaction_index].messages
+                if read_field(message, "role") != "system"
+            ]
             previous_summary = None
-            boundary_start = previous_compaction_index + 1
 
-    tokens_before = estimate_context_tokens(build_session_context(path_entries).messages).tokens
-    cut_point = find_cut_point(path_entries, boundary_start, len(path_entries), settings.keepRecentTokens)
-    first_kept_entry = path_entries[cut_point.firstKeptEntryIndex]
-    first_kept_entry_id = first_kept_entry.get("id")
+    boundary_end = len(projected_entries)
+    tokens_before = estimate_projected_context_tokens(projection, path_entries).tokens
+    cut_point = _find_projected_cut_point(projected_entries, boundary_start, boundary_end, settings.keepRecentTokens)
+    first_kept_entry = (
+        projected_entries[cut_point.firstKeptEntryIndex].sourceEntry
+        if cut_point.firstKeptEntryIndex < len(projected_entries)
+        else None
+    )
+    first_kept_entry_id = first_kept_entry.get("id") if first_kept_entry else None
     if not isinstance(first_kept_entry_id, str) or not first_kept_entry_id:
         return None
 
     history_end = cut_point.turnStartIndex if cut_point.isSplitTurn else cut_point.firstKeptEntryIndex
-    messages_to_summarize: list[AgentMessage] = list(checkpoint_messages)
-    for entry in path_entries[boundary_start:history_end]:
-        message = _get_message_from_entry_for_compaction(entry)
-        if message is not None:
-            messages_to_summarize.append(message)
-
-    turn_prefix_messages: list[AgentMessage] = []
-    if cut_point.isSplitTurn:
-        for entry in path_entries[cut_point.turnStartIndex : cut_point.firstKeptEntryIndex]:
-            message = _get_message_from_entry_for_compaction(entry)
-            if message is not None:
-                turn_prefix_messages.append(message)
-
-    # pi compaction.ts:805-807 returns undefined here: with nothing to summarize, `compact()`
-    # would pay for a request over an empty `<conversation>` and persist a fake summary.
-    # `agent_session` already guards with `_is_noop_compaction`; the guard belongs to the
-    # public API too (audit 2026-09-02, core-runtime-02).
+    messages_to_summarize: list[AgentMessage] = [
+        *checkpoint_messages,
+        *(
+            message
+            for entry in projected_entries[boundary_start:history_end]
+            for message in _get_messages_from_projected_entry_for_compaction(entry)
+        ),
+    ]
+    turn_prefix_messages: list[AgentMessage] = (
+        [
+            message
+            for entry in projected_entries[cut_point.turnStartIndex : cut_point.firstKeptEntryIndex]
+            for message in _get_messages_from_projected_entry_for_compaction(entry)
+        ]
+        if cut_point.isSplitTurn
+        else []
+    )
     if not messages_to_summarize and not turn_prefix_messages:
         return None
 
-    file_ops = _extract_file_operations(messages_to_summarize, path_entries, previous_compaction_index)
+    # Extract file operations from edited model-visible messages and the previous compaction.
+    file_ops = _extract_file_operations(messages_to_summarize, source_entries, prev_compaction_index)
     if cut_point.isSplitTurn:
         for message in turn_prefix_messages:
             extract_file_ops_from_message(message, file_ops)
@@ -800,7 +968,11 @@ async def compact(
             callbacks=callbacks,
             session_id=session_id,
         )
-        history_text = history_result.text if history_result is not None else "No prior history."
+        history_text = (
+            history_result.text
+            if history_result is not None
+            else (preparation.previousSummary if preparation.previousSummary is not None else "No prior history.")
+        )
         summary = f"{history_text}\n\n---\n\n**Turn Context (split turn):**\n\n{turn_prefix_result.text}"
         summary_usage = (
             combine_usage(history_result.usage, turn_prefix_result.usage)
@@ -870,11 +1042,22 @@ def _extract_file_operations(
     return file_ops
 
 
-def _get_message_from_entry_for_compaction(entry: SessionEntry) -> AgentMessage | None:
-    if entry.get("type") == "compaction":
-        return None
-    messages = session_entry_to_context_messages(entry)
-    return messages[0] if messages else None
+def _get_messages_from_projected_entry_for_compaction(entry: SessionProjectionEntry) -> list[AgentMessage]:
+    """Extract the AgentMessages an entry contributes to compaction. Empty for entries that
+    don't contribute to LLM context."""
+    if _entry_field(entry.sourceEntry, "type") == "compaction":
+        return []
+    # System messages are prompt state, not conversation; the compaction entry carries their replay.
+    return [message for message in entry.messages if read_field(message, "role") != "system"]
+
+
+def _tool_payload(tool: Any) -> Any:
+    schema = getattr(tool, "parameters_json_schema", None)
+    if callable(schema) and hasattr(tool, "model_dump"):
+        payload = tool.model_dump(exclude={"parameters"})
+        payload["parameters"] = schema()
+        return payload
+    return tool.model_dump() if hasattr(tool, "model_dump") else tool
 
 
 def _find_valid_cut_points(
@@ -912,13 +1095,10 @@ async def _generate_turn_prefix_summary(
         model.maxTokens if model.maxTokens > 0 else math.inf,
     )
     conversation_text = _serialize_conversation(convertToLlm(messages))
-    prompt_text = f"<conversation>\n{conversation_text}\n</conversation>\n\n{_TURN_PREFIX_SUMMARIZATION_PROMPT}"
+    prompt_text = f"# Conversation\n{conversation_text}\n\n# Instructions\n{_TURN_PREFIX_SUMMARIZATION_PROMPT}"
     response = await complete_summarization(
         model,
-        {
-            "systemPrompt": _SUMMARIZATION_SYSTEM_PROMPT,
-            "messages": [UserMessage(content=[{"type": "text", "text": prompt_text}], timestamp=_timestamp_ms())],
-        },
+        _build_summarization_context(prompt_text),
         _create_summarization_options(
             model,
             int(max_tokens),
@@ -978,6 +1158,7 @@ calculateContextTokens = calculate_context_tokens
 completeSummarization = complete_summarization
 estimateContextTokens = estimate_context_tokens
 estimateTokens = estimate_tokens
+estimateProjectedContextTokens = estimate_projected_context_tokens
 findCutPoint = find_cut_point
 findTurnStartIndex = find_turn_start_index
 getLastAssistantUsage = get_last_assistant_usage
@@ -1001,8 +1182,10 @@ __all__ = [
     "completeSummarization",
     "complete_summarization",
     "estimateContextTokens",
+    "estimateProjectedContextTokens",
     "estimateTokens",
     "estimate_context_tokens",
+    "estimate_projected_context_tokens",
     "estimate_tokens",
     "findCutPoint",
     "findTurnStartIndex",

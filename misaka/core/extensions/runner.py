@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from misaka.ai.types import ImageContent, Model
+from misaka.ai.utils.transcript import get_current_system_message
 from misaka.core.diagnostics import ResourceDiagnostic
 from misaka.core.extensions.types import (
     EntryRenderer,
@@ -32,8 +33,13 @@ from misaka.core.extensions.types import (
     ResolvedCommand,
     UIPromptKind,
 )
-from misaka.core.system_prompt import BuildSystemPromptOptions
+from misaka.core.system_prompt import (
+    BuildSystemPromptOptions,
+    build_system_prompt,
+    normalize_build_system_prompt_options,
+)
 from misaka.ui.tui.interactive.theme.theme import theme
+from misaka.utils.values import maybe_await
 
 RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = (
     "app.interrupt",
@@ -64,6 +70,83 @@ type ReloadHandler = Any
 type ShutdownHandler = Any
 
 _MISSING = object()
+
+
+def _is_user_bash_event_result(value: Any) -> bool:
+    if not isinstance(value, Mapping) and not hasattr(value, "__dict__"):
+        return False
+    operations = _result_flag(value, "operations", None)
+    result = _result_flag(value, "result", None)
+    has_operations = operations is not None
+    has_result = result is not None
+    if has_operations == has_result:
+        return False
+    if has_operations:
+        return callable(_result_flag(operations, "exec", None))
+    output = _result_flag(result, "output", None)
+    exit_code = _result_flag(result, "exitCode", _MISSING)
+    full_output_path = _result_flag(result, "fullOutputPath", None)
+    return (
+        isinstance(output, str)
+        and exit_code is not _MISSING
+        and (exit_code is None or isinstance(exit_code, int))
+        and isinstance(_result_flag(result, "cancelled", None), bool)
+        and isinstance(_result_flag(result, "truncated", None), bool)
+        and (full_output_path is None or isinstance(full_output_path, str))
+    )
+
+
+class _BeforeAgentStartEvent(dict[str, Any]):
+    """The `before_agent_start` event: `systemPrompt` renders the current options on every
+    read (pi's `get systemPrompt()`), so a handler that edited `systemPromptOptions` sees the
+    result. Mapping-shaped like every other event, so handlers read it the same way."""
+
+    def __init__(self, *, prompt: str, images: Any, systemPromptOptions: Any, render: Any) -> None:
+        super().__init__(type="before_agent_start", prompt=prompt, images=images, systemPromptOptions=systemPromptOptions)
+        self._render = render
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "systemPrompt":
+            return self._render()
+        return super().__getitem__(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key == "systemPrompt":
+            return self._render()
+        return super().get(key, default)
+
+    def __contains__(self, key: object) -> bool:
+        return key == "systemPrompt" or super().__contains__(key)
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "systemPrompt":
+            return self._render()
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+
+def _snapshot_event_handlers(extensions: list[Any], event: str) -> list[tuple[Any, list[Any]]]:
+    """Handlers added or removed during a dispatch apply to later dispatches, not the current one."""
+    return [(extension, list(extension.handlers.get(event) or [])) for extension in extensions]
+
+
+def _same_messages(left: list[Any], right: list[Any]) -> bool:
+    return len(left) == len(right) and all(message is right[index] for index, message in enumerate(left))
+
+
+def _restore_system_messages(current: list[Any], visible: list[Any], returned: list[Any]) -> list[Any]:
+    """Re-attach the prompt and tool state after a `context` handler. Handlers only see the
+    conversation; the system messages belong to Pi. An unchanged conversation keeps every
+    system message in place, so models with mid-conversation support keep their cached
+    prefix. A changed one gets the replayed prompt sections and tool declarations as one
+    leading system message, so pruning, windowing, or slicing from a compaction summary
+    cannot drop them."""
+    if _same_messages(returned, visible):
+        return current
+    head = get_current_system_message(current)
+    return [head, *returned] if head else returned
 
 
 @dataclass(slots=True)
@@ -415,8 +498,8 @@ async def emit_project_trust_event(
     ctx: ProjectTrustContext,
 ) -> dict[str, Any]:
     errors: list[ExtensionError] = []
-    for extension in extensions_result.extensions:
-        for handler in extension.handlers.get("project_trust", []):
+    for extension, handlers in _snapshot_event_handlers(extensions_result.extensions, "project_trust"):
+        for handler in handlers:
             try:
                 handler_result = _invoke_handler(handler, event, ctx)
                 if hasattr(handler_result, "__await__"):
@@ -485,7 +568,7 @@ class ExtensionRunner:
         self.getSystemPromptOptionsFn = self._default_system_prompt_options
 
     def _default_system_prompt_options(self) -> BuildSystemPromptOptions:
-        return {"cwd": self.cwd}
+        return normalize_build_system_prompt_options({"cwd": self.cwd})  # type: ignore[return-value]
 
     def bind_core(
         self,
@@ -883,8 +966,7 @@ class ExtensionRunner:
         event_type = _event_type(event)
         ctx = self.create_context()
         result: Any = None
-        for extension in self.extensions:
-            handlers = extension.handlers.get(event_type, [])
+        for extension, handlers in _snapshot_event_handlers(self.extensions, event_type):
             for handler in handlers:
                 try:
                     handler_result = _invoke_handler(handler, event, ctx)
@@ -911,8 +993,8 @@ class ExtensionRunner:
         ctx = self.create_context()
         current_message = _event_field(event, "message")
         modified = False
-        for extension in self.extensions:
-            for handler in extension.handlers.get("message_end", []):
+        for extension, handlers in _snapshot_event_handlers(self.extensions, "message_end"):
+            for handler in handlers:
                 try:
                     current_event = _clone_with(event, message=current_message)
                     handler_result = _invoke_handler(handler, current_event, ctx)
@@ -940,8 +1022,8 @@ class ExtensionRunner:
         ctx = self.create_context()
         current_event = _clone_with(event)
         modified = False
-        for extension in self.extensions:
-            for handler in extension.handlers.get("tool_result", []):
+        for extension, handlers in _snapshot_event_handlers(self.extensions, "tool_result"):
+            for handler in handlers:
                 try:
                     handler_result = _invoke_handler(handler, current_event, ctx)
                     if hasattr(handler_result, "__await__"):
@@ -970,8 +1052,8 @@ class ExtensionRunner:
     async def emit_tool_call(self, event: Any) -> Any:
         ctx = self.create_context()
         result: Any = None
-        for extension in self.extensions:
-            for handler in extension.handlers.get("tool_call", []):
+        for extension, handlers in _snapshot_event_handlers(self.extensions, "tool_call"):
+            for handler in handlers:
                 try:
                     handler_result = _invoke_handler(handler, event, ctx)
                     if hasattr(handler_result, "__await__"):
@@ -990,44 +1072,93 @@ class ExtensionRunner:
         return result
 
     async def emit_user_bash(self, event: Any) -> Any:
+        """`user_bash` fails closed: an error or an invalid defined result aborts the command
+        without invoking later handlers or executing locally (pi #9068)."""
         ctx = self.create_context()
-        for extension in self.extensions:
-            for handler in extension.handlers.get("user_bash", []):
+        for extension, handlers in _snapshot_event_handlers(self.extensions, "user_bash"):
+            for handler in handlers:
                 try:
                     handler_result = _invoke_handler(handler, event, ctx)
                     if hasattr(handler_result, "__await__"):
                         handler_result = await handler_result
-                    if handler_result is not None:
-                        return handler_result
-                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
+                    if handler_result is None:
+                        continue
+                    if not _is_user_bash_event_result(handler_result):
+                        raise ValueError(
+                            "Invalid user_bash handler result: return undefined for local execution "
+                            "or exactly one valid { operations } or { result } object"
+                        )
+                    return handler_result
+                except Exception as error:
                     self._emit_extension_exception(extension.path, "user_bash", error)
+                    raise
         return None
 
     async def emit_context(self, messages: list[Any]) -> list[Any]:
+        """Run the request-time transforms in two phases. `context` handlers see the conversation
+        only and Pi restores the prompt and tool state after each; `context_with_system`
+        handlers then see the full transcript and their output is used as returned."""
         ctx = self.create_context()
         current_messages = deepcopy(messages)
-        for extension in self.extensions:
-            for handler in extension.handlers.get("context", []):
+        for extension, handlers in _snapshot_event_handlers(self.extensions, "context"):
+            for handler in handlers:
                 try:
+                    visible_messages = [m for m in current_messages if _event_field(m, "role") != "system"]
+                    visible_snapshot = list(visible_messages)
                     handler_result = _invoke_handler(
                         handler,
-                        {"type": "context", "messages": current_messages},
+                        {"type": "context", "messages": visible_messages},
                         ctx,
                     )
                     if hasattr(handler_result, "__await__"):
                         handler_result = await handler_result
-                    next_messages = _result_flag(handler_result, "messages")
-                    if next_messages is not None:
-                        current_messages = next_messages
+                    # Handlers may return a new list or edit event.messages in place.
+                    returned = _result_flag(handler_result, "messages")
+                    if returned is None:
+                        returned = None if _same_messages(visible_messages, visible_snapshot) else visible_messages
+                    if returned is None:
+                        continue
+                    current_messages = _restore_system_messages(current_messages, visible_snapshot, returned)
                 except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, "context", error)
+        for extension, handlers in _snapshot_event_handlers(self.extensions, "context_with_system"):
+            for handler in handlers:
+                try:
+                    had_leading_system_message = bool(current_messages) and _event_field(current_messages[0], "role") == "system"
+                    handler_result = _invoke_handler(
+                        handler,
+                        {"type": "context_with_system", "messages": current_messages},
+                        ctx,
+                    )
+                    if hasattr(handler_result, "__await__"):
+                        handler_result = await handler_result
+                    returned = _result_flag(handler_result, "messages")
+                    current_messages = returned if returned is not None else current_messages
+                    # Providers read the prompt and initial tools from the leading system message.
+                    # Losing it is never intended; report it but honor the handler's output.
+                    if had_leading_system_message and (
+                        not current_messages or _event_field(current_messages[0], "role") != "system"
+                    ):
+                        self.emit_error(
+                            ExtensionError(
+                                extensionPath=extension.path,
+                                event="context_with_system",
+                                error=(
+                                    "Handler removed the leading system message; the request has no prompt or "
+                                    "initial tool declarations. Keep it at index 0 or replace a dropped prefix "
+                                    "with getCurrentSystemMessage()."
+                                ),
+                            )
+                        )
+                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
+                    self._emit_extension_exception(extension.path, "context_with_system", error)
         return current_messages
 
     async def emit_before_provider_request(self, payload: Any) -> Any:
         ctx = self.create_context()
         current_payload = payload
-        for extension in self.extensions:
-            for handler in extension.handlers.get("before_provider_request", []):
+        for extension, handlers in _snapshot_event_handlers(self.extensions, "before_provider_request"):
+            for handler in handlers:
                 try:
                     handler_result = _invoke_handler(
                         handler,
@@ -1048,8 +1179,8 @@ class ExtensionRunner:
         The handler return value is ignored; a ``None`` value deletes that header.
         """
         ctx = self.create_context()
-        for extension in self.extensions:
-            for handler in extension.handlers.get("before_provider_headers", []):
+        for extension, handlers in _snapshot_event_handlers(self.extensions, "before_provider_headers"):
+            for handler in handlers:
                 try:
                     handler_result = _invoke_handler(
                         handler,
@@ -1066,23 +1197,27 @@ class ExtensionRunner:
         self,
         prompt: str,
         images: list[ImageContent] | None,
-        systemPrompt: str,
         systemPromptOptions: Any,
-    ) -> dict[str, Any] | None:
-        current_system_prompt = systemPrompt
-        ctx = _ContextBase(self, {"getSystemPrompt": lambda: current_system_prompt})
+    ) -> dict[str, Any]:
+        """Handlers see and may edit the mutable prompt options; a returned `systemPrompt`
+        becomes `forceSystemPrompt`. Always returns `{messages, systemPromptOptions}`, or
+        `{block, reason}` when a MISAKA hook blocked the turn (# MISAKA fork: pi has no block)."""
+        current_options = normalize_build_system_prompt_options(systemPromptOptions)
+
+        def render_current_system_prompt() -> str:
+            return build_system_prompt(current_options)
+
+        ctx = _ContextBase(self, {"getSystemPrompt": render_current_system_prompt})
         messages: list[Any] = []
-        system_prompt_modified = False
-        for extension in self.extensions:
-            for handler in extension.handlers.get("before_agent_start", []):
+        for extension, handlers in _snapshot_event_handlers(self.extensions, "before_agent_start"):
+            for handler in handlers:
                 try:
-                    event = {
-                        "type": "before_agent_start",
-                        "prompt": prompt,
-                        "images": images,
-                        "systemPrompt": current_system_prompt,
-                        "systemPromptOptions": systemPromptOptions,
-                    }
+                    event = _BeforeAgentStartEvent(
+                        prompt=prompt,
+                        images=images,
+                        systemPromptOptions=current_options,
+                        render=render_current_system_prompt,
+                    )
                     handler_result = _invoke_handler(handler, event, ctx)
                     if hasattr(handler_result, "__await__"):
                         handler_result = await handler_result
@@ -1099,16 +1234,69 @@ class ExtensionRunner:
                     if message is not None:
                         messages.append(message)
                     if _result_flag(handler_result, "systemPrompt") is not None:
-                        current_system_prompt = _result_flag(handler_result, "systemPrompt")
-                        system_prompt_modified = True
+                        current_options["forceSystemPrompt"] = _result_flag(handler_result, "systemPrompt")
                 except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, "before_agent_start", error)
-        if messages or system_prompt_modified:
-            return {
-                "messages": messages or None,
-                "systemPrompt": current_system_prompt if system_prompt_modified else None,
-            }
-        return None
+        return {"messages": messages, "systemPromptOptions": current_options}
+
+    async def emit_boundary(self, base_event: Mapping[str, Any], build_context: Any) -> dict[str, Any]:
+        """Dispatch an actionable boundary (`turn_end`, `agent_before_settle`): each handler sees
+        the entries and continuation decision so far plus a context built from them, and may
+        return replacements for either."""
+        ctx = self.create_context()
+        entries: list[Any] = []
+        should_continue = False
+        context = await maybe_await(build_context(entries))
+        valid = True
+        event_type = str(base_event["type"])
+        for extension, handlers in _snapshot_event_handlers(self.extensions, event_type):
+            for handler in handlers:
+                event = {**base_event, "entries": entries, "continue": should_continue, "context": context}
+                try:
+                    handler_result = _invoke_handler(handler, event, ctx)
+                    if hasattr(handler_result, "__await__"):
+                        handler_result = await handler_result
+                    next_entries = _result_flag(handler_result, "entries", _MISSING)
+                    if next_entries is not _MISSING and next_entries is not None:
+                        entries = list(next_entries)
+                    next_continue = _result_flag(handler_result, "continue", _MISSING)
+                    if next_continue is not _MISSING and next_continue is not None:
+                        should_continue = bool(next_continue)
+                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
+                    self._emit_extension_exception(extension.path, event_type, error)
+                try:
+                    context = await maybe_await(build_context(entries))
+                    valid = True
+                except Exception as error:  # noqa: BLE001 - the drafts, not the runner, are what failed
+                    valid = False
+                    self.emit_error(
+                        ExtensionError(
+                            extensionPath=extension.path,
+                            event=event_type,
+                            error=f"Invalid boundary entries: {error}",
+                            stack=traceback.format_exc(),
+                        )
+                    )
+        if valid:
+            return {"entries": entries, "continue": should_continue, "context": context, "valid": True}
+        return {"entries": [], "continue": False, "context": context, "valid": False}
+
+    async def emit_cache_warming_decision(self, event: Mapping[str, Any]) -> Any:
+        """Returns the event's own action unless a handler overrides it; the last override wins."""
+        ctx = self.create_context()
+        action = event.get("action")
+        for extension, handlers in _snapshot_event_handlers(self.extensions, str(event["type"])):
+            for handler in handlers:
+                try:
+                    result = _invoke_handler(handler, event, ctx)
+                    if hasattr(result, "__await__"):
+                        result = await result
+                    next_action = _result_flag(result, "action", None)
+                    if next_action is not None:
+                        action = next_action
+                except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
+                    self._emit_extension_exception(extension.path, str(event["type"]), error)
+        return action
 
     async def emit_agent_end(self, event: Any) -> dict[str, Any] | None:
         """Emit ``agent_end`` while preserving a stop-hook decision.
@@ -1120,8 +1308,8 @@ class ExtensionRunner:
         """
 
         ctx = self.create_context()
-        for extension in self.extensions:
-            for handler in extension.handlers.get("agent_end", []):
+        for extension, handlers in _snapshot_event_handlers(self.extensions, "agent_end"):
+            for handler in handlers:
                 try:
                     handler_result = _invoke_handler(handler, event, ctx)
                     if hasattr(handler_result, "__await__"):
@@ -1144,8 +1332,8 @@ class ExtensionRunner:
         prompt_paths: list[dict[str, str]] = []
         theme_paths: list[dict[str, str]] = []
         skill_paths: list[dict[str, str]] = []
-        for extension in self.extensions:
-            for handler in extension.handlers.get("resources_discover", []):
+        for extension, handlers in _snapshot_event_handlers(self.extensions, "resources_discover"):
+            for handler in handlers:
                 try:
                     handler_result = _invoke_handler(
                         handler,
@@ -1179,8 +1367,8 @@ class ExtensionRunner:
         ctx = self.create_context()
         current_text = text
         current_images = images
-        for extension in self.extensions:
-            for handler in extension.handlers.get("input", []):
+        for extension, handlers in _snapshot_event_handlers(self.extensions, "input"):
+            for handler in handlers:
                 try:
                     event = {
                         "type": "input",

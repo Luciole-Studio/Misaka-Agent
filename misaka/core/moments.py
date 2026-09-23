@@ -25,6 +25,12 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+from misaka.ai.utils.transcript import get_current_system_message
+from misaka.core.system_prompt import (
+    build_system_prompt,
+    normalize_build_system_prompt_options,
+)
+
 logger = logging.getLogger(__name__)
 
 # What a part may say about a custom message it sends, in the message's ``details`` -- the one
@@ -46,10 +52,12 @@ def _field(result: Any, name: str, default: Any = None) -> Any:
 
 @dataclass(slots=True)
 class BeforeAgentStart:
-    """What the parts did with a turn about to start, folded the way the runner folds it."""
+    """What the parts did with a turn about to start, folded the way the runner folds it.
 
-    system_prompt: str
-    system_prompt_changed: bool = False
+    `system_prompt_options` is the mutable, normalized options object every part saw; a part
+    that returned `systemPrompt` set `forceSystemPrompt` on it, as an extension would."""
+
+    system_prompt_options: dict[str, Any]
     messages: list[Any] = field(default_factory=list)
     block: bool = False
     reason: str | None = None
@@ -210,11 +218,11 @@ class Moments:
                 return result
         return None
 
-    async def before_agent_start(
-        self, prompt: str, images: Any, system_prompt: str, options: Any
-    ) -> BeforeAgentStart:
-        """Runner ``emit_before_agent_start``: each part sees the prompt as the previous one left it."""
-        folded = BeforeAgentStart(system_prompt=system_prompt)
+    async def before_agent_start(self, prompt: str, images: Any, options: Any) -> BeforeAgentStart:
+        """Runner ``emit_before_agent_start``: each part sees the prompt options as the previous
+        one left them, and ``systemPrompt`` renders them on every read."""
+        current_options = normalize_build_system_prompt_options(options)
+        folded = BeforeAgentStart(system_prompt_options=current_options)
         if not self.parts:
             return folded
         ctx = self._ctx()
@@ -223,8 +231,8 @@ class Moments:
                 "type": "before_agent_start",
                 "prompt": prompt,
                 "images": images,
-                "systemPrompt": folded.system_prompt,
-                "systemPromptOptions": options,
+                "systemPrompt": build_system_prompt(current_options),
+                "systemPromptOptions": current_options,
             }, ctx)
             if result is None:
                 continue
@@ -242,8 +250,7 @@ class Moments:
                 folded.messages.extend(messages)
             replaced = _field(result, "systemPrompt")
             if replaced is not None:
-                folded.system_prompt = str(replaced)
-                folded.system_prompt_changed = True
+                current_options["forceSystemPrompt"] = str(replaced)
         return folded
 
     async def agent_end(self, event: dict[str, Any]) -> Any:
@@ -358,17 +365,42 @@ class Moments:
         return {"action": "continue"}
 
     async def context(self, messages: list[Any]) -> list[Any]:
-        """Runner ``emit_context``: each part rewrites the list the previous one produced."""
+        """Runner ``emit_context``: each part rewrites the list the previous one produced.
+
+        As for extensions, a part's `context` sees the conversation only; the system messages
+        are re-attached after it (an unchanged list keeps them in place, a changed one gets
+        the replayed head). A part's `context_with_system` then sees the full transcript."""
         if not self.parts:
             return messages
         ctx = self._ctx()
         current = deepcopy(messages)
         for part in self.parts:
-            result = await self._call(part, "context", {"type": "context", "messages": current}, ctx)
+            visible = [m for m in current if _field(m, "role") != "system"]
+            visible_snapshot = list(visible)
+            result = await self._call(part, "context", {"type": "context", "messages": visible}, ctx)
+            replaced = _field(result, "messages")
+            if replaced is None:
+                replaced = None if _same_messages(visible, visible_snapshot) else visible
+            if replaced is None:
+                continue
+            current = _restore_system_messages(current, visible_snapshot, replaced)
+        for part in self.parts:
+            result = await self._call(part, "context_with_system", {"type": "context_with_system", "messages": current}, ctx)
             replaced = _field(result, "messages")
             if replaced is not None:
                 current = replaced
         return current
+
+
+def _same_messages(left: list[Any], right: list[Any]) -> bool:
+    return len(left) == len(right) and all(message is right[index] for index, message in enumerate(left))
+
+
+def _restore_system_messages(current: list[Any], visible: list[Any], returned: list[Any]) -> list[Any]:
+    if _same_messages(returned, visible):
+        return current
+    head = get_current_system_message(current)
+    return [head, *returned] if head else returned
 
 
 __all__ = ["BeforeAgentStart", "CoreCommand", "Moments"]

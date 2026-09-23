@@ -41,12 +41,16 @@ from misaka.core.agent_session_runtime import (
     SessionImportFileNotFoundError,
 )
 from misaka.core.bash_executor import BashResult
+from misaka.core.cache_warmer import (
+    format_cache_warming_status,
+    format_cache_warming_usage,
+)
 from misaka.core.defaults import DEFAULT_THINKING_LEVEL
 from misaka.core.extensions import startup_sections
 from misaka.core.footer_data_provider import FooterDataProvider
 from misaka.core.http_dispatcher import formatHttpIdleTimeoutMs
 from misaka.core.keybindings import KeybindingsManager
-from misaka.core.messages import createCompactionSummaryMessage
+from misaka.core.messages import createCompactionSummaryMessage, createCustomMessage
 from misaka.core.model_resolver import (
     defaultModelPerProvider,
     findExactModelReferenceMatch,
@@ -2453,6 +2457,9 @@ class InteractiveMode(Conversation):
             if read_field(message, "type") == "custom" and _message_role(message) is None:
                 self.addCustomEntryToChat(message)
                 continue
+            if read_field(message, "type") == "usage" and _message_role(message) is None:
+                self.addCacheWarmingUsage(message)
+                continue
             renderer.appendItem(self.chatContainer, message, rendered_pending_tools)
             self._rememberUserMessage(message, options)
 
@@ -2469,9 +2476,23 @@ class InteractiveMode(Conversation):
         items = [
             item
             for entry in entries
-            for item in ([entry] if read_field(entry, "type") == "custom" else session_entry_to_display_messages(entry))
+            for item in (
+                [entry] if read_field(entry, "type") in {"custom", "usage"} else session_entry_to_display_messages(entry)
+            )
         ]
         self._renderSessionItems(items, options)
+
+    def addCacheWarmingUsage(self, entry: Any) -> None:
+        """Successful cache-warming usage is persisted, unlike cache misses; show it in place."""
+        show = _callable_attr(self.settingsManager, "getShowCacheMissNotices")
+        if show is not None and not show():
+            return
+        if read_field(entry, "kind") != "cache_warm":
+            return
+        self.chatContainer.addChild(Spacer(1))
+        self.chatContainer.addChild(
+            Text(interactive_theme.theme.fg("dim", format_cache_warming_usage(entry)), 1, 0)
+        )
 
     def renderInitialMessages(self) -> None:
         self.renderSessionEntries(
@@ -2849,6 +2870,25 @@ class InteractiveMode(Conversation):
         if stats.tokens.cacheWrite > 0:
             lines.append(f"{interactive_theme.theme.fg('dim', 'Cache Write:')} {stats.tokens.cacheWrite:,}")
         lines.append(f"{interactive_theme.theme.fg('dim', 'Total:')} {stats.tokens.total:,}")
+        cache_warming_status = getattr(self.session, "cacheWarmingStatus", None)
+        get_mode = _callable_attr(self.settingsManager, "getCacheWarmingMode")
+        lines.extend(
+            [
+                "",
+                interactive_theme.theme.bold("Cache Warming"),
+                f"{interactive_theme.theme.fg('dim', 'Mode:')} {get_mode() if get_mode is not None else 'streaming'}",
+                f"{interactive_theme.theme.fg('dim', 'Status:')} "
+                + (
+                    format_cache_warming_status(cache_warming_status)
+                    if cache_warming_status is not None
+                    else "Inactive (cache warming unavailable)"
+                ),
+            ]
+        )
+        decision = getattr(cache_warming_status, "decision", None)
+        if decision is not None and decision.economicsAvailable:
+            lines.append(f"{interactive_theme.theme.fg('dim', 'Cache miss penalty:')} ${decision.missCost:.3f}")
+            lines.append(f"{interactive_theme.theme.fg('dim', 'Refresh cost:')} ${decision.warmCost:.3f}")
         if stats.cost > 0:
             lines.extend(
                 [
@@ -4348,6 +4388,20 @@ class InteractiveMode(Conversation):
             entry = read_field(event, "entry")
             if read_field(entry, "type") == "custom":
                 self.addCustomEntryToChat(entry)
+                self._request_render()
+            elif read_field(entry, "type") == "usage" and read_field(entry, "kind") == "cache_warm":
+                self.addCacheWarmingUsage(entry)
+                self._request_render()
+            elif read_field(entry, "type") == "custom_message" and read_field(entry, "display"):
+                self.addMessageToChat(
+                    createCustomMessage(
+                        read_field(entry, "customType"),
+                        read_field(entry, "content"),
+                        bool(read_field(entry, "display")),
+                        read_field(entry, "details"),
+                        read_field(entry, "timestamp"),
+                    )
+                )
                 self._request_render()
             return
         if event_type == "compaction_start":
@@ -5956,6 +6010,12 @@ class InteractiveMode(Conversation):
                 f"HTTP idle timeout: {formatHttpIdleTimeoutMs(timeout_ms)}"
             )
 
+        def _on_cache_warming_mode_change(mode: str) -> None:
+            set_mode = _callable_attr(self.session, "setCacheWarmingMode")
+            if set_mode is not None:
+                set_mode(mode)
+            self.showStatus(f"Cache warming: {mode}")
+
         def _current_model() -> Any | None:
             model = getattr(self.session, "model", None)
             if model is not None:
@@ -6043,6 +6103,7 @@ class InteractiveMode(Conversation):
                             "getHttpIdleTimeoutMs",
                             300_000,
                         ),
+                        cacheWarmingMode=_safe_call_str(self.settingsManager, "getCacheWarmingMode", "streaming"),
                         thinkingLevel=global_thinking_level,
                         availableThinkingLevels=list(get_available_thinking_levels() or [])
                         if get_available_thinking_levels is not None
@@ -6102,6 +6163,7 @@ class InteractiveMode(Conversation):
                         ),
                         onTransportChange=_on_transport_change,
                         onHttpIdleTimeoutMsChange=_on_http_idle_timeout_ms_change,
+                        onCacheWarmingModeChange=_on_cache_warming_mode_change,
                         # The settings panel is the defaults panel: every other item here
                         # writes through to settings.json (setSteeringMode, setFollowUpMode,
                         # setTransport, ...), so this one persists too. pi has no global

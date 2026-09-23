@@ -298,7 +298,7 @@ async def test_responses_fallback_call_is_in_final_message(added):
         execute=execute,
     )
     result = await execute_tool_calls(
-        AgentContext(systemPrompt="", messages=[], tools=[tool]),
+        AgentContext(messages=[], tools=[tool]),
         restored,
         AgentLoopConfig(model=None, convertToLlm=lambda m: m),
         None,

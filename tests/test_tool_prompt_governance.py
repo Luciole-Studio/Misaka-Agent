@@ -14,6 +14,7 @@ from misaka.core.documents.prompt import (
     WEB_EVIDENCE_GUIDELINE,
 )
 from misaka.core.documents.wiring import documents
+from misaka.core.system_prompt import build_system_prompt
 from misaka.core.tools import _office
 from misaka.core.tools.download_file import create_download_file_tool_definition
 from misaka.core.tools.office import create_office_tool_definition
@@ -47,7 +48,9 @@ class ToolPromptGovernanceTests(unittest.TestCase):
             _cwd=self.workspace, _resourceLoader=loader,
             _toolRegistry=self.tools, _toolDefinitions=self.tools,
         )
-        return AgentSession._rebuild_system_prompt(session, names)
+        # pi 0.87: the rebuild sets the base options; the text is rendered from them.
+        AgentSession._rebuild_system_prompt(session, names)
+        return build_system_prompt(session._baseSystemPromptOptions)
 
     def test_shared_rules_survive_standalone_tools_and_deduplicate(self):
         cases = (

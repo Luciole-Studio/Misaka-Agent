@@ -47,6 +47,7 @@ from misaka.ai.auth.helpers import envApiKeyAuth, lazyOAuth
 from misaka.ai.auth.oauth_bridge import oauth_auth_from_flow
 from misaka.ai.auth.resolve import ModelsError
 from misaka.ai.auth.types import ProviderAuth
+from misaka.ai.models_generated import MODELS
 from misaka.ai.models_runtime import ModelsPublication, RefreshModelsContext
 from misaka.ai.models_store import ModelsStoreEntry
 from misaka.ai.providers.radius_config import (
@@ -57,7 +58,7 @@ from misaka.ai.providers.radius_config import (
     load_radius_gateway_config,
     normalize_radius_gateway_url,
 )
-from misaka.ai.types import Context, Model
+from misaka.ai.types import Model, TranscriptContext
 from misaka.ai.utils.oauth.radius import create_radius_oauth
 from misaka.utils.values import read_field, signal_aborted
 
@@ -97,9 +98,17 @@ class _RadiusProvider:
         self.name = options.name or DEFAULT_RADIUS_PROVIDER_NAME
         self.gateway = normalize_radius_gateway_url(options.gateway or DEFAULT_RADIUS_GATEWAY)
         self._load_config = load_config or load_radius_gateway_config
+        # The public catalog (pi 0.86 `RADIUS_MODELS`, transcribed into `models_generated`)
+        # makes Radius models selectable immediately and offline; the gateway's own catalog
+        # overlays it once fetched. Another gateway has no baseline.
+        self._baseline_models: list[Model] = (
+            [model.model_copy(update={"provider": self.id}) for model in MODELS.get("radius", {}).values()]
+            if self.gateway == normalize_radius_gateway_url(DEFAULT_RADIUS_GATEWAY)
+            else []
+        )
         # Upstream seeds this with `getRadiusModels(id, undefined)`, which is the empty
         # list by construction; the seeding call is what documents where models come from.
-        self._models: list[Model] = get_radius_models(self.id, None)
+        self._dynamic_models: list[Model] = get_radius_models(self.id, None)
         self.auth = ProviderAuth(
             apiKey=envApiKeyAuth("Radius API key", [RADIUS_API_KEY_ENV]),
             # The flow is built on first use, as upstream's `lazyOAuth` does, and the
@@ -113,7 +122,14 @@ class _RadiusProvider:
         )
 
     def getModels(self) -> list[Model]:
-        return self._models
+        merged = [*self._baseline_models]
+        for model in self._dynamic_models:
+            index = next((i for i, entry in enumerate(merged) if entry.id == model.id), -1)
+            if index >= 0:
+                merged[index] = model
+            else:
+                merged.append(model)
+        return merged
 
     # -- refresh ------------------------------------------------------------------
 
@@ -157,11 +173,11 @@ class _RadiusProvider:
         )
 
     def _apply(self, models: list[Model]) -> None:
-        self._models = models
+        self._dynamic_models = models
 
     # -- streaming ----------------------------------------------------------------
 
-    def _dispatch(self, model: Model, context: Context, options: Any, simple: bool):
+    def _dispatch(self, model: Model, context: TranscriptContext, options: Any, simple: bool):
         """Look ``pi-messages`` up in the API registry at call time.
 
         A missing implementation ends the returned stream with an error rather than
@@ -178,10 +194,10 @@ class _RadiusProvider:
             return lazy_stream(model, fail)
         return (api.streamSimple if simple else api.stream)(model, context, options)
 
-    def stream(self, model: Model, context: Context, options: Any = None):
+    def stream(self, model: Model, context: TranscriptContext, options: Any = None):
         return self._dispatch(model, context, options, simple=False)
 
-    def streamSimple(self, model: Model, context: Context, options: Any = None):
+    def streamSimple(self, model: Model, context: TranscriptContext, options: Any = None):
         return self._dispatch(model, context, options, simple=True)
 
 

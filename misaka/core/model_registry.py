@@ -55,12 +55,15 @@ from misaka.ai.types import (
     Model,
     ModelCompat,
     ModelCost,
+    ModelInputLimits,
     OpenAICompletionsCompat,
     OpenAIResponsesCompat,
     SimpleStreamOptions,
+    TranscriptContext,
 )
 from misaka.ai.utils.headers import resolve_provider_headers
 from misaka.ai.utils.oauth.types import OAuthCredentials
+from misaka.ai.utils.transcript import normalize_context
 from misaka.config import get_agent_dir, home
 from misaka.core.models_store import FileModelsStore
 from misaka.core.provider_display_names import BUILT_IN_PROVIDER_DISPLAY_NAMES
@@ -116,6 +119,29 @@ class _PartialModelCostSchema(_ConfigModel):
     cacheRead: float | None = None
     cacheWrite: float | None = None
     tiers: list[_ModelCostTierSchema] | None = None
+
+
+class _ModelPromptCacheSchema(_ConfigModel):
+    short: float | None = Field(default=None, gt=0)
+    long: float | None = Field(default=None, gt=0)
+
+
+class _ImageResizeSchema(_ConfigModel):
+    maxWidth: int | None = Field(default=None, ge=1)
+    maxHeight: int | None = Field(default=None, ge=1)
+    maxBytes: int | None = Field(default=None, ge=1)
+    jpegQuality: int | None = Field(default=None, ge=1, le=100)
+
+
+class _ModelImageInputLimitsSchema(_ConfigModel):
+    resize: _ImageResizeSchema | None = None
+    maxPerMessage: int | None = Field(default=None, ge=1)
+    maxPerRequest: int | None = Field(default=None, ge=1)
+
+
+class _ModelInputLimitsSchema(_ConfigModel):
+    maxRequestBytes: int | None = Field(default=None, ge=1)
+    images: _ModelImageInputLimitsSchema | None = None
 
 
 # Which compat shape a block is, decided once. The config validator and the parser both
@@ -179,7 +205,9 @@ class _ModelDefinitionSchema(_ConfigModel):
     reasoning: bool | None = None
     thinkingLevelMap: _ThinkingLevelMapSchema | None = None
     input: list[Literal["text", "image"]] | None = None
+    inputLimits: _ModelInputLimitsSchema | None = None
     cost: _ModelCostSchema | None = None
+    promptCache: _ModelPromptCacheSchema | None = None
     contextWindow: float | None = None
     maxTokens: float | None = None
     samplingParams: dict[str, Any] | None = None
@@ -192,7 +220,9 @@ class _ModelOverrideSchema(_ConfigModel):
     reasoning: bool | None = None
     thinkingLevelMap: _ThinkingLevelMapSchema | None = None
     input: list[Literal["text", "image"]] | None = None
+    inputLimits: _ModelInputLimitsSchema | None = None
     cost: _PartialModelCostSchema | None = None
+    promptCache: _ModelPromptCacheSchema | None = None
     contextWindow: float | None = None
     maxTokens: float | None = None
     samplingParams: dict[str, Any] | None = None
@@ -268,7 +298,7 @@ class ProviderConfigInput(TypedDict, total=False):
     baseUrl: str
     apiKey: str
     api: Api
-    streamSimple: Callable[[Model, Context, SimpleStreamOptions | None], AssistantMessageEventStream]
+    streamSimple: Callable[[Model, TranscriptContext, SimpleStreamOptions | None], AssistantMessageEventStream]
     headers: dict[str, str]
     authHeader: bool
     oauth: OAuthProviderInterface | Mapping[str, Any]
@@ -362,6 +392,26 @@ def _merge_compat(baseCompat: _ProviderCompat | None, overrideCompat: _ProviderC
     return _coerce_compat(merged)
 
 
+def _merge_input_limits(base: Any, override: Any) -> Any:
+    if not override:
+        return base
+    base_dump = base.model_dump(exclude_none=True) if base is not None else {}
+    override_dump = dict(override)
+    merged = {**base_dump, **override_dump}
+    if override_dump.get("images"):
+        base_images = base_dump.get("images") or {}
+        override_images = dict(override_dump["images"])
+        images = {**base_images, **override_images}
+        if override_images.get("resize"):
+            images["resize"] = {**(base_images.get("resize") or {}), **override_images["resize"]}
+        else:
+            images["resize"] = base_images.get("resize")
+        merged["images"] = {key: value for key, value in images.items() if value is not None}
+    else:
+        merged["images"] = base_dump.get("images")
+    return ModelInputLimits.model_validate({key: value for key, value in merged.items() if value is not None})
+
+
 def _apply_model_override(model: Model, override: dict[str, Any]) -> Model:
     update: dict[str, Any] = {}
     for key in ("name", "reasoning", "input", "contextWindow", "maxTokens"):
@@ -369,6 +419,10 @@ def _apply_model_override(model: Model, override: dict[str, Any]) -> Model:
             update[key] = override[key]
     if "thinkingLevelMap" in override:
         update["thinkingLevelMap"] = {**(model.thinkingLevelMap or {}), **(override["thinkingLevelMap"] or {})}
+    if override.get("inputLimits"):
+        update["inputLimits"] = _merge_input_limits(model.inputLimits, override["inputLimits"])
+    if override.get("promptCache"):
+        update["promptCache"] = {**(model.promptCache or {}), **override["promptCache"]}
     if "cost" in override and isinstance(override["cost"], dict):
         # pi provider-composer.ts:112-120: every rate, and `tiers`, falls back to the base
         # cost on its own. Rebuilding from the four rates dropped inherited tiers.
@@ -664,7 +718,7 @@ class _LegacyRuntimeProvider:
     def _stream(
         self,
         model: Model,
-        context: Context,
+        context: TranscriptContext,
         options: Any,
         *,
         simple: bool,
@@ -684,12 +738,12 @@ class _LegacyRuntimeProvider:
         return method(model, context, options)
 
     def stream(
-        self, model: Model, context: Context, options: Any = None
+        self, model: Model, context: TranscriptContext, options: Any = None
     ) -> AssistantMessageEventStream:
         return self._stream(model, context, options, simple=False)
 
     def streamSimple(
-        self, model: Model, context: Context, options: Any = None
+        self, model: Model, context: TranscriptContext, options: Any = None
     ) -> AssistantMessageEventStream:
         return self._stream(model, context, options, simple=True)
 
@@ -1262,7 +1316,9 @@ class ModelRegistry:
                         reasoning=_coalesce(model_def.get("reasoning"), False),
                         thinkingLevelMap=model_def.get("thinkingLevelMap"),
                         input=_coalesce(model_def.get("input"), ["text"]),
+                        inputLimits=model_def.get("inputLimits"),
                         cost=ModelCost.model_validate(cost),
+                        promptCache=model_def.get("promptCache"),
                         contextWindow=_coalesce(model_def.get("contextWindow"), 128000),
                         maxTokens=_coalesce(model_def.get("maxTokens"), 16384),
                         samplingParams=model_def.get("samplingParams"),
@@ -1734,15 +1790,24 @@ class ModelRegistry:
                 )
         return list(providers.values())
 
+    def stream(
+        self,
+        model: Model,
+        context: Context | TranscriptContext,
+        options: Any = None,
+    ) -> AssistantMessageEventStream:
+        """Stream through the configured provider with request-time authentication."""
+        return self._authModels.stream(model, context, options)
+
     def streamSimple(
         self,
         model: Model,
-        context: Context,
+        context: Context | TranscriptContext,
         options: SimpleStreamOptions | None = None,
     ) -> AssistantMessageEventStream:
-        resolved_context = (
-            context if isinstance(context, Context) else Context.model_validate(context)
-        )
+        """Stream with provider-neutral options; the transcript is normalized before any
+        provider sees it (pi `Models.streamSimple`)."""
+        resolved_context = normalize_context(context)
         provider = self._authModels.getProvider(model.provider)
         instance_owned = (
             model.provider in self._registeredProviders

@@ -65,6 +65,9 @@ class TranscriptRenderer:
 
     def addMessage(self, container: Container, message: Any) -> None:
         role = read_field(message, "role")
+        if role == "system":
+            # Prompt and tool state ride the transcript as system messages; nothing to show.
+            return
         if role == "user":
             text = user_text(message)
             if not text:

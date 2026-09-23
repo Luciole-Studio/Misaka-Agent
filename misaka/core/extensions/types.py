@@ -700,8 +700,26 @@ type SessionEvent = (
 
 
 class ContextEvent(TypedDict):
+    """The conversation only: system messages belong to Pi and are restored after the handler."""
+
     type: Literal["context"]
     messages: list[AgentMessage]
+
+
+class ContextWithSystemEvent(TypedDict):
+    """The full transcript including system messages; runs after `context` handlers and
+    the result is sent verbatim."""
+
+    type: Literal["context_with_system"]
+    messages: list[AgentMessage]
+
+
+class CacheWarmingDecisionEvent(TypedDict):
+    type: Literal["cache_warming_decision"]
+    warmCost: float
+    missCost: float
+    continuationProbability: float
+    action: Literal["warm", "stop"]
 
 
 class BeforeProviderRequestEvent(TypedDict):
@@ -730,7 +748,9 @@ class BeforeAgentStartEvent(TypedDict):
     type: Literal["before_agent_start"]
     prompt: str
     images: NotRequired[list[ImageContent]]
+    # Rendered from `systemPromptOptions` on every read, so edits to the options show here.
     systemPrompt: str
+    # Mutable, collection-complete prompt options for this run; handlers may edit them.
     systemPromptOptions: BuildSystemPromptOptions
 
 
@@ -761,11 +781,47 @@ class TurnStartEvent(TypedDict):
     timestamp: int
 
 
+class BoundaryContext(TypedDict):
+    """What a boundary handler sees: the projection with the drafts so far applied."""
+
+    contextEntries: list[Any]
+    contextMessages: list[AgentMessage]
+    llmMessages: list[Any]
+    pendingMessages: list[AgentMessage]
+    canContinue: bool
+
+
 class TurnEndEvent(TypedDict):
+    """An actionable boundary: return `{"entries": [...event.entries, draft], "continue": True}`
+    to persist structural entries in order and ensure one next provider request."""
+
     type: Literal["turn_end"]
     turnIndex: int
     message: AgentMessage
     toolResults: list[ToolResultMessage]
+    messageEntryId: str
+    toolResultEntryIds: list[str]
+    outcome: Literal["completed", "error", "aborted"]
+    entries: list[Any]
+    # The continuation decision so far.
+    continue_: NotRequired[bool]
+    context: BoundaryContext
+
+
+class AgentBeforeSettleEvent(TypedDict):
+    """The last boundary before the run settles; same contract as `turn_end`."""
+
+    type: Literal["agent_before_settle"]
+    outcome: Literal["completed", "error", "aborted"]
+    entries: list[Any]
+    continue_: NotRequired[bool]
+    context: BoundaryContext
+
+
+class BoundaryEventResult(TypedDict, total=False):
+    entries: list[Any]
+    # `continue` on the wire; spelled with a trailing underscore here because it is a keyword.
+    continue_: bool
 
 
 class MessageStartEvent(TypedDict):
@@ -1002,6 +1058,8 @@ type ExtensionEvent = (
     | ResourcesDiscoverEvent
     | SessionEvent
     | ContextEvent
+    | ContextWithSystemEvent
+    | CacheWarmingDecisionEvent
     | BeforeProviderRequestEvent
     | BeforeProviderHeadersEvent
     | AfterProviderResponseEvent
@@ -1011,6 +1069,7 @@ type ExtensionEvent = (
     | AgentSettledEvent
     | TurnStartEvent
     | TurnEndEvent
+    | AgentBeforeSettleEvent
     | MessageStartEvent
     | MessageUpdateEvent
     | MessageEndEvent
@@ -1063,6 +1122,8 @@ class MessageEndEventResult(TypedDict, total=False):
 
 class BeforeAgentStartEventResult(TypedDict, total=False):
     message: _CustomMessagePayload
+    # Becomes `forceSystemPrompt`: sent as the provider's leading system prompt without
+    # being recorded; edit `event.systemPromptOptions` to change the structured prompt.
     systemPrompt: str
     block: bool
     reason: str
@@ -1315,6 +1376,16 @@ class ExtensionAPI(Protocol):
     def on(self, event: Literal["context"], handler: ExtensionHandler[ContextEvent, ContextEventResult]) -> None: ...
 
     @overload
+    def on(
+        self, event: Literal["context_with_system"], handler: ExtensionHandler[ContextWithSystemEvent, ContextEventResult]
+    ) -> Callable[[], None]: ...
+
+    @overload
+    def on(
+        self, event: Literal["cache_warming_decision"], handler: ExtensionHandler[CacheWarmingDecisionEvent, Any]
+    ) -> Callable[[], None]: ...
+
+    @overload
     def on(self, event: Literal["before_provider_request"], handler: ExtensionHandler[BeforeProviderRequestEvent, BeforeProviderRequestEventResult]) -> None: ...
 
     @overload
@@ -1339,7 +1410,16 @@ class ExtensionAPI(Protocol):
     def on(self, event: Literal["turn_start"], handler: ExtensionHandler[TurnStartEvent, None]) -> None: ...
 
     @overload
-    def on(self, event: Literal["turn_end"], handler: ExtensionHandler[TurnEndEvent, None]) -> None: ...
+    def on(
+        self, event: Literal["turn_end"], handler: ExtensionHandler[TurnEndEvent, BoundaryEventResult | None]
+    ) -> Callable[[], None]: ...
+
+    @overload
+    def on(
+        self,
+        event: Literal["agent_before_settle"],
+        handler: ExtensionHandler[AgentBeforeSettleEvent, BoundaryEventResult | None],
+    ) -> Callable[[], None]: ...
 
     @overload
     def on(self, event: Literal["message_start"], handler: ExtensionHandler[MessageStartEvent, None]) -> None: ...

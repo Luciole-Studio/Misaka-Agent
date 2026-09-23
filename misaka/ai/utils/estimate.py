@@ -22,7 +22,8 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from misaka.ai.types import Context, Model, Usage
+from misaka.ai.types import Model, TranscriptContext, Usage
+from misaka.ai.utils.text import get_system_message_text
 
 CHARS_PER_TOKEN = 4
 ESTIMATED_IMAGE_CHARS = 4800
@@ -90,6 +91,12 @@ def estimate_text_and_image_content_tokens(content: Any) -> int:
 def estimate_message_tokens(message: Any) -> int:
     """Text by length, images by a flat allowance, tool calls by name plus arguments."""
     role = getattr(message, "role", None)
+    if role == "system":
+        return (
+            estimate_text_tokens(get_system_message_text(message))
+            + _estimate_tools_tokens(message.toolsAdded)
+            + _estimate_tools_tokens(message.toolsRemoved)
+        )
     if role in ("user", "toolResult"):
         return estimate_text_and_image_content_tokens(message.content)
 
@@ -168,44 +175,15 @@ def _estimate_tools_tokens(tools: list[Any] | None) -> int:
     return estimate_text_tokens(_safe_json([_tool_payload(t) for t in tools]))
 
 
-def estimate_context_tokens(context: Context | list[Any]) -> ContextUsageEstimate:
-    """The whole context, or just a message list.
-
-    With a usage anchor, the only tools added on top of the reported number are the ones
-    named by ``addedToolNames`` after the anchor. Without one, the system prompt and the
-    whole tool list are estimated too.
-    """
-    if isinstance(context, list):
-        return _estimate_messages(context)
-
-    estimate = _estimate_messages(context.messages)
-    if estimate.lastUsageIndex is not None:
-        added_names: set[str] = set()
-        for message in context.messages[estimate.lastUsageIndex + 1 :]:
-            if getattr(message, "role", None) == "toolResult":
-                added_names.update(message.addedToolNames or [])
-        added = _estimate_tools_tokens(
-            [tool for tool in (context.tools or []) if tool.name in added_names]
-        )
-        return ContextUsageEstimate(
-            tokens=estimate.tokens + added,
-            usageTokens=estimate.usageTokens,
-            trailingTokens=estimate.trailingTokens + added,
-            lastUsageIndex=estimate.lastUsageIndex,
-        )
-
-    prefix = (
-        estimate_text_tokens(context.systemPrompt) if context.systemPrompt else 0
-    ) + _estimate_tools_tokens(context.tools)
-    return ContextUsageEstimate(
-        tokens=estimate.tokens + prefix,
-        usageTokens=estimate.usageTokens,
-        trailingTokens=estimate.trailingTokens + prefix,
-        lastUsageIndex=estimate.lastUsageIndex,
-    )
+def estimate_context_tokens(context: TranscriptContext | list[Any]) -> ContextUsageEstimate:
+    """The whole transcript, or just a message list. The prompt and tools are system
+    messages, so they are counted where they sit: only after the usage anchor when one
+    exists, otherwise in full."""
+    messages = context.messages if hasattr(context, "messages") else context
+    return _estimate_messages(list(messages))
 
 
-def clamp_max_tokens_to_context(model: Model, context: Context, maxTokens: int) -> int:
+def clamp_max_tokens_to_context(model: Model, context: TranscriptContext, maxTokens: int) -> int:
     """Never ask for more output than the window can still hold.
 
     ``CONTEXT_SAFETY_TOKENS`` is subtracted on top of the estimate, the same margin

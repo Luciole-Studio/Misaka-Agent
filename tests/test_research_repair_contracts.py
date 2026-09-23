@@ -129,7 +129,7 @@ async def test_invalid_call_gets_receipt_without_blocking_valid_sibling(executio
     StreamingArgs("{}").finish_into(good)
     msg = AssistantMessage.model_validate_json(message([bad, good]).model_dump_json())
     result = await execute_tool_calls(
-        AgentContext(systemPrompt="", messages=[], tools=[tool]),
+        AgentContext(messages=[], tools=[tool]),
         msg,
         AgentLoopConfig(model=None, convertToLlm=lambda m: m, toolExecution=execution),
         None,

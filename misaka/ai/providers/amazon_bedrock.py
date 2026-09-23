@@ -49,7 +49,6 @@ from misaka.ai.providers.transform_messages import transform_messages
 from misaka.ai.types import (
     AssistantMessage,
     CacheRetention,
-    Context,
     DoneEvent,
     ErrorEvent,
     Model,
@@ -73,6 +72,7 @@ from misaka.ai.types import (
     ToolCallEndEvent,
     ToolCallStartEvent,
     ToolResultMessage,
+    TranscriptContext,
 )
 from misaka.ai.utils.diagnostics import (
     AssistantMessageDiagnostic,
@@ -85,6 +85,13 @@ from misaka.ai.utils.json_parse import StreamingArgs
 from misaka.ai.utils.node_http_proxy import create_http_proxy_agents_for_target
 from misaka.ai.utils.provider_env import get_provider_env_value
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
+from misaka.ai.utils.text import get_system_message_text
+from misaka.ai.utils.transcript import (
+    collapse_system_messages,
+    get_current_tools,
+    get_initial_system_message,
+    without_initial_system_message,
+)
 from misaka.utils.values import maybe_await, signal_aborted
 
 # Bedrock rejects a text block whose text is empty, and rejects a message whose content
@@ -335,10 +342,12 @@ def _register_request_overrides(client: Any, headers: dict[str, str], bearer_tok
 
 def stream_bedrock(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: StreamOptions | dict[str, Any] | None = None,
 ) -> AssistantMessageEventStream:
     stream = AssistantMessageEventStream()
+    # Bedrock has no mid-conversation system messages; fold them into the leading prompt.
+    normalized_context = collapse_system_messages(context)
 
     async def run() -> None:
         output = AssistantMessage(
@@ -373,16 +382,18 @@ def stream_bedrock(
             if inference_max_tokens is None and is_anthropic_claude_model(model):
                 inference_max_tokens = model.maxTokens
 
+            initial_system_message = get_initial_system_message(normalized_context.messages)
+            initial_system_prompt = get_system_message_text(initial_system_message) if initial_system_message else None
             command_input: dict[str, Any] = {
                 "modelId": model.id,
-                "messages": convert_messages(context, model, cache_retention, env),
-                "system": build_system_prompt(context.systemPrompt, model, cache_retention, env),
+                "messages": convert_messages(normalized_context, model, cache_retention, env),
+                "system": build_system_prompt(initial_system_prompt, model, cache_retention, env),
                 "inferenceConfig": {
                     **({"maxTokens": inference_max_tokens} if inference_max_tokens is not None else {}),
                     **({"temperature": _option(options, "temperature")} if _option(options, "temperature") is not None else {}),
                 },
                 "toolConfig": convert_tool_config(
-                    context.tools,
+                    get_current_tools(normalized_context.messages),
                     _option(options, "toolChoice"),
                     bool(getattr(getattr(model, "compat", None), "supportsStrictMode", None)),
                 ),
@@ -516,7 +527,7 @@ def stream_bedrock(
 
 def stream_simple_bedrock(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: SimpleStreamOptions | None = None,
 ) -> AssistantMessageEventStream:
     base = build_base_options(model, context, options, None)
@@ -893,6 +904,13 @@ def handle_metadata(event: dict[str, Any], model: Model, output: AssistantMessag
     output.usage.output = int(usage.get("outputTokens") or 0)
     output.usage.cacheRead = int(usage.get("cacheReadInputTokens") or 0)
     output.usage.cacheWrite = int(usage.get("cacheWriteInputTokens") or 0)
+    # One-hour cache writes are priced at their own rate, not the five-minute one (pi #9457).
+    cache_details = usage.get("cacheDetails")
+    output.usage.cacheWrite1h = (
+        sum(int(detail.get("inputTokens") or 0) for detail in cache_details if detail.get("ttl") == "ONE_HOUR")
+        if isinstance(cache_details, list)
+        else None
+    )
     output.usage.totalTokens = int(usage.get("totalTokens") or (output.usage.input + output.usage.output))
     calculate_cost(model, output.usage)
 
@@ -1089,13 +1107,17 @@ def decode_redacted_content(signature: str | None) -> bytes | None:
 
 
 def convert_messages(
-    context: Context,
+    context: TranscriptContext,
     model: Model,
     cache_retention: CacheRetention,
     env: Any = None,
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
-    transformed_messages = transform_messages(context.messages, model, lambda tool_call_id, _target_model, _source: normalize_tool_call_id(tool_call_id))
+    transformed_messages = transform_messages(
+        without_initial_system_message(context.messages),
+        model,
+        lambda tool_call_id, _target_model, _source: normalize_tool_call_id(tool_call_id),
+    )
     index = 0
     while index < len(transformed_messages):
         message = transformed_messages[index]

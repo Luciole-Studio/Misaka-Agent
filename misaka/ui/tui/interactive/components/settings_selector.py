@@ -13,7 +13,11 @@ from misaka.core.http_dispatcher import (
     HTTP_IDLE_TIMEOUT_CHOICES,
     formatHttpIdleTimeoutMs,
 )
-from misaka.core.settings_manager import DefaultProjectTrust, WarningSettings
+from misaka.core.settings_manager import (
+    CACHE_WARMING_MODES,
+    DefaultProjectTrust,
+    WarningSettings,
+)
 from misaka.ui.tui import (
     Container,
     SelectItem,
@@ -73,6 +77,7 @@ class SettingsConfig:
     followUpMode: SteeringMode
     transport: Transport
     httpIdleTimeoutMs: int
+    cacheWarmingMode: str
     thinkingLevel: ThinkingLevel
     availableThinkingLevels: list[ThinkingLevel]
     currentModel: Model | None
@@ -110,6 +115,7 @@ class SettingsCallbacks:
     onFollowUpModeChange: Callable[[SteeringMode], None]
     onTransportChange: Callable[[Transport], None]
     onHttpIdleTimeoutMsChange: Callable[[int], None]
+    onCacheWarmingModeChange: Callable[[str], None]
     onThinkingLevelChange: Callable[[ThinkingLevel], None]
     onModelThinkingLevelChange: Callable[[str, str, ThinkingLevel], None]
     onModelThinkingLevelRemove: Callable[[str, str], None]
@@ -378,6 +384,13 @@ class SettingsSelectorComponent(Container):
                 ),
                 currentValue=formatHttpIdleTimeoutMs(config.httpIdleTimeoutMs),
                 values=[str(choice["label"]) for choice in HTTP_IDLE_TIMEOUT_CHOICES],
+            ),
+            SettingItem(
+                id="cache-warming-mode",
+                label="Cache warming",
+                description="off; streaming while the agent runs; idle also between runs while continuation stays profitable",
+                currentValue=config.cacheWarmingMode,
+                values=list(CACHE_WARMING_MODES),
             ),
             SettingItem(
                 id="hide-thinking",
@@ -664,6 +677,8 @@ class SettingsSelectorComponent(Container):
                 )
                 if choice is not None:
                     callbacks.onHttpIdleTimeoutMsChange(int(choice["timeoutMs"]))
+            case "cache-warming-mode":
+                callbacks.onCacheWarmingModeChange(new_value)
             case "hide-thinking":
                 callbacks.onHideThinkingBlockChange(new_value == "true")
             case "collapse-changelog":

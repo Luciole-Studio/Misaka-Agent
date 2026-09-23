@@ -20,7 +20,6 @@ from misaka.ai.providers.constrained_sampling import (
 from misaka.ai.providers.transform_messages import transform_messages
 from misaka.ai.types import (
     AssistantMessage,
-    Context,
     Model,
     StopReason,
     TextContent,
@@ -37,6 +36,7 @@ from misaka.ai.types import (
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    TranscriptContext,
     Usage,
     UsageCost,
 )
@@ -44,6 +44,8 @@ from misaka.ai.utils.event_stream import AssistantMessageEventStream
 from misaka.ai.utils.hash import short_hash
 from misaka.ai.utils.json_parse import StreamingArgs
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
+from misaka.ai.utils.text import get_system_message_text, render_system_message_update
+from misaka.ai.utils.transcript import resolve_transcript, resolve_transcript_tools
 
 _TOOL_CALL_ID_PART_PATTERN = re.compile(r"[^a-zA-Z0-9_-]")
 
@@ -63,14 +65,11 @@ class ConvertResponsesMessagesOptions(TypedDict, total=False):
     # a grammar tool: it is replayed as a `custom_tool_call` carrying free text rather
     # than a `function_call` carrying JSON arguments.
     grammarToolInputProperties: Mapping[str, str]
-    # Tools the prefix does not declare, keyed by name. They enter the transcript at the
-    # tool result that made them available, so the model sees them appear where they
-    # actually appeared rather than all at once up front.
-    deferredTools: Mapping[str, Tool]
-    # How this endpoint takes them: a developer `additional_tools` item, or a pair of
-    # `tool_search_call` / `tool_search_output` items. None means the prefix carries
-    # everything and no tool is deferred.
-    deferredToolsMode: str | None
+    supportsMidConvoSystemMessages: bool
+    # How this endpoint takes tools a later system message adds: a developer
+    # `additional_tools` item, or a pair of `tool_search_call` / `tool_search_output` items.
+    supportsAdditionalTools: bool
+    supportsToolSearch: bool
     toolOptions: ConvertResponsesToolsOptions
 
 
@@ -78,7 +77,7 @@ class ConvertResponsesToolsOptions(TypedDict, total=False):
     strict: bool | None
     supportsStrictMode: bool
     supportsOpenAIGrammarTools: bool
-    deferLoading: bool
+    toolSearchResult: bool
 
 
 def encode_text_signature_v1(text_id: str, phase: TextSignatureV1 | str | None = None) -> str:
@@ -139,37 +138,74 @@ def _create_normalize_tool_call_id(model: Model, allowed_tool_call_providers: se
 
 def convert_responses_messages(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     allowed_tool_call_providers: set[str] | frozenset[str],
     options: ConvertResponsesMessagesOptions | None = None,
 ) -> list[dict[str, Any]]:
-    messages: list[dict[str, Any]] = []
     opts = options or {}
-    deferred_tools: Mapping[str, Tool] = opts.get("deferredTools") or {}
-    deferred_mode: str | None = opts.get("deferredToolsMode")
+    normalized_context = resolve_transcript(context, opts.get("supportsMidConvoSystemMessages"))
+    messages: list[dict[str, Any]] = []
     tool_options: ConvertResponsesToolsOptions = opts.get("toolOptions") or {}
-    # One transcript, one delivery per tool: the set spans the whole conversion.
-    loaded_tool_names: set[str] = set()
     transformed_messages = transform_messages(
-        context.messages,
+        normalized_context.messages,
         model,
         _create_normalize_tool_call_id(model, allowed_tool_call_providers),
     )
+    transcript_tools = resolve_transcript_tools(
+        normalized_context.messages,
+        bool(opts.get("supportsAdditionalTools", False)) or bool(opts.get("supportsToolSearch", False)),
+    )
 
-    include_system_prompt = True if options is None else options.get("includeSystemPrompt", True)
+    def append_system_tool_additions(message: Any, seed: str) -> None:
+        tools = (message.toolsAdded or []) if transcript_tools.anchorsAdditions else []
+        if len(tools) == 0:
+            return
+        if opts.get("supportsAdditionalTools"):
+            messages.append({
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": convert_responses_tools(tools, tool_options),
+            })
+            return
+        if not opts.get("supportsToolSearch"):
+            return
+        names = [tool.name for tool in tools]
+        call_id = f"pi_tool_load_{short_hash(seed + ':' + ','.join(names))}"
+        messages.append({
+            "type": "tool_search_call",
+            "call_id": call_id,
+            "execution": "client",
+            "status": "completed",
+            "arguments": {"query": " ".join(names), "limit": len(names)},
+        })
+        messages.append({
+            "type": "tool_search_output",
+            "call_id": call_id,
+            "execution": "client",
+            "status": "completed",
+            "tools": convert_responses_tools(tools, {**tool_options, "toolSearchResult": True}),
+        })
+
+    include_initial_system_message = True if options is None else options.get("includeSystemPrompt", True)
     grammar_tool_input_properties: Mapping[str, str] = (
         {} if options is None else options.get("grammarToolInputProperties") or {}
     )
-    if include_system_prompt and context.systemPrompt:
-        messages.append(
-            {
-                "role": "developer" if model.reasoning else "system",
-                "content": sanitize_surrogates(context.systemPrompt),
-            }
-        )
+    compat = model.compat
+    instruction_role = (
+        "developer" if model.reasoning and getattr(compat, "supportsDeveloperRole", None) is not False else "system"
+    )
 
-    for msg_index, message in enumerate(transformed_messages):
-        if message.role == "user":
+    msg_index = 0
+    for source_index, message in enumerate(transformed_messages):
+        is_leading_system_message = source_index == 0 and message.role == "system"
+        if message.role == "system":
+            if not is_leading_system_message:
+                append_system_tool_additions(message, f"system:{msg_index}")
+            if not is_leading_system_message or include_initial_system_message:
+                text = get_system_message_text(message) if is_leading_system_message else render_system_message_update(message)
+                if len(text) > 0:
+                    messages.append({"role": instruction_role, "content": sanitize_surrogates(text)})
+        elif message.role == "user":
             if isinstance(message.content, str):
                 messages.append(
                     {
@@ -234,14 +270,9 @@ def convert_responses_messages(
                         custom_input_property is None and not (item_id or "").startswith("fc_")
                     ):
                         item_id = None
-                    # A namespace only means something to the endpoint that issued it, or to
-                    # one that is about to be handed the same tool again as a deferred
-                    # definition. Replaying it anywhere else names a namespace the request
-                    # never declares.
-                    can_replay_namespace = (not is_different_model) or block.name in deferred_tools
                     namespace = (
                         {"namespace": block.namespace}
-                        if can_replay_namespace and block.namespace is not None
+                        if not is_different_model and block.namespace is not None
                         else {}
                     )
                     if custom_input_property is not None:
@@ -307,54 +338,10 @@ def convert_responses_messages(
                     "output": output_value,
                 }
             )
-            messages.extend(
-                _deferred_tool_items(message, deferred_tools, deferred_mode, tool_options, loaded_tool_names)
-            )
+        if not is_leading_system_message:
+            msg_index += 1
 
     return messages
-
-
-def _deferred_tool_items(
-    message: Any,
-    deferred_tools: Mapping[str, Tool],
-    mode: str | None,
-    tool_options: ConvertResponsesToolsOptions,
-    loaded: set[str],
-) -> list[dict[str, Any]]:
-    """The items that hand this tool result's newly available tools to the model.
-
-    ``addedToolNames`` is the tool runtime's record of what a call made reachable. Each name
-    is delivered once: a transcript replays the same result on every turn, and repeating the
-    definition would grow the prefix without adding anything.
-    """
-    if not mode or not deferred_tools:
-        return []
-    fresh: list[Tool] = []
-    for name in getattr(message, "addedToolNames", None) or []:
-        tool = deferred_tools.get(name)
-        if tool is None or name in loaded:
-            continue
-        loaded.add(name)
-        fresh.append(tool)
-    if not fresh:
-        return []
-    if mode == "additional-tools":
-        return [{"type": "additional_tools", "role": "developer",
-                 "tools": convert_responses_tools(fresh, tool_options)}]
-    if mode == "tool-search":
-        names = [tool.name for tool in fresh]
-        # The id ties the two items together and has to be the same on every replay of this
-        # transcript, so it is derived from the call and the names rather than generated.
-        call_id = f"pi_tool_load_{short_hash(message.toolCallId + ':' + ','.join(names))}"
-        return [
-            {"type": "tool_search_call", "call_id": call_id, "execution": "client",
-             "status": "completed",
-             "arguments": {"query": " ".join(names), "limit": len(names)}},
-            {"type": "tool_search_output", "call_id": call_id, "execution": "client",
-             "status": "completed",
-             "tools": convert_responses_tools(fresh, {**tool_options, "deferLoading": True})},
-        ]
-    return []
 
 
 def convert_responses_tools(
@@ -365,7 +352,7 @@ def convert_responses_tools(
     default_strict = options.get("strict", False)
     supports_strict_mode = options.get("supportsStrictMode", True)
     supports_grammar_tools = options.get("supportsOpenAIGrammarTools", False)
-    defer_loading = bool(options.get("deferLoading"))
+    tool_search_result = bool(options.get("toolSearchResult"))
 
     converted: list[dict[str, Any]] = []
     for tool in tools:
@@ -383,7 +370,7 @@ def convert_responses_tools(
                         "syntax": grammar.format,
                         "definition": grammar.definition,
                     },
-                    **({"defer_loading": True} if defer_loading else {}),
+                    **({"defer_loading": True} if tool_search_result else {}),
                 }
             )
             continue
@@ -395,7 +382,7 @@ def convert_responses_tools(
             "name": tool.name,
             "description": tool.description,
             "parameters": get_json_schema_tool_parameters(tool, strict is True),
-            **({"defer_loading": True} if defer_loading else {}),
+            **({"defer_loading": True} if tool_search_result else {}),
         }
         if supports_strict_mode:
             function_tool["strict"] = strict

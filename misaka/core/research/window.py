@@ -185,7 +185,7 @@ class WindowLO:
                 from misaka.agent.guards import install_guards
                 from misaka.core.platform.session import BOOKKEEPING_TOOLS
 
-                guard_hooks = (session.agent.shouldStopAfterTurn, session.agent.prepareNextTurnWithContext)
+                guard_hooks = (session.agent.finishTurn, session.agent.prepareNextTurnWithContext)
                 install_guards(session, limiter, bookkeeping_tools=BOOKKEEPING_TOOLS)
             if reservation.get("token"):
                 heartbeat = asyncio.create_task(keep_reservation())
@@ -212,7 +212,7 @@ class WindowLO:
             unsubscribe()
             session.agent.streamFn = stream
             if guard_hooks is not None:
-                session.agent.shouldStopAfterTurn, session.agent.prepareNextTurnWithContext = guard_hooks
+                session.agent.finishTurn, session.agent.prepareNextTurnWithContext = guard_hooks
                 del session.agent._misaka_guards
             if previous_limiter is not None:
                 session.agent._misaka_turn_budget = previous_limiter

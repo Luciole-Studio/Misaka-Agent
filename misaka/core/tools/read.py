@@ -13,7 +13,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import Api, ImageContent, Model, TextContent
-from misaka.core.experimental import get_experimental_tool_sampling
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools._common import (
     _ignore_background_task_result,
@@ -37,6 +36,7 @@ from misaka.core.tools.truncate import (
 from misaka.ui.tui import Text
 from misaka.ui.tui.interactive.theme.theme import get_language_from_path, highlight_code
 from misaka.utils.image_process import ProcessImageOptions, process_image
+from misaka.utils.image_resize import ImageResizeOptions
 from misaka.utils.mime import detect_supported_image_mime_type_from_file
 from misaka.utils.paths import format_path_relative_to_cwd_or_absolute
 from misaka.utils.values import read_field, signal_aborted
@@ -80,6 +80,8 @@ class ReadOperations(Protocol):
 @dataclass(slots=True)
 class ReadToolOptions:
     autoResizeImages: bool = True
+    # Used when the session's model declares no `inputLimits.images.resize` of its own.
+    resizeOptions: ImageResizeOptions | None = None
     operations: ReadOperations | None = None
 
 
@@ -261,12 +263,24 @@ async def _render_office(absolute_path: str, cell_range: str | None, workspace: 
         office.render_cached, absolute_path, lambda: office.render(absolute_path), workspace=workspace)
 
 
+def _model_resize_options(model: Any) -> ImageResizeOptions | None:
+    """The session model's `inputLimits.images.resize`, as the resizer's own options."""
+    images = getattr(getattr(model, "inputLimits", None), "images", None)
+    resize = getattr(images, "resize", None)
+    if resize is None:
+        return None
+    return ImageResizeOptions(
+        maxWidth=resize.maxWidth, maxHeight=resize.maxHeight, maxBytes=resize.maxBytes, jpegQuality=resize.jpegQuality
+    )
+
+
 def create_read_tool_definition(
     cwd: str,
     options: ReadToolOptions | Mapping[str, Any] | None = None,
 ) -> ToolDefinition[ReadToolInput | dict[str, Any], ReadToolDetails | None]:
     resolved_options = _coerce_options(options)
     auto_resize_images = resolved_options.autoResizeImages
+    fallback_resize_options = resolved_options.resizeOptions
     operations = resolved_options.operations or _DefaultReadOperations()
 
     async def execute(
@@ -300,7 +314,10 @@ def create_read_tool_definition(
                 processed = await process_image(
                     buffer,
                     mime_type,
-                    ProcessImageOptions(autoResizeImages=auto_resize_images),
+                    ProcessImageOptions(
+                        autoResizeImages=auto_resize_images,
+                        resizeOptions=_model_resize_options(getattr(ctx, "model", None)) or fallback_resize_options,
+                    ),
                 )
                 if not processed.ok:
                     text_note = f"Read image file [{mime_type}]\n{processed.message}"
@@ -446,7 +463,7 @@ def create_read_tool_definition(
         promptSnippet="Read file contents",
         promptGuidelines=["Use read to examine files instead of cat or sed."],
         parameters=ReadToolInput,
-        constrainedSampling=get_experimental_tool_sampling(),
+        constrainedSampling={"type": "json_schema", "strict": "prefer"},
         execute=execute,
         renderCall=render_call,
         renderResult=render_result,

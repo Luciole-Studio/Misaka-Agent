@@ -274,18 +274,10 @@ class ToolResultMessage(SchemaModel):
     # Usage from the tool execution itself, if available.  Not part of main LLM context
     # accounting (pi packages/ai/src/types.ts ToolResultMessage.usage).
     usage: Usage | None = None
-    # Names from the tool list that became available after this result.  Providers with
-    # native deferred tool loading use this as the load point; other providers ignore it
-    # (pi ToolResultMessage.addedToolNames).
-    addedToolNames: list[str] | None = None
     isError: bool
     timestamp: int
 
     _normalize_null_content = field_validator("content", mode="before")(_content_never_null)
-
-
-MessageValue: TypeAlias = UserMessage | AssistantMessage | ToolResultMessage
-Message: TypeAlias = Annotated[MessageValue, Field(discriminator="role")]
 
 
 class ImagesContext(SchemaModel):
@@ -387,10 +379,61 @@ class Tool(RuntimeModel):
         return deepcopy(self.parameters)
 
 
+class ToolReference(SchemaModel):
+    name: str
+
+
+class SystemMessage(SchemaModel):
+    """System instructions and tool declarations at one point in the transcript.
+
+    The leading system message is the system prompt. Later system messages change it:
+    `content` adds instructions from that point on, `sections` replace or remove named
+    prompt sections, and `toolsAdded`/`toolsRemoved` change the tool set. Replaying
+    every system message in order yields the current prompt and tools. Providers that
+    accept system messages mid-conversation send each one in place; other providers
+    rebuild the leading system message from the replayed state.
+    """
+
+    role: Literal["system"] = "system"
+    # Instruction text. On the leading message this is the base prompt; later, additional instructions.
+    content: str | list[TextContent]
+    # Named, ordered prompt sections rendered verbatim after `content`. The leading message
+    # declares them; later messages replace sections by name, and `null` removes one. Keep
+    # each section self-delimiting (a tag, a heading) so the model can relate an update to
+    # the original. Avoid integer-like names; JSON objects reorder those.
+    sections: dict[str, str | None] | None = None
+    # Complete definitions of tools that become available at this point.
+    toolsAdded: list[Tool] | None = None
+    # Tools that stop being available at this point.
+    toolsRemoved: list[ToolReference] | None = None
+    timestamp: int
+
+
+MessageValue: TypeAlias = SystemMessage | UserMessage | AssistantMessage | ToolResultMessage
+Message: TypeAlias = Annotated[MessageValue, Field(discriminator="role")]
+
+
 class Context(SchemaModel):
+    """Request input accepted by the public stream entry points (`Models.stream()`,
+    `streamSimple()`, ...). `systemPrompt` and `tools` are shorthand for a leading
+    system message; `normalizeContext()` folds them into one before the request
+    reaches a provider."""
+
     systemPrompt: str | None = None
     messages: list[Message]
     tools: list[Tool] | None = None
+
+
+class TranscriptContext(SchemaModel):
+    """Normalized request context passed to providers and API implementations. The
+    prompt and tool declarations are carried by the transcript's system messages.
+    Only `normalizeContext()` produces this type, so a raw `Context` cannot reach
+    provider code by accident.
+
+    pi brands the type with a unique symbol; here it is a distinct class, which is what
+    the brand buys in TypeScript: a `Context` is not a `TranscriptContext`."""
+
+    messages: list[Message]
 
 
 class OpenRouterRoutingSort(SchemaModel):
@@ -458,10 +501,13 @@ class AnthropicAllowedFallbackModel(SchemaModel):
 class OpenAICompletionsCompat(SchemaModel):
     supportsStore: bool | None = None
     supportsDeveloperRole: bool | None = None
-    # pi 0.86 (types.ts): whether the exact model accepts system or developer messages after
-    # the conversation has started, and whether such messages may add tools; misaka carries
-    # them from the catalog and folds nothing mid-conversation yet.
+    # Whether the exact model accepts system or developer messages after the conversation
+    # has started. When false, later system messages are folded into the leading system
+    # message. Default: false; the generated model catalog enables it for verified models.
     supportsMidConvoSystemMessages: bool | None = None
+    # Whether system messages can introduce additional tools mid-conversation. Requires
+    # `supportsMidConvoSystemMessages`. Default: false; the generated model catalog enables
+    # it for capable models.
     supportsMidConvoToolAdditions: bool | None = None
     # pi 0.86: vLLM `--scheduling-policy priority` value; never set by the generated catalog.
     vllmPriority: int | None = None
@@ -497,15 +543,18 @@ class OpenAICompletionsCompat(SchemaModel):
     openRouterRouting: OpenRouterRouting | None = None
     vercelGatewayRouting: VercelGatewayRouting | None = None
     zaiToolStream: bool | None = None
+    # Whether the provider supports the `strict` field in tool definitions. Default: false;
+    # generated capable models enable it explicitly.
     supportsStrictMode: bool | None = None
     cacheControlFormat: Literal["anthropic"] | None = None
+    # Whether to send session-affinity data from `options.sessionId`. Default: true for
+    # OpenRouter endpoints, false otherwise.
     sendSessionAffinityHeaders: bool | None = None
     supportsLongCacheRetention: bool | None = None
     supportsFinishReason: bool | None = None
     thinkingTokenBudgetField: ThinkingTokenBudgetField | None = None
     supportsThinkingTokenBudget: bool | None = None
     supportsOpenAIGrammarTools: bool | None = None
-    deferredToolsMode: Literal["kimi"] | None = None
     sessionAffinityFormat: SessionAffinityFormat | None = None
 
 
@@ -514,11 +563,16 @@ class OpenAIResponsesCompat(SchemaModel):
     # Default true upstream: a model that sets it false takes no `max_output_tokens` at all.
     supportsMaxOutputTokens: bool | None = None
     supportsDeveloperRole: bool | None = None
-    supportsMidConvoSystemMessages: bool | None = None     # pi 0.86, carried from the catalog (see AnthropicMessagesCompat)
+    # Whether the exact model accepts developer or system messages after the conversation
+    # has started. When false, later system messages are folded into the leading system
+    # message. Default: false; the generated model catalog enables it for verified models.
+    supportsMidConvoSystemMessages: bool | None = None
     sessionAffinityFormat: SessionAffinityFormat | None = None
     supportsStrictMode: bool | None = None
     supportsOpenAIGrammarTools: bool | None = None
     supportsAdditionalTools: bool | None = None
+    # Whether the model supports client-executed tool search for transcript-anchored
+    # additions. Default: false.
     supportsToolSearch: bool | None = None
     supportsExplicitPromptCacheMode: bool | None = None
 
@@ -537,14 +591,16 @@ class AnthropicMessagesCompat(SchemaModel):
     # request carries `output_config.effort` system messages, adaptive thinking with
     # `block_binding`, and two extra beta features. See `anthropic.py`.
     supportsMidConvoEffort: bool | None = None
-    # pi 0.86: transcript-backed mid-conversation system prompt and tool changes on models
-    # whose cache survives them (types.ts). Carried from the catalog; misaka does not yet
-    # rewrite a running conversation's prompt or tools, so they decide nothing here.
+    # Whether the exact model accepts system-role messages inside the conversation. When
+    # false, later system messages are folded into the top-level system prompt. Default: false.
     supportsMidConvoSystemMessages: bool | None = None
+    # Whether the exact model accepts mid-conversation `tool_addition` and `tool_removal`
+    # blocks. Requires `supportsMidConvoSystemMessages`. Default: false.
     supportsMidConvoToolChanges: bool | None = None
+    # Session-affinity format. `"openrouter"` sends `x-session-id`; when unset, sends
+    # `x-session-affinity`.
     sessionAffinityFormat: Literal["openrouter"] | None = None
     allowedFallbackModels: list[AnthropicAllowedFallbackModel] | None = None
-    supportsToolReferences: bool | None = None
 
 
 class BedrockCompat(SchemaModel):
@@ -553,7 +609,22 @@ class BedrockCompat(SchemaModel):
     supportsStrictMode: bool | None = None
 
 
-ModelCompat: TypeAlias = OpenAICompletionsCompat | OpenAIResponsesCompat | AnthropicMessagesCompat | BedrockCompat
+class MistralConversationsCompat(SchemaModel):
+    """Compatibility settings for the Mistral chat API."""
+
+    # Whether the exact model accepts system messages after the conversation has started.
+    # When false, later system messages are folded into the leading system message.
+    # Default: false.
+    supportsMidConvoSystemMessages: bool | None = None
+
+
+ModelCompat: TypeAlias = (
+    OpenAICompletionsCompat
+    | OpenAIResponsesCompat
+    | AnthropicMessagesCompat
+    | BedrockCompat
+    | MistralConversationsCompat
+)
 
 
 class ModelCostTier(SchemaModel):
@@ -578,28 +649,30 @@ class ModelCost(SchemaModel):
     tiers: list[ModelCostTier] | None = None
 
 
-class ModelImageResizeOptions(SchemaModel):
-    """pi-ai 0.87 ``ModelImageResizeOptions``: the cache-safe resize profile applied before a
-    new image enters conversation history."""
+# Best-effort prompt cache lifetime in seconds for each retention tier a request can ask for.
+# A missing tier means the lifetime is unknown; pi does not warm such caches.
+ModelPromptCache: TypeAlias = dict[Literal["short", "long"], int]
 
+
+class ModelImageResizeOptions(SchemaModel):
     maxWidth: int | None = None
     maxHeight: int | None = None
-    maxBytes: int | None = None            # of the base64-encoded payload
+    # Maximum base64-encoded payload size in bytes.
+    maxBytes: int | None = None
     jpegQuality: int | None = None
 
 
 class ModelImageInputLimits(SchemaModel):
+    # Cache-safe resize profile applied before a new image enters conversation history.
     resize: ModelImageResizeOptions | None = None
+    # Maximum images accepted in one provider message.
     maxPerMessage: int | None = None
+    # Maximum images accepted across one provider request.
     maxPerRequest: int | None = None
 
 
 class ModelInputLimits(SchemaModel):
-    """pi-ai 0.87 ``ModelInputLimits``: what a model accepts in one request. Carried from the
-    catalog and ``models.json``; the resize profile is not applied by misaka yet (pi applies it
-    to attachments, ``read`` and tool-result images), so a catalog entry that names one is
-    valid rather than refused."""
-
+    # Maximum serialized provider request size in bytes.
     maxRequestBytes: int | None = None
     images: ModelImageInputLimits | None = None
 
@@ -622,12 +695,11 @@ class Model(SchemaModel):
     reasoning: bool
     thinkingLevelMap: ThinkingLevelMap | None = None
     input: list[InputModality]
+    # Provider input limits and cache-safe preprocessing metadata.
     inputLimits: ModelInputLimits | None = None
     cost: ModelCost
-    # pi 0.86 ``ModelPromptCache``: prompt-cache lifetime in seconds per retention tier
-    # (``short``/``long``), unset when the provider's cache behaviour is unknown. Carried from
-    # the catalog for pi's cache warming, which misaka does not run.
-    promptCache: dict[Literal["short", "long"], int] | None = None
+    # Prompt cache lifetimes per retention tier. Unset when the provider's cache behavior is unknown.
+    promptCache: ModelPromptCache | None = None
     contextWindow: int
     maxTokens: int
     headers: dict[str, str] | None = None
@@ -780,7 +852,10 @@ __all__ = [
     "ImagesProvider",
     "ImagesStopReason",
     "Message",
+    "MistralConversationsCompat",
     "Model",
+    "ModelInputLimits",
+    "ModelPromptCache",
     "ModelThinkingLevel",
     "OpenAICompletionsCompat",
     "OpenAIResponsesCompat",
@@ -792,6 +867,7 @@ __all__ = [
     "SimpleStreamOptions",
     "StopReason",
     "StreamOptions",
+    "SystemMessage",
     "TextContent",
     "TextSignatureV1",
     "ThinkingBudgets",
@@ -800,7 +876,9 @@ __all__ = [
     "ThinkingLevelMap",
     "Tool",
     "ToolCall",
+    "ToolReference",
     "ToolResultMessage",
+    "TranscriptContext",
     "Transport",
     "Usage",
     "UserMessage",

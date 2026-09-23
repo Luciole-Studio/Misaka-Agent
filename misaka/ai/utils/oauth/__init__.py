@@ -32,6 +32,11 @@ from misaka.ai.utils.oauth.kimi_coding import (
     loginKimiCoding,
     refreshKimiCodingToken,
 )
+from misaka.ai.utils.oauth.meta import (
+    loginMeta,
+    metaOAuthProvider,
+    mintMetaApiKey,
+)
 from misaka.ai.utils.oauth.openai_codex import (
     loginOpenAICodex,
     loginOpenAICodexDeviceCode,
@@ -66,6 +71,7 @@ _BUILT_IN_OAUTH_PROVIDERS: list[OAuthProviderInterface] = [
     anthropicOAuthProvider,
     githubCopilotOAuthProvider,
     kimiCodingOAuthProvider,
+    metaOAuthProvider,
     openaiCodexOAuthProvider,
     openrouterOAuthProvider,
     radius_oauth_provider,
@@ -194,10 +200,13 @@ __all__ = [
     "loginAnthropic",
     "loginGitHubCopilot",
     "loginKimiCoding",
+    "loginMeta",
     "loginOpenAICodex",
     "loginOpenAICodexDeviceCode",
     "loginOpenRouter",
     "loginXai",
+    "metaOAuthProvider",
+    "mintMetaApiKey",
     "normalizeDomain",
     "oauthCredentialsExpireSoon",
     "openaiCodexOAuthProvider",

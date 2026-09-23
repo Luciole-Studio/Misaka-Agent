@@ -36,17 +36,22 @@ from misaka.ai.providers.sdk import require
 from misaka.ai.providers.simple_options import build_base_options
 from misaka.ai.types import (
     AssistantMessage,
-    Context,
     DoneEvent,
     ErrorEvent,
     Model,
     SimpleStreamOptions,
     StartEvent,
     StreamOptions,
+    TranscriptContext,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headers_to_record
 from misaka.ai.utils.provider_retry import retry_provider_request
+from misaka.ai.utils.transcript import (
+    get_declared_tools,
+    resolve_transcript,
+    resolve_transcript_tools,
+)
 from misaka.ai.utils.user_agent import get_misaka_user_agent
 from misaka.utils.values import maybe_await, signal_aborted
 
@@ -180,15 +185,32 @@ def create_client(model: Model, api_key: str, options: Any = None) -> AsyncAzure
     )
 
 
-def build_params(model: Model, context: Context, options: Any, deployment_name: str) -> dict[str, Any]:
+def _compat_field(model: Model, name: str, default: Any) -> Any:
+    value = getattr(getattr(model, "compat", None), name, None)
+    return default if value is None else value
+
+
+def build_params(model: Model, context: TranscriptContext, options: Any, deployment_name: str) -> dict[str, Any]:
+    supports_additional_tools = bool(_compat_field(model, "supportsAdditionalTools", False))
+    supports_tool_search = bool(_compat_field(model, "supportsToolSearch", False))
+    transcript_tools = resolve_transcript_tools(context.messages, supports_additional_tools or supports_tool_search)
     messages = convert_responses_messages(
         model,
         context,
         AZURE_TOOL_CALL_PROVIDERS,
-        {"grammarToolInputProperties": create_grammar_tool_input_properties(
-        context.tools,
-        bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None)),
-    )},
+        {
+            "grammarToolInputProperties": create_grammar_tool_input_properties(
+                get_declared_tools(context.messages),
+                bool(_compat_field(model, "supportsOpenAIGrammarTools", False)),
+            ),
+            "supportsMidConvoSystemMessages": bool(_compat_field(model, "supportsMidConvoSystemMessages", False)),
+            "supportsAdditionalTools": supports_additional_tools,
+            "supportsToolSearch": supports_tool_search,
+            "toolOptions": {
+                "supportsStrictMode": bool(_compat_field(model, "supportsStrictMode", True)),
+                "supportsOpenAIGrammarTools": bool(_compat_field(model, "supportsOpenAIGrammarTools", False)),
+            },
+        },
     )
     params: dict[str, Any] = {
         "model": deployment_name,
@@ -204,11 +226,13 @@ def build_params(model: Model, context: Context, options: Any, deployment_name: 
         params["max_output_tokens"] = max(_option(options, "maxTokens"), MIN_OUTPUT_TOKENS)
     if _option(options, "temperature") is not None:
         params["temperature"] = _option(options, "temperature")
-    if context.tools:
+    if len(transcript_tools.requestTools) > 0:
         params["tools"] = convert_responses_tools(
-            context.tools,
-            {"supportsStrictMode": bool(getattr(getattr(model, "compat", None), "supportsStrictMode", None) if getattr(getattr(model, "compat", None), "supportsStrictMode", None) is not None else True),
-             "supportsOpenAIGrammarTools": bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None))},
+            transcript_tools.requestTools,
+            {
+                "supportsStrictMode": bool(_compat_field(model, "supportsStrictMode", True)),
+                "supportsOpenAIGrammarTools": bool(_compat_field(model, "supportsOpenAIGrammarTools", False)),
+            },
         )
 
     if _option(options, "toolChoice") is not None:
@@ -304,10 +328,11 @@ def _delete_stream_scratch_field(block: Any, name: str) -> None:
 
 def stream_azure_openai_responses(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: StreamOptions | dict[str, Any] | None = None,
 ) -> AssistantMessageEventStream:
     stream = AssistantMessageEventStream()
+    normalized_context = resolve_transcript(context, _compat_field(model, "supportsMidConvoSystemMessages", None))
 
     async def run() -> None:
         deployment_name = resolve_deployment_name(model, options)
@@ -324,7 +349,7 @@ def stream_azure_openai_responses(
         try:
             api_key = _option(options, "apiKey") or get_env_api_key(model.provider) or ""
             client = create_client(model, api_key, options)
-            params = build_params(model, context, options, deployment_name)
+            params = build_params(model, normalized_context, options, deployment_name)
             on_payload = _option(options, "onPayload")
             if callable(on_payload):
                 next_params = await maybe_await(on_payload(params, model))
@@ -345,8 +370,8 @@ def stream_azure_openai_responses(
                 model,
                 {
                     "grammarToolInputProperties": create_grammar_tool_input_properties(
-                        context.tools,
-                        bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None)),
+                        get_declared_tools(normalized_context.messages),
+                        bool(_compat_field(model, "supportsOpenAIGrammarTools", False)),
                     ),
                 },
             )
@@ -373,7 +398,7 @@ def stream_azure_openai_responses(
 
 def stream_simple_azure_openai_responses(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: SimpleStreamOptions | None = None,
 ) -> AssistantMessageEventStream:
     api_key = _option(options, "apiKey") or get_env_api_key(model.provider)

@@ -95,7 +95,7 @@ def _default_keybindings(windowsKeybindings: bool, platform: str = sys.platform)
         "app.thinking.toggle": KeybindingDefinition("ctrl+t", "Toggle thinking blocks"),
         "app.session.toggleNamedFilter": KeybindingDefinition("ctrl+n", "Toggle named session filter"),
         "app.editor.external": KeybindingDefinition("ctrl+g", "Open external editor"),
-        "app.message.copy": KeybindingDefinition("ctrl+x", "Copy message to clipboard"),
+        "app.message.copy": KeybindingDefinition("ctrl+x", "Copy selection or last assistant message"),
         "app.message.followUp": KeybindingDefinition(
             "ctrl+q" if windowsKeybindings else "alt+enter", "Queue follow-up message"
         ),

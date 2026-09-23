@@ -54,6 +54,7 @@ RETRYABLE_PROVIDER_ERROR_PATTERN = _build_provider_error_pattern(
     (
         # Generic provider load, HTTP status, and server-side transient failures.
         "overloaded",
+        "currently experiencing high demand",
         "rate.?limit",
         "too many requests",
         "429",
@@ -61,6 +62,7 @@ RETRYABLE_PROVIDER_ERROR_PATTERN = _build_provider_error_pattern(
         "502",
         "503",
         "504",
+        "520",
         "524",
         "service.?unavailable",
         "server.?error",
@@ -125,6 +127,23 @@ class RetryPolicy:
     maxRetries: int
     #: Base delay in ms. Per-attempt delay is ``baseDelayMs * 2**(attempt-1)``.
     baseDelayMs: int
+    #: Cap on the per-attempt delay so long retry runs stay responsive during prolonged
+    #: transient outages (pi #8826). ``None`` means :data:`DEFAULT_MAX_AGENT_RETRY_DELAY_MS`.
+    maxAgentDelayMs: int | None = None
+
+
+DEFAULT_MAX_AGENT_RETRY_DELAY_MS = 60_000
+_MAX_SAFE_INTEGER = 2**53 - 1
+
+
+def retry_delay_ms(policy: RetryPolicy, attempt: int) -> int:
+    delay = policy.baseDelayMs * 2 ** max(0, attempt - 1)
+    # `Number.isSafeInteger` upstream: Python ints do not overflow, so the cap is explicit.
+    safe_delay = min(delay, _MAX_SAFE_INTEGER)
+    return min(
+        safe_delay,
+        policy.maxAgentDelayMs if policy.maxAgentDelayMs is not None else DEFAULT_MAX_AGENT_RETRY_DELAY_MS,
+    )
 
 
 @dataclass(slots=True)
@@ -237,7 +256,7 @@ async def retry_assistant_call(
             return response
 
         attempt += 1
-        delay_ms = (policy.baseDelayMs if policy is not None else 0) * (2 ** (attempt - 1))
+        delay_ms = retry_delay_ms(policy, attempt) if policy is not None else 0
         error_message = response.errorMessage or "Unknown error"
         last_retry = (attempt, error_message)
         await _invoke_callback(

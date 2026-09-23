@@ -190,6 +190,7 @@ def run_llm_review(prompt):
 
 
 async def _run_review_session(scope, prompt):
+    from misaka.agent.guards import finish_turn_from_stop_predicate
     from misaka.core.platform.session import (
         install_guards,
         install_turn_budget,
@@ -241,7 +242,7 @@ async def _run_review_session(scope, prompt):
             nonlocal iterations
             iterations += 1
             return iterations >= _REVIEW_MAX_ITERATIONS
-        session.agent.shouldStopAfterTurn = stop_after_turn
+        session.agent.finishTurn = finish_turn_from_stop_predicate(stop_after_turn, session.agent.finishTurn)
         install_guards(session, limiter, wall_seconds=600)
         async with asyncio.timeout(600):
             await session.prompt(prompt)

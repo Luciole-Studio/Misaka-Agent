@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import itertools
 import json
-import re
 import time
 from collections.abc import Mapping
 from typing import Any, Literal, TypedDict
@@ -24,22 +23,24 @@ from misaka.ai.providers._common import (
     _prepare_sdk_params,
 )
 from misaka.ai.providers.google_shared import (
-    GoogleThinkingLevel,
     coerce_thought_signature,
     convert_messages,
     convert_tools,
+    get_disabled_google_thinking_config,
     is_thinking_part,
     map_stop_reason,
     resolve_google_function_calling_mode,
     resolve_google_thinking_level,
     retain_thought_signature,
     supports_google_strict_tool_sampling,
+    to_google_sdk_thinking_level,
+    to_google_thinking_level,
+    uses_google_thinking_level,
 )
 from misaka.ai.providers.sdk import require
 from misaka.ai.providers.simple_options import build_base_options
 from misaka.ai.types import (
     AssistantMessage,
-    Context,
     DoneEvent,
     ErrorEvent,
     Model,
@@ -59,12 +60,19 @@ from misaka.ai.types import (
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    TranscriptContext,
     Usage,
     UsageCost,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import provider_headers_to_record
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
+from misaka.ai.utils.text import get_system_message_text
+from misaka.ai.utils.transcript import (
+    collapse_system_messages,
+    get_current_tools,
+    get_initial_system_message,
+)
 from misaka.ai.utils.user_agent import get_misaka_user_agent
 from misaka.utils.values import maybe_await, signal_aborted
 
@@ -182,7 +190,7 @@ def create_client(
 
 def build_params(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: StreamOptions | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     signal = _option(options, "signal")
@@ -190,6 +198,8 @@ def build_params(
         raise RuntimeError("Request aborted")
 
     contents = convert_messages(model, context)
+    initial_system_message = get_initial_system_message(context.messages)
+    current_tools = get_current_tools(context.messages)
 
     generation_config: dict[str, Any] = {}
     if _option(options, "temperature") is not None:
@@ -198,33 +208,34 @@ def build_params(
         generation_config["maxOutputTokens"] = _option(options, "maxTokens")
 
     config: dict[str, Any] = dict(generation_config)
-    if context.systemPrompt:
-        config["systemInstruction"] = sanitize_surrogates(context.systemPrompt)
+    system_instruction = get_system_message_text(initial_system_message) if initial_system_message else ""
+    if system_instruction:
+        config["systemInstruction"] = sanitize_surrogates(system_instruction)
     supports_strict_mode = supports_google_strict_tool_sampling(model.id)
-    if context.tools:
-        converted_tools = convert_tools(context.tools, supports_strict_mode=supports_strict_mode)
+    if len(current_tools) > 0:
+        converted_tools = convert_tools(current_tools, supports_strict_mode=supports_strict_mode)
         if converted_tools is not None:
             config["tools"] = converted_tools
 
     # `VALIDATED` is Google's half of strict sampling: sending the constrained schema
     # without asking for the mode leaves the constraint unenforced.
-    mode = resolve_google_function_calling_mode(
-        list(context.tools or []), _option(options, "toolChoice"), supports_strict_mode
+    mode = (
+        resolve_google_function_calling_mode(current_tools, _option(options, "toolChoice"), supports_strict_mode)
+        if len(current_tools) > 0
+        else None
     )
-    config["toolConfig"] = (
-        {"functionCallingConfig": {"mode": mode}} if context.tools and mode else None
-    )
+    config["toolConfig"] = {"functionCallingConfig": {"mode": mode}} if mode else None
 
     thinking = _option(options, "thinking")
     if _nested_option(thinking, "enabled") and model.reasoning:
         thinking_config: dict[str, Any] = {"includeThoughts": True}
         if _nested_option(thinking, "level") is not None:
-            thinking_config["thinkingLevel"] = _nested_option(thinking, "level")
+            thinking_config["thinkingLevel"] = to_google_sdk_thinking_level(_nested_option(thinking, "level"))
         elif _nested_option(thinking, "budgetTokens") is not None:
             thinking_config["thinkingBudget"] = _nested_option(thinking, "budgetTokens")
         config["thinkingConfig"] = thinking_config
     elif model.reasoning and thinking is not None and not _nested_option(thinking, "enabled", True):
-        config["thinkingConfig"] = get_disabled_thinking_config(model)
+        config["thinkingConfig"] = get_disabled_google_thinking_config(model)
 
     if signal is not None:
         config["abortSignal"] = signal
@@ -238,10 +249,11 @@ def build_params(
 
 def stream_google(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: StreamOptions | Mapping[str, Any] | None = None,
 ) -> AssistantMessageEventStream:
     stream = AssistantMessageEventStream()
+    normalized_context = collapse_system_messages(context)
 
     async def run() -> None:
         output = AssistantMessage(
@@ -264,7 +276,7 @@ def stream_google(
                 _option(options, "headers"),
                 _option(options, "timeoutMs"),
             )
-            params = build_params(model, context, options)
+            params = build_params(model, normalized_context, options)
             on_payload = _option(options, "onPayload")
             if callable(on_payload):
                 next_params = await maybe_await(on_payload(params, model))
@@ -433,7 +445,7 @@ def stream_google(
 
 def stream_simple_google(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: SimpleStreamOptions | None = None,
 ) -> AssistantMessageEventStream:
     api_key = _option(options, "apiKey") or get_env_api_key(model.provider)
@@ -453,9 +465,10 @@ def stream_simple_google(
         )
 
     clamped_reasoning = clamp_thinking_level(model, reasoning)
-    effort: ClampedThinkingLevel = resolve_google_thinking_level(model, clamped_reasoning)
-
-    if is_gemini3_pro_model(model) or is_gemini3_flash_model(model) or is_gemma4_model(model):
+    if clamped_reasoning == "off":
+        return stream_google(model, context, {**base.model_dump(), "thinking": {"enabled": False}})
+    resolved_level: ClampedThinkingLevel = resolve_google_thinking_level(model, clamped_reasoning)
+    if uses_google_thinking_level(model):
         return stream_google(
             model,
             context,
@@ -463,7 +476,7 @@ def stream_simple_google(
                 **base.model_dump(),
                 "thinking": {
                     "enabled": True,
-                    "level": get_thinking_level(effort, model),
+                    "level": to_google_thinking_level(resolved_level),
                 },
             },
         )
@@ -475,48 +488,10 @@ def stream_simple_google(
             **base.model_dump(),
             "thinking": {
                 "enabled": True,
-                "budgetTokens": get_google_budget(model, effort, _option(options, "thinkingBudgets")),
+                "budgetTokens": get_google_budget(model, resolved_level, _option(options, "thinkingBudgets")),
             },
         },
     )
-
-
-def is_gemma4_model(model: Model) -> bool:
-    return re.search(r"gemma-?4", model.id.lower()) is not None
-
-
-def is_gemini3_pro_model(model: Model) -> bool:
-    return re.search(r"gemini-3(?:\.\d+)?-pro", model.id.lower()) is not None
-
-
-def is_gemini3_flash_model(model: Model) -> bool:
-    return re.search(r"gemini-3(?:\.\d+)?-flash", model.id.lower()) is not None
-
-
-def get_disabled_thinking_config(model: Model) -> dict[str, Any]:
-    if is_gemini3_pro_model(model):
-        return {"thinkingLevel": "LOW"}
-    if is_gemini3_flash_model(model) or is_gemma4_model(model):
-        return {"thinkingLevel": "MINIMAL"}
-    return {"thinkingBudget": 0}
-
-
-def get_thinking_level(effort: ClampedThinkingLevel, model: Model) -> GoogleThinkingLevel:
-    if is_gemini3_pro_model(model):
-        if effort in {"minimal", "low"}:
-            return "LOW"
-        return "HIGH"
-    if is_gemma4_model(model):
-        if effort in {"minimal", "low"}:
-            return "MINIMAL"
-        return "HIGH"
-    if effort == "minimal":
-        return "MINIMAL"
-    if effort == "low":
-        return "LOW"
-    if effort == "medium":
-        return "MEDIUM"
-    return "HIGH"
 
 
 def _custom_budget(custom_budgets: ThinkingBudgets | Mapping[str, int | None] | None, effort: str) -> int | None:
@@ -553,7 +528,6 @@ def get_google_budget(
 
 streamGoogle = stream_google
 streamSimpleGoogle = stream_simple_google
-getThinkingLevel = get_thinking_level
 
 __all__ = [
     "GoogleOptions",

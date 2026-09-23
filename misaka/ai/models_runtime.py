@@ -63,6 +63,7 @@ from misaka.ai.types import (
     DeferredHandle,
     Model,
     ProviderStreamOptions,
+    TranscriptContext,
 )
 from misaka.ai.utils.abort import (
     AbortController,
@@ -72,6 +73,7 @@ from misaka.ai.utils.abort import (
 )
 from misaka.ai.utils.abort import throw_if_aborted as _throwIfAborted
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
+from misaka.ai.utils.transcript import normalize_context
 from misaka.utils.values import signal_aborted
 
 # --------------------------------------------------------------------------------------
@@ -140,11 +142,11 @@ class Provider(Protocol):
         ...
 
     def stream(
-        self, model: Model, context: Context, options: Any = None
+        self, model: Model, context: TranscriptContext, options: Any = None
     ) -> AssistantMessageEventStream: ...
 
     def streamSimple(
-        self, model: Model, context: Context, options: Any = None
+        self, model: Model, context: TranscriptContext, options: Any = None
     ) -> AssistantMessageEventStream: ...
 
 
@@ -627,10 +629,12 @@ class ModelsImpl:
         return requestModel, _mergeRequestOptions(options, apiKey=apiKey, headers=headers, env=env)
 
     def stream(self, model: Model, context: Context, options: Any = None) -> AssistantMessageEventStream:
+        transcript = normalize_context(context)
+
         async def setup():
             provider = self._requireProvider(model)
             requestModel, requestOptions = await self._applyAuth(model, options)
-            return provider.stream(requestModel, context, requestOptions)
+            return provider.stream(requestModel, transcript, requestOptions)
 
         return lazy_stream(model, setup)
 
@@ -640,10 +644,12 @@ class ModelsImpl:
     def streamSimple(
         self, model: Model, context: Context, options: Any = None
     ) -> AssistantMessageEventStream:
+        transcript = normalize_context(context)
+
         async def setup():
             provider = self._requireProvider(model)
             requestModel, requestOptions = await self._applyAuth(model, options)
-            return provider.streamSimple(requestModel, context, requestOptions)
+            return provider.streamSimple(requestModel, transcript, requestOptions)
 
         return lazy_stream(model, setup)
 
@@ -819,10 +825,10 @@ class _BuiltProvider:
             return lazy_stream(model, fail)
         return run(streams)
 
-    def stream(self, model: Model, context: Context, options: Any = None):
+    def stream(self, model: Model, context: TranscriptContext, options: Any = None):
         return self._dispatch(model, lambda streams: streams.stream(model, context, options))
 
-    def streamSimple(self, model: Model, context: Context, options: Any = None):
+    def streamSimple(self, model: Model, context: TranscriptContext, options: Any = None):
         return self._dispatch(model, lambda streams: streams.streamSimple(model, context, options))
 
     async def refreshModels(self, context: RefreshModelsContext) -> None:

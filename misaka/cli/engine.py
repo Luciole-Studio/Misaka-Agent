@@ -159,16 +159,16 @@ def _format_colored_message(text: str, color: str) -> str:
 
 async def prepare_initial_message(
     parsed: Args,
-    auto_resize_images: bool,
     stdin_content: str | None = None,
 ) -> tuple[str | None, list[ImageContent] | None]:
     if not parsed.fileArgs:
         result = build_initial_message(parsed=parsed, stdinContent=stdin_content)
         return result.initialMessage, result.initialImages
 
+    # AgentSession resizes these after extension hooks select the request model.
     processed = await process_file_arguments(
         parsed.fileArgs,
-        options=ProcessFileOptions(autoResizeImages=auto_resize_images),
+        options=ProcessFileOptions(autoResizeImages=False),
     )
     result = build_initial_message(
         parsed=parsed,
@@ -179,23 +179,29 @@ async def prepare_initial_message(
     return result.initialMessage, result.initialImages
 
 
+def _find_local_session_by_exact_id(session_id: str, cwd: str, session_dir: str | None) -> ResolvedSession | None:
+    path = SessionManager.findById(cwd, session_id, session_dir)
+    return ResolvedSession(type="local", path=path) if path else None
+
+
 async def resolve_session_path(session_arg: str, cwd: str, session_dir: str | None = None) -> ResolvedSession:
     if "/" in session_arg or "\\" in session_arg or session_arg.endswith(".jsonl"):
         return ResolvedSession(type="path", path=resolve_path(session_arg, cwd))
 
+    # Exact IDs only require reading session headers. Fall back to the full
+    # metadata listing for prefix matches.
+    exact_local_match = _find_local_session_by_exact_id(session_arg, cwd, session_dir)
+    if exact_local_match is not None:
+        return exact_local_match
     local_sessions = await SessionManager.list(cwd, session_dir)
     local_match = next(
-        (session for session in local_sessions if session.id == session_arg), None
+        (
+            session
+            for session in local_sessions
+            if session.id.startswith(session_arg)
+        ),
+        None,
     )
-    if local_match is None:
-        local_match = next(
-            (
-                session
-                for session in local_sessions
-                if session.id.startswith(session_arg)
-            ),
-            None,
-        )
     if local_match is not None:
         return ResolvedSession(type="local", path=local_match.path)
 
@@ -778,7 +784,8 @@ async def create_session_manager(
             raise SystemExit(1) from error
 
     async def find_local_session_by_exact_id(session_id: str) -> str | None:
-        return next((s.path for s in await SessionManager.list(cwd, session_dir) if s.id == session_id), None)
+        match = _find_local_session_by_exact_id(session_id, cwd, session_dir)
+        return match.path if match else None
 
     if parsed.noSession or parsed.help or parsed.listModels is not None:
         manager = SessionManager.inMemory(cwd)
@@ -1014,11 +1021,7 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
         stdin_content = await read_piped_stdin()
         time("readPipedStdin")
 
-        initial_message, initial_images = await prepare_initial_message(
-            parsed,
-            settings_manager.getImageAutoResize(),
-            stdin_content,
-        )
+        initial_message, initial_images = await prepare_initial_message(parsed, stdin_content)
         time("prepareInitialMessage")
         init_theme(settings_manager.getTheme(), app_mode == "interactive")
         time("initTheme")

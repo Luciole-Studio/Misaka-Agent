@@ -336,7 +336,7 @@ class AgentSessionRuntime:
         )
         if options and callable(options.get("setup")):
             await options["setup"](self.session.sessionManager)
-            self.session.agent.state.messages = self.session.sessionManager.buildSessionContext().messages
+            self.session.refreshContext()
         await self.finishSessionReplacement(options.get("withSession") if options else None)
         return {"cancelled": False}
 

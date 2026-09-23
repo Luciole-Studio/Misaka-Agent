@@ -15,7 +15,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
-from misaka.core.experimental import get_experimental_tool_sampling
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools._common import _drain_worker, _string_arg, abort_race
 from misaka.core.tools.output_accumulator import (
@@ -268,7 +267,12 @@ class _LocalShellOperations:
                     raise RuntimeError("aborted")
                 if timed_out:
                     raise RuntimeError(f"timeout:{timeout}")
-                return {"exitCode": None if exit_code is not None and exit_code < 0 else exit_code}
+                # A signal-killed shell has no exit code. Use the standard shell convention so
+                # callers do not mistake the termination for a successful command (pi #9577).
+                # asyncio reports a signal death as the negative signal number.
+                if exit_code is not None and exit_code < 0:
+                    return {"exitCode": 128 + (-exit_code)}
+                return {"exitCode": exit_code if exit_code is not None else 1}
             except BaseException as error:
                 primary_error = error
                 if isinstance(error, asyncio.CancelledError):
@@ -381,7 +385,15 @@ def _now_ms() -> float:
 
 
 def _format_duration(ms: float) -> str:
-    return f"{ms / 1000:.1f}s"
+    seconds = ms / 1000
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    total_seconds = int(seconds)
+    minutes = total_seconds // 60
+    remainder = total_seconds % 60
+    if minutes < 60:
+        return f"{minutes}m {remainder}s"
+    return f"{minutes // 60}h {minutes % 60}m {remainder}s"
 
 
 def _get_render_state(state: dict[str, Any]) -> _BashRenderState:
@@ -704,7 +716,9 @@ def create_shell_tool_definition(
 
             snapshot = await finish_output()
             output_text, details = format_output(snapshot)
-            if exit_code not in {0, None}:
+            if exit_code is None:
+                raise RuntimeError(_append_status(output_text, "Command terminated without an exit code"))
+            if exit_code != 0:
                 raise RuntimeError(_append_status(output_text, f"Command exited with code {exit_code}"))
             return _make_text_result(output_text, details)
         finally:
@@ -728,7 +742,7 @@ def create_shell_tool_definition(
             list(config.promptGuidelines) if expose_session_environment else []
         ),
         parameters=input_model,
-        constrainedSampling=get_experimental_tool_sampling(),
+        constrainedSampling={"type": "json_schema", "strict": "prefer"},
         execute=execute,
         renderCall=lambda args, _theme, context: _render_call(
             args, context, config.prompt

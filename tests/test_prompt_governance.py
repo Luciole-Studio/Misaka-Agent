@@ -62,7 +62,8 @@ class PromptGovernanceTests(unittest.TestCase):
     def test_base_prompt_tool_selection_and_exact_dedup(self):
         common = {"cwd": "/fixture", "toolSnippets": {"bash": "Shell", "grep": "Search"}}
         empty = build_system_prompt({**common, "selectedTools": []})
-        self.assertIn("Available tools:\n(none)", empty)
+        # pi 0.87: the prompt is built from tagged, independently replaceable sections.
+        self.assertIn("<tools>\n(none)", empty)
         self.assertNotIn("Use bash for file operations", empty)
         shell = build_system_prompt({**common, "selectedTools": ["bash"]})
         self.assertIn("Use bash for file operations", shell)
@@ -78,10 +79,10 @@ class PromptGovernanceTests(unittest.TestCase):
                                       "appendSystemPrompt": "APPEND",
                                       "contextFiles": [{"path": "/fixture/PROJECT.md", "content": "PROJECT"}],
                                       "selectedTools": []})
-        self.assertTrue(prompt.startswith("USER SYSTEM\n\nAPPEND"))
+        self.assertTrue(prompt.startswith("USER SYSTEM\n\n<addendum>\nAPPEND\n</addendum>"))
         self.assertIn("PROJECT", prompt)
-        self.assertNotIn("Available tools:", prompt)
-        self.assertTrue(prompt.endswith("Current working directory: /fixture\n"))
+        self.assertNotIn("<tools>", prompt)
+        self.assertTrue(prompt.endswith("<cwd>\n/fixture\n</cwd>"))
 
     def test_research_delta_does_not_reconstruct_or_duplicate_the_role_base(self):
         session = SimpleNamespace(getToolDefinition=lambda name: SimpleNamespace(

@@ -8,8 +8,9 @@ from typing import Any, TypedDict
 
 from misaka.agent.harness.session.uuid import uuidv7
 from misaka.agent.types import AgentMessage, StreamFn
-from misaka.ai.types import Model, SimpleStreamOptions, Usage, UserMessage
+from misaka.ai.types import Context, Model, SimpleStreamOptions, Usage, UserMessage
 from misaka.ai.utils.retry import RetryCallbacks, RetryPolicy
+from misaka.ai.utils.transcript import normalize_context
 from misaka.core.compaction.compaction import (
     complete_summarization,
     estimate_tokens,
@@ -214,12 +215,18 @@ async def generate_branch_summary(
         f"{serialize_conversation(convertToLlm(preparation.messages))}\n"
         f"</conversation>\n\n{instructions}"
     )
+    # Uses the same summarization request path as compaction so provider
+    # request behavior (timeouts, retries, attribution headers) stays consistent
+    # without running through agent state/events. Retried via completeSummarization
+    # so transient stream drops reuse the configured retry policy.
     response = await complete_summarization(
         options.model,
-        {
-            "systemPrompt": SUMMARIZATION_SYSTEM_PROMPT,
-            "messages": [UserMessage(content=[{"type": "text", "text": prompt_text}], timestamp=_timestamp_ms())],
-        },
+        normalize_context(
+            Context(
+                systemPrompt=SUMMARIZATION_SYSTEM_PROMPT,
+                messages=[UserMessage(content=[{"type": "text", "text": prompt_text}], timestamp=_timestamp_ms())],
+            )
+        ),
         SimpleStreamOptions(
             apiKey=options.apiKey,
             headers=options.headers,

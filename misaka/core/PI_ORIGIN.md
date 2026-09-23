@@ -1,7 +1,7 @@
 # core/ 里什么是 pi 的，什么是 misaka 的
 
 `misaka/core/` 是 misaka 的内核：pi 的 coding-agent 内核（`packages/coding-agent/src/core/`，
-本机对照件为 `@earendil-works/pi-coding-agent` 0.83.0 的 `dist/core/`）加上 misaka 自己的产品能力。
+本机对照件为 `@earendil-works/pi-coding-agent` 0.87.1 的 `dist/core/`，2026-09-23 从 0.85.1 基线整体移植了 0.86.0–0.87.1 的内核改动，台账见 `docs/plans/pi-0.87-port-2026-09-23.md`）加上 misaka 自己的产品能力。
 两者按**目录/文件**分得开，按**目录名**分不开——这份清单就是那条线。改 pi 文件之前先看
 `docs/audits/pi-kernel-compat-audit.md` 的去向总表；改了要在改处留 `# MISAKA fork:` 注释说明理由
 （先例：`system_prompt.py:96`）。新增 misaka 子树要登记到下面。

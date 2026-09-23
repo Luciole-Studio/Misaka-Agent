@@ -169,7 +169,7 @@ def convert_to_llm(messages: list[AgentMessage]) -> list[MessageValue]:
                 )
             )
             continue
-        if role in {"user", "assistant", "toolResult"}:
+        if role in {"system", "user", "assistant", "toolResult"}:
             converted.append(validate_message(_message_dump(message)))
     return converted
 

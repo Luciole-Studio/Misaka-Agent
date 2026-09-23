@@ -12,7 +12,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
-from misaka.core.experimental import get_experimental_tool_sampling
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools._common import _drain_worker, abort_race, write_file_text
 from misaka.core.tools.file_mutation_queue import with_file_mutation_queue
@@ -378,7 +377,7 @@ def create_write_tool_definition(
         promptSnippet=write_tool_system_prompt_contribution["snippet"],
         promptGuidelines=list(write_tool_system_prompt_contribution["guidelines"]),
         parameters=WriteToolInput,
-        constrainedSampling=get_experimental_tool_sampling(),
+        constrainedSampling={"type": "json_schema", "strict": "prefer"},
         execute=execute,
         renderCall=render_call,
         renderResult=render_result,

@@ -22,13 +22,22 @@ from misaka.ai.types import (
     Tool,
     ToolCall,
     ToolResultMessage,
+    TranscriptContext,
     Transport,
     Usage,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
+from misaka.ai.utils.transcript import (
+    create_initial_system_message,
+    get_current_system_prompt,
+    to_tool_declaration,
+)
 
+# Stream function type: the loop passes a normalized transcript: the system prompt and tool
+# declarations are carried by the transcript's system messages, never by
+# `context.systemPrompt` or `context.tools`.
 type StreamFn = Callable[
-    [Model, "LlmContext", SimpleStreamOptions | dict[str, Any] | None],
+    [Model, TranscriptContext, SimpleStreamOptions | dict[str, Any] | None],
     AssistantMessageEventStream | Awaitable[AssistantMessageEventStream],
 ]
 type ToolExecutionMode = Literal["sequential", "parallel"]
@@ -76,9 +85,6 @@ class AgentToolResult:
     # Usage from the final tool execution itself, if available.  Not used for main LLM
     # context accounting (pi packages/agent/src/types.ts AgentToolResult.usage).
     usage: Usage | None = None
-    # Names of tools introduced by this result and available from this transcript point
-    # onward (pi AgentToolResult.addedToolNames).
-    addedToolNames: list[str] | None = None
     terminate: bool | None = None
 
 
@@ -87,16 +93,11 @@ type AgentToolUpdateCallback = Callable[[AgentToolResult], None]
 
 @dataclass(slots=True)
 class AgentContext:
-    systemPrompt: str
+    # Conversation transcript. System messages in the transcript carry the prompt and tool
+    # declarations.
     messages: list[AgentMessage]
+    # Tools available for execution in this run.
     tools: list[AgentTool] | None = None
-
-
-@dataclass(slots=True)
-class LlmContext:
-    systemPrompt: str | None
-    messages: list[MessageValue]
-    tools: list[Tool] | None = None
 
 
 @dataclass(slots=True)
@@ -118,14 +119,34 @@ class AfterToolCallContext:
 
 
 @dataclass(slots=True)
-class ShouldStopAfterTurnContext:
+class AgentTurnContext:
+    """Context passed to completed-turn callbacks."""
+
     message: AssistantMessage
+    # Tool result messages emitted for the completed turn.
     toolResults: list[ToolResultMessage]
     context: AgentContext
     newMessages: list[AgentMessage]
 
 
-type PrepareNextTurnContext = ShouldStopAfterTurnContext
+@dataclass(slots=True)
+class AgentTurnDecision:
+    """Decision returned by a `FinishTurn`. Returning None preserves normal scheduling."""
+
+    action: Literal["continue", "end"]
+
+
+# Called after a completed assistant turn and all of its tool-result messages, but before `turn_end`.
+# On a normal turn, `{ action: "continue" }` ensures one next provider request. Tool-result, steering, or
+# follow-up scheduling can satisfy that request and adds no extra request; otherwise the loop continues once
+# with the current context. Error and aborted responses remain hard exits.
+type FinishTurn = Callable[
+    [AgentTurnContext, Any | None],
+    AgentTurnDecision | None | Awaitable[AgentTurnDecision | None],
+]
+
+
+type PrepareNextTurnContext = AgentTurnContext
 
 
 @dataclass(slots=True)
@@ -133,6 +154,34 @@ class AgentLoopTurnUpdate:
     context: AgentContext | None = None
     model: Model | None = None
     thinkingLevel: ThinkingLevel | None = None
+    # Messages to append before the next provider request, with normal lifecycle events.
+    messages: list[AgentMessage] | None = None
+
+
+@dataclass(slots=True)
+class PrepareRequestContext:
+    """Runtime state available immediately before a conversational provider request."""
+
+    context: AgentContext
+    model: Model
+    thinkingLevel: ThinkingLevel
+
+
+@dataclass(slots=True)
+class AgentRequestUpdate:
+    """Replacement runtime state for the provider request being prepared."""
+
+    context: AgentContext | None = None
+    model: Model | None = None
+    thinkingLevel: ThinkingLevel | None = None
+
+
+# Called immediately before every conversational provider request, including the first.
+# Pending messages have already been appended and emitted when this callback runs.
+type PrepareRequest = Callable[
+    [PrepareRequestContext, Any | None],
+    AgentRequestUpdate | None | Awaitable[AgentRequestUpdate | None],
+]
 
 
 @dataclass(slots=True)
@@ -144,7 +193,17 @@ class AgentLoopConfig:
     ]
     transformContext: Callable[[list[AgentMessage], Any | None], Awaitable[list[AgentMessage]]] | None = None
     getApiKey: Callable[[str], str | None | Awaitable[str | None]] | None = None
-    shouldStopAfterTurn: Callable[[ShouldStopAfterTurnContext], bool | Awaitable[bool]] | None = None
+    # Called after the assistant message and all tool-result messages have been emitted, immediately before `turn_end`.
+    # `{ action: "end" }` ends the run without polling queues or preparing another request.
+    # On a normal turn, `{ action: "continue" }` ensures one next provider request. Tool-result, steering, or
+    # follow-up scheduling can satisfy that request and adds no extra request; otherwise the loop continues once
+    # with the current context. Returning None preserves normal scheduling. Error and aborted responses remain
+    # hard exits.
+    finishTurn: FinishTurn | None = None
+    # Called immediately before every conversational provider request, including the first.
+    # Pending messages have already been appended. The returned context, model, and thinking level
+    # replace the runtime values for this and later requests in the run. This hook does not poll queues.
+    prepareRequest: PrepareRequest | None = None
     prepareNextTurn: (
         Callable[
             [PrepareNextTurnContext],
@@ -202,18 +261,36 @@ class AgentState:
         pendingToolCalls: set[str] | None = None,
         errorMessage: str | None = None,
     ) -> None:
-        self.systemPrompt = systemPrompt
         self.model = model
         self.thinkingLevel = thinkingLevel
         self._tools = list(tools or [])
         self._messages = list(messages or [])
+        # In `initialState`, `systemPrompt` seeds the leading system message
+        # (pi `createMutableAgentState`).
+        initial_message = create_initial_system_message(systemPrompt, [to_tool_declaration(tool) for tool in self._tools])
+        if (not self._messages or getattr(self._messages[0], "role", None) != "system") and initial_message:
+            self._messages.insert(0, initial_message)
         self.isStreaming = isStreaming
         self.streamingMessage = streamingMessage
         self.pendingToolCalls = set(pendingToolCalls or set())
         self.errorMessage = errorMessage
 
     @property
+    def systemPrompt(self) -> str:
+        """Current system prompt, replayed from the transcript's system messages.
+
+        Read-only: to change the prompt, append a system message with `content` or `sections`.
+        In `initialState`, this seeds the leading system message.
+        """
+        return get_current_system_prompt(self._messages)
+
+    @property
     def tools(self) -> list[AgentTool]:
+        """Executable tools. Assigning a new array copies the top-level array.
+
+        Differences from the tools declared in the transcript are announced to the model
+        with a system message before the next request.
+        """
         return self._tools
 
     @tools.setter
@@ -319,23 +396,27 @@ __all__ = [
     "AgentLoopConfig",
     "AgentLoopTurnUpdate",
     "AgentMessage",
+    "AgentRequestUpdate",
     "AgentStartEvent",
     "AgentState",
     "AgentTool",
     "AgentToolCall",
     "AgentToolResult",
     "AgentToolUpdateCallback",
+    "AgentTurnContext",
+    "AgentTurnDecision",
     "AssistantMessageEvent",
     "BeforeToolCallContext",
     "BeforeToolCallResult",
     "CustomAgentMessage",
-    "LlmContext",
+    "FinishTurn",
     "MessageEndEvent",
     "MessageStartEvent",
     "MessageUpdateEvent",
     "PrepareNextTurnContext",
+    "PrepareRequest",
+    "PrepareRequestContext",
     "QueueMode",
-    "ShouldStopAfterTurnContext",
     "SimpleStreamOptions",
     "StopReason",
     "StreamFn",

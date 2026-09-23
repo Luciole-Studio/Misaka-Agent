@@ -50,10 +50,12 @@ from misaka.ai.types import (
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    TranscriptContext,
     Usage,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.json_parse import StreamingArgs, parse_streaming_json
+from misaka.ai.utils.transcript import normalize_context
 from misaka.utils.values import signal_aborted
 
 logger = logging.getLogger(__name__)
@@ -196,27 +198,34 @@ def _as_options(
     return ProxyStreamOptions.model_validate(payload)
 
 
-def _as_context(context: Context | Mapping[str, Any] | Any) -> Context:
-    if isinstance(context, Context):
-        return context
-    if isinstance(context, Mapping):
-        return Context.model_validate(context)
-    return Context(
-        systemPrompt=getattr(context, "systemPrompt", None),
-        messages=list(context.messages),
-        tools=getattr(context, "tools", None),
+def _as_context(context: Context | TranscriptContext | Mapping[str, Any] | Any) -> TranscriptContext:
+    """The normalized transcript the server receives: the loop already hands one over, and
+    a raw `Context` (or a mapping shaped like one) is folded the way every stream entry
+    point folds it."""
+    if isinstance(context, TranscriptContext | Context | Mapping):
+        return normalize_context(context)
+    return normalize_context(
+        Context(
+            systemPrompt=getattr(context, "systemPrompt", None),
+            messages=list(context.messages),
+            tools=getattr(context, "tools", None),
+        )
     )
 
 
-def _serialize_context(context: Context) -> dict[str, Any]:
-    # Keep native parse diagnostics in history, not in the upstream wire protocol.
+def _serialize_context(context: TranscriptContext) -> dict[str, Any]:
+    # Keep native parse diagnostics in history, not in the upstream wire protocol. The tools
+    # a system message declares are rebuilt rather than dumped because `Tool.parameters` may
+    # hold a pydantic model class, which has no JSON form until `parameters_json_schema()`.
     payload = context.model_dump(mode="json", exclude_none=True, exclude={
-        "tools": True,
-        "messages": {"__all__": {"content": {"__all__": {"argumentsError"}}}},
+        "messages": {"__all__": {"content": {"__all__": {"argumentsError"}}, "toolsAdded": True}},
     })
-    if context.tools is not None:
-        payload["tools"] = []
-        for tool in context.tools:
+    for message, dumped in zip(context.messages, payload["messages"], strict=True):
+        tools = getattr(message, "toolsAdded", None)
+        if tools is None:
+            continue
+        dumped["toolsAdded"] = []
+        for tool in tools:
             serialized: dict[str, Any] = {
                 "name": tool.name,
                 "description": tool.description,
@@ -228,7 +237,7 @@ def _serialize_context(context: Context) -> dict[str, Any]:
                     if isinstance(tool.constrainedSampling, BaseModel)
                     else tool.constrainedSampling
                 )
-            payload["tools"].append(serialized)
+            dumped["toolsAdded"].append(serialized)
     return payload
 
 
@@ -271,7 +280,7 @@ def stream_proxy(
 async def _consume_proxy_stream(
     stream: ProxyMessageEventStream,
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: ProxyStreamOptions,
     partial: AssistantMessage,
 ) -> None:

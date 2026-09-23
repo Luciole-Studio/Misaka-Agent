@@ -127,12 +127,39 @@ class _ExtensionAPI:
     load: _FactoryLoad
     events: Any
 
-    def on(self, event: str, handler: Any) -> None:
+    def on(self, event: str, handler: Any) -> Callable[[], None]:
+        """Register a handler; the returned function drops it again. Handlers added or removed
+        during a dispatch apply to later dispatches, not the current one (pi #8967)."""
         self.load.assert_active()
-        self.extension.handlers.setdefault(event, []).append(handler)
+
+        def registered_handler(*args: Any) -> Any:
+            return handler(*args)
+
+        handlers = self.extension.handlers.setdefault(event, [])
+        handlers.append(registered_handler)
+
+        def unsubscribe() -> None:
+            handlers = self.extension.handlers.get(event)
+            if not handlers:
+                return
+            if registered_handler not in handlers:
+                return
+            handlers.remove(registered_handler)
+            if not handlers:
+                self.extension.handlers.pop(event, None)
+
+        return unsubscribe
 
     def registerTool(self, definition: ToolDefinition[Any, Any]) -> None:
         self.load.assert_active()
+        parameters = getattr(definition, "parameters", None)
+        if parameters is None or isinstance(parameters, list):
+            # A tool without a parameter schema would break the provider request; refuse it
+            # at registration instead (pi #9300).
+            raise ValueError(
+                f'Tool "{definition.name}" registered by extension "{self.extension.path}" '
+                "must define an object parameter schema."
+            )
         self.extension.tools[definition.name] = RegisteredTool(
             definition=definition,
             sourceInfo=self.extension.sourceInfo,

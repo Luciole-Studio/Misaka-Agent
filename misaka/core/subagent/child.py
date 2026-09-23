@@ -19,8 +19,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from misaka.agent.guards import finish_turn_from_stop_predicate
 from misaka.core.platform.vocabulary import MANAGEMENT_TOOL_NAMES, MANAGEMENT_TOOLS
-from misaka.utils.values import call_with_optional_second_arg, maybe_await, read_field
+from misaka.utils.values import read_field
 
 PROTOCOL_VERSION = 2
 PROCESS_GROUP_IDENTITY = "process-group|"
@@ -666,14 +667,23 @@ async def amain() -> int:
                     "model": model,
                     "thinkingLevel": "off",
                     "tools": tools,
-                    "messages": copy.deepcopy(session.agent.state.messages) if kind == "prompt" else [],
+                    # The parent's transcript leads with its own system messages (prompt and
+                    # tool declarations); the verifier must run under its own `systemPrompt`,
+                    # which only seeds the head when no system message is copied in.
+                    "messages": [
+                        message
+                        for message in copy.deepcopy(session.agent.state.messages)
+                        if str(read_field(message, "role", "")) != "system"
+                    ]
+                    if kind == "prompt"
+                    else [],
                 },
                 convertToLlm=session.agent.convertToLlm,
                 onPayload=output_format,
                 streamFn=getattr(session.agent, "_subagent_base_stream_fn", session.agent.streamFn),
                 getApiKey=session.agent.getApiKey,
                 beforeToolCall=before_tool if tools else None,
-                shouldStopAfterTurn=should_stop,
+                finishTurn=finish_turn_from_stop_predicate(should_stop),
             )
         )
         try:
@@ -728,15 +738,13 @@ async def amain() -> int:
 
     model_turn_count = 0
     turn_budget = install_turn_budget(session)
-    previous_stop = getattr(session.agent, "shouldStopAfterTurn", None)
-
     async def stop_at_turn_boundary(context: Any, abort_signal: Any = None) -> bool:
-        if max_turns is not None and model_turn_count >= max_turns:
-            return True
-        return bool(await maybe_await(call_with_optional_second_arg(previous_stop, context, abort_signal))) if previous_stop else False
+        return max_turns is not None and model_turn_count >= max_turns
 
     if max_turns is not None:
-        session.agent.shouldStopAfterTurn = stop_at_turn_boundary
+        session.agent.finishTurn = finish_turn_from_stop_predicate(
+            stop_at_turn_boundary, getattr(session.agent, "finishTurn", None)
+        )
     sequence = 0
     active_turn_id: str | None = None
     active_messages: list[dict[str, Any]] | None = None

@@ -11,6 +11,7 @@ import pytest
 from misaka.core.agent_session import AgentSession
 from misaka.core.compaction.compaction import CompactionResult
 from misaka.core.session_manager import SessionManager
+from misaka.core.system_prompt import normalize_build_system_prompt_options
 
 
 def _user(text):
@@ -29,7 +30,9 @@ def _session(manager=None):
         hasQueuedMessages=lambda: False,
     )
     settings = {"enabled": True, "reserveTokens": 100, "keepRecentTokens": 1}
-    session.settingsManager = SimpleNamespace(getCompactionSettings=lambda: settings)
+    session.settingsManager = SimpleNamespace(getCompactionSettings=lambda model=None: settings)
+    session._baseSystemPromptOptions = normalize_build_system_prompt_options({"cwd": "/tmp", "customPrompt": "fixture"})
+    session._runSystemPromptOptions = None
     session._extensionRunner = SimpleNamespace(has_handlers=lambda _: False, emit=AsyncMock())
     session.moments = SimpleNamespace(session_context_prepare=AsyncMock(),
                                       session_compact=AsyncMock(),

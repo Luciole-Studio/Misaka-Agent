@@ -213,10 +213,12 @@ class _Turn:
 
     _stopHookContinuationPending = False
     _retryAttempt = 0
+    _agentRunAbortRequested = False
     handle = AgentSession._handle_post_agent_run
 
     def __init__(self, recovered, *, retryable=False):
         self._lastAssistantMessage = _Message()
+        self._lastAssistantToolResults = []
         self._recovered, self._retryable = recovered, retryable
         self.prepared = []
         self.agent = SimpleNamespace(hasQueuedMessages=lambda: False)
@@ -234,7 +236,7 @@ class _Turn:
         self.prepared.append(message)
         return True
 
-    async def _check_compaction(self, _message):
+    async def _check_compaction(self, _message, _skip_aborted_check=True, _tool_results=None):
         return False
 
 

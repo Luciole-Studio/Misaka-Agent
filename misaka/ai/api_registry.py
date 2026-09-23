@@ -5,11 +5,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from misaka.ai.types import Api, Context, Model, SimpleStreamOptions, StreamOptions
+from misaka.ai.types import (
+    Api,
+    Model,
+    SimpleStreamOptions,
+    StreamOptions,
+    TranscriptContext,
+)
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
 
-ApiStreamFunction = Callable[[Model, Context, StreamOptions | None], AssistantMessageEventStream]
-ApiStreamSimpleFunction = Callable[[Model, Context, SimpleStreamOptions | None], AssistantMessageEventStream]
+ApiStreamFunction = Callable[[Model, TranscriptContext, StreamOptions | None], AssistantMessageEventStream]
+ApiStreamSimpleFunction = Callable[[Model, TranscriptContext, SimpleStreamOptions | None], AssistantMessageEventStream]
 
 
 @dataclass(slots=True)
@@ -29,7 +35,7 @@ _api_provider_registry: dict[str, RegisteredApiProvider] = {}
 
 
 def _wrap_stream(api: Api, stream: ApiStreamFunction) -> ApiStreamFunction:
-    def wrapped(model: Model, context: Context, options: StreamOptions | None = None) -> AssistantMessageEventStream:
+    def wrapped(model: Model, context: TranscriptContext, options: StreamOptions | None = None) -> AssistantMessageEventStream:
         if model.api != api:
             raise ValueError(f"Mismatched api: {model.api} expected {api}")
         return stream(model, context, options)
@@ -40,7 +46,7 @@ def _wrap_stream(api: Api, stream: ApiStreamFunction) -> ApiStreamFunction:
 def _wrap_stream_simple(api: Api, stream_simple: ApiStreamSimpleFunction) -> ApiStreamSimpleFunction:
     def wrapped(
         model: Model,
-        context: Context,
+        context: TranscriptContext,
         options: SimpleStreamOptions | None = None,
     ) -> AssistantMessageEventStream:
         if model.api != api:

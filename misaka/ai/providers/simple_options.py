@@ -5,19 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from misaka.ai.types import (
-    Context,
     Model,
     SimpleStreamOptions,
     StreamOptions,
     ThinkingBudgets,
     ThinkingLevel,
+    TranscriptContext,
 )
 from misaka.ai.utils.estimate import clamp_max_tokens_to_context
 
 
 def build_base_options(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: SimpleStreamOptions | None = None,
     api_key: str | None = None,
 ) -> StreamOptions:

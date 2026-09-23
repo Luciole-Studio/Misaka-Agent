@@ -117,7 +117,10 @@ def host(root):
                  sessionManager=SessionManager.create(workspace, str(root / "sessions")),
                  settingsManager=NS(getGlobalSettings=dict, getProjectSettings=dict),
                  getActiveToolNames=list, isProjectTrusted=lambda: True,
-                 agent=NS(state=NS(messages=[], tools=[], systemPrompt="Fixture parent.")))
+                 # The fork snapshot records the session's effective prompt (pi 0.87: the
+                 # agent state's prompt is replayed from the transcript and read-only).
+                 systemPrompt="Fixture parent.",
+                 agent=NS(state=NS(messages=[], tools=[])))
     manager = SubagentManager(session, RoleContext(
         role="sisters/10032", mcp_role="sisters/10032", workspace=workspace,
         profile_dir=str(home.path("profiles_root") / "10032")))

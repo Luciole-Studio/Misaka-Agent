@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from misaka.config import home
+from misaka.core.diagnostics import ResourceDiagnostic
 from misaka.core.source_info import SourceInfo, create_synthetic_source_info
 from misaka.utils.frontmatter import parse_frontmatter
 from misaka.utils.paths import resolve_path
@@ -136,12 +137,31 @@ def parse_prompt_template_invocation(text: str) -> tuple[str, str] | None:
     return text[1:name_end], text[args_start:]
 
 
-def load_prompt_templates(options: LoadPromptTemplatesOptions) -> list[PromptTemplate]:
+@dataclass(slots=True)
+class LoadedPromptTemplates:
+    templates: list[PromptTemplate]
+    # Malformed frontmatter and unreadable files are reported as resource warnings instead
+    # of being silently ignored (pi #9830).
+    diagnostics: list[ResourceDiagnostic]
+
+
+@dataclass(slots=True)
+class _LoadedTemplate:
+    template: PromptTemplate | None
+    diagnostics: list[ResourceDiagnostic]
+
+
+def load_prompt_templates(options: LoadPromptTemplatesOptions) -> LoadedPromptTemplates:
     resolved_cwd = resolve_path(options["cwd"])
     resolved_agent_dir = resolve_path(options["agentDir"])
     prompt_paths = options["promptPaths"]
 
     templates: list[PromptTemplate] = []
+    diagnostics: list[ResourceDiagnostic] = []
+
+    def add_result(result: LoadedPromptTemplates) -> None:
+        templates.extend(result.templates)
+        diagnostics.extend(result.diagnostics)
     global_prompts_dir = os.path.join(resolved_agent_dir, "prompts")
     project_dir = home.project_dir(resolved_cwd)
     project_prompts_dir = str(project_dir / "prompts") if project_dir is not None else None
@@ -183,15 +203,17 @@ def load_prompt_templates(options: LoadPromptTemplatesOptions) -> list[PromptTem
             continue
         try:
             if os.path.isdir(resolved):
-                templates.extend(_load_templates_from_dir(resolved, get_source_info))
+                add_result(_load_templates_from_dir(resolved, get_source_info))
             elif os.path.isfile(resolved) and resolved.endswith(".md"):
-                template = _load_template_from_file(resolved, get_source_info(resolved))
-                if template is not None:
-                    templates.append(template)
-        except Exception:  # noqa: BLE001, S112 - an unreadable entry is skipped
-            continue
+                result = _load_template_from_file(resolved, get_source_info(resolved))
+                if result.template is not None:
+                    templates.append(result.template)
+                diagnostics.extend(result.diagnostics)
+        except Exception as error:  # noqa: BLE001 - an unreadable entry becomes a warning
+            message = str(error) or "failed to read prompt template path"
+            diagnostics.append(ResourceDiagnostic(type="warning", message=message, path=resolved))
 
-    return templates
+    return LoadedPromptTemplates(templates=templates, diagnostics=diagnostics)
 
 
 def expand_prompt_template(text: str, templates: list[PromptTemplate]) -> str:
@@ -208,10 +230,12 @@ def expand_prompt_template(text: str, templates: list[PromptTemplate]) -> str:
 def _load_templates_from_dir(
     dir_path: str,
     get_source_info: Callable[[str], SourceInfo],
-) -> list[PromptTemplate]:
-    if not os.path.isdir(dir_path):
-        return []
+) -> LoadedPromptTemplates:
+    """Scan a directory for .md files (non-recursive) and load them as prompt templates."""
     templates: list[PromptTemplate] = []
+    diagnostics: list[ResourceDiagnostic] = []
+    if not os.path.isdir(dir_path):
+        return LoadedPromptTemplates(templates=templates, diagnostics=diagnostics)
     try:
         for entry in os.scandir(dir_path):
             entry_path = entry.path
@@ -222,39 +246,55 @@ def _load_templates_from_dir(
                 except Exception:  # noqa: BLE001, S112 - an unreadable entry is skipped
                     continue
             if is_file and entry.name.endswith(".md"):
-                template = _load_template_from_file(entry_path, get_source_info(entry_path))
-                if template is not None:
-                    templates.append(template)
+                result = _load_template_from_file(entry_path, get_source_info(entry_path))
+                if result.template is not None:
+                    templates.append(result.template)
+                diagnostics.extend(result.diagnostics)
     except Exception:  # noqa: BLE001
-        return []
-    return templates
+        return LoadedPromptTemplates(templates=templates, diagnostics=diagnostics)
+    return LoadedPromptTemplates(templates=templates, diagnostics=diagnostics)
 
 
-def _load_template_from_file(file_path: str, source_info: SourceInfo) -> PromptTemplate | None:
+def _load_template_from_file(file_path: str, source_info: SourceInfo) -> _LoadedTemplate:
+    diagnostics: list[ResourceDiagnostic] = []
     try:
         raw_content = Path(file_path).read_text(encoding="utf-8")
+    except Exception as error:  # noqa: BLE001 - reported, not swallowed
+        message = str(error) or "failed to read prompt template file"
+        diagnostics.append(ResourceDiagnostic(type="warning", message=message, path=file_path))
+        return _LoadedTemplate(template=None, diagnostics=diagnostics)
+    try:
         parsed = parse_frontmatter(raw_content)
-        frontmatter = parsed.frontmatter
-        body = parsed.body
-        name = Path(file_path).stem
-        description = frontmatter.get("description") or ""
-        if not description:
-            first_line = next((line for line in body.split("\n") if line.strip()), None)
-            if first_line:
-                description = first_line[:60] + ("..." if len(first_line) > 60 else "")
-        return PromptTemplate(
+    except Exception as error:  # noqa: BLE001 - reported, not swallowed
+        message = str(error) or "failed to parse prompt template file"
+        diagnostics.append(ResourceDiagnostic(type="warning", message=message, path=file_path))
+        return _LoadedTemplate(template=None, diagnostics=diagnostics)
+    frontmatter = parsed.frontmatter
+    body = parsed.body
+    name = Path(file_path).stem
+    # Get description from frontmatter or first non-empty line
+    description = frontmatter.get("description") if isinstance(frontmatter.get("description"), str) else ""
+    if not description:
+        first_line = next((line for line in body.split("\n") if line.strip()), None)
+        if first_line:
+            # Truncate if too long
+            description = first_line[:60] + ("..." if len(first_line) > 60 else "")
+    argument_hint = frontmatter.get("argument-hint") if isinstance(frontmatter.get("argument-hint"), str) else None
+    return _LoadedTemplate(
+        template=PromptTemplate(
             name=name,
             description=description,
-            argumentHint=frontmatter.get("argument-hint") or None,
+            argumentHint=argument_hint or None,
             content=body,
             sourceInfo=source_info,
             filePath=file_path,
-        )
-    except Exception:  # noqa: BLE001
-        return None
+        ),
+        diagnostics=diagnostics,
+    )
 
 
 __all__ = [
     "LoadPromptTemplatesOptions",
+    "LoadedPromptTemplates",
     "PromptTemplate",
     ]

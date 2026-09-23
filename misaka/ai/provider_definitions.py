@@ -57,6 +57,7 @@ from misaka.ai.models_runtime import (
     createModels,
     createProvider,
 )
+from misaka.ai.providers.opencode_headers import withOpenCodeSessionHeader
 from misaka.ai.radius_provider import radiusProvider
 from misaka.ai.types import Model
 from misaka.utils.values import signal_aborted
@@ -678,6 +679,20 @@ def kimiCodingProvider() -> _BuiltProvider:
     )
 
 
+def metaProvider() -> _BuiltProvider:
+    return createProvider(
+        CreateProviderOptions(
+            id="meta",
+            name="Meta",
+            baseUrl="https://api.meta.ai/v1",
+            auth=ProviderAuth(apiKey=envApiKeyAuth("Meta Model API key", ['META_API_KEY']),
+            oauth=_oauth("meta", name="Meta (Muse subscription)", upstreamLoader="loadMetaOAuth", isSubscription=True, loginLabel="Sign in with Meta")),
+            models=_catalog("meta"),
+            api=_api("openai-responses"),
+        )
+    )
+
+
 def minimaxCnProvider() -> _BuiltProvider:
     return createProvider(
         CreateProviderOptions(
@@ -790,7 +805,11 @@ def opencodeGoProvider() -> _BuiltProvider:
             name="OpenCode Go",
             auth=ProviderAuth(apiKey=envApiKeyAuth("OpenCode API key", ['OPENCODE_API_KEY'])),
             models=_catalog("opencode-go"),
-            api={"anthropic-messages": _api("anthropic-messages"), "openai-completions": _api("openai-completions"), "openai-responses": _api("openai-responses")},
+            api={
+                "anthropic-messages": withOpenCodeSessionHeader(_api("anthropic-messages")),
+                "openai-completions": withOpenCodeSessionHeader(_api("openai-completions")),
+                "openai-responses": withOpenCodeSessionHeader(_api("openai-responses")),
+            },
         )
     )
 
@@ -802,7 +821,12 @@ def opencodeProvider() -> _BuiltProvider:
             name="OpenCode Zen",
             auth=ProviderAuth(apiKey=envApiKeyAuth("OpenCode API key", ['OPENCODE_API_KEY'])),
             models=_catalog("opencode"),
-            api={"anthropic-messages": _api("anthropic-messages"), "google-generative-ai": _api("google-generative-ai"), "openai-completions": _api("openai-completions"), "openai-responses": _api("openai-responses")},
+            api={
+                "anthropic-messages": withOpenCodeSessionHeader(_api("anthropic-messages")),
+                "google-generative-ai": withOpenCodeSessionHeader(_api("google-generative-ai")),
+                "openai-completions": withOpenCodeSessionHeader(_api("openai-completions")),
+                "openai-responses": withOpenCodeSessionHeader(_api("openai-responses")),
+            },
         )
     )
 
@@ -1001,6 +1025,7 @@ def builtinProviders() -> list[_BuiltProvider]:
         groqProvider(),
         huggingfaceProvider(),
         kimiCodingProvider(),
+        metaProvider(),
         minimaxProvider(),
         minimaxCnProvider(),
         mistralProvider(),

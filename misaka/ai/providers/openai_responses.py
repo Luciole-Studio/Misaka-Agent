@@ -46,15 +46,14 @@ from misaka.ai.providers.simple_options import build_base_options
 from misaka.ai.types import (
     AssistantMessage,
     CacheRetention,
-    Context,
     DoneEvent,
     ErrorEvent,
     Model,
     SimpleStreamOptions,
     StartEvent,
     StreamOptions,
+    TranscriptContext,
 )
-from misaka.ai.utils.deferred_tools import split_deferred_tools
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import (
     apply_provider_headers,
@@ -62,6 +61,11 @@ from misaka.ai.utils.headers import (
     provider_headers_to_record,
 )
 from misaka.ai.utils.provider_retry import retry_provider_request
+from misaka.ai.utils.transcript import (
+    get_declared_tools,
+    resolve_transcript,
+    resolve_transcript_tools,
+)
 from misaka.utils.values import maybe_await, read_field, signal_aborted
 
 OPENAI_TOOL_CALL_PROVIDERS = {"openai", "openai-codex", "opencode"}
@@ -103,6 +107,7 @@ def get_compat(model: Model) -> dict[str, Any]:
     compat = model.compat if getattr(model, "compat", None) is not None else None
     return {
         "supportsDeveloperRole": read_field(compat, "supportsDeveloperRole", True),
+        "supportsMidConvoSystemMessages": read_field(compat, "supportsMidConvoSystemMessages", False),
         "sessionAffinityFormat": read_field(
             compat, "sessionAffinityFormat", _detect_session_affinity_format(model)
         ),
@@ -140,11 +145,13 @@ def _error_message(error: Exception) -> str:
     return message if isinstance(message, str) else str(error)
 
 
-def format_openai_responses_error(error: Any) -> str:
+def format_openai_responses_error(error: Any, model: Model | None = None) -> str:
+    # The label names the actual provider instead of always saying OpenAI (pi #9298).
+    label = "OpenAI" if model is None or model.provider == "openai" else model.provider
     if isinstance(error, Exception):
         status = getattr(error, "status", None)
         if isinstance(status, int):
-            return f"OpenAI API error ({status}): {_error_message(error)}"
+            return f"{label} API error ({status}): {_error_message(error)}"
         return _error_message(error)
     try:
         return json.dumps(error)
@@ -154,7 +161,7 @@ def format_openai_responses_error(error: Any) -> str:
 
 def create_client(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     api_key: str | None = None,
     options_headers: dict[str, str] | None = None,
     session_id: str | None = None,
@@ -208,31 +215,27 @@ def create_client(
     )
 
 
-def build_params(model: Model, context: Context, options: Any = None) -> dict[str, Any]:
+def build_params(model: Model, context: TranscriptContext, options: Any = None) -> dict[str, Any]:
     cache_retention = resolve_cache_retention(_option(options, "cacheRetention"), _option(options, "env"))
     compat = get_compat(model)
     tool_options: dict[str, Any] = {
         "supportsStrictMode": compat["supportsStrictMode"],
         "supportsOpenAIGrammarTools": compat["supportsOpenAIGrammarTools"],
     }
-    # Two ways of handing over a tool the prefix does not declare, and the endpoint takes
-    # one or the other. Without either, every tool goes in the prefix as before.
-    deferred_tools_mode = (
-        "additional-tools" if compat["supportsAdditionalTools"]
-        else "tool-search" if compat["supportsToolSearch"]
-        else None
+    transcript_tools = resolve_transcript_tools(
+        context.messages, compat["supportsAdditionalTools"] or compat["supportsToolSearch"]
     )
-    placement = split_deferred_tools(context, deferred_tools_mode is not None)
     messages = convert_responses_messages(
         model,
         context,
         OPENAI_TOOL_CALL_PROVIDERS,
         {
             "grammarToolInputProperties": create_grammar_tool_input_properties(
-                context.tools, compat["supportsOpenAIGrammarTools"],
+                get_declared_tools(context.messages), compat["supportsOpenAIGrammarTools"],
             ),
-            "deferredTools": placement.deferred,
-            "deferredToolsMode": deferred_tools_mode,
+            "supportsMidConvoSystemMessages": compat["supportsMidConvoSystemMessages"],
+            "supportsAdditionalTools": compat["supportsAdditionalTools"],
+            "supportsToolSearch": compat["supportsToolSearch"],
             "toolOptions": tool_options,
         },
     )
@@ -258,10 +261,8 @@ def build_params(model: Model, context: Context, options: Any = None) -> dict[st
         params["service_tier"] = _option(options, "serviceTier")
     if _option(options, "toolChoice") is not None:
         params["tool_choice"] = _option(options, "toolChoice")
-    # Only the immediate half: the deferred definitions arrive in the transcript, at the
-    # tool result that made them reachable.
-    if placement.immediate:
-        params["tools"] = convert_responses_tools(placement.immediate, tool_options)
+    if len(transcript_tools.requestTools) > 0:
+        params["tools"] = convert_responses_tools(transcript_tools.requestTools, tool_options)
 
     reasoning_effort = _option(options, "reasoningEffort")
     reasoning_summary = _option(options, "reasoningSummary")
@@ -346,10 +347,11 @@ async def _create_responses_stream(client: Any, params: dict[str, Any], options:
 
 def stream_openai_responses(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: StreamOptions | dict[str, Any] | None = None,
 ) -> AssistantMessageEventStream:
     stream = AssistantMessageEventStream()
+    normalized_context = resolve_transcript(context, get_compat(model)["supportsMidConvoSystemMessages"])
 
     async def run() -> None:
         output = AssistantMessage(
@@ -368,12 +370,12 @@ def stream_openai_responses(
             cache_session_id = None if cache_retention == "none" else _option(options, "sessionId")
             client = create_client(
                 model,
-                context,
+                normalized_context,
                 api_key,
                 _option(options, "headers"),
                 cache_session_id,
             )
-            params = build_params(model, context, options)
+            params = build_params(model, normalized_context, options)
             on_payload = _option(options, "onPayload")
             if callable(on_payload):
                 next_params = await maybe_await(on_payload(params, model))
@@ -394,7 +396,7 @@ def stream_openai_responses(
                 model,
                 {
                     "grammarToolInputProperties": create_grammar_tool_input_properties(
-                        context.tools,
+                        get_declared_tools(normalized_context.messages),
                         bool(getattr(getattr(model, "compat", None), "supportsOpenAIGrammarTools", None)),
                     ),
                     "serviceTier": _option(options, "serviceTier"),
@@ -415,7 +417,7 @@ def stream_openai_responses(
                         delattr(block, attr)
             signal = _option(options, "signal")
             output.stopReason = "aborted" if signal_aborted(signal) else "error"
-            output.errorMessage = format_openai_responses_error(error)
+            output.errorMessage = format_openai_responses_error(error, model)
             stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
         finally:
             stream.end()
@@ -426,7 +428,7 @@ def stream_openai_responses(
 
 def stream_simple_openai_responses(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: SimpleStreamOptions | None = None,
 ) -> AssistantMessageEventStream:
     api_key = _option(options, "apiKey") or get_env_api_key(model.provider)

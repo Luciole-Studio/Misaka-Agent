@@ -15,7 +15,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
-from misaka.core.experimental import get_experimental_tool_sampling
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools._common import (
     _drain_worker,
@@ -576,7 +575,7 @@ def create_edit_tool_definition(
             "Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
         ],
         parameters=_edit_tool_schema(),
-        constrainedSampling=get_experimental_tool_sampling(),
+        constrainedSampling={"type": "json_schema", "strict": "prefer"},
         renderShell="self",
         prepareArguments=prepare_edit_arguments,
         execute=execute,

@@ -25,11 +25,12 @@ from misaka.agent.types import (
     AgentState,
     BeforeToolCallContext,
     BeforeToolCallResult,
+    FinishTurn,
     MessageEndEvent,
     MessageStartEvent,
     PrepareNextTurnContext,
+    PrepareRequest,
     QueueMode,
-    ShouldStopAfterTurnContext,
     StreamFn,
     ToolExecutionMode,
     TurnEndEvent,
@@ -46,7 +47,8 @@ from misaka.ai.types import (
     Usage,
     validate_message,
 )
-from misaka.utils.values import call_with_optional_second_arg, maybe_await
+from misaka.ai.utils.transcript import get_current_system_message
+from misaka.utils.values import maybe_await
 
 logger = logging.getLogger(__name__)
 
@@ -97,13 +99,6 @@ PrepareNextTurnWithContextFn = Callable[
     [PrepareNextTurnContext, "AbortSignal | None"],
     AgentLoopTurnUpdate | None | Awaitable[AgentLoopTurnUpdate | None],
 ]
-ShouldStopAfterTurnFn = (
-    Callable[
-        [ShouldStopAfterTurnContext, "AbortSignal | None"],
-        bool | Awaitable[bool],
-    ]
-    | Callable[[ShouldStopAfterTurnContext], bool | Awaitable[bool]]
-)
 
 
 def _copy_empty_usage() -> Usage:
@@ -120,7 +115,7 @@ def _normalize_standard_message(message: AgentMessage) -> AgentMessage:
     role = getattr(message, "role", None)
     if role is None and isinstance(message, dict):
         role = message.get("role")
-    if role in {"user", "assistant", "toolResult"}:
+    if role in {"system", "user", "assistant", "toolResult"}:
         return validate_message(_maybe_model_dump(message))
     return message
 
@@ -129,7 +124,7 @@ def default_convert_to_llm(messages: list[AgentMessage]) -> list[MessageValue]:
     converted: list[MessageValue] = []
     for message in messages:
         role = message.get("role") if isinstance(message, dict) else getattr(message, "role", None)
-        if role not in {"user", "assistant", "toolResult"}:
+        if role not in {"system", "user", "assistant", "toolResult"}:
             continue
         converted.append(validate_message(_maybe_model_dump(message)))
     return converted
@@ -205,18 +200,16 @@ class PendingMessageQueue:
     def has_items(self) -> bool:
         return bool(self._messages)
 
-    def drain(self) -> list[AgentMessage]:
+    def peek(self) -> list[AgentMessage]:
         if self.mode == "all":
-            drained = self._messages[:]
-            self._messages.clear()
-            return drained
+            return self._messages[:]
+        first = self._messages[0] if self._messages else None
+        return [first] if first is not None else []
 
-        if not self._messages:
-            return []
-
-        first = self._messages[0]
-        self._messages = self._messages[1:]
-        return [first]
+    def drain(self) -> list[AgentMessage]:
+        drained = self.peek()
+        self._messages = self._messages[len(drained):]
+        return drained
 
     def clear(self) -> None:
         self._messages.clear()
@@ -241,7 +234,8 @@ class AgentOptions:
     ) = None
     prepareNextTurn: PrepareNextTurnFn | None = None
     prepareNextTurnWithContext: PrepareNextTurnWithContextFn | None = None
-    shouldStopAfterTurn: ShouldStopAfterTurnFn | None = None
+    finishTurn: FinishTurn | None = None
+    prepareRequest: PrepareRequest | None = None
     steeringMode: QueueMode = "one-at-a-time"
     followUpMode: QueueMode = "one-at-a-time"
     sessionId: str | None = None
@@ -278,9 +272,10 @@ class Agent:
         self.onResponse = resolved.onResponse
         self.beforeToolCall = resolved.beforeToolCall
         self.afterToolCall = resolved.afterToolCall
+        self.finishTurn = resolved.finishTurn
+        self.prepareRequest = resolved.prepareRequest
         self.prepareNextTurn = resolved.prepareNextTurn
         self.prepareNextTurnWithContext = resolved.prepareNextTurnWithContext
-        self.shouldStopAfterTurn = resolved.shouldStopAfterTurn
         self.sessionId = resolved.sessionId
         self.thinkingBudgets = resolved.thinkingBudgets
         self.transport = resolved.transport
@@ -353,7 +348,13 @@ class Agent:
         self.clearFollowUpQueue()
 
     def hasQueuedMessages(self) -> bool:
+        """Returns true when either queue still contains pending messages."""
         return self._steering_queue.has_items() or self._follow_up_queue.has_items()
+
+    def peekQueuedMessages(self) -> list[AgentMessage]:
+        """Preview the messages selected for the next turn without consuming them."""
+        steering = self._steering_queue.peek()
+        return steering if steering else self._follow_up_queue.peek()
 
     def abort(self) -> None:
         if self._active_run is not None:
@@ -369,9 +370,11 @@ class Agent:
         await self.waitForIdle()
 
     def reset(self) -> None:
+        """Clear conversation state and queues while retaining the replayed prompt/tool baseline."""
         if self._active_run is not None:  # pi 1532c99 #7717: resetting mid-run would wipe the active run state
             raise RuntimeError("Agent is already processing. Wait for completion before resetting.")
-        self._state.messages = []
+        baseline = get_current_system_message(self._state.messages)
+        self._state.messages = [baseline] if baseline else []
         self._state.isStreaming = False
         self._state.streamingMessage = None
         self._state.pendingToolCalls = set()
@@ -403,7 +406,10 @@ class Agent:
             raise RuntimeError("Agent is already processing. Wait for completion before continuing.")
 
         last_message = self._state.messages[-1] if self._state.messages else None
-        if last_message is None:
+        if last_message is None or all(
+            (message.get("role") if isinstance(message, dict) else getattr(message, "role", None)) == "system"
+            for message in self._state.messages
+        ):
             raise RuntimeError("No messages to continue from")
 
         if getattr(last_message, "role", None) == "assistant":
@@ -474,14 +480,12 @@ class Agent:
 
     def _create_context_snapshot(self) -> AgentContext:
         return AgentContext(
-            systemPrompt=self._state.systemPrompt,
             messages=self._state.messages[:],
             tools=self._state.tools[:],
         )
 
     def _create_loop_config(self, *, skip_initial_steering_poll: bool = False) -> AgentLoopConfig:
         skip_poll = skip_initial_steering_poll
-        should_stop_after_turn = self.shouldStopAfterTurn
 
         async def get_steering_messages() -> list[AgentMessage]:
             nonlocal skip_poll
@@ -492,17 +496,6 @@ class Agent:
 
         async def get_follow_up_messages() -> list[AgentMessage]:
             return self._follow_up_queue.drain()
-
-        async def should_stop(context: ShouldStopAfterTurnContext) -> bool:
-            return bool(
-                await maybe_await(
-                    call_with_optional_second_arg(
-                        should_stop_after_turn,
-                        context,
-                        self.signal,
-                    )
-                )
-            )
 
         async def prepare_next_turn(next_turn_context: Any) -> AgentLoopTurnUpdate | None:
             if self.prepareNextTurnWithContext is not None:
@@ -524,7 +517,8 @@ class Agent:
                 or self.prepareNextTurn is not None
                 else None
             ),
-            shouldStopAfterTurn=should_stop if should_stop_after_turn is not None else None,
+            finishTurn=self.finishTurn,
+            prepareRequest=self.prepareRequest,
             getSteeringMessages=get_steering_messages,
             getFollowUpMessages=get_follow_up_messages,
             toolExecution=self.toolExecution,

@@ -27,6 +27,7 @@ from misaka.agent.harness.session.uuid import uuidv7
 from misaka.agent.harness.types import SessionContext
 from misaka.agent.types import AgentMessage
 from misaka.ai.types import ImageContent, MessageValue, TextContent, Usage
+from misaka.ai.utils.transcript import get_current_system_message
 from misaka.config import get_sessions_dir
 from misaka.utils import atomic
 from misaka.utils.paths import canonicalize_path, normalize_path, resolve_path
@@ -58,10 +59,29 @@ type CustomEntry = dict[str, Any]
 type LabelEntry = dict[str, Any]
 type SessionInfoEntry = dict[str, Any]
 type CustomMessageEntry = dict[str, Any]
+type ContextEditEntry = dict[str, Any]
 type SessionEntry = dict[str, Any]
 type FileEntry = dict[str, Any]
 type SessionModelInfo = dict[str, str]
 type SessionListProgress = Callable[[int, int], None]
+
+
+@dataclass(slots=True)
+class SessionProjectionEntry:
+    """One context entry and the model messages it contributes after edits and compaction."""
+
+    sourceEntry: SessionEntry
+    messages: list[AgentMessage]
+
+
+@dataclass(slots=True)
+class SessionProjection:
+    """Provenance-preserving, compaction-aware model context (pi ``SessionProjection``)."""
+
+    entries: list[SessionProjectionEntry]
+    messages: list[AgentMessage]
+    thinkingLevel: str
+    model: SessionModelInfo | None
 
 _LEAF_UNSET = object()
 _UNSET = object()
@@ -255,6 +275,12 @@ def session_entry_to_context_messages(entry: SessionEntry) -> list[AgentMessage]
             return []
         # Session files are parsed without message validation; old versions, forks, or
         # hand-edited files can contain standard messages with null/missing content.
+        if _message_role(message) == "system" and read_field(message, "content") is None:
+            if isinstance(message, Mapping):
+                return [{**message, "content": ""}]
+            model_copy = getattr(message, "model_copy", None)
+            if callable(model_copy):
+                return [model_copy(update={"content": ""})]
         if (
             _message_role(message) in {"user", "assistant", "toolResult"}
             and read_field(message, "content") is None
@@ -285,15 +311,18 @@ def session_entry_to_context_messages(entry: SessionEntry) -> list[AgentMessage]
             )
         ]
     if entry_type == "compaction":
+        system_message = entry.get("systemMessage")
         if entry.get("contextMessages") is not None:
-            return _copy_context_messages(entry["contextMessages"])
-        return [
-            create_compaction_summary_message(
-                str(entry.get("summary")),
-                int(entry.get("tokensBefore", 0)),
-                entry.get("timestamp"),
-            )
-        ]
+            # MISAKA fork: an engine's whole-context replacement carries the conversation only;
+            # the prompt and tool state it replayed under lead it, as they lead a summary.
+            replaced = _copy_context_messages(entry["contextMessages"])
+            return [system_message, *replaced] if system_message else replaced
+        summary = create_compaction_summary_message(
+            str(entry.get("summary")),
+            int(entry.get("tokensBefore", 0)),
+            entry.get("timestamp"),
+        )
+        return [system_message, summary] if system_message else [summary]
     return []
 
 
@@ -350,7 +379,9 @@ def _context_entries_from_path(path: list[SessionEntry]) -> list[SessionEntry]:
     for entry in path[:compaction_index]:
         if entry.get("id") == first_kept_entry_id:
             found_first_kept = True
-        if found_first_kept:
+        if found_first_kept and not (
+            entry.get("type") == "message" and _message_role(entry.get("message")) == "system"
+        ):
             context_entries.append(entry)
     context_entries.extend(path[compaction_index + 1 :])
     return context_entries
@@ -365,13 +396,32 @@ def build_context_entries(
     return _context_entries_from_path(_build_session_path(entries, leaf_id, by_id))
 
 
-def build_session_context(
-    entries: list[SessionEntry],
-    leaf_id: str | None | object = _LEAF_UNSET,
-    by_id: Mapping[str, SessionEntry] | None = None,
-) -> SessionContext:
-    path = _build_session_path(entries, leaf_id, by_id)
+def _project_context_entry(entry: SessionEntry, edit: ContextEditEntry | None) -> list[AgentMessage]:
+    messages = session_entry_to_context_messages(entry)
+    if not edit:
+        return messages
+    replacement = edit.get("replacement")
+    if replacement is None:
+        return []
+    projected: list[AgentMessage] = []
+    for message in messages:
+        role = _message_role(message)
+        if role not in {"user", "assistant", "toolResult", "custom"}:
+            projected.append(message)
+            continue
+        content = (
+            [TextContent(text=replacement["content"])]
+            if role in {"assistant", "toolResult"} and isinstance(replacement.get("content"), str)
+            else replacement.get("content")
+        )
+        if isinstance(message, Mapping):
+            projected.append({**message, "content": content})
+        else:
+            projected.append(message.model_copy(update={"content": content}))
+    return projected
 
+
+def _session_context_settings(path: list[SessionEntry]) -> tuple[str, SessionModelInfo | None]:
     thinking_level = "off"
     model: SessionModelInfo | None = None
     for entry in path:
@@ -388,13 +438,52 @@ def build_session_context(
             model_id = read_field(entry.get("message"), "model")
             if isinstance(provider, str) and isinstance(model_id, str):
                 model = {"provider": provider, "modelId": model_id}
-    messages = [
-        message
-        for entry in _context_entries_from_path(path)
-        for message in session_entry_to_context_messages(entry)
-    ]
+    return thinking_level, model
 
-    return SessionContext(messages=messages, thinkingLevel=thinking_level, model=model)
+
+def build_session_projection(
+    entries: list[SessionEntry],
+    leaf_id: str | None | object = _LEAF_UNSET,
+    by_id: Mapping[str, SessionEntry] | None = None,
+) -> SessionProjection:
+    """Build provenance-preserving, compaction-aware model context."""
+    path = _build_session_path(entries, leaf_id, by_id)
+    thinking_level, model = _session_context_settings(path)
+    context_entries = _context_entries_from_path(path)
+    edits: dict[str, ContextEditEntry] = {}
+    for entry in context_entries:
+        if entry.get("type") == "context_edit":
+            edits[str(entry.get("targetId"))] = entry
+    projected_entries = [
+        SessionProjectionEntry(
+            sourceEntry=source_entry,
+            # buildContextEntries() may retain an older compaction entry because its
+            # raw ID lies inside the newest retained range. Only the newest compaction
+            # at index zero contributes a checkpoint and summary.
+            messages=(
+                []
+                if source_entry.get("type") == "compaction" and index > 0
+                else _project_context_entry(source_entry, edits.get(str(source_entry.get("id"))))
+            ),
+        )
+        for index, source_entry in enumerate(context_entries)
+    ]
+    return SessionProjection(
+        entries=projected_entries,
+        messages=[message for entry in projected_entries for message in entry.messages],
+        thinkingLevel=thinking_level,
+        model=model,
+    )
+
+
+def build_session_context(
+    entries: list[SessionEntry],
+    leaf_id: str | None | object = _LEAF_UNSET,
+    by_id: Mapping[str, SessionEntry] | None = None,
+) -> SessionContext:
+    """Build the finalized model context from the canonical session projection."""
+    projection = build_session_projection(entries, leaf_id, by_id)
+    return SessionContext(messages=projection.messages, thinkingLevel=projection.thinkingLevel, model=projection.model)
 
 
 def _canonical_cwd(cwd: str) -> str:
@@ -517,16 +606,21 @@ def load_entries_from_file(
 
 
 def find_most_recent_session(session_dir: str, cwd: str | None = None) -> str | None:
-    valid_files = []
+    """The newest session whose header matches. Candidates are checked in modification-time
+    order and the scan stops at the first match, so `--continue` reads one header, not every
+    file's (pi 0.86)."""
+    files: list[tuple[str, float]] = []
     for path in iter_session_files(session_dir):
-        header = read_session_header(path)
-        if not header or (cwd is not None and not _session_cwd_matches(header.get("cwd"), cwd)):
-            continue
         try:
-            valid_files.append((path, os.stat(path).st_mtime))
+            files.append((path, os.stat(path).st_mtime))
         except OSError:
             continue
-    return max(valid_files, key=lambda item: item[1])[0] if valid_files else None
+    files.sort(key=lambda item: item[1], reverse=True)
+    for path, _mtime in files:
+        header = read_session_header(path)
+        if header and (cwd is None or _session_cwd_matches(header.get("cwd"), cwd)):
+            return path
+    return None
 
 
 class SessionManager:
@@ -720,10 +814,28 @@ class SessionManager:
         self._appendEntry(entry)
         return str(entry["id"])
 
+    def appendUsage(
+        self, kind: str, provider: str, model: str, usage: Usage | Mapping[str, Any], note: str | None = None
+    ) -> SessionEntry:
+        """Append model-attributed usage that does not participate in LLM context. Returns the appended entry."""
+        entry: SessionEntry = {
+            "type": "usage",
+            "id": generate_id(self.byId),
+            "parentId": self.leafId,
+            "timestamp": _iso_now(),
+            "kind": kind,
+            "provider": provider,
+            "model": model,
+            "usage": usage,
+            **({"note": note} if note else {}),
+        }
+        self._appendEntry(entry)
+        return entry
+
     def appendCompaction(
         self,
         summary: str,
-        firstKeptEntryId: str,
+        firstKeptEntryId: str | None,
         tokensBefore: int,
         details: Any = _UNSET,
         fromHook: bool | None | object = _UNSET,
@@ -731,13 +843,21 @@ class SessionManager:
         *,
         contextMessages: list[AgentMessage] | None = None,
     ) -> str:
+        """Append a compaction summary as child of current leaf, then advance leaf. Returns entry id.
+
+        A `None` `firstKeptEntryId` is retain-none compaction: the entry's own id is its kept
+        boundary. The current system message (prompt and tools replayed from the branch) is
+        stored on the entry so the context after the boundary still starts with it."""
+        timestamp = _iso_now()
+        system_message = get_current_system_message(self.buildSessionProjection().messages)
+        entry_id = generate_id(self.byId)
         entry: SessionEntry = {
             "type": "compaction",
-            "id": generate_id(self.byId),
+            "id": entry_id,
             "parentId": self.leafId,
-            "timestamp": _iso_now(),
+            "timestamp": timestamp,
             "summary": summary,
-            "firstKeptEntryId": firstKeptEntryId,
+            "firstKeptEntryId": firstKeptEntryId if firstKeptEntryId is not None else entry_id,
             "tokensBefore": tokensBefore,
         }
         if details is not _UNSET:
@@ -746,7 +866,13 @@ class SessionManager:
             entry["fromHook"] = fromHook
         if usage is not _UNSET and usage is not None:
             entry["usage"] = usage
+        if system_message:
+            entry["systemMessage"] = system_message.model_copy(
+                update={"timestamp": int(_datetime_from_iso(timestamp).timestamp() * 1000)}
+            )
         if contextMessages is not None:
+            # MISAKA fork: an engine that replaces the whole context (the LCM plugin) supplies
+            # it here; the projection then reads `contextMessages` instead of the summary.
             entry["contextMessages"] = _copy_context_messages(contextMessages)
         self._appendEntry(entry)
         return str(entry["id"])
@@ -803,6 +929,44 @@ class SessionManager:
         self._appendEntry(entry)
         return str(entry["id"])
 
+    def appendContextEdit(self, targetId: str, replacement: Mapping[str, Any] | None) -> str:
+        """Append a branch-local edit to an earlier model-visible entry."""
+        if replacement is not None and (
+            not isinstance(replacement, Mapping)
+            or "content" not in replacement
+            or (not isinstance(replacement["content"], str) and not isinstance(replacement["content"], list))
+        ):
+            raise ValueError("Context edit replacement must be null or contain string/array content")
+        target = self.byId.get(targetId)
+        if not target:
+            raise ValueError(f"Entry {targetId} not found")
+        if not any(entry.get("id") == targetId for entry in self.getBranch()):
+            raise ValueError(f"Entry {targetId} is not on the active branch")
+        editable = target.get("type") == "custom_message" or (
+            target.get("type") == "message"
+            and _message_role(target.get("message")) in {"user", "assistant", "toolResult"}
+        )
+        if not editable:
+            raise ValueError(f"Entry {targetId} does not contribute editable model content")
+        target_role = _message_role(target.get("message")) if target.get("type") == "message" else "custom"
+        normalized_replacement = (
+            {"content": [{"type": "text", "text": replacement["content"]}]}
+            if replacement is not None
+            and target_role in {"assistant", "toolResult"}
+            and isinstance(replacement["content"], str)
+            else (dict(replacement) if replacement is not None else None)
+        )
+        entry: SessionEntry = {
+            "type": "context_edit",
+            "id": generate_id(self.byId),
+            "parentId": self.leafId,
+            "timestamp": _iso_now(),
+            "targetId": targetId,
+            "replacement": normalized_replacement,
+        }
+        self._appendEntry(entry)
+        return str(entry["id"])
+
     def getLeafId(self) -> str | None:
         return self.leafId
 
@@ -851,8 +1015,13 @@ class SessionManager:
     def buildContextEntries(self) -> list[SessionEntry]:
         return build_context_entries(self.getEntries(), self.leafId, self.byId)
 
+    def buildSessionProjection(self) -> SessionProjection:
+        return build_session_projection(self.getEntries(), self.leafId, self.byId)
+
     def buildSessionContext(self) -> SessionContext:
-        return build_session_context(self.getEntries(), self.leafId, self.byId)
+        """Build the session context (what gets sent to the LLM). Uses tree traversal from current leaf."""
+        projection = self.buildSessionProjection()
+        return SessionContext(messages=projection.messages, thinkingLevel=projection.thinkingLevel, model=projection.model)
 
     def getHeader(self) -> SessionHeader | None:
         header = next((entry for entry in self.fileEntries if entry.get("type") == "session"), None)
@@ -1051,6 +1220,25 @@ class SessionManager:
         require_current_version(manager.fileEntries, resolved_path)
         manager._buildIndex()
         return manager
+
+    @classmethod
+    def findById(cls, cwd: str, id: str, sessionDir: str | None = None) -> str | None:
+        """Find an exact session ID without loading transcript bodies (pi #9601)."""
+        directory = normalize_path(sessionDir) if sessionDir else get_default_session_dir(cwd)
+        filter_cwd = sessionDir is not None and directory != get_default_session_dir(cwd)
+        resolved_cwd = resolve_path(cwd)
+        try:
+            for path in iter_session_files(directory):
+                header = read_session_header(path)
+                if not header or header.get("id") != id:
+                    continue
+                if filter_cwd and not _session_cwd_matches(header.get("cwd"), resolved_cwd):
+                    continue
+                return path
+        except OSError:
+            # Exact session discovery is best-effort, matching list().
+            pass
+        return None
 
     @classmethod
     def continueRecent(cls, cwd: str, sessionDir: str | None = None) -> SessionManager:

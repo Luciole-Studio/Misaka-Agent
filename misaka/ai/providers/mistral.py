@@ -17,7 +17,6 @@ from misaka.ai.providers.simple_options import build_base_options
 from misaka.ai.providers.transform_messages import transform_messages
 from misaka.ai.types import (
     AssistantMessage,
-    Context,
     DoneEvent,
     ErrorEvent,
     MessageValue,
@@ -39,11 +38,14 @@ from misaka.ai.types import (
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    TranscriptContext,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.hash import short_hash
 from misaka.ai.utils.json_parse import StreamingArgs
 from misaka.ai.utils.sanitize_unicode import sanitize_surrogates
+from misaka.ai.utils.text import get_system_message_text, render_system_message_update
+from misaka.ai.utils.transcript import get_current_tools, resolve_transcript
 
 try:
     from mistralai.client import Mistral as _MistralClient
@@ -115,10 +117,13 @@ def _get_mistral_client_class():
 
 def stream_mistral(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: StreamOptions | Mapping[str, Any] | None = None,
 ) -> AssistantMessageEventStream:
     stream = AssistantMessageEventStream()
+    normalized_context = resolve_transcript(
+        context, getattr(getattr(model, "compat", None), "supportsMidConvoSystemMessages", None)
+    )
 
     async def run() -> None:
         output = create_output(model)
@@ -134,12 +139,12 @@ def stream_mistral(
 
             normalize_tool_call_id = create_mistral_tool_call_id_normalizer()
             transformed_messages = transform_messages(
-                context.messages,
+                normalized_context.messages,
                 model,
                 lambda tool_call_id, _target_model, _source: normalize_tool_call_id(tool_call_id),
             )
 
-            payload = build_chat_payload(model, context, transformed_messages, options)
+            payload = build_chat_payload(model, normalized_context, transformed_messages, options)
             on_payload = _option(options, "onPayload")
             if callable(on_payload):
                 next_payload = await maybe_await(on_payload(payload, model))
@@ -195,7 +200,7 @@ def stream_mistral(
 
 def stream_simple_mistral(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     options: SimpleStreamOptions | None = None,
 ) -> AssistantMessageEventStream:
     api_key = _option(options, "apiKey") or get_env_api_key(model.provider)
@@ -331,7 +336,7 @@ def build_request_kwargs(model: Model, options: StreamOptions | Mapping[str, Any
 
 def build_chat_payload(
     model: Model,
-    context: Context,
+    context: TranscriptContext,
     messages: list[MessageValue],
     options: StreamOptions | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -341,8 +346,9 @@ def build_chat_payload(
         "messages": to_chat_messages(messages, "image" in model.input),
     }
 
-    if context.tools:
-        payload["tools"] = to_function_tools(context.tools)
+    current_tools = get_current_tools(context.messages)
+    if len(current_tools) > 0:
+        payload["tools"] = to_function_tools(current_tools)
     if _option(options, "temperature") is not None:
         payload["temperature"] = _option(options, "temperature")
     if _option(options, "maxTokens") is not None:
@@ -359,15 +365,6 @@ def build_chat_payload(
     # the former, so caching was requested and never obtained.
     if _should_use_prompt_caching(options):
         payload["promptCacheKey"] = _option(options, "sessionId")
-
-    if context.systemPrompt:
-        payload["messages"].insert(
-            0,
-            {
-                "role": "system",
-                "content": sanitize_surrogates(context.systemPrompt),
-            },
-        )
 
     return payload
 
@@ -732,7 +729,12 @@ def strip_symbol_keys(value: Any) -> Any:
 def to_chat_messages(messages: list[MessageValue], supports_images: bool) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
 
-    for message in messages:
+    for index, message in enumerate(messages):
+        if message.role == "system":
+            text = get_system_message_text(message) if index == 0 else render_system_message_update(message)
+            if len(text) > 0:
+                result.append({"role": "system", "content": sanitize_surrogates(text)})
+            continue
         if message.role == "user":
             if isinstance(message.content, str):
                 result.append({"role": "user", "content": sanitize_surrogates(message.content)})
@@ -834,7 +836,12 @@ def build_tool_result_text(text: str, has_images: bool, supports_images: bool, i
 
 
 def uses_reasoning_effort(model: Model) -> bool:
-    return model.id in {"mistral-small-2603", "mistral-small-latest", "mistral-medium-3.5"}
+    return (
+        model.id == "mistral-small-2603"
+        or model.id == "mistral-small-latest"
+        or model.id.startswith("mistral-medium-")
+        or model.id == "zai-glm-5-2"
+    )
 
 
 def uses_prompt_mode_reasoning(model: Model) -> bool:

@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -121,7 +122,9 @@ def capture(task: Any, session: Any, *, seed: bool) -> None:
              if canonical_tool_name(tool.name) not in ALL_AGENT_DISALLOWED_TOOLS]
     payload = {
         "schemaVersion": 1, "agentId": task.id, "parentSessionId": task.parent_session_id,
-        "systemPrompt": session.agent.state.systemPrompt,
+        # The effective prompt of the parent's current run: a `before_agent_start` handler
+        # may force one that the transcript's replayed sections do not show.
+        "systemPrompt": session.systemPrompt,
         "tools": [{"name": tool.name, "description": tool.description,
                    "parameters": tool.parameters_json_schema(),
                    "constrainedSampling": to_jsonable(tool.constrainedSampling)}
@@ -141,7 +144,8 @@ def capture(task: Any, session: Any, *, seed: bool) -> None:
 def install(session: Any, snapshot: dict[str, Any]) -> None:
     """Keep rendered prompt/schema bytes; resolve implementations in THIS worker."""
     from misaka.agent.stream_fn import get_default_stream_fn
-    from misaka.ai.types import Tool
+    from misaka.ai.types import SystemMessage, Tool, TranscriptContext
+    from misaka.ai.utils.transcript import get_current_system_message
 
     wire_tools = [Tool.model_validate(item) for item in snapshot["tools"]]
     names = [tool.name for tool in wire_tools]
@@ -164,7 +168,16 @@ def install(session: Any, snapshot: dict[str, Any]) -> None:
             # schemas may not: otherwise the child could execute different args.
             if tool.parameters_json_schema() != active[tool.name].parameters_json_schema():
                 raise ValueError(f"Fork tool schema differs from the parent: {tool.name}")
-        exact = context.model_copy(update={"systemPrompt": snapshot["systemPrompt"], "tools": wire_tools})
+        # The request context is a transcript: its system messages carry the prompt and
+        # the tool declarations (the parent's copied head plus whatever this worker
+        # patched in). They collapse into one head holding the parent's rendered bytes.
+        current = get_current_system_message(context.messages)
+        head = SystemMessage(
+            content=snapshot["systemPrompt"], toolsAdded=wire_tools,
+            timestamp=current.timestamp if current else int(time.time() * 1000),
+        )
+        exact = TranscriptContext(messages=[
+            head, *(message for message in context.messages if read_field(message, "role") != "system")])
         return previous(model, exact, options)
 
     session.agent.streamFn = stream

@@ -12,6 +12,7 @@ from misaka.ai.types import (
     SimpleStreamOptions,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
+from misaka.ai.utils.transcript import normalize_context
 
 
 def _resolve_api_provider(api: str):
@@ -22,9 +23,9 @@ def _resolve_api_provider(api: str):
 
 
 def stream(model: Model, context: Context, options: ProviderStreamOptions | None = None) -> AssistantMessageEventStream:
+    transcript = normalize_context(context)
     provider = _resolve_api_provider(model.api)
-    resolved_context = context if isinstance(context, Context) else Context.model_validate(context)
-    return provider.stream(model, resolved_context, options)
+    return provider.stream(model, transcript, options)
 
 
 async def complete(model: Model, context: Context, options: ProviderStreamOptions | None = None) -> AssistantMessage:
@@ -36,9 +37,9 @@ def stream_simple(
     context: Context,
     options: SimpleStreamOptions | None = None,
 ) -> AssistantMessageEventStream:
+    transcript = normalize_context(context)
     provider = _resolve_api_provider(model.api)
-    resolved_context = context if isinstance(context, Context) else Context.model_validate(context)
-    return provider.streamSimple(model, resolved_context, options)
+    return provider.streamSimple(model, transcript, options)
 
 
 async def complete_simple(

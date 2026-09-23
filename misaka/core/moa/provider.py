@@ -22,12 +22,14 @@ from misaka.ai.types import (
     ThinkingDeltaEvent,
     ThinkingEndEvent,
     ThinkingStartEvent,
+    TranscriptContext,
     Usage,
     UsageCost,
     UserMessage,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import provider_headers_to_record
+from misaka.ai.utils.text import get_system_message_text
 from misaka.config import home
 from misaka.config.product import current_config
 from misaka.core.moa.privacy import (
@@ -637,7 +639,10 @@ def _serialize_messages(messages) -> list[dict[str, Any]]:
     for m in messages:
         role = getattr(m, "role", "?")
         content = getattr(m, "content", None)
-        if isinstance(content, str):
+        if role == "system":
+            # A system message may carry its prompt as sections rather than `content`.
+            out.append({"role": role, "content": get_system_message_text(m)})
+        elif isinstance(content, str):
             out.append({"role": role, "content": content})
         else:
             parts = []
@@ -777,8 +782,10 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
             agg_messages = list(context.messages)
             if guidance:
                 agg_messages = attach_guidance(agg_messages, guidance)
-            agg_ctx = Context(systemPrompt=context.systemPrompt, messages=agg_messages,
-                              tools=context.tools)
+            # `context` is the normalized transcript: the session's prompt and tool
+            # declarations already lead `agg_messages` as system messages, so the
+            # aggregator sees exactly what the session's own model would.
+            agg_ctx = TranscriptContext(messages=agg_messages)
             # The session's own credentials belong to `moa`, whose key is a placeholder;
             # the aggregator is a real model at a real provider and pays its own way.
             agg_model, agg_auth = await _slot_auth(agg_model)

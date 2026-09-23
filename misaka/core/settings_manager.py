@@ -14,7 +14,8 @@ from typing import Any, Literal, TypedDict
 
 from filelock import FileLock, Timeout
 
-from misaka.ai.types import ModelThinkingLevel, Transport
+from misaka.ai.types import Model, ModelThinkingLevel, Transport
+from misaka.ai.utils.retry import DEFAULT_MAX_AGENT_RETRY_DELAY_MS
 from misaka.config import get_agent_dir, home
 from misaka.core.http_dispatcher import (
     DEFAULT_HTTP_IDLE_TIMEOUT_MS,
@@ -22,6 +23,18 @@ from misaka.core.http_dispatcher import (
 )
 from misaka.utils import atomic
 from misaka.utils.paths import normalize_path, resolve_path
+
+DEFAULT_COMPACTION_TOKEN_SETTINGS = {
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000,
+}
+# Cache-warming profile. "idle" also warms between agent runs.
+CACHE_WARMING_MODES = ("off", "streaming", "idle")
+_MAX_SAFE_INTEGER = 2**53 - 1
+
+
+def _is_non_negative_safe_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_SAFE_INTEGER
 
 type CompactionSettings = dict[str, Any]
 type BranchSummarySettings = dict[str, Any]
@@ -856,17 +869,48 @@ class SettingsManager:
         self.markModified("compaction", "enabled")
         self.save()
 
-    def getCompactionReserveTokens(self) -> int:
-        return self._nullish(self._settings_object("compaction").get("reserveTokens"), 16384)
+    def getCompactionTokenSetting(self, field: str, model: Model | None = None) -> int:
+        compaction = self._settings_object("compaction")
+        ordinary = compaction.get(field)
+        if ordinary is not None and not _is_non_negative_safe_integer(ordinary):
+            raise ValueError(
+                f"Invalid compaction.{field} setting: {ordinary}. Expected a non-negative safe integer."
+            )
+        model_key = f"{model.provider}/{model.id}" if model is not None else None
+        model_overrides = compaction.get("modelOverrides")
+        entry = (
+            model_overrides.get(model_key)
+            if model_key is not None and isinstance(model_overrides, dict)
+            else None
+        )
+        if entry is not None and not isinstance(entry, dict):
+            raise ValueError(
+                f'Invalid compaction.modelOverrides["{model_key}"] setting: {entry}. Expected an object.'
+            )
+        override = entry.get(field) if entry is not None else None
+        if override is not None and not _is_non_negative_safe_integer(override):
+            raise ValueError(
+                f'Invalid compaction.modelOverrides["{model_key}"].{field} setting: {override}. '
+                "Expected a non-negative safe integer."
+            )
+        if override is not None:
+            return override
+        if ordinary is not None:
+            return ordinary
+        return DEFAULT_COMPACTION_TOKEN_SETTINGS[field]
 
-    def getCompactionKeepRecentTokens(self) -> int:
-        return self._nullish(self._settings_object("compaction").get("keepRecentTokens"), 20000)
+    def getCompactionReserveTokens(self, model: Model | None = None) -> int:
+        return self.getCompactionTokenSetting("reserveTokens", model)
 
-    def getCompactionSettings(self) -> dict[str, Any]:
+    def getCompactionKeepRecentTokens(self, model: Model | None = None) -> int:
+        return self.getCompactionTokenSetting("keepRecentTokens", model)
+
+    def getCompactionSettings(self, model: Model | None = None) -> dict[str, Any]:
+        """Resolve each token setting through model override, ordinary setting, then built-in default."""
         return {
             "enabled": self.getCompactionEnabled(),
-            "reserveTokens": self.getCompactionReserveTokens(),
-            "keepRecentTokens": self.getCompactionKeepRecentTokens(),
+            "reserveTokens": self.getCompactionReserveTokens(model),
+            "keepRecentTokens": self.getCompactionKeepRecentTokens(model),
         }
 
     def getBranchSummarySettings(self) -> dict[str, Any]:
@@ -894,6 +938,7 @@ class SettingsManager:
             "enabled": self.getRetryEnabled(),
             "maxRetries": self._nullish(retry_settings.get("maxRetries"), 3),
             "baseDelayMs": self._nullish(retry_settings.get("baseDelayMs"), 2000),
+            "maxAgentDelayMs": self._nullish(retry_settings.get("maxAgentDelayMs"), DEFAULT_MAX_AGENT_RETRY_DELAY_MS),
         }
 
     def getHttpIdleTimeoutMs(self) -> int:
@@ -912,6 +957,14 @@ class SettingsManager:
         if timeout_ms is None:
             raise ValueError(f"Invalid httpIdleTimeoutMs setting: {timeoutMs}")
         self._set_global_value("httpIdleTimeoutMs", timeout_ms)
+
+    def getCacheWarmingMode(self) -> str:
+        """Read from global settings only because warming costs money."""
+        mode = self.globalSettings.get("cacheWarming")
+        return mode if mode is not None and mode in CACHE_WARMING_MODES else "streaming"
+
+    def setCacheWarmingMode(self, mode: str) -> None:
+        self._set_global_value("cacheWarming", mode)
 
     def getProviderRetrySettings(self) -> dict[str, Any]:
         provider = self._settings_object("retry").get("provider")

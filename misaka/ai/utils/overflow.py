@@ -7,7 +7,7 @@ import re
 from misaka.ai.types import AssistantMessage
 
 _OVERFLOW_PATTERNS = [
-    re.compile(r"prompt is too long", re.IGNORECASE),
+    re.compile(r"prompt (?:is )?too long", re.IGNORECASE),  # Anthropic and z.ai token overflow
     re.compile(r"request_too_large", re.IGNORECASE),
     re.compile(r"input is too long for requested model", re.IGNORECASE),
     re.compile(r"exceeds the context window", re.IGNORECASE),
@@ -34,8 +34,10 @@ _OVERFLOW_PATTERNS = [
     re.compile(r"context[_ ]length[_ ]exceeded", re.IGNORECASE),
     re.compile(r"too many tokens", re.IGNORECASE),
     re.compile(r"token limit exceeded", re.IGNORECASE),
-    re.compile(r"^4(?:00|13)\s*(?:status code)?\s*\(no body\)", re.IGNORECASE),
 ]
+# Cerebras: 400/413 with no body. Bodyless 400/413 from other providers are not overflow
+# (pi #9482), so this one is checked against the message's provider.
+_CEREBRAS_BODYLESS_OVERFLOW_PATTERN = re.compile(r"^4(?:00|13)\s*(?:status code)?\s*\(no body\)", re.IGNORECASE)
 
 _NON_OVERFLOW_PATTERNS = [
     re.compile(r"^(Throttling error|Service unavailable):", re.IGNORECASE),
@@ -47,8 +49,11 @@ _NON_OVERFLOW_PATTERNS = [
 def is_context_overflow(message: AssistantMessage, context_window: int | None = None) -> bool:
     if message.stopReason == "error" and message.errorMessage:
         is_non_overflow = any(pattern.search(message.errorMessage) for pattern in _NON_OVERFLOW_PATTERNS)
-        if not is_non_overflow and any(pattern.search(message.errorMessage) for pattern in _OVERFLOW_PATTERNS):
-            return True
+        if not is_non_overflow:
+            if any(pattern.search(message.errorMessage) for pattern in _OVERFLOW_PATTERNS):
+                return True
+            if message.provider == "cerebras" and _CEREBRAS_BODYLESS_OVERFLOW_PATTERN.search(message.errorMessage):
+                return True
 
     if context_window and message.stopReason == "stop":
         input_tokens = message.usage.input + message.usage.cacheRead
