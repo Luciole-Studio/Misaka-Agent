@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark"><title>MISAKA · 研究工作台</title>
+  <link rel="preload" href="/fonts/NotoSerifSC-VF-subset.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/InstrumentSerif-Regular.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+</head>
+<body>
+<div class="app" id="app">
+<nav class="nav-rail" aria-label="主导航">
+  <button class="rail-item rail-home active" id="rail-home" data-action="new-chat" aria-label="首页"><i data-icon="home"></i><span class="rail-tip" role="tooltip">首页</span></button>
+  <button class="rail-item" data-view="research" aria-label="研究"><i data-icon="research"></i><em id="research-badge" class="rail-badge" hidden></em><span class="rail-tip" role="tooltip">研究</span></button>
+  <button class="rail-item" data-view="documents" aria-label="材料与文件"><i data-icon="library"></i><span class="rail-tip" role="tooltip">材料与文件</span></button>
+  <button class="rail-item" data-view="board" aria-label="任务看板"><i data-icon="board"></i><em id="board-badge" class="rail-badge" hidden></em><span class="rail-tip" role="tooltip">任务看板</span></button>
+  <button class="rail-item" data-view="team" aria-label="协作成员"><i data-icon="team"></i><span class="rail-tip" role="tooltip">协作成员</span></button>
+  <button class="rail-item" data-view="skills" aria-label="技能库"><i data-icon="skills"></i><span class="rail-tip" role="tooltip">技能库</span></button>
+  <button class="rail-item" data-action="history" aria-label="当前项目历史"><i data-icon="history"></i><span class="rail-tip" role="tooltip">当前项目历史</span></button>
+  <button class="rail-item" id="rail-trash" aria-label="回收站"><i data-icon="trash"></i><span class="rail-tip" role="tooltip">回收站</span></button>
+  <button class="rail-item" id="rail-terminal" data-view="legacy" aria-label="外部终端" hidden><i data-icon="terminal"></i><span class="rail-tip" role="tooltip">外部终端</span></button>
+  <div class="rail-bottom"><button class="rail-item" data-view="settings" aria-label="设置"><i data-icon="settings"></i><span class="rail-tip" role="tooltip">设置</span></button></div>
+</nav>
+<aside class="sidebar" id="sidebar" aria-label="侧栏">
+  <div class="sb-head">
+    <a class="brand" href="#" data-action="new-chat" aria-label="MISAKA 首页">
+      <svg class="logo" viewBox="120 124 240 240" aria-hidden="true" focusable="false">
+        <defs><mask id="brand-symbol" maskUnits="userSpaceOnUse" x="120" y="124" width="240" height="240"><circle cx="240" cy="244.13" r="115.98" fill="white"/><circle cx="240" cy="157.12" r="29.10" fill="black"/><circle cx="240" cy="293.44" r="72.62" fill="black"/></mask></defs>
+        <circle cx="240" cy="244.13" r="115.98" fill="currentColor" mask="url(#brand-symbol)"/>
+      </svg>
+      <span class="wordmark">Misaka<small>研究工作台</small></span>
+    </a>
+    <button class="icon-btn" id="sidebar-toggle" title="收起项目与对话（Ctrl+B）" aria-label="项目与对话" aria-controls="sidebar" aria-expanded="true"><i data-icon="sidebar"></i></button>
+  </div>
+  <button class="project-switch" id="project-switch" title="切换项目文件夹" aria-label="切换项目文件夹" aria-haspopup="menu"><i data-icon="folder"></i><span class="ps-text"><small>项目</small><b id="project-name">加载项目…</b></span><i data-icon="chevrons" class="ps-caret"></i></button>
+  <div class="sb-group">
+    <button class="sb-item new-chat" data-action="new-chat"><i data-icon="compose"></i><span>新对话</span><kbd>Ctrl ⇧ O</kbd></button>
+    <label class="sb-search"><i data-icon="search"></i><input id="chat-filter" type="search" placeholder="搜索对话" aria-label="搜索对话" autocomplete="off"><kbd>Ctrl K</kbd></label>
+  </div>
+  <div class="sb-list-toolbar">
+    <div class="sidebar-views" role="group" aria-label="侧栏视图">
+      <button id="view-projects" aria-label="按项目查看" aria-pressed="true">项目</button><button id="view-recent" aria-label="按最新顺序查看" aria-pressed="false">最近</button>
+    </div>
+    <button class="icon-btn" id="add-project" title="添加项目文件夹" aria-label="添加项目文件夹"><i data-icon="plus"></i></button>
+  </div>
+  <div id="chat-list" class="chat-list"></div>
+  <span id="chat-count" hidden></span>
+  <div class="sb-foot">
+    <div class="connection" title="本地会话服务"><i id="connection-dot"></i><span id="connection-text">正在连接</span><small id="version"></small></div>
+  </div>
+</aside>
+<div class="scrim" id="scrim"></div>
+
+<main class="main">
+  <header class="topbar">
+    <button class="icon-btn" id="sidebar-open" title="展开侧栏（Ctrl+B）" aria-label="展开侧栏"><i data-icon="sidebar"></i></button>
+    <div class="topbar-title">
+      <button id="page-title" class="page-title" title="">新对话</button>
+      <span id="chat-role" class="role-tag" hidden></span>
+      <span id="chat-status" class="status-chip" hidden></span>
+    </div>
+    <div class="topbar-actions" id="chat-actions">
+      <button class="icon-btn" id="notification-toggle" title="开启系统通知" aria-label="开启系统通知"><i data-icon="bell"></i></button>
+      <button class="icon-btn" id="context-toggle" title="展开右侧边栏" aria-label="展开右侧边栏" aria-controls="context-panel" aria-expanded="false"><i data-icon="sidebar"></i></button>
+      <button class="icon-btn" id="open-terminal" title="在当前项目目录打开终端" aria-label="打开终端"><i data-icon="terminal"></i></button>
+      <button class="icon-btn" id="chat-export" title="复制对话记录" hidden><i data-icon="copy"></i></button>
+      <button class="icon-btn" id="chat-menu" title="更多操作" aria-haspopup="menu" hidden><i data-icon="more"></i></button>
+    </div>
+  </header>
+  <div id="notice" class="notice" hidden role="status"></div>
+
+  <section id="view-chat" class="view chat-view is-home">
+    <div class="conversation">
+    <div id="chat-scroll" class="chat-scroll">
+      <div id="chat-stream" class="chat-stream" role="log" aria-label="对话内容" aria-live="polite"></div>
+    </div>
+    <button id="jump-latest" class="jump-latest" hidden title="回到最新"><i data-icon="arrow-down"></i></button>
+    <div class="dock" id="dock">
+      <div class="home-hero" id="home-hero">
+        <h1 id="greeting">你好</h1>
+        <p id="home-sub">在 <b id="welcome-project"></b> 中继续你的研究</p>
+      </div>
+      <div id="chat-banner" class="chat-banner" hidden></div>
+      <div id="message-queue" class="message-queue" hidden aria-label="排队消息" aria-live="polite"></div>
+      <div id="readonly-bar" class="readonly-bar" hidden><i data-icon="history"></i><span>这是已保存的历史记录（只读）。</span><button id="resume-snapshot" class="btn primary sm">继续这段对话</button></div>
+      <form id="chat-form" class="composer">
+        <div id="image-chips" class="image-chips" hidden></div>
+        <div id="slash-menu" class="slash-menu" hidden role="listbox" aria-label="指令"></div>
+        <textarea id="chat-input" rows="1" placeholder="向 Last Order 提问…" aria-label="消息" spellcheck="false"></textarea>
+        <div class="composer-bar">
+          <div class="cb-left">
+            <button type="button" class="icon-btn round" id="attach-btn" title="添加图片（也可粘贴或拖入）" aria-label="添加图片"><i data-icon="plus"></i></button>
+            <input type="file" id="attach-input" accept="image/*" multiple hidden>
+            <button type="button" class="pill-btn" id="agent-pick" title="选择对话对象" aria-haspopup="menu"><span class="mini-seal" id="agent-seal">L</span><span id="agent-label">Last Order</span><i data-icon="chevron-down"></i></button>
+          </div>
+          <div class="cb-right">
+            <button type="button" class="pill-btn" id="chat-model" title="切换本次会话使用的模型" aria-haspopup="menu"><i data-icon="model"></i><span id="model-label">默认模型</span><i data-icon="chevron-down"></i></button>
+            <button type="button" class="pill-btn" id="chat-thinking" title="调整思考深度" aria-haspopup="menu"><i data-icon="bulb"></i><span id="thinking-label">思考</span><i data-icon="chevron-down"></i></button>
+            <button type="submit" id="chat-send" class="send-btn" title="发送（Enter）" aria-label="发送"><i data-icon="arrow-up" class="i-send"></i><i data-icon="stop" class="i-stop"></i></button>
+          </div>
+        </div>
+      </form>
+      <div class="composer-foot"><span id="chat-hint">Enter 发送 · Shift+Enter 换行 · / 选择技能与指令 · @ 引用项目文件</span></div>
+      <div class="home-suggest" id="home-suggest">
+        <button data-view="research"><i data-icon="research"></i><span>发起一项研究</span></button>
+        <button data-action="history"><i data-icon="history"></i><span>继续之前的会话</span></button>
+        <button data-view="documents"><i data-icon="library"></i><span>浏览项目材料</span></button>
+        <button data-view="team"><i data-icon="team"></i><span>认识研究团队</span></button>
+      </div>
+    </div>
+    <div class="drop-overlay" id="drop-overlay" hidden><div><i data-icon="image"></i><b>松开以添加图片</b><small>最多 6 张，每张不超过 4 MB</small></div></div>
+    </div>
+    <div class="context-slot">
+    <aside id="context-panel" class="context-panel" inert aria-hidden="true" aria-label="右侧边栏">
+      <div class="context-head"><b>工作区</b><button id="context-close" class="icon-btn" aria-label="收起右侧边栏"><i data-icon="x"></i></button></div>
+      <div class="context-tabs" role="tablist" aria-label="工作区内容">
+        <button id="context-files" role="tab" aria-controls="context-body" aria-selected="true">文件</button>
+        <button id="context-tasks" role="tab" aria-controls="context-body" aria-selected="false">任务</button>
+        <button id="context-sisters" role="tab" aria-controls="context-body" aria-selected="false">Sister 对话</button>
+      </div>
+      <div id="context-body" class="context-body" role="tabpanel" aria-labelledby="context-files"></div>
+    </aside>
+    </div>
+  </section>
+
+  <section id="view-research" class="view page" hidden>
+    <header class="page-head"><div><span class="eyebrow">Research</span><h1>让问题长成一张研究图</h1><p>Last Order 协调研究，Sisters 分工调查，红队审查结论。</p></div></header>
+    <div class="research-layout">
+      <form id="research-form" class="card">
+        <h2 class="card-title">新建研究</h2>
+        <label class="field">研究问题<textarea name="goal" required rows="4" placeholder="描述你想研究的问题，以及范围、材料或期待的结果…"></textarea></label>
+        <div class="form-grid">
+          <label class="field">研究深度<input name="depth" type="number" min="0" max="10" value="3" required></label>
+          <label class="field">节点上限<input name="max_nodes" type="number" min="1" max="500" value="30" required></label>
+          <label class="field">节点并行数<input name="parallel" type="number" min="1" max="32" value="4" required></label>
+          <label class="field">任务卡并行数<input name="sister_parallel" type="number" min="1" max="32" value="4" required></label>
+          <label class="field">追加轮次<input name="followups" type="number" min="0" max="6" value="2" required></label>
+          <label class="field">修订次数<input name="revisions" type="number" min="0" max="6" value="2" required></label>
+        </div>
+        <p class="hint">计划审批、压缩阈值与输出上限沿用现有研究设置。启动后在研究记录中查看进度，进入研究对话确认计划或提出修改。第一次建议深度 1、节点上限 3。</p>
+        <div class="form-actions"><button type="submit" class="btn primary">开始研究<i data-icon="arrow-up-right"></i></button></div>
+      </form>
+      <aside class="card workflow-guide">
+        <h3>一次研究的路径</h3>
+        <ol><li><b>共同制定计划</b><span>明确问题、证据与成员分工</span></li><li><b>并行调查与写作</b><span>阅读材料，形成可追溯的结论</span></li><li><b>审查与答辩</b><span>核查论证，回应反证与缺口</span></li><li><b>分叉与汇合</b><span>探索替代可能，汇总研究报告</span></li></ol>
+        <button class="text-btn" data-settings="research">研究设置<i data-icon="chevron-right"></i></button>
+      </aside>
+    </div>
+    <div class="list-head"><h2>研究记录</h2><button id="refresh-research" class="btn ghost sm"><i data-icon="refresh"></i>刷新</button></div>
+    <div id="research-list" class="stack"></div>
+  </section>
+
+  <section id="view-board" class="view page" hidden>
+    <header class="page-head"><div><span class="eyebrow">Tasks</span><h1>任务看板</h1><p>跟踪当前项目中每位成员的进展，打开任务查看完整过程。</p></div><button id="refresh-board" class="btn ghost"><i data-icon="refresh"></i>刷新看板</button></header>
+    <div id="board-stats" class="stats"></div>
+    <div class="board" id="board"></div>
+  </section>
+
+  <section id="view-team" class="view page" hidden>
+    <header class="page-head"><div><span class="eyebrow">Team</span><h1>你的研究团队</h1><p>每位 Sister 拥有独立专长、技能与模型配置。选择一位即可开始对话。</p></div><button class="btn ghost" data-settings="team"><i data-icon="settings"></i>管理成员</button></header>
+    <div id="team-grid" class="team-grid"></div>
+  </section>
+
+  <section id="view-documents" class="view page" hidden>
+    <header class="page-head"><div><span class="eyebrow">Library</span><h1>材料与研究产物</h1><p>索引文档、检索原文，也可以浏览项目中的计划与最终报告。</p></div><button id="refresh-documents" class="btn ghost"><i data-icon="refresh"></i>刷新</button></header>
+    <form id="document-form" class="card inline-form"><label class="field grow">导入文档<input name="path" required placeholder="当前项目内的 PDF、Word 或文本文件路径，例如 sources/paper.pdf"></label><label class="check"><input name="tree" type="checkbox"><span>生成结构索引（可能调用模型）</span></label><button type="submit" class="btn primary">导入</button></form>
+    <form id="document-search" class="search-bar"><i data-icon="search"></i><input name="query" required placeholder="在已索引文档中查找原文…" aria-label="检索原文"><button type="submit" class="btn sm">检索</button></form>
+    <div id="document-list" class="card list-card"></div>
+    <div class="list-head"><h2>项目文件</h2><button id="file-root" class="btn ghost sm"><i data-icon="folder"></i>返回根目录</button></div>
+    <div id="file-list" class="card list-card"></div>
+  </section>
+
+  <section id="view-skills" class="view page" hidden>
+    <header class="page-head"><div><span class="eyebrow">Capabilities</span><h1>技能库</h1><p>使用现有的分层技能系统，查看、扫描和管理成员的技能。</p></div></header>
+    <div class="tool-grid">
+      <button class="card tool-card" data-command='["skills","list"]'><i data-icon="skills"></i><h3>已启用技能</h3><p>查看 Sister 当前可用的技能栈</p></button>
+      <button class="card tool-card" data-command='["skills","pending"]'><i data-icon="clock"></i><h3>待审阅技能</h3><p>检查等待批准的技能变更</p></button>
+      <button class="card tool-card" data-command='["skills","scan"]'><i data-icon="search"></i><h3>扫描项目</h3><p>发现项目中可以复用的技能</p></button>
+      <button class="card tool-card" data-command='["bundles","list"]'><i data-icon="layers"></i><h3>技能组合</h3><p>查看角色专属的技能组合</p></button>
+      <button class="card tool-card" data-settings="skills"><i data-icon="settings"></i><h3>技能层与来源</h3><p>查看技能目录、审批与可选目录</p></button>
+      <button class="card tool-card" data-command='["skills","curator-status"]'><i data-icon="gauge"></i><h3>整理器状态</h3><p>查看自动整理与同步进度</p></button>
+    </div>
+  </section>
+
+  <section id="view-settings" class="view page settings-page" hidden>
+    <header class="page-head"><div><span class="eyebrow">Preferences</span><h1>设置</h1><p>模型、成员、联网与研究的全部设置都在这里完成。保存在本机 MISAKA 配置中，与终端版互通。</p></div></header>
+    <div class="settings-layout">
+      <nav class="settings-nav" id="settings-nav" aria-label="设置分类"></nav>
+      <div class="settings-body" id="settings-body"></div>
+    </div>
+  </section>
+
+  <section id="view-legacy" class="view page legacy-view" hidden>
+    <header class="page-head compact"><div><span class="eyebrow">Terminal</span><h1>外部终端进程</h1><p>这些进程由终端版 MISAKA 启动。图形界面发起的研究与设置不再需要终端。</p></div></header>
+    <div id="pane-list" class="pane-strip"></div><span id="pane-count" hidden></span>
+    <div id="terminal-stack" class="terminal-stack" hidden>
+      <div class="term-head"><div><b id="session-title">实时会话</b><small id="session-description">这个会话在独立终端中运行，适用于研究工作流与设置向导。</small></div><div id="pane-actions" hidden><span class="status-chip" id="pane-status"></span><button id="close-pane" class="btn ghost sm danger">关闭会话</button></div></div>
+      <div id="terminal-wrap" class="terminal-wrap"><div class="terminal-bar"><span><i></i> 实时会话</span><div><button id="scroll-up" title="查看较早内容">↑ 向上翻阅</button><button id="scroll-bottom">回到最新 ↓</button></div></div><div id="terminal" class="terminal" tabindex="0" role="region" aria-label="实时会话，点击后可直接使用键盘" spellcheck="false"></div><div class="keybar"><span>交互按键</span><button data-key="up">↑</button><button data-key="down">↓</button><button data-key="left">←</button><button data-key="right">→</button><button data-key="enter">确认 ↵</button><button data-key="escape">返回 Esc</button><button data-key="tab">Tab</button><button data-key="interrupt">中断 Ctrl+C</button><span class="key-tip">可点击会话区域直接键入</span></div></div>
+      <form id="message-form" class="term-composer"><textarea id="message" rows="2" placeholder="在这个终端会话中输入…（Ctrl / ⌘ + Enter 发送）" aria-label="消息"></textarea><button id="send-button" type="submit" class="btn primary">发送</button></form>
+    </div>
+  </section>
+</main>
+</div>
+
+<div id="popover" class="popover" hidden role="menu"></div>
+<dialog id="dialog"><div class="dialog-head"><h2 id="dialog-title"></h2><button id="dialog-close" class="icon-btn" aria-label="关闭对话框"><i data-icon="x"></i></button></div><div id="dialog-body"></div></dialog>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+</body></html>

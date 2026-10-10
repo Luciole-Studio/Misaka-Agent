@@ -22,3 +22,8 @@ __pycache__/
 # Development records (plans, audits, ledgers): kept on the developer's machine, not published
 /docs/plans/
 /docs/audits/
+
+# Local GUI launcher state. The log contains the one-time browser address.
+/.gui-runtime/
+/.test-tmp/
+.mimosa/

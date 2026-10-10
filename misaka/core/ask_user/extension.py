@@ -103,14 +103,19 @@ def register(harn: Any) -> None:
                 {"action": "unanswered", "questions": [q.model_dump() for q in params.questions],
                  "answers": {}, "annotations": {}, "imageCount": 0}, [])
 
-        result = await ctx.ui.custom(
-            lambda tui, _theme, keybindings, done: AskUserQuestionComponent(
-                [question.model_dump() for question in params.questions],
-                done,
-                tui=tui,
-                keybindings=keybindings,
+        ask_questions = getattr(ctx.ui, "ask_questions", None)
+        if callable(ask_questions):
+            # The GUI draws the same questions natively and answers in the component's shape.
+            result = await ask_questions([question.model_dump() for question in params.questions])
+        else:
+            result = await ctx.ui.custom(
+                lambda tui, _theme, keybindings, done: AskUserQuestionComponent(
+                    [question.model_dump() for question in params.questions],
+                    done,
+                    tui=tui,
+                    keybindings=keybindings,
+                )
             )
-        )
         if not isinstance(result, dict):
             raise RuntimeError("AskUserQuestion dialog closed without a result")  # noqa: TRY004 - callers treat bad input as ValueError
 
