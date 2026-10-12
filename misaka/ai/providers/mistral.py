@@ -840,7 +840,7 @@ def uses_reasoning_effort(model: Model) -> bool:
         model.id == "mistral-small-2603"
         or model.id == "mistral-small-latest"
         or model.id.startswith("mistral-medium-")
-        or model.id == "zai-glm-5-2"
+        or model.id == "zai-glm-5-3"
     )
 
 
