@@ -50,10 +50,14 @@ def _skills_root(profile_dir):
     return Path(profile_dir) / "skills"
 
 
-def _skill_dir(profile_dir, name):
+# Layers a person can change. ``extension`` ships inside the install and stays put.
+WRITABLE_LAYERS = frozenset({"project", "role", "shared", "external"})
+
+
+def _skill_dir(profile_dir, name, root=None):
     """The one way from a skill name to its directory: ``(skill_dir, None)`` or ``(None, error)``.
     The name must be a plain identifier and the directory, symlinks followed, must stay inside
-    the role's skills root; every read and write path goes through here."""
+    ``root`` (the directory MISAKA loaded the skill from) or the role's skills root."""
     err = lookup_path_error(name)
     if err:
         return None, err
@@ -62,15 +66,16 @@ def _skill_dir(profile_dir, name):
     checked_parts = parts[1:] if org_mirror else parts
     if any(not NAME_RE.fullmatch(part) or len(part) > 64 for part in checked_parts):
         return None, f"Invalid skill name '{name}'; use up to 64 lowercase letters, numbers, underscores, and hyphens."
-    root = _skills_root(profile_dir)
-    if org_mirror and (len(parts) < 3 or not (root / name / 'SKILL.md').is_file()):
+    base = Path(root) if root is not None else _skills_root(profile_dir)
+    if org_mirror and (len(parts) < 3 or not (base / name / 'SKILL.md').is_file()):
         return None, "Organisation mirror writes require an existing, resolved Skill."
-    skill_dir = root / name
+    skill_dir = base / name
+    place = "the directory this skill was loaded from" if root is not None else "this role's skill directory"
     try:
-        resolved, root_resolved = skill_dir.resolve(), root.resolve()
+        resolved, root_resolved = skill_dir.resolve(), base.resolve()
         resolved.relative_to(root_resolved)
     except ValueError:
-        return None, f"Skill '{name}' resolves outside this role's skill directory."
+        return None, f"Skill '{name}' resolves outside {place}."
     except OSError as error:
         return None, f"Cannot resolve skill '{name}': {error}"
     try:
@@ -586,10 +591,17 @@ def _precheck(action, skill_dir, name, content, file_path, file_content, old_str
 # Hermes exposes ONE shape; legacy calls are normalized before schema validation.
 # Keep unknown keys so validation reports them rather than silently dropping work.
 _OPERATION_KEYS = {"action", "name", "content", "category", "file_path", "file_content",
-                   "old_string", "new_string", "replace_all", "absorbed_into"}
+                   "old_string", "new_string", "replace_all", "absorbed_into", "source"}
 MANAGE_PARAMETERS = copy.deepcopy(SKILL_MANAGE_SCHEMA["parameters"])
 MANAGE_PARAMETERS["additionalProperties"] = False
 MANAGE_PARAMETERS["properties"]["operations"]["items"]["additionalProperties"] = True
+MANAGE_PARAMETERS["properties"]["operations"]["items"]["properties"]["source"] = {
+    "type": "string",
+    "description": ("Exact indexed SKILL.md source path, as accepted by skill_view. "
+                    "Select it when the user names a particular project/host copy or names collide. "
+                    "Existing skills are edited at this source, not copied into MISAKA. "
+                    "Not an arbitrary destination; unavailable for create."),
+}
 
 
 def prepare_arguments(raw):
@@ -598,11 +610,14 @@ def prepare_arguments(raw):
     result = copy.deepcopy(raw)
     if result.get("operations") is not None:
         default_name = result.get("name")
+        default_source = result.get("source")
         result = {k: v for k, v in result.items() if k not in _OPERATION_KEYS}
         if isinstance(result["operations"], list):
             for op in result["operations"]:
                 if isinstance(op, dict) and not op.get("name") and default_name:
                     op["name"] = default_name
+                if isinstance(op, dict) and not op.get("source") and default_source:
+                    op["source"] = default_source
     else:
         op = {k: v for k, v in result.items() if k in _OPERATION_KEYS}
         result = {k: v for k, v in result.items() if k not in _OPERATION_KEYS and k != "operations"}
@@ -614,16 +629,17 @@ def prepare_arguments(raw):
     return result
 
 
-def _validate_operations(operations):
+def _validate_operations(operations, *, extra=()):
     from .vendor.batch import _BATCH_MAX_OPS, _validate_batch_ops
     if not isinstance(operations, list) or not operations:
         return "operations must be a non-empty array."
     if len(operations) > _BATCH_MAX_OPS:
         return f"operations is capped at {_BATCH_MAX_OPS} ops per call."
+    allowed = _OPERATION_KEYS | set(extra)
     for op in operations:
         if not isinstance(op, dict):
             return "Every operation must be an object."
-        if unknown := op.keys() - _OPERATION_KEYS:
+        if unknown := op.keys() - allowed:
             return f"Unknown operation fields: {', '.join(sorted(unknown))}"
         for k, v in op.items():
             if k == "replace_all":
@@ -656,16 +672,49 @@ def _apply_operation(profile_dir, op):
     return _remove_file(profile_dir, name, op.get("file_path", ""))
 
 
+def _stage_relative(profile_dir, live_path, bound):
+    """Path of a live skill directory inside the staging ``skills`` folder."""
+    live = Path(live_path).absolute()
+    for op in bound:
+        if op.get("live_dir") and Path(op["live_dir"]).absolute() == live:
+            return Path(op["name"])
+    return live.relative_to(_skills_root(profile_dir).absolute())
+
+
+def _published_path(stage_profile, bound, profile_dir, value):
+    """Map a path inside the staging tree back to the directory the skill was loaded from."""
+    stage_skills = Path(stage_profile) / "skills"
+    path = Path(value)
+    try:
+        rel = path.relative_to(stage_skills)
+    except ValueError:
+        return value.replace(str(stage_profile), str(profile_dir), 1)
+    for op in bound:
+        name = Path(op["name"])
+        if rel == name or name in rel.parents:
+            return str(Path(op["live_dir"]) / rel.relative_to(name))
+    return str(_skills_root(profile_dir) / rel)
+
+
 def _bind_operations(profile_dir, operations, visible_roots):
-    """Read and write resolve the same identity; only this role's objects are mutable."""
+    """Read and write resolve the same identity.
+
+    An existing skill is written back to the directory MISAKA loaded it from.
+    A new skill is created in this role's own skills directory. Skills that ship
+    inside the install are refused.
+    """
     from . import index
-    root = _skills_root(profile_dir).absolute()
+    role_root = _skills_root(profile_dir).absolute()
     created = {}
+    destinations = {}
     bound = []
     for original in operations:
         op = dict(original)
         name = op["name"]
+        layer_root = None
         if op["action"] == "create":
+            if op.get("source"):
+                return None, "source selects an existing indexed skill; it cannot set a create destination."
             if err := _validate_category(op.get("category")):
                 return None, err
             if "/" in name or "\\" in name:
@@ -675,22 +724,38 @@ def _bind_operations(profile_dir, operations, visible_roots):
             rel = str(Path(op.get("category") or "") / name)
             created[name] = rel
             created[rel] = rel
-        elif name in created:
+        elif name in created and not op.get("source"):
             rel = created[name]
         else:
-            entry, err = index.resolve(visible_roots, name, require_compatible=False)
+            entry, err = index.resolve(visible_roots, name, source=op.get("source") or None,
+                                       require_compatible=False)
             if err:
                 return None, err
-            if Path(entry.get("root", "")).resolve() != root.resolve():
-                return None, f"Skill '{name}' belongs to the {entry['layer']} layer; this session only manages its own role."
-            rel = str(Path(entry["dir"]).relative_to(root))
-        _directory, err = _skill_dir(profile_dir, rel)
+            layer = entry.get("layer") or ""
+            if layer not in WRITABLE_LAYERS:
+                return None, (
+                    f"Skill '{name}' is loaded from the {layer} layer, which ships with MISAKA. "
+                    "It is not edited in place."
+                )
+            layer_root = Path(entry["root"]).resolve()
+            try:
+                rel = Path(entry["dir"]).resolve().relative_to(layer_root).as_posix()
+            except ValueError:
+                return None, f"Skill '{name}' is outside the directory MISAKA loaded it from."
+        checked, err = _skill_dir(profile_dir, rel, root=layer_root)
         if err:
             return None, err
         op["name"] = rel
+        op["live_dir"] = str(Path(checked).resolve())
+        # Staging uses relative skill names. Never collapse two independent
+        # host copies into one staged tree and publish one copy over the other.
+        if rel in destinations and destinations[rel] != op["live_dir"]:
+            return None, (f"Skill '{rel}' selects different source directories in this batch. "
+                          "Use a separate skill_manage call for each source.")
+        destinations[rel] = op["live_dir"]
         if op.get("absorbed_into"):
             target, err = index.resolve(visible_roots, op["absorbed_into"], require_compatible=False)
-            if err or Path(target.get("root", "")).resolve() != root.resolve():
+            if err or Path(target.get("root", "")).resolve() != role_root.resolve():
                 return None, "The absorbing skill must exist in this role."
             op["absorbed_into"] = target["rel"]
         bound.append(op)
@@ -701,7 +766,7 @@ def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
            file_content=None, old_string=None, new_string=None, category=None,
            replace_all=False, absorbed_into=None, base=None, operations=None,
            approved_payload_hash=None, visible_roots=_VISIBLE_ROOTS_UNSET,
-           workspace=None, _reviewed=None):
+           workspace=None, source=None, _reviewed=None):
     """One isolated, recoverable transaction for single calls, batches, and approvals."""
     from .layers import skill_roots
     from .scope import scope_for, using_scope
@@ -711,7 +776,8 @@ def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
     profile_dir = os.path.abspath(os.path.expanduser(profile_dir))
     flat = {k: v for k, v in {"action": action, "name": name, "content": content, "file_path": file_path,
             "file_content": file_content, "old_string": old_string, "new_string": new_string,
-            "category": category, "replace_all": replace_all, "absorbed_into": absorbed_into}.items() if v is not None}
+            "category": category, "replace_all": replace_all, "absorbed_into": absorbed_into,
+            "source": source}.items() if v is not None}
     canonical = prepare_arguments({**flat, **({"operations": operations} if operations is not None else {})})["operations"]
     if err := _validate_operations(canonical):
         return {"success": False, "error": err}
@@ -742,15 +808,15 @@ def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
             # malformed main document or an invalid support-file target.
             for op in bound:
                 a = "edit" if op["action"] == "patch" and op.get("content") else op["action"]
-                err = _precheck(a, _skills_root(profile_dir) / op["name"], op["name"], op.get("content", ""), op.get("file_path", ""), op.get("file_content"), op.get("old_string", ""), op.get("new_string"))
+                err = _precheck(a, Path(op["live_dir"]), op["name"], op.get("content", ""), op.get("file_path", ""), op.get("file_content"), op.get("old_string", ""), op.get("new_string"))
                 if err:
                     return {"success": False, "error": err}
-            if err := _validate_operations(bound):
+            if err := _validate_operations(bound, extra={"live_dir"}):
                 return {"success": False, "error": err}
             from .vendor.skill_provenance import is_background_review
             curator_archive = is_background_review() and any(op['action'] == 'delete' for op in bound)
             paths = ([str(_skills_root(profile_dir))] if curator_archive else
-                     list(dict.fromkeys(str(_skills_root(profile_dir) / op["name"]) for op in bound)))
+                     list(dict.fromkeys(op["live_dir"] for op in bound)))
             dependencies = list(dict.fromkeys(str(_skills_root(profile_dir) / op["absorbed_into"])
                                                for op in bound if op.get("absorbed_into")))
             bases = {path: skill_write.digest(path) for path in [*paths, *dependencies]}
@@ -768,7 +834,7 @@ def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
                        "bound_names": [op["name"] for op in bound]}
             if payload["write_origin"] == "background_review":
                 from .vendor.skill_manager_guards import _background_review_has_read
-                targets = [_skills_root(profile_dir) / op['name'] / (op.get('file_path') or 'SKILL.md') for op in bound]
+                targets = [Path(op["live_dir"]) / (op.get('file_path') or 'SKILL.md') for op in bound]
                 payload['read_paths'] = [str(path.resolve()) for path in targets if _background_review_has_read(path)]
             if _reviewed is not None and payload["bound_names"] != _reviewed.get("bound_names"):
                 return {"success": False, "error": "Skill identity changed after review; stage again."}
@@ -782,7 +848,15 @@ def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
                         staged = skill_write.stage(payload, summary=gist)
                     except OSError as error:
                         return {"success": False, "error": f"Could not stage the skill write for review: {error}"}
-                    return {"success": True, "staged": True, "pending_id": staged["id"], "gist": gist, "message": note}
+                    from .sandbox import copies_of
+                    copies = [copy for path in paths for copy in copies_of(path)]
+                    shown = [str(Path(path)) for path in paths]
+                    detail = "将写入：\n" + "\n".join(shown)
+                    if copies:
+                        detail += "\n启动时的副本：\n" + "\n".join(copies)
+                    return {"success": True, "staged": True, "pending_id": staged["id"], "gist": gist,
+                            "destinations": shown, "copies": copies,
+                            "message": note + "\n" + detail + "\n批准或拒绝的卡片就在这条对话里。技能库页面也能处理同一条。"}
             from .vendor.skill_provenance import get_current_write_origin
             evidence = {"profile_dir": profile_dir, "workspace": workspace,
                         "operations": canonical, "bound_operations": bound, "write_origin": payload["write_origin"],
@@ -793,10 +867,10 @@ def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
             with tempfile.TemporaryDirectory(prefix="misaka-skill-stage-") as temp:
                 stage_profile = Path(temp)
                 for change in journal["changes"]:
-                    dest = stage_profile / "skills" / Path(change["root"]).relative_to(_skills_root(profile_dir))
+                    dest = stage_profile / "skills" / _stage_relative(profile_dir, change["root"], bound)
                     skill_write._materialize(dest, change["before"])
                 for dependency in dependencies:
-                    dest = stage_profile / "skills" / Path(dependency).relative_to(_skills_root(profile_dir))
+                    dest = stage_profile / "skills" / _stage_relative(profile_dir, dependency, bound)
                     if not dest.exists():
                         skill_write._materialize(dest, skill_write.tree_image(dependency))
                 results = []
@@ -818,7 +892,7 @@ def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
                             return {**result, "failed_index": i, "completed_before_failure": i,
                                     "error": f"operations[{i}] failed: {result.get('error')}; live skills unchanged."}
                         results.append(result)
-                    after = [skill_write.tree_image(stage_profile / "skills" / Path(path).relative_to(_skills_root(profile_dir))) for path in paths]
+                    after = [skill_write.tree_image(stage_profile / "skills" / _stage_relative(profile_dir, path, bound)) for path in paths]
                     if curator_archive:
                         from .distribution import _pre_publish
                         _pre_publish(journal['changes'][0]['before'], after[0], scope, 'archive')
@@ -832,8 +906,20 @@ def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
                 for result in results:
                     for key in ("path", "skill_md"):
                         if isinstance(result.get(key), str):
-                            result[key] = result[key].replace(str(stage_profile), profile_dir, 1)
+                            result[key] = _published_path(stage_profile, bound, profile_dir, result[key])
                 _invalidate_index()
+                from .sandbox import refresh_copies
+                updated, copy_errors = [], []
+                role_root = _skills_root(profile_dir).resolve()
+                for path in paths:
+                    if Path(path).resolve() == role_root:
+                        continue
+                    got, errs = refresh_copies(path)
+                    updated.extend(got)
+                    copy_errors.extend(errs)
+                written = {"written_paths": [str(Path(path)) for path in paths], "updated_copies": updated}
+                if copy_errors:
+                    written["copy_errors"] = copy_errors
                 from .operations import flush_usage
                 try:
                     flush_usage(profile_dir, workspace)
@@ -847,11 +933,11 @@ def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
                     notes = [f"Local Skill committed; organisation sharing failed: {error}"]
                 sharing = {"org_sharing": " ".join(notes)} if notes else {}
                 if operations is None:
-                    single = {**results[0], "ledger_id": entry_id, **sharing}
+                    single = {**results[0], "ledger_id": entry_id, **sharing, **written}
                     if notes:
                         single["message"] = (single.get("message", "") + " " + sharing["org_sharing"]).strip()
                     return single
-                return {"success": True, "operations_applied": len(results), "ledger_id": entry_id, **sharing,
+                return {"success": True, "operations_applied": len(results), "ledger_id": entry_id, **sharing, **written,
                         "results": [{"name": raw["name"], "action": raw["action"], "file_path": raw.get("file_path"), "success": True} for raw in canonical]}
     except (OSError, ValueError, TypeError) as error:
         return {"success": False, "error": f"Skill transaction did not complete: {error}"}
@@ -910,7 +996,7 @@ def pending_diff(payload):
                 path = Path(source)
                 if path.exists():
                     skill_write._safe_parents(path)
-                    dest = Path(temp) / "skills" / path.relative_to(_skills_root(profile))
+                    dest = Path(temp) / "skills" / _stage_relative(profile, source, bound)
                     if not dest.exists():  # A whole-role base already contains its dependencies.
                         shutil.copytree(path, dest, symlinks=True)
             from .scope import SkillScope, using_scope

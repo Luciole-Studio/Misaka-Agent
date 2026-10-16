@@ -324,7 +324,7 @@ def _root_fingerprint(layer, root):
             else _manifest_digest(root))
 
 
-def _offered_entries(roots, *, prompt, platform="cli", tools=None, toolsets=None, detect=None):
+def _offered_entries(roots, *, prompt, platform="cli", tools=None, toolsets=None, detect=None, include_sources=False):
     from .visibility import offered
     seen, out = set(), []
     disabled = set(disabled_skill_names(platform))
@@ -332,11 +332,12 @@ def _offered_entries(roots, *, prompt, platform="cli", tools=None, toolsets=None
         compatible = "prompt_compatible" if prompt else "runtime_compatible"
         fm = "prompt_frontmatter" if prompt else "frontmatter"
         name = entry["name"] if prompt else entry.get("runtime_name", entry["name"])
+        key = (name, entry["identity_path"]) if include_sources else name
         if (not entry.get(compatible, True) or is_disabled(entry, platform, disabled=disabled)
                 or not offered(entry.get(fm, {}), tools=tools, toolsets=toolsets, platform=platform,
-                               detect=detect, conditions=prompt) or name in seen):
+                               detect=detect, conditions=prompt) or key in seen):
             continue
-        seen.add(name)
+        seen.add(key)
         out.append(dict(entry))
     return out
 
@@ -347,8 +348,8 @@ def build(roots, *, platform="cli", available_tools=None, available_toolsets=Non
                             toolsets=available_toolsets, detect=detect)
 
 
-def runtime_build(roots, *, platform="cli", detect=None):
-    return _offered_entries(roots, prompt=False, platform=platform, detect=detect)
+def runtime_build(roots, *, platform="cli", detect=None, include_sources=False):
+    return _offered_entries(roots, prompt=False, platform=platform, detect=detect, include_sources=include_sources)
 
 
 def categories(roots):

@@ -301,6 +301,103 @@ def _entry_size(entry):
     return _tree_size(entry["dir"])
 
 
+def _snapshot_roots():
+    """Card and Sister sandboxes, the copies made when an agent starts."""
+    from misaka.config import home
+    root = home.path("tasks_root")
+    if not root.is_dir():
+        return
+    for path in root.rglob(".misaka-skill-snapshot.json"):
+        if path.is_file() and not path.is_symlink():
+            yield path.parent
+
+
+def copies_of(origin_dir):
+    """Sandbox directories copied from ``origin_dir`` and still on disk."""
+    try:
+        origin = Path(origin_dir).resolve()
+    except OSError:
+        return []
+    found = []
+    for root in _snapshot_roots():
+        manifest = root / ".misaka-skill-snapshot.json"
+        try:
+            raw = json.loads(manifest.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        for entry in raw.get("entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            source = entry.get("origin_dir") or entry.get("dir")
+            copied = entry.get("copied_dir")
+            if not isinstance(source, str) or not isinstance(copied, str):
+                continue
+            if Path(copied).name != copied or copied in {".", ".."}:
+                continue
+            try:
+                if Path(source).resolve() != origin:
+                    continue
+            except OSError:
+                continue
+            found.append(str((root / copied).resolve()))
+    return found
+
+
+def _make_writable(path):
+    path = Path(path)
+    if not path.exists() or path.is_symlink():
+        return
+    os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
+    if path.is_dir():
+        for child in path.rglob("*"):
+            if child.is_symlink():
+                continue
+            try:
+                os.chmod(child, os.stat(child).st_mode | stat.S_IWUSR)
+            except OSError:
+                pass
+
+
+def refresh_copies(origin_dir):
+    """Replace sandbox copies of ``origin_dir`` with its current files.
+
+    A sealed snapshot keeps a digest of those bytes. The digest is rewritten
+    so a later child still accepts the snapshot. Returns ``(updated, errors)``.
+    """
+    try:
+        origin = Path(origin_dir).resolve()
+    except OSError as error:
+        return [], [str(error)]
+    updated, errors = [], []
+    for dest_s in copies_of(origin):
+        dest = Path(dest_s)
+        root = dest.parent
+        try:
+            _make_writable(root)
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(origin, dest, symlinks=False, ignore=lambda _src, names: {
+                name for name in names if os.path.islink(os.path.join(_src, name))})
+            _reseal_hashes(root)
+            updated.append(str(dest))
+        except (OSError, ValueError) as error:
+            errors.append(f"{dest}: {error}")
+    return updated, errors
+
+
+def _reseal_hashes(root):
+    path = Path(root) / ".misaka-skill-snapshot.json"
+    raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    if raw.get("state") == "sealed":
+        raw["files"] = _file_digests(root)
+        raw["digest"] = _manifest_digest(raw)
+        from misaka.utils import atomic
+        atomic.write_text(path, json.dumps(raw, ensure_ascii=False), mode=0o644)
+    _strip_write(root)
+
+
 def snapshot_stack(profile_dir, workspace, destination):
     """Capture one scope's documents, category metadata and bundle aliases together."""
     from . import bundles, index

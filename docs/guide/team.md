@@ -148,10 +148,22 @@ and everything outside her own tab.
 ## Skills and sub-agents
 
 A skill is a folder with a `SKILL.md`, in the [agentskills](https://agentskills.io) format.
-Skills come from the project's `skills/` folder, then the role's, then the home's, then
-`~/.agents/skills`; the first match wins. `misaka skills` lists, reviews, approves and installs
+Skills come from the project's `skills/`, `.agents/skills/`, `.claude/skills/`,
+`.codex/skills/` and `.grok/skills/` folders, then the role's, then the home's, then
+`~/.agents/skills` and configured `skills.external_dirs`. Project skills take precedence;
+independent copies with the same name require an exact indexed `source` path.
+`misaka skills` lists, reviews, approves and installs
 them, including an optional catalog that ships with MISAKA. `misaka bundles` saves a set of skills
 under one name for a role.
+
+`skill_manage` updates an existing skill at the same source that `skill_view` reads.
+Each operation accepts `source` with the exact indexed `SKILL.md` path to select a
+particular copy. The write result lists the directories actually changed. A new
+skill is still created in the role's own `skills/` folder. Selecting a source does
+not export a skill or synchronize independent host copies, and a project edit does
+not update host directories in the user's home. Those directories must be configured
+as external roots to select their existing skills. If two copies have the same
+relative directory name, edit them in separate calls.
 
 Sisters can hand work to sub-agents. The built-in research types are `explorer` (finds things in
 the indexed documents and on the web), `reader` (reads one section closely and quotes it

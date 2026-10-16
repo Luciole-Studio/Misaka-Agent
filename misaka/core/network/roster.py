@@ -24,10 +24,9 @@ def _registry():
 
 def model_choices():
     """The pinning menu: the global default, then what the sessions' own registry can run on the
-    product provider (builtin catalog plus models.json) as ``provider/id`` references -- the
+    configured providers (builtin catalog plus models.json) as ``provider/id`` references -- the
     shape a pin is stored in -- then a free-form reference."""
-    provider = current_config()["provider"]
-    mine = sorted({f"{m.provider}/{m.id}" for m in _registry().getAvailable() if m.provider == provider})
+    mine = sorted({f"{m.provider}/{m.id}" for m in _registry().getAvailable()})
     return [DEFAULT_CHOICE, *mine, CUSTOM_CHOICE]
 
 

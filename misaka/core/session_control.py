@@ -13,6 +13,7 @@ from pathlib import Path
 
 from misaka.utils import local_socket
 from misaka.utils.values import read_field
+from misaka.core.gui_input_queue import GuiInputQueue
 
 
 def for_session(session):
@@ -62,6 +63,20 @@ class SessionControl:
         self.check_active = lambda: None
         self._stream_revision = 0
         self._unsubscribe_stream = None
+        self.gui_queue = GuiInputQueue(session, self._deliver_gui_input,
+                                       failed=lambda error: setattr(self, "error", str(error)))
+
+    async def _deliver_gui_input(self, command):
+        return await self._execute({**command, "streamingBehavior": "steer"})
+
+    def _settings(self):
+        model = getattr(self.session, "model", None)
+        return {"model": ({"provider": model.provider, "id": model.id, "name": model.name,
+                           "reasoning": bool(model.reasoning), "contextWindow": model.contextWindow} if model else None),
+                "thinkingLevel": getattr(self.session, "thinkingLevel", "off"),
+                "availableThinkingLevels": getattr(self.session, "getAvailableThinkingLevels", lambda: ["off"])(),
+                "pendingPrompts": self.gui_queue.snapshot(),
+                "capabilities": ["models", "set_model", "set_thinking", "queue", "send_now", "withdraw"]}
 
     def _stream_event(self, event):
         if read_field(event, "type") in {"message_start", "message_update", "message_end", "agent_end"}:
@@ -83,6 +98,7 @@ class SessionControl:
 
     def close(self):
         self.accepting = False
+        self.gui_queue.clear()
         if self._unsubscribe_stream is not None:
             self._unsubscribe_stream()
             self._unsubscribe_stream = None
@@ -172,12 +188,50 @@ class SessionControl:
                     "steering": self.session.getSteeringMessages(), "follow_up": self.session.getFollowUpMessages(),
                     "stream_cursor": stream_cursor,
                     "streaming": streaming if command.get("stream_cursor") != stream_cursor else None,
-                    "entries": manager.buildContextEntries() if command.get("cursor") != cursor else None}
+                    "entries": manager.buildContextEntries() if command.get("cursor") != cursor else None,
+                    **self._settings()}
         if not self.accepting:
             raise ValueError("The original owner is finishing; no further input is accepted.")
         self._check_input_owner()
+        if operation == "models":
+            registry = self.session._modelRegistry
+            await registry.refresh({"allowNetwork": False})
+            from misaka.ui.gui.model_preferences import visible_models
+            return {"models": [{"provider": m.provider, "providerName": registry.getProviderDisplayName(m.provider), "id": m.id, "name": m.name,
+                                "reasoning": bool(m.reasoning), "contextWindow": m.contextWindow,
+                                "configured": registry.hasConfiguredAuth(m)} for m in visible_models(registry.getAvailable())],
+                    "shortlisted": True, "current": self._settings()["model"]}
+        if operation == "set_model":
+            await self.session._modelRegistry.refresh({"allowNetwork": False})
+            model = self.session._modelRegistry.find(str(command.get("provider", "")), str(command.get("model", "")))
+            if model is None:
+                raise ValueError("没有这个模型")
+            await self.session.setModel(model, persist=False)
+            return self._settings()
+        if operation == "set_thinking":
+            level = command.get("level")
+            if level not in self.session.getAvailableThinkingLevels():
+                raise ValueError("当前模型不支持这个思考等级")
+            self.session.setThinkingLevel(level, persist=False)
+            return self._settings()
+        if operation == "send_now":
+            paused = self.paused
+            self.paused = False
+            try:
+                result = await self.gui_queue.send_now(command.get("message_id"))
+            except Exception:
+                self.paused = paused
+                raise
+            self.catalog.refresh()
+            return result
+        if operation == "withdraw":
+            return self.gui_queue.withdraw(command.get("message_id"))
         if operation in {"pause", "resume"}:
             self.paused = operation == "pause"
+            if self.paused:
+                self.gui_queue.pause()
+            else:
+                self.gui_queue.resume()
             self.catalog.refresh()
             return "Pause requested: current request/tool may finish; new work waits." if self.paused else "Resumed."
         if operation != "input":
@@ -185,6 +239,8 @@ class SessionControl:
         text = command.get("text")
         if not isinstance(text, str) or not text.strip():
             raise ValueError("Enter a message for this session.")
+        if command.get("streamingBehavior") == "followUp":
+            return self.gui_queue.submit(command)
         # Serialize only ingress, not turns. A second message can steer the first
         # while it is running, using AgentSession's normal input/queue contract.
         async with self.ingress:

@@ -477,7 +477,7 @@ class Wizard:
         shared = skill_layers.shared_skills_dir()
         shown = ((f"{ui.tilde(roles_root)}/<role>/skills/", "that role alone"),
                  (ui.tilde(shared), "every role"),
-                 ("~/.agents/skills", "shared with your other agent tools, read-only"))
+                 ("~/.agents/skills", "shared with your other agent tools; an approved edit is written back here when the skill was loaded from here"))
         column = max(len(path) for path, _purpose in shown)
         ui.print_info("A skill is a folder with a SKILL.md a role reads when the work calls for it.",
                       "Three layers, in the order a role sees them:",

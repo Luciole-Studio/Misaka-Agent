@@ -202,10 +202,42 @@ def make_strict_json_schema(schema: Any) -> dict[str, Any]:
     return cloned
 
 
+def _portable_json_schema(parameters: dict[str, Any]) -> dict[str, Any]:
+    """Expand object alternatives that Google gateways validate in isolation.
+
+    A required-only branch is valid JSON Schema alongside its parent's properties.
+    Google's Schema requires its own object type and property definitions. Copy just
+    those definitions so the accepted arguments stay identical, leaving the tool's
+    original schema (and host-side validation) untouched.
+    """
+    result = deepcopy(parameters)
+
+    def visit(node):
+        if isinstance(node, list):
+            for item in node:
+                visit(item)
+        elif isinstance(node, dict):
+            properties = node.get("properties")
+            alternatives = node.get("anyOf")
+            if node.get("type") == "object" and isinstance(properties, dict) and isinstance(alternatives, list):
+                for branch in alternatives:
+                    if not isinstance(branch, dict) or set(branch) != {"required"}:
+                        continue
+                    required = branch["required"]
+                    if isinstance(required, list) and required and all(isinstance(key, str) and key in properties for key in required):
+                        branch["type"] = "object"
+                        branch["properties"] = {key: deepcopy(properties[key]) for key in required}
+            for value in node.values():
+                visit(value)
+
+    visit(result)
+    return result
+
+
 def get_json_schema_tool_parameters(tool: Tool, strict: bool | None) -> dict[str, Any]:
-    """The parameter schema to send for ``tool``, rewritten only when strict mode is on."""
+    """A request-only copy with portable object branches and optional strict sampling."""
     parameters = tool.parameters_json_schema()
-    return make_strict_json_schema(parameters) if strict is True else parameters
+    return make_strict_json_schema(parameters) if strict is True else _portable_json_schema(parameters)
 
 
 def tool_constrained_sampling(tool: Tool) -> ConstrainedSamplingConfig | None:

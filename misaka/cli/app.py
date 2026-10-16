@@ -106,6 +106,9 @@ def _parser(extension_commands=None):
     sub.add_parser("ally-bridge", help="Internal: the MCP server lending an ally its card's tools")
 
     sub.add_parser("panel", help="Open the Misaka Network panel (default in a terminal)")
+    gui = sub.add_parser("gui", help="打开中文图形界面（本地浏览器，支持 Windows / macOS / Linux）")
+    gui.add_argument("--port", type=int, default=0, help="本地端口；默认自动选择")
+    gui.add_argument("--no-browser", action="store_true", help="启动后不自动打开浏览器")
     ch = sub.add_parser("chat", help="Chat with Last Order, or with a Sister via --as")
     ch.add_argument("--model", help="Override the model")
     ch.add_argument("-s", "--skills", action="append", help="Preload Skill names; repeat or separate with commas")
@@ -890,7 +893,13 @@ def _cmd_uninstall(args):
     sys.exit(uninstall.run(mode=args.mode, assume_yes=args.yes, dry_run=args.dry_run))
 
 
+def _cmd_gui(args):
+    from misaka.ui.gui.server import serve
+    return serve(port=args.port, open_browser=not args.no_browser)
+
+
 COMMANDS = {
+    "gui": _cmd_gui,
     "setup": _cmd_setup,
     "update": _cmd_update,
     "uninstall": _cmd_uninstall,

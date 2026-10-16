@@ -53,9 +53,17 @@ def guards(operations, profile, workspace):
         _validate_metadata(Path(profile) / "skills")
         for op in operations:
             action, name = op["action"], op["name"]
-            root = Path(profile) / "skills" / name
+            root = Path(op["live_dir"]) if op.get("live_dir") else Path(profile) / "skills" / name
             if action == "create":
                 continue
+            if native._is_background_review():
+                role_root = (Path(profile) / "skills").resolve()
+                try:
+                    Path(root).resolve().relative_to(role_root)
+                except ValueError:
+                    return {"success": False, "error":
+                            "Background review only changes this role's own skills. "
+                            "The directory MISAKA loaded this skill from waits for a person to approve the change."}
             if error := native._background_review_write_guard(name, root, action):
                 return error
             if error := native._org_mirror_write_guard(name, root, action):

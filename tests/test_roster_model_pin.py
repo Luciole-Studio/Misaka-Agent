@@ -34,7 +34,7 @@ def test_the_menu_offers_provider_qualified_references(product_provider):
     choices = roster.model_choices()
     assert choices[0] == roster.DEFAULT_CHOICE and choices[-1] == roster.CUSTOM_CHOICE
     concrete = choices[1:-1]
-    assert concrete and all(item.startswith(f"{product_provider}/") for item in concrete)
+    assert concrete and any(item.startswith(f"{product_provider}/") for item in concrete)
     # Every menu entry is a valid pin as-is.
     for item in concrete:
         assert roster.resolve_pin(item) == item
@@ -82,3 +82,14 @@ def test_an_ambiguous_raw_id_names_the_candidates_instead_of_guessing(tmp_path, 
     ok, message = roster.create_sister("10080", root=str(tmp_path), model="openai/gpt-oss-120b")
     assert ok is False and "Ambiguous model" in message and "groq/openai/gpt-oss-120b" in message
     assert not os.path.exists(tmp_path / "10080")
+
+
+def test_menu_includes_every_configured_provider(monkeypatch):
+    from types import SimpleNamespace
+    models = [SimpleNamespace(provider="openai-codex", id="gpt-test"),
+              SimpleNamespace(provider="google", id="gemini-test"),
+              SimpleNamespace(provider="gateway", id="anthropic/claude-test")]
+    monkeypatch.setattr(roster, "_registry", lambda: SimpleNamespace(getAvailable=lambda: models))
+    monkeypatch.setattr(roster, "current_config", lambda: {"provider": "google"})
+    assert roster.model_choices() == [roster.DEFAULT_CHOICE, "gateway/anthropic/claude-test",
+                                      "google/gemini-test", "openai-codex/gpt-test", roster.CUSTOM_CHOICE]
