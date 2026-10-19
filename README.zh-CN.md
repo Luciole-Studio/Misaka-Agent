@@ -195,6 +195,7 @@ MISAKA 仅在你要求时提交。若项目为 git 仓库，可使用 `/commit` 
 | 与单个 Sister 对话 | `/sister 10032` |
 | 创建 Sister | `misaka create 10036 --desc "实证计量与因果识别"` |
 | 为文档建立索引 | `misaka doc scan sources/` |
+| 与 Agent 共读材料 | `misaka read open 材料 --question "..."` |
 | 选择模型、登录 | `/model`、`/login` |
 | 查看全部命令 | 对话中输入 `/`，终端中运行 `misaka --help` |
 | 查看面板快捷键 | 先按 `ctrl+b`，再按 `?`（见[面板指南](docs/guide/panel.md)） |
@@ -212,11 +213,12 @@ MISAKA 仅在你要求时提交。若项目为 git 仓库，可使用 `/commit` 
 | 面板：标签页、窗格与快捷键 | [面板指南](docs/guide/panel.md) |
 | 登录、选择模型、接入本地模型 | [模型指南](docs/guide/models.md) |
 | 文档与网络资源的使用 | [文档与网络](docs/guide/sources.md) |
+| 与 Agent 共读材料 | [阅读指南](docs/guide/reading.zh-CN.md) |
 | 故障排查 | [排障](docs/guide/troubleshooting.md) |
 | MISAKA 能防住什么、防不住什么 | [安全使用（英文）](docs/guide/security.md) |
 | 命令与配置参考 | [命令](docs/reference/commands.md)、[配置](docs/reference/configuration.md) |
 
-[docs/README.md](docs/README.md) 提供全部文档的索引及术语说明。除入门指南外，上述文档目前仅提供英文版。
+[docs/README.md](docs/README.md) 提供全部文档的索引及术语说明。除入门指南与阅读指南外，上述文档目前仅提供英文版。
 
 ## 数据与费用
 
