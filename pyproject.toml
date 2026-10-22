@@ -66,8 +66,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # Provider SDKs are extras: a user install picks the ones it talks to.
-# 0.99 is the first SDK whose in-memory workload identity federation `config=` honours `workspace_id`.
-anthropic = ["anthropic>=0.99"]
+# 0.99 is the first SDK whose in-memory workload identity federation `config=` honours `workspace_id`; below 1, as
+# pi pins its SDK to one 0.x release: 1.x moved to httpx2 and 2.x sends an API key as `Authorization: Bearer`.
+anthropic = ["anthropic>=0.99,<1"]
 openai = ["openai>=1.60"]
 google = ["google-genai>=1.0"]
 bedrock = ["boto3>=1.35"]
