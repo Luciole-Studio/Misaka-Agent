@@ -12,8 +12,9 @@ from typing import Any
 import pytest
 
 from misaka.chord.context import BACKGROUND_CONTEXT
+from misaka.chord.output import OutputBuffer
 from misaka.durable.env.node import NodeExecutionEnv
-from misaka.durable.harness.output import OutputBuffer
+from misaka.durable.errors import StorageRequestError
 from misaka.durable.storage.memory import MemoryStorage
 from misaka.durable.testing.assertions import createAssertions
 from misaka.utils import node_path
@@ -81,10 +82,11 @@ async def test_an_unawaited_transaction_operation_fails_the_commit():
 
 async def test_a_cursor_with_a_null_after_is_rejected():
     storage = MemoryStorage()
-    with pytest.raises(TypeError, match="Invalid storage cursor"):
+    # pi 1.3.0: storages refuse an invalid cursor with StorageRequestError, which fails only that read.
+    with pytest.raises(StorageRequestError, match="Invalid storage cursor"):
         await storage.scanConversations({}, 10, {"after": None}, BACKGROUND_CONTEXT)
     # pi 1.1.0 (scan.ts): a table scan's cursor must carry its `after`, so `{}` is refused too.
-    with pytest.raises(TypeError, match="Invalid storage cursor"):
+    with pytest.raises(StorageRequestError, match="Invalid storage cursor"):
         await storage.scanConversations({}, 10, {}, BACKGROUND_CONTEXT)
 
 

@@ -1,6 +1,6 @@
 """Public types of the durable runtime: records, documents, storage, sessions.
 
-Translated from pi's ``packages/durable/src/types.ts``. IDs are plain integers (the nominal brand is erased), records
+Translated from pi's ``packages/durable/src/types.ts`` (v1.3.0). IDs are plain integers (the nominal brand is erased), records
 and definitions are plain ``dict`` objects with the upstream key names, a key that upstream leaves ``undefined`` is
 absent from the dict, ``None`` is ``null``, and ``UNDEFINED`` (``misaka.utils.js``) is ``undefined`` where a value
 (not a key) can be undefined. A document or task *token* is ``{"definition": definition}``; a definition is a ``dict``
@@ -89,7 +89,11 @@ type TaskOwnership = dict[str, Any]
 type JoinPolicy = Literal["failFast", "allSettled"]
 """How a waiting task treats the tasks it waits on (spec section 5.5)."""
 type TaskOptions = dict[str, Any]
-"""``ownership`` (required: a task always names its owner), and optional ``conversationId``/``join``."""
+"""``ownership`` (required: a task always names its owner), and optional ``conversationId``/``join``, ``background``
+(conversation-owned tasks only: excluded from ordinary idle waits, conversation aborts, and cascades) and
+``abandonOnRestart`` (its creator awaits it only in memory and does not resume after a restart, so it is pointless once
+the Harness that created it is gone. When scheduling starts in a later Harness, the task, if still live, is abort-marked
+with reason ``restart``, and the mark cascades to its ordinary owned work, before any of it runs again)."""
 type ConversationOwnership = dict[str, Any]
 """``{"kind": "ownerless"}`` or ``{"kind": "task", "taskId"}``."""
 type ConversationRecord = dict[str, Any]
@@ -127,7 +131,10 @@ type TaskRecord = dict[str, Any]
 """``startedAt``: wall-clock milliseconds of the first change to ``running``, stamped by the Session; kept through waits
 and recovery, so the span to ``endedAt`` includes them; absent before the task first runs, and on records written by
 earlier versions. ``endedAt``: wall-clock milliseconds of the change to ``terminal``, stamped by the Session; absent
-while live."""
+while live. ``abortReason``: why the mark was set when not by an abort request: ``restart`` for a task abandoned after a
+restart (``TaskOptions.abandonOnRestart``) or below one; such a task waits for its definition instead of becoming
+``orphaned``, and a later abort request clears it. ``abandonOnRestart``: ``True`` from ``TaskOptions.abandonOnRestart``;
+immutable."""
 type DocumentRecord = dict[str, Any]
 type DocumentCreate = dict[str, Any]
 """A document record without ``createdAt``/``retiredAt``."""
@@ -230,10 +237,19 @@ type DocumentState = Any
 
 class WatchEnd(TypedDict):
     """Terminal result of one document watch: ``reason`` is ``stopped``, ``cancelled``, ``session_closed``,
-    ``retired`` or ``listener_error`` (with the ``error``)."""
+    ``retired``, ``listener_error`` (with the ``error``), or ``session_failed`` (the Session failed; ``error`` is what
+    failed it, usually a storage error, see ``SessionFailed``)."""
 
     reason: str
-    error: NotRequired[Exception]
+    error: NotRequired[Any]
+
+
+class SessionEnd(TypedDict):
+    """Why a Session ended: ``{"reason": "closed"}`` after ``close()``, or ``{"reason": "failed", "error"}`` after a
+    failed Storage call, whose error it carries."""
+
+    reason: Literal["closed", "failed"]
+    error: NotRequired[Any]
 
 
 class WatchHandle(Protocol):
@@ -291,13 +307,27 @@ class TaskRuntime(DocumentObserver, DocumentReader, Protocol):
 
     def env(self, context: Context) -> Awaitable[Any]: ...
 
-    def commit(self, change: Callable[[Tx, RunningTask], Any], context: Context) -> Awaitable[None]: ...
+    def commit(self, change: Callable[[Tx, RunningTask], Any], context: Context) -> Awaitable[None]:
+        """Commit on the Session line after rereading the task. Inside the callback read only through ``tx``:
+        ``snapshot()``, ``documentState()``, ``watchDoc()``, ``getTask()``, and the other Session and runtime reads may
+        queue on the line the callback holds, and then never resolve."""
+        ...
 
     def memo(self, name: str, *args: Any) -> Awaitable[Any]: ...
 
     def getTask(self, id: TaskId, context: Context) -> Awaitable[TaskRecord | None]: ...
 
     def waitForTask(self, id: TaskId, context: Context) -> Awaitable[Any]: ...
+
+    def abortOwned(self, id: TaskId, context: Context) -> Awaitable[None]:
+        """Abort a task this task owns, as ``Harness.abortTask()`` does, and resolve once it is terminal. Rejects for a
+        task another owns; resolves at once for a terminal one."""
+        ...
+
+    def ownedTasks(self, context: Context) -> Awaitable[list[TaskRecord]]:
+        """Live tasks this task owns directly, in ID order: also those an earlier invocation created, before a restart.
+        Tasks in conversations it owns are not included. Copies of the committed records."""
+        ...
 
     def outcomes(self, ids: Sequence[TaskId], context: Context) -> Awaitable[list[TaskOutcome]]: ...
 
@@ -318,19 +348,29 @@ class Session(Protocol):
     """Owner of one mutation line, its records, and its tracked documents."""
 
     def commit(self, change: Callable[[Tx], Any], context: Context) -> Awaitable[Any]:
-        """Run one atomic transaction on the Session mutation line."""
+        """Run one atomic transaction on the Session mutation line. Inside the callback read only through ``tx``:
+        ``snapshot()``, ``documentState()``, ``watchDoc()``, ``getTask()``, and the other Session and runtime reads may
+        queue on the line the callback holds, and then never resolve."""
         ...
 
     def close(self, context: Context) -> Awaitable[None]:
         """Seal admission, settle admitted commits, then close storage."""
         ...
 
+    @property
+    def closed(self) -> Awaitable[SessionEnd]:
+        """Settles once the Session has closed, Storage included: after ``close()``, or after the first failed Storage
+        call, which closes the Session itself. A failed Session is reopened from Storage; nothing else is left to clean
+        up."""
+        ...
+
     def subscribeCommits(self, listener: Callable[[CommitPublication, Context], None]) -> Callable[[], None]:
-        """Observe complete commits synchronously after adoption. The listener must not raise, block, or call Session APIs."""
+        """Observe complete commits synchronously after adoption. The listener must not block or call Session APIs."""
         ...
 
     def subscribeClose(self, listener: Callable[[], None]) -> Callable[[], None]:
-        """Observe close synchronously when it begins. The listener must not raise, block, or call Session APIs."""
+        """Observe close synchronously when it begins, also when a failed Storage call closes the Session. The listener
+        must not block or call Session APIs."""
         ...
 
     def snapshot(self, token: DocToken, *args: Any) -> Awaitable[Any]: ...
@@ -347,7 +387,12 @@ class Storage(Protocol):
 
     Storage trusts the owning Session to supply semantically valid records, references, ancestry, and transitions.
     Implementations enforce atomicity, global ID ownership, immutable conversation/entry creation, document record
-    consistency, and detached values; Session serializes commits."""
+    consistency, and detached values; Session serializes commits.
+
+    An error a method throws is final: it fails the Session, which nothing retries, so retry transient failures inside
+    the method. Two errors of a read fail only that read: a ``StorageRequestError`` for an invalid request (an unknown
+    conversation, a foreign or malformed cursor, history a document does not keep), which must have no durable effect,
+    and a rejection because its caller's context was aborted. Any error from ``commit()`` or ``mintId()`` is fatal."""
 
     def commit(self, writes: Sequence[StorageWrite], context: Context) -> Awaitable[Seq]:
         """Atomically persist one batch and return its sequence. Once resolved, later reads through this storage
@@ -355,7 +400,8 @@ class Storage(Protocol):
         ...
 
     def mintId(self) -> Awaitable[int]:
-        """Return a fresh candidate from the Session-global numeric ID namespace."""
+        """Return a fresh candidate from the Session-global numeric ID namespace, greater than every ID minted or stored
+        before, also across reopen: scans order by ID as creation order, and the Harness relies on it."""
         ...
 
     def conversation(self, id: ConversationId, context: Context) -> Awaitable[ConversationRecord | None]: ...
@@ -442,6 +488,7 @@ __all__ = [
     "Session",
     "SessionDocFamilyToken",
     "SessionDocToken",
+    "SessionEnd",
     "Storage",
     "StorageWrite",
     "StoredDocument",

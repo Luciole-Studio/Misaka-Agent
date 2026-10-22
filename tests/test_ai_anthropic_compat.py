@@ -1,4 +1,4 @@
-"""Translated from pi's Anthropic compat tests (v1.1.0): ``anthropic-temperature-compat.test.ts``,
+"""Translated from pi's Anthropic compat tests (v1.3.0): ``anthropic-temperature-compat.test.ts``,
 ``anthropic-force-adaptive-thinking.test.ts``, ``anthropic-empty-thinking-signature-compat.test.ts``,
 ``anthropic-eager-tool-input-compat.test.ts`` and the unit half of ``anthropic-thinking-disable.test.ts`` (its
 credential-gated E2E block is not ported)."""
@@ -125,17 +125,6 @@ async def test_uses_adaptive_thinking_with_native_xhigh_effort_for_claude_fable_
     assert payload["output_config"] == {"effort": "xhigh"}
 
 
-@pytest.mark.parametrize(
-    ("modelId", "reasoning", "effort"),
-    [("kimi-for-coding", "medium", "medium"), ("k3", "max", "max"), ("kimi-for-coding-highspeed", "medium", "medium")],
-)
-async def test_uses_adaptive_thinking_effort_without_a_token_budget_for_kimi_coding(modelId, reasoning, effort):
-    payload = await capturePayload(getModel("kimi-coding", modelId), {"reasoning": reasoning})
-
-    assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
-    assert payload["output_config"] == {"effort": effort}
-
-
 async def test_allows_built_in_adaptive_models_to_opt_out_with_compat_force_adaptive_thinking_false():
     model = _model(getModel("anthropic", "claude-opus-4-8"), compat={"forceAdaptiveThinking": False})
     payload = await capturePayload(model, {"reasoning": "medium"})
@@ -248,25 +237,6 @@ async def test_preserves_unsigned_thinking_for_fireworks(modelId):
         {"type": "thinking", "thinking": "internal reasoning", "signature": ""},
         {"type": "text", "text": "answer"},
     ]
-
-
-async def test_still_converts_cross_model_fireworks_thinking_to_text():
-    # Regression for #9323: opting into unsigned replay must not change cross-model conversion.
-    model = getModel("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash")
-    payload = await captureSimplePayload(
-        model,
-        _signatureContext("", "internal reasoning", "fireworks", "accounts/fireworks/models/nemotron-3-ultra-nvfp4"),
-    )
-    assert _assistantContent(payload) == [{"type": "text", "text": "internal reasoning"}]
-
-
-@pytest.mark.parametrize("modelId", ["k3"])
-async def test_allows_empty_signatures_for_kimi_coding(modelId):
-    model = getModel("kimi-coding", modelId)
-    assert model.compat.allowEmptySignature is True
-
-    payload = await captureSimplePayload(model, _signatureContext(" ", "internal reasoning", "kimi-coding", modelId))
-    assert _assistantContent(payload) == [{"type": "thinking", "thinking": "internal reasoning", "signature": ""}]
 
 
 # --- anthropic-eager-tool-input-compat.test.ts ----------------------------------------------

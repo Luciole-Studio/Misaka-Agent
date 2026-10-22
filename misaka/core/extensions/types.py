@@ -337,6 +337,9 @@ class ToolNamespace(TypedDict):
 
     # For example `mcp__docs`.
     name: str
+    # Other names that refer to the namespace where tools look it up by name (codemode's
+    # `describeNamespace()` and the `namespace` option of `searchTools()`), for example `docs`.
+    aliases: NotRequired[Sequence[str]]
     # Short summary shown once with the group in model-facing tool listings.
     description: NotRequired[str]
     # Longer usage guidance, such as MCP server instructions. Not part of tool listings; tools that
@@ -390,6 +393,12 @@ class ToolDefinition[TArgs, TDetails]:
     exposure: ToolExposure | None = None
     # Group the tool belongs to, for example its MCP server.
     namespace: ToolNamespace | None = None
+    # For tools that reach other tools (such as `codemode`, which calls them, and `tool_search`, which
+    # loads them): which tools a call with `input` may reach. `"all"`, or the words of the input that
+    # may name them, where a word refers to a tool or namespace whose name it contains, so words may
+    # over-match. Extensions that register tools late, such as MCP servers that are still connecting,
+    # use it from their `tool_call` handler to finish registering those tools before the call runs.
+    reachesTools: Callable[[Mapping[str, Any]], Literal["all"] | Sequence[str]] | None = None
     # Hints about what the tool does, for example from an MCP server.
     annotations: ToolAnnotations | None = None
     # Whether registering the tool activates it. Default: `True` for `direct` and `model-only`
@@ -436,8 +445,9 @@ class ToolInfo:
     parameters: Any
     exposure: ToolExposure
     sourceInfo: SourceInfo
-    # pi types.ts:1639-1641 picks promptGuidelines off ToolDefinition too.
+    # pi types.ts picks promptGuidelines and reachesTools off ToolDefinition too.
     promptGuidelines: list[str] = field(default_factory=list)
+    reachesTools: Callable[[Mapping[str, Any]], Literal["all"] | Sequence[str]] | None = None
     namespace: ToolNamespace | None = None
     annotations: ToolAnnotations | None = None
 
@@ -975,14 +985,36 @@ class ProviderStreamEvent(TypedDict):
     data: Any
 
 
-class BeforeAgentStartEvent(TypedDict):
+class _BeforeAgentStartEventBase(TypedDict):
     type: Literal["before_agent_start"]
-    prompt: str
-    images: NotRequired[list[ImageContent]]
-    # Rendered from `systemPromptOptions` on every read, so edits to the options show here.
+    # The current system prompt, rendered from `systemPromptOptions` and earlier handler changes on
+    # every read, so edits to the options show here.
     systemPrompt: str
-    # Mutable, collection-complete prompt options for this run; handlers may edit them.
+    # Mutable, collection-complete prompt options for this run. Later handlers observe mutations made
+    # by earlier handlers.
     systemPromptOptions: BuildSystemPromptOptions
+
+
+class BeforeAgentStartUserEvent(_BeforeAgentStartEventBase):
+    """A run started by a submitted prompt, RPC prompt, or `pi.sendUserMessage()`."""
+
+    messageType: Literal["user"]
+    # The raw user prompt text (after expansion).
+    prompt: str
+    # Images attached to the user prompt, if any.
+    images: NotRequired[list[ImageContent]]
+
+
+class BeforeAgentStartCustomEvent(_BeforeAgentStartEventBase):
+    """A run started by `pi.sendMessage(..., {"triggerTurn": True})` while idle."""
+
+    messageType: Literal["custom"]
+    # The custom message that starts the run.
+    message: CustomMessage[Any]
+
+
+# Fired before a run starts from a user message or an idle custom message with `triggerTurn`.
+type BeforeAgentStartEvent = BeforeAgentStartUserEvent | BeforeAgentStartCustomEvent
 
 
 class AgentStartEvent(TypedDict):
@@ -2056,8 +2088,10 @@ __all__ = [
     "AutocompleteProviderFactory",
     "BashToolCallEvent",
     "BashToolResultEvent",
+    "BeforeAgentStartCustomEvent",
     "BeforeAgentStartEvent",
     "BeforeAgentStartEventResult",
+    "BeforeAgentStartUserEvent",
     "BeforeProviderHeadersEvent",
     "BeforeProviderRequestEvent",
     "BeforeProviderRequestEventResult",

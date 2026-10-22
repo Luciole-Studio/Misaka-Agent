@@ -1,5 +1,5 @@
-"""MISAKA fork: the JavaScript built-ins the translated pi packages rely on (MCP, codemode, Chord, protocol, client, server,
-durable and the experimental server), where Python's counterparts differ.
+"""MISAKA fork: the JavaScript built-ins the translated pi packages rely on (ai, agent, the TUI, the coding agent, MCP,
+codemode, Chord, durable and env), where Python's counterparts differ.
 
 pi's packages run on Node. A literal translation goes wrong in a few recurring places:
 ``JSON.stringify`` and ``json.dumps`` print numbers and lone surrogates differently, ``trim()`` and
@@ -620,20 +620,6 @@ def liveKeys(mapping: dict[Any, Any]) -> Iterator[Any]:
             return
 
 
-def liveValues(mapping: dict[Any, Any]) -> Iterator[Any]:
-    """The values of a ``Map``, walked as :func:`liveKeys` walks keys."""
-    visited: list[Any] = []
-    while True:
-        for value in list(mapping.values()):
-            if not any(value is seen for seen in visited):
-                visited.append(value)
-                yield value
-                break
-        else:
-            return
-
-
-
 class ErrorOptions(TypedDict, total=False):
     """The ``ErrorOptions`` an ``Error`` constructor takes; ``cause`` is also chained as ``__cause__``."""
 
@@ -892,11 +878,6 @@ def rejectedPromise(error: BaseException) -> asyncio.Future[Any]:
     return future
 
 
-
-def aggregateError(errors: list[Any], message: str) -> ExceptionGroup:
-    """``new AggregateError(errors, message)``: an ``ExceptionGroup``; a reason that is not an exception is carried by
-    one."""
-    return ExceptionGroup(message, [error if isinstance(error, Exception) else Exception(str(error)) for error in errors])
 
 def resolvedPromise(value: Any) -> asyncio.Future[Any]:
     """``Promise.resolve(value)``: a future that has already finished. An awaitable is started and returned."""
@@ -1178,7 +1159,6 @@ __all__ = [
     "jsonParse",
     "jsonStringify",
     "liveKeys",
-    "liveValues",
     "nullishCoalesce",
     "onAbort",
     "pathResolve",

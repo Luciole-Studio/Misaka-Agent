@@ -7,10 +7,12 @@ thread, not a file).
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import math
 import re
 import time
+from typing import ClassVar
 
 import pytest
 
@@ -156,12 +158,12 @@ async def test_rejects_invalid_text_and_image_arguments(sandboxes):
     errors = result["value"]
     assert re.match(r"^TypeError: .*circular", errors[0])
     assert errors[1:] == [
-        "TypeError: image expects a non-empty image URL string, an object with image_url, or a raw MCP image block",
+        'TypeError: image expects a non-empty image URL string, an object with image_url, or an image block { type: "image", data, mimeType }',
         "TypeError: remote image URLs are not supported in tool outputs. Pass a base64 data URI instead",
         "TypeError: invalid image output. Pass a base64 data URI instead",
-        'TypeError: image only accepts MCP image blocks, got "text"',
-        "TypeError: image expected MCP image data",
-        "TypeError: image expects a non-empty image URL string, an object with image_url, or a raw MCP image block",
+        'TypeError: image only accepts image blocks, got "text"',
+        "TypeError: image expected image block data",
+        'TypeError: image expects a non-empty image URL string, an object with image_url, or an image block { type: "image", data, mimeType }',
         *["TypeError: invalid image output. The image data is not valid base64 (truncated or corrupted?)"] * 6,
         *["TypeError: invalid image output. The image data is not a PNG, JPEG, GIF, or WebP image"] * 3,
     ]
@@ -626,12 +628,15 @@ async def test_runs_executions_in_parallel_without_sharing_state(sandboxes):
 
 class RawWorker:
     """Stands in for the real worker in host tests (upstream's ``fixtures/raw-worker.ts``): posts the JSON
-    message passed as the script source, so tests can send the host payloads the real prelude never
-    produces."""
+    message (or array of messages) passed as the script source, so tests can send the host payloads the real
+    prelude never produces."""
 
     def __init__(self, workerData) -> None:
         self._listeners = {}
-        asyncio.get_running_loop().call_soon(lambda: self._emit("message", json.loads(workerData["code"])))
+        self.threadExited = concurrent.futures.Future()
+        messages = json.loads(workerData["code"])
+        for message in messages if isinstance(messages, list) else [messages]:
+            asyncio.get_running_loop().call_soon(lambda message=message: self._emit("message", message))
 
     def _emit(self, event, payload) -> None:
         for listener in self._listeners.get(event, []):
@@ -643,8 +648,9 @@ class RawWorker:
     def postMessage(self, _message) -> None:
         pass
 
-    async def terminate(self) -> int:
-        return 1
+    def terminate(self):
+        if not self.threadExited.done():
+            self.threadExited.set_result(None)
 
 
 async def test_reports_a_failing_wasm_module_as_a_sandbox_error(sandboxes):
@@ -857,7 +863,19 @@ async def test_a_script_cannot_run_code_while_it_is_compiled(sandboxes):
     assertMatches(result, {"ok": False, "error": {"kind": "timeout"}})
 
 
-async def test_cancelling_the_task_that_awaits_a_run_stops_the_run(sandboxes):
+class RecordingWorker(codemode_host.Worker):
+    """The real worker, remembered: the launcher keeps its worker to itself."""
+
+    created: ClassVar[list[codemode_host.Worker]] = []
+
+    def __init__(self, workerData) -> None:
+        super().__init__(workerData)
+        RecordingWorker.created.append(self)
+
+
+async def test_cancelling_the_task_that_awaits_a_run_stops_the_run(sandboxes, monkeypatch):
+    monkeypatch.setattr(RecordingWorker, "created", [])
+    monkeypatch.setattr(codemode_host, "Worker", RecordingWorker)
     hang = CodemodeTool(name="hang", execute=lambda _args, _context: asyncio.Event().wait())
     sandbox = createSandbox(sandboxes, [hang])
 
@@ -866,8 +884,7 @@ async def test_cancelling_the_task_that_awaits_a_run_stops_the_run(sandboxes):
 
     task = asyncio.get_running_loop().create_task(wait())
     await asyncio.sleep(0.3)
-    (execution,) = sandbox._running
-    worker = execution._worker
+    (worker,) = RecordingWorker.created
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -1063,7 +1080,13 @@ async def test_a_finished_run_releases_its_vm(sandboxes, monkeypatch):
     disposed = []
     dispose = quickjs_wasi.QuickJS.dispose
     monkeypatch.setattr(quickjs_wasi.QuickJS, "dispose", lambda vm: (disposed.append(vm), dispose(vm))[1])
-    assertMatches(await createSandbox(sandboxes).execute("return 1"), {"ok": True, "value": 1})
+    exited: list[concurrent.futures.Future[None]] = []
+    sandbox = CodemodeSandbox({"onWorkerStarted": exited.append})
+    sandboxes.append(sandbox)
+    assertMatches(await sandbox.execute("return 1"), {"ok": True, "value": 1})
+    # The result no longer waits for the worker (#10748): the VM is disposed as its thread ends, which may be after.
+    assert len(exited) == 1
+    await asyncio.wait_for(asyncio.wrap_future(exited[0]), 10)
     assert len(disposed) == 1 and disposed[0].disposed
 
 

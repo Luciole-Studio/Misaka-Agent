@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any, TypedDict
 
 from misaka.chord.json import copyJson
-from misaka.utils.js import UNDEFINED
+from misaka.utils.js import UNDEFINED, nullishCoalesce
 
 from ..documents import defineDoc
 from ..types import ConversationId, Tx
@@ -54,9 +54,9 @@ def addUsage(total: Any, usage: dict[str, Any]) -> None:
     total["cacheWrite"] += usage["cacheWrite"]
     total["totalTokens"] += usage["totalTokens"]
     if usage.get("cacheWrite1h") is not None:
-        total["cacheWrite1h"] = total.get("cacheWrite1h", 0) + usage["cacheWrite1h"]
+        total["cacheWrite1h"] = nullishCoalesce(total.get("cacheWrite1h"), 0) + usage["cacheWrite1h"]
     if usage.get("reasoning") is not None:
-        total["reasoning"] = total.get("reasoning", 0) + usage["reasoning"]
+        total["reasoning"] = nullishCoalesce(total.get("reasoning"), 0) + usage["reasoning"]
     total["cost"]["input"] += usage["cost"]["input"]
     total["cost"]["output"] += usage["cost"]["output"]
     total["cost"]["cacheRead"] += usage["cost"]["cacheRead"]

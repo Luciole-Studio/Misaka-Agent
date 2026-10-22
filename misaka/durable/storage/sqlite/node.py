@@ -1,6 +1,6 @@
 """Durable SQLite storage over Python's built-in ``sqlite3``.
 
-Translated from pi's ``packages/durable/src/storage/sqlite/node.ts``, which runs on ``node:sqlite``. ``sqlite3`` is
+Translated from pi's ``packages/durable/src/storage/sqlite/node.ts`` (v1.3.0), which runs on ``node:sqlite``. ``sqlite3`` is
 synchronous like ``DatabaseSync``: an operation runs on the event loop thread when it is called and returns a future
 that has already settled, and a serial queue orders the operations of overlapping callers and transactions. The
 connection runs in autocommit mode (``BEGIN IMMEDIATE`` and ``COMMIT`` are explicit statements) and ``sqlite3`` caches
@@ -21,16 +21,21 @@ from typing import Any, TypedDict
 from misaka.utils.js import rejectedPromise, resolvedPromise, startTask
 
 from .database import SqliteExecutor, SqliteValue
-from .storage import SqliteStorage
+from .schema import validateSqliteSchemaPrefix
+from .storage import SqliteStorage, SqliteStorageOptions
 
 
-class NodeSqliteStorageOptions(TypedDict, total=False):
+class NodeSqliteDatabaseOptions(TypedDict, total=False):
     """SQLite connection settings for a durable storage file."""
 
     walAutoCheckpointPages: int
     """SQLite WAL auto-checkpoint threshold. SQLite and this adapter default to 1,000 pages; 0 disables it."""
     busyTimeoutMs: int
     """Time SQLite waits for a competing file lock. SQLite defaults to 0; this adapter defaults to 5,000 ms."""
+
+
+class NodeSqliteStorageOptions(NodeSqliteDatabaseOptions, SqliteStorageOptions, total=False):
+    """SQLite connection settings plus durable storage options."""
 
 
 DEFAULT_WAL_AUTO_CHECKPOINT_PAGES = 1_000
@@ -225,7 +230,7 @@ class NodeSqliteDatabase(_NodeSqliteExecutor):
         return self._access.run(operation)
 
 
-async def openNodeSqliteDatabase(path: str, options: NodeSqliteStorageOptions | None = None) -> NodeSqliteDatabase:
+async def openNodeSqliteDatabase(path: str, options: NodeSqliteDatabaseOptions | None = None) -> NodeSqliteDatabase:
     """Open and configure a Python-backed SQLite database facade."""
     if options is None:
         options = {}
@@ -253,14 +258,22 @@ async def openNodeSqliteDatabase(path: str, options: NodeSqliteStorageOptions | 
 
 
 async def openNodeSqliteStorage(path: str, options: NodeSqliteStorageOptions | None = None) -> SqliteStorage:
-    """Open or create file-backed durable storage using Python's built-in SQLite."""
-    return await SqliteStorage.open(await openNodeSqliteDatabase(path, options))
+    """Open or create file-backed durable storage using Python's built-in SQLite, optionally under a table prefix."""
+    databaseOptions: dict[str, Any] = dict(options or {})
+    prefix = databaseOptions.pop("prefix", None)
+    if prefix is not None:
+        validateSqliteSchemaPrefix(prefix)
+    return await SqliteStorage.open(
+        await openNodeSqliteDatabase(path, databaseOptions),  # type: ignore[arg-type]
+        {} if prefix is None else {"prefix": prefix},
+    )
 
 
 __all__ = [
     "DEFAULT_BUSY_TIMEOUT_MS",
     "DEFAULT_WAL_AUTO_CHECKPOINT_PAGES",
     "NodeSqliteDatabase",
+    "NodeSqliteDatabaseOptions",
     "NodeSqliteStorageOptions",
     "openNodeSqliteDatabase",
     "openNodeSqliteStorage",

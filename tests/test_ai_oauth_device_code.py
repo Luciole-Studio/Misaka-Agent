@@ -1,7 +1,7 @@
 """Translated from pi's ``packages/ai/test/oauth-device-code.test.ts`` (v1.1.0).
 
 MISAKA fork: vitest's fake timers are stood in for by replacing the running loop's ``call_later`` with
-``tests.experimental_support.FakeTimers`` and the module's clock with the fake one.
+``tests.fake_timers.FakeTimers`` and the module's clock with the fake one.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import pytest
 from misaka.ai.auth.oauth import device_code
 from misaka.ai.auth.oauth.device_code import pollOAuthDeviceCodeFlow
 from misaka.utils.js import AbortController
-from tests.experimental_support import FakeTimers
+from tests.fake_timers import FakeTimers
 
 neverAbortedSignal = None
 

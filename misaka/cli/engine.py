@@ -78,7 +78,7 @@ from misaka.modes.interactive.theme.theme import (
     setThemeJsonValidator,
     stopThemeWatcher,
 )
-from misaka.modes.interactive.theme.theme_json import validateThemeJson
+from misaka.modes.interactive.theme.theme_schema import validateThemeJson
 from misaka.ui.tui import (
     setCapabilityOverrides,
 )
@@ -479,6 +479,7 @@ def buildSessionOptions(
                 "cliProvider": parsed.provider,
                 "cliModel": parsed.model,
                 "cliThinking": parsed.thinking,
+                "inlineApiKey": bool(parsed.apiKey),
                 "modelRuntime": modelRuntime,
             }
         )
@@ -766,6 +767,8 @@ class MainOptions(TypedDict, total=False):
 
 async def main(args: list[str], options: MainOptions | None = None) -> int:
     resetTimings()
+    # Commands and startup selectors can load user-authored themes before runtime creation.
+    setThemeJsonValidator(validateThemeJson)
     extensionFactories = (options or {}).get("extensionFactories")
     # MISAKA fork: `MISAKA_OFFLINE`, where upstream reads `PI_OFFLINE`; misaka has no version check to skip.
     offlineMode = "--offline" in args or isTruthyEnvFlag(os.environ.get("MISAKA_OFFLINE"))
@@ -913,8 +916,6 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
         initial = await prepareInitialMessage(parsed, stdinContent)
         initialMessage, initialImages = initial.initialMessage, initial.initialImages
         time("prepareInitialMessage")
-        # pi reads user-authored themes, so it opts into full validation before any theme loads.
-        setThemeJsonValidator(validateThemeJson)
         initTheme(settingsManager.getTheme(), appMode == "interactive")
         time("initTheme")
 

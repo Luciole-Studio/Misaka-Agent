@@ -1,8 +1,9 @@
-"""pi-ai's ``models-runtime.test.ts`` cases (v1.1.0) for the provider collection (``misaka/ai/models.py``)."""
+"""pi-ai's ``models-runtime.test.ts`` cases (v1.3.0) for the provider collection (``misaka/ai/models.py``)."""
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
 from types import SimpleNamespace
 
@@ -985,6 +986,26 @@ async def test_passes_effective_api_key_credentials_and_refresh_options_while_sk
     assert seen["effectiveCredential"] == ApiKeyCredential(type="api_key", key="ambient-key", env=None)
     assert seen["forceRefresh"] is True
     assert seen["unconfiguredRefreshes"] == 0
+
+
+async def test_passes_the_registered_providers_base_url_including_wrapper_overrides_to_refresh_models():
+    # A models.json baseUrl (e.g. a regional OpenRouter host) is applied by a wrapper around the
+    # built-in provider. The built-in refresh must still request that URL.
+    baseUrls: list[str | None] = []
+
+    async def refreshModels(context):
+        baseUrls.append(context.baseUrl)
+
+    inner = _Provider("dynamic", refreshModels=refreshModels)
+    inner.baseUrl = "https://default.example.test/v1"
+    # `{ ...inner, baseUrl: "https://regional.example.test/v1" }`.
+    wrapped = copy.copy(inner)
+    wrapped.baseUrl = "https://regional.example.test/v1"
+    models = createModels()
+    models.setProvider(wrapped)
+
+    await models.refresh()
+    assert baseUrls == ["https://regional.example.test/v1", "https://regional.example.test/v1"]
 
 
 async def test_refreshes_expired_oauth_before_refreshing_models():

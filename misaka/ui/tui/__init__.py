@@ -1,9 +1,9 @@
-"""Translated from pi-tui's ``index.ts`` (v1.1.0): the package's public names.
+"""Translated from pi-tui's ``index.ts`` (v1.3.0): the package's public names.
 
 MISAKA fork: not re-exported, because they are not ported: the alt screen and everything only it uses (D1:
 ``TuiAltScreen``, ``TuiMainScreenRenderState``, ``isViewportTUI``/``ViewportTUI``, ``TuiMode``, the ``TuiMouse*``
 types, ``ScrollView``, ``HStack``/``VStack`` and the stack types, ``deleteAllKittyImages``, ``getOsc8LinkAtColumn``,
-``stripTerminalSequences``, ``WheelScrollLines``), and the OKLCH/OKHSL part of the colour library behind the system
+``WheelScrollLines``), and the OKLCH/OKHSL part of the colour library behind the system
 theme (D11: ``colorToOkhsl``, ``OkhslChannels``, ``OklchColorValue``, ``okhslColor``, ``oklchColor`` and
 ``oklabToOkhslLightness``).
 """
@@ -184,12 +184,14 @@ from misaka.ui.tui.tui import (
     TuiStopOptions,
     compositeTuiLine,
     isFocusable,
+    renderFakeCursor,
 )
 from misaka.ui.tui.tui_main_screen import TuiMainScreen
 
 # Utilities
 from misaka.ui.tui.utils import (
     sliceByColumn,
+    stripTerminalSequences,
     truncateToWidth,
     visibleWidth,
     wrapTextWithAnsi,
@@ -327,6 +329,7 @@ __all__ = [
     "parseColor",
     "parseKey",
     "parseTerminalColorSchemeReport",
+    "renderFakeCursor",
     "renderImage",
     "renderLatex",
     "resetCapabilitiesCache",
@@ -338,6 +341,7 @@ __all__ = [
     "setKeybindings",
     "setKittyProtocolActive",
     "sliceByColumn",
+    "stripTerminalSequences",
     "styleText",
     "styleTextWithAnsi",
     "truncateToWidth",

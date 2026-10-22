@@ -1,4 +1,4 @@
-"""Translated from pi's ``coding-agent/src/utils/clipboard.ts`` (v1.1.0): copying text, and reading the text and the
+"""Translated from pi's ``coding-agent/src/utils/clipboard.ts`` (v1.3.0): copying text, and reading the text and the
 copied files."""
 
 from __future__ import annotations
@@ -28,7 +28,17 @@ def _platform() -> str:
 
 
 def isRemoteSession(env: Mapping[str, str]) -> bool:
-    return bool(env.get("SSH_CONNECTION") or env.get("SSH_CLIENT") or env.get("MOSH_CONNECTION"))
+    """Remote sessions also emit OSC 52 so the client terminal receives the copy. MISAKA_CLIPBOARD_OSC52=1
+    covers remote clients that leave no SSH markers, such as multiplexer attaches (#10114, #10835)
+    or IDE daemons (#10826)."""
+    # MISAKA fork: `MISAKA_CLIPBOARD_OSC52`, where upstream reads `PI_CLIPBOARD_OSC52` (the `MISAKA_` prefix, as
+    # `MISAKA_OFFLINE`).
+    return bool(
+        env.get("SSH_CONNECTION")
+        or env.get("SSH_CLIENT")
+        or env.get("MOSH_CONNECTION")
+        or env.get("MISAKA_CLIPBOARD_OSC52") == "1"
+    )
 
 
 def emitOsc52(text: str) -> bool:

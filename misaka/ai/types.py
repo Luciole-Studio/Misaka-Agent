@@ -1,12 +1,18 @@
 # ruff: noqa: UP040 - this module spells its aliases with the explicit TypeAlias form.
 
-"""Translated from pi's ``packages/ai/src/types.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/src/types.ts`` (v1.3.0).
 
 MISAKA fork: the interfaces are pydantic models (records are validated where they enter: session files, catalogs, the
 LLM wire), field names stay camelCase, and the order follows upstream. Python-only pieces are marked where they stand:
 the pydantic bases, discriminated-union aliases, the runtime ``ModelTypeMap`` table, the event classes and the
 validation entry points at the end. TypeScript-only type-level helpers (``ApiOptionsMap``, ``ApiStreamOptions``,
 ``IsJsonCompatible`` and friends, ``JsonRepresentation``, the transcript brand) have no counterpart.
+
+Upstream moved the compat and model-metadata types to ``providers/compat-schema.ts`` and ``providers/model-schema.ts``
+(``Static<>`` of the schemas there) and re-exports them from here. MISAKA fork: the type aliases come from
+``misaka.ai.providers.{compat_schema,model_schema}`` the same way; the object types (``OpenAICompletionsCompat``,
+``ModelCost``, ``OpenRouterRouting``, ...) stay records defined below, because those modules hold the configuration
+schemas, which validate with TypeBox's rules, and the records validate catalog and session data with this module's.
 """
 
 from __future__ import annotations
@@ -29,6 +35,19 @@ from pydantic import (
     field_validator,
 )
 
+from misaka.ai.providers.compat_schema import (
+    ChatTemplateKwargValue,
+    SessionAffinityFormat,
+    ThinkingTokenBudgetField,
+)
+from misaka.ai.providers.model_schema import (
+    CacheRetention,
+    ModelInputModality,
+    ModelPromptCache,
+    ModelThinkingLevel,
+    ThinkingLevel,
+    ThinkingLevelMap,
+)
 from misaka.ai.utils.diagnostics import AssistantMessageDiagnostic
 
 KnownApi: TypeAlias = Literal[
@@ -106,17 +125,8 @@ KnownProvider: TypeAlias = Literal[
 ProviderId: TypeAlias = str
 
 ToolChoice: TypeAlias = Literal["auto", "none"]
-ThinkingLevel: TypeAlias = Literal["minimal", "low", "medium", "high", "xhigh", "max"]
-ModelThinkingLevel: TypeAlias = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
-ThinkingLevelMap: TypeAlias = dict[ModelThinkingLevel, str | None]
 SamplingParams: TypeAlias = dict[str, Any]
 SamplingParamsByThinkingLevel: TypeAlias = dict[ModelThinkingLevel, SamplingParams]
-# A literal, or `{"$var": "thinking.enabled" | "thinking.effort" | "thinking.budget", "omitWhenOff"?: bool}`.
-ChatTemplateKwargValue: TypeAlias = str | int | float | bool | None | dict[str, Any]
-
-# Top-level request field used to cap reasoning tokens on OpenAI-compatible servers.
-ThinkingTokenBudgetField: TypeAlias = Literal["thinking_token_budget", "thinking_budget", "thinking_budget_tokens"]
-
 
 class SchemaModel(PydanticBaseModel):
     """MISAKA fork: the pydantic base of the record interfaces; unknown fields are rejected."""
@@ -152,19 +162,12 @@ class ThinkingBudgets(SchemaModel):
 
 
 # Base options all providers share
-CacheRetention: TypeAlias = Literal["none", "short", "long"]
-
-# Best-effort prompt cache lifetime in seconds for each retention tier a request can ask for.
-# A missing tier means the lifetime is unknown; pi does not warm such caches.
-ModelPromptCache: TypeAlias = dict[Literal["short", "long"], int]
-
 Transport: TypeAlias = Literal["sse", "websocket", "websocket-cached", "auto"]
 
 # Provider-scoped environment overrides. Values take precedence over process.env.
 ProviderEnv: TypeAlias = dict[str, str]
 ProviderHeaders: TypeAlias = dict[str, str | None]
 # MISAKA fork: no `FetchFunction`; the `fetch` option is not ported, requests go through httpx.
-SessionAffinityFormat: TypeAlias = Literal["openai", "openai-nosession", "openrouter"]
 
 
 class ProviderResponse(SchemaModel):
@@ -321,6 +324,8 @@ class ProviderImagesOptions(ImagesOptions):
 
 
 class AnthropicAllowedFallbackModel(_CompatObject):
+    """An Anthropic server-side refusal fallback model with local pricing metadata."""
+
     provider: ProviderId
     model: str
     cost: ModelCost
@@ -404,8 +409,9 @@ class ToolCall(SchemaModel):
     id: str
     name: str
     arguments: dict[str, Any]
-    # MISAKA fork: a lossy streaming preview is not an executable final argument set.
-    # Persist the failure with the call so replay and provider bridges retain the fence.
+    # Set when the model's complete arguments text was not a valid JSON object. `arguments` is then `{}`.
+    # Describes the problem and includes the text the model sent; tool argument validation fails with it.
+    # (Upstream declares it last; it stays where MISAKA has stored it since before, so dumps keep their key order.)
     argumentsError: str | None = None
     thoughtSignature: str | None = None  # Google-specific: opaque signature for reusing thought context
     # OpenAI Responses namespace for calls to dynamically loaded or namespaced tools.
@@ -918,7 +924,7 @@ class OpenAICompletionsCompat(SchemaModel):
     requiresThinkingAsText: bool | None = None
     # Whether all replayed assistant messages must include an empty reasoning_content field when reasoning is enabled. Default: auto-detected from URL.
     requiresReasoningContentOnAssistantMessages: bool | None = None
-    # Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "openrouter" uses reasoning: { effort }, "deepseek" uses thinking: { type } plus reasoning_effort when supported, "together" uses reasoning: { enabled } plus reasoning_effort when supported, "baseten" uses configurable chat_template_args plus reasoning_effort when supported, "zai" uses thinking: { type }, "qwen" uses top-level enable_thinking: boolean, "qwen-chat-template" uses chat_template_kwargs.enable_thinking and preserve_thinking, "chat-template" uses configurable chat_template_kwargs, "string-thinking" uses top-level thinking: string, and "ant-ling" uses reasoning: { effort } only when the mapped effort is non-null. Default: "openai".
+    # Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "openrouter" uses reasoning: { effort }, "deepseek" uses thinking: { type } plus reasoning_effort when supported, "together" uses reasoning: { enabled } plus reasoning_effort when supported, "baseten" uses configurable chat_template_args plus reasoning_effort when supported, "zai" uses thinking: { type }, "qwen" uses top-level enable_thinking: boolean, "qwen-chat-template" uses chat_template_kwargs.enable_thinking and preserve_thinking, "chat-template" uses configurable chat_template_kwargs, "string-thinking" uses top-level thinking: string, and "ant-ling" uses reasoning: { effort } only when the mapped effort is non-null. When omitted, pi auto-detects the format from the provider URL.
     thinkingFormat: (
         Literal[
             "openai",
@@ -967,7 +973,7 @@ class OpenAICompletionsCompat(SchemaModel):
     sendSessionAffinityHeaders: bool | None = None
     # Session-affinity header format: `openai` sends `session_id`, `x-client-request-id`, and `x-session-affinity`; `openai-nosession` sends `x-client-request-id` and `x-session-affinity`; `openrouter` sends `x-session-id`. Does not affect the `prompt_cache_key` body param, which is governed by cache retention. Default: auto-detected.
     sessionAffinityFormat: SessionAffinityFormat | None = None
-    # Whether the provider supports long prompt cache retention (`prompt_cache_retention: "24h"` or Anthropic-style `cache_control.ttl: "1h"`, depending on format). Default: true.
+    # Whether the provider supports long prompt cache retention (`prompt_cache_retention: "24h"` or Anthropic-style `cache_control.ttl: "1h"`, depending on format). Default: auto-detected from provider and URL.
     supportsLongCacheRetention: bool | None = None
     # vLLM scheduler priority sent as the top-level `priority` request field (lower values are
     # handled earlier; server default 0). Only meaningful when vLLM runs with
@@ -997,6 +1003,8 @@ class OpenAIResponsesCompat(SchemaModel):
     supportsToolSearch: bool | None = None
     # Whether the model accepts `prompt_cache_options` (OpenAI GPT-5.6+ prompt caching). Older OpenAI models reject the parameter. Default: false.
     supportsExplicitPromptCacheMode: bool | None = None
+    # Whether thinking level changes are sent as `configuration_update` input items instead of changing `reasoning.effort`, so a change keeps the prompt cache. Only used by the openai-responses API, and ignored with Sign in with ChatGPT on the openai provider. Default: false.
+    supportsMidConvoEffort: bool | None = None
     # Whether the provider accepts the `max_output_tokens` parameter. Some Codex-protocol gateways reject it. Default: true.
     supportsMaxOutputTokens: bool | None = None
 
@@ -1016,7 +1024,7 @@ class AnthropicMessagesCompat(SchemaModel):
     # when caching is enabled. Required for providers like Fireworks that use
     # session affinity for prompt cache routing (requests to the same replica
     # maximize cache hits).
-    # Default: false.
+    # Default: true for OpenRouter endpoints, false otherwise.
     sendSessionAffinityHeaders: bool | None = None
     # Session-affinity format. `"openrouter"` sends `x-session-id`; when unset, sends `x-session-affinity`.
     sessionAffinityFormat: Literal["openrouter"] | None = None
@@ -1229,8 +1237,8 @@ class ModelInputLimits(SchemaModel):
     images: ModelImageInputLimits | None = None
 
 
-# MISAKA fork: `("text" | "image")`, named.
-InputModality: TypeAlias = Literal["text", "image"]
+# MISAKA fork: the name callers used before upstream named it `ModelInputModality`.
+InputModality: TypeAlias = ModelInputModality
 
 
 class RadiusModelProvider(SchemaModel):
@@ -1250,7 +1258,7 @@ class BaseModel(SchemaModel):
     api: str
     provider: ProviderId
     baseUrl: str
-    input: list[InputModality]
+    input: list[ModelInputModality]
     # Provider input limits and cache-safe preprocessing metadata.
     inputLimits: ModelInputLimits | None = None
     cost: ModelCost
@@ -1444,6 +1452,7 @@ __all__ = [
     "ModelImageInputLimits",
     "ModelImageResizeOptions",
     "ModelInputLimits",
+    "ModelInputModality",
     "ModelPromptCache",
     "ModelThinkingLevel",
     "ModelType",

@@ -23,6 +23,7 @@ from misaka.env import (
     connectSsh,
     deployDaemon,
     detectPlatform,
+    nodePlatform,
     scanHostKey,
 )
 from tests.env_support import closeConnection, daemon, removeTempDir
@@ -73,7 +74,7 @@ async def connected() -> AsyncIterator[dict[str, Any]]:
 
 async def test_reaches_the_remote_system_through_its_default_shell(connected):
     info = await connected["connection"].info()
-    assert info["os"] == ("windows" if windows else "macos" if sys.platform == "darwin" else sys.platform)
+    assert nodePlatform(info)["platform"] == sys.platform
     if windows:
         assert connected["remote"]["shell"] == os.environ.get("PI_ENV_SSH_SHELL", "cmd")
 
@@ -93,7 +94,7 @@ async def withEnv(use: Any) -> None:
 
 cases = createEnvConformance(
     {
-        **({"shell": [gitBash, "-c"], "symlinks": False} if windows else {}),
+        **({"shell": [gitBash, "-c"], "symlinks": False, "listFiles": True} if windows else {"listFiles": True}),
         "assertions": createAssertions(),
         "withEnv": withEnv,
     }

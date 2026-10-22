@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/test/google-thinking-level-map.test.ts`` (v1.1.0)."""
+"""Translated from pi's ``packages/ai/test/google-thinking-level-map.test.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
@@ -162,6 +162,14 @@ async def test_disables_gemini_2_5_thinking_when_reasoning_is_omitted(capture):
     payload = await capture("gemini-2.5-flash", {})
 
     assert payload["config"]["thinkingConfig"] == {"thinkingBudget": 0}
+
+
+# Regression test for https://github.com/earendil-works/pi/issues/10890
+@pytest.mark.parametrize("capture", googleAdapters)
+async def test_uses_thinking_levels_for_gemini_4_models(capture):
+    payload = await capture("gemini-4-argon", {}, "medium")
+
+    assert payload["config"]["thinkingConfig"] == {"includeThoughts": True, "thinkingLevel": "MEDIUM"}
 
 
 @pytest.mark.parametrize("reasoning", ["xhigh", "max"])

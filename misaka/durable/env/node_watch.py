@@ -1,10 +1,14 @@
-"""Ported from: pi packages/durable/src/env/node-watch.ts @ v1.1.0
+"""Ported from: pi packages/durable/src/env/node-watch.ts @ v1.3.0
 
 MISAKA fork (one place, ``_fsWatch`` and ``_statfsType`` at the end of the module): Node's ``fs.watch`` and
-``fs.statfs`` have no standard-library counterpart. ``_fsWatch`` watches one path with inotify (ctypes) on Linux and
-Android and with a kqueue vnode filter on macOS; elsewhere it raises ``ENOSYS``, which is upstream's "unsupported" path
-(the watcher switches to polling). macOS gets one watcher per directory, as Linux does, because a kqueue watch is not
-recursive (upstream uses one recursive FSEvents watcher per target there). Windows polls by default upstream as here.
+``fs.statfs`` have no standard-library counterpart. ``_fsWatch`` is ``fs.watch`` as libuv 1.52 (node 26) implements
+it: inotify (ctypes) on Linux and Android, one instance per watch (libuv shares one per loop; a host whose
+``fs.inotify.max_user_instances`` runs out switches to polling sooner); on macOS FSEvents (ctypes, CoreServices) for a
+directory, through one stream per event loop over every directory the loop watches, destroyed and created again from
+now whenever a watch is added or removed (so, as in Node, a change made during that switch reaches no watch of the
+loop), with libuv's naming of events and ``realpath(3)`` of the watched path, and a kqueue vnode filter for a file (and
+for a directory in a forked child of a process that used FSEvents, as libuv). Elsewhere it raises ``ENOSYS``, which is
+upstream's "unsupported" path (the watcher switches to polling). Windows polls by default upstream as here.
 """
 
 from __future__ import annotations
@@ -499,8 +503,7 @@ class NodeFileWatcher:
         wanted: dict[str, bool] = {}
         for path in linkedFiles:
             wanted[path] = False
-        # MISAKA fork: macOS watches per directory too (a kqueue watch is not recursive; see the module docstring).
-        perDirectory = sys.platform.startswith("linux") or sys.platform == "android" or sys.platform == "darwin"
+        perDirectory = sys.platform.startswith("linux") or sys.platform == "android"
         for target in self._targets:
             for ancestor in _ancestorsOf(target.path):
                 entry = snapshot.get(ancestor)
@@ -670,12 +673,18 @@ def _fsWatch(
     """``fs.watch(path, {recursive, persistent: false}, listener)`` with its ``error`` event as ``onError``. Raises an
     ``OSError`` as ``fs.watch`` throws: ``ENOENT``/``EACCES``/``EPERM`` for the path, anything else (``ENOSPC`` out of
     watches, ``ENOSYS`` unsupported) makes the caller switch to polling."""
-    if recursive:
-        raise OSError(errno.ENOSYS, "recursive native watching is not available", path)
     loop = asyncio.get_running_loop()
     if sys.platform.startswith("linux") or sys.platform == "android":
+        # libuv's inotify backend has no recursive watch; the watcher never asks for one there.
+        if recursive:
+            raise OSError(errno.ENOSYS, "recursive native watching is not available", path)
         return _inotifyWatch(loop, path, listener, onError)
     if sys.platform == "darwin":
+        # libuv watches a directory with FSEvents and a file with kqueue. A kqueue watch of a directory reports only
+        # its entries being added, removed or renamed, never a file in it being rewritten in place.
+        # In a forked child of a process that used FSEvents, libuv watches directories with kqueue too.
+        if statModule.S_ISDIR(os.stat(path).st_mode) and not _FSEvents.forked:
+            return _fseventsWatch(loop, path, recursive, listener, onError)
         return _kqueueWatch(loop, path, listener, onError)
     raise OSError(errno.ENOSYS, "native file watching is not available", path)
 
@@ -793,6 +802,447 @@ def _kqueueWatch(
             os.close(fd)
 
     return _NativeWatcher(close)
+
+
+# FSEvents (CoreServices), as libuv's ``fsevents.c`` (1.52.1, node 26) uses it: one stream per event loop over the real
+# path of every watch of the loop, destroyed and created again from ``kFSEventStreamEventIdSinceNow`` whenever a watch
+# is added or removed; file-level events, no deferral, 50 ms latency.
+_kFSEventStreamEventIdSinceNow = 0xFFFFFFFFFFFFFFFF
+_kFSEventStreamCreateFlagNoDefer = 0x02
+_kFSEventStreamCreateFlagFileEvents = 0x10
+# `kFSEventsSystem`: dropped events, wrapped ids, history done, mounts, unmounts, a changed root. libuv ignores them.
+_kFSEventsSystem = 0x02 | 0x04 | 0x08 | 0x10 | 0x40 | 0x80 | 0x20
+_FSEVENTS_LATENCY = 0.05
+
+
+class _FSEventsHandle:
+    """One ``fs.watch`` of a directory: its real path, whether it is recursive, and where its events go."""
+
+    __slots__ = ("closed", "listener", "loop", "onError", "real", "recursive")
+
+    def __init__(
+        self,
+        real: str,
+        recursive: bool,
+        listener: Callable[[str | None], None],
+        onError: Callable[[], None],
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        self.real = real
+        self.recursive = recursive
+        self.listener = listener
+        self.onError = onError
+        self.loop = loop
+        self.closed = False
+
+    def names(self, path: str) -> str | None:
+        """The name libuv reports for an event at ``path`` (under this handle's real path), or ``None`` to drop it."""
+        if self.real == "/":
+            # The root keeps the leading slash; libuv strips no prefix from it.
+            name = path
+        elif path == self.real:
+            # An event about the directory itself names it by its base name.
+            name = self.real.rsplit("/", 1)[-1]
+        else:
+            name = path[len(self.real) + 1 :]
+        # Without `recursive`, only the directory's own entries (libuv: `strchr(path + 1, '/')`).
+        if not self.recursive and name != "" and "/" in name[1:]:
+            return None
+        return name
+
+    def deliver(self, names: list[str]) -> None:
+        """On the handle's loop."""
+        if self.closed:
+            return
+        for name in names:
+            self.listener(name)
+
+    def fail(self) -> None:
+        """On the handle's loop: the stream could not be (re)created, as libuv's error broadcast."""
+        if not self.closed:
+            self.onError()
+
+
+class _FSEventsLoop:
+    """libuv's ``uv__cf_loop_state_t``: one event loop's watches, in the order they were added (``fsevent_handles``),
+    and the one stream over their paths."""
+
+    __slots__ = ("handles", "id", "loop", "needReschedule", "stream")
+
+    def __init__(self, id: int, loop: asyncio.AbstractEventLoop) -> None:
+        self.id = id
+        # Held, so its id is not reused while this state exists.
+        self.loop = loop
+        self.handles: list[_FSEventsHandle] = []
+        self.needReschedule = False
+        self.stream: Any = None
+
+
+class _FSEvents:
+    """The CoreServices, CoreFoundation and dispatch functions, loaded once, and every loop's state. Streams deliver on
+    one serial dispatch queue, which also recreates them (libuv's CF thread), so a stream is never released while its
+    callback runs."""
+
+    instance: _FSEvents | None = None
+    forked = False
+    """Set in a forked child of a process that used FSEvents: CoreFoundation cannot be used there again, and libuv
+    (``uv__has_forked_with_cfrunloop``) watches directories with kqueue from then on."""
+
+    def __init__(self) -> None:
+        import atexit
+        import ctypes
+        import threading
+
+        c = ctypes
+        services = c.CDLL("/System/Library/Frameworks/CoreServices.framework/CoreServices")
+        foundation = c.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        system = c.CDLL("/usr/lib/libSystem.B.dylib")
+        self.callbackType = c.CFUNCTYPE(
+            None,
+            c.c_void_p,
+            c.c_void_p,
+            c.c_size_t,
+            c.POINTER(c.c_char_p),
+            c.POINTER(c.c_uint32),
+            c.POINTER(c.c_uint64),
+        )
+        self.workType = c.CFUNCTYPE(None, c.c_void_p)
+
+        class Context(c.Structure):
+            _fields_ = [  # noqa: RUF012 - ctypes reads the layout from this class attribute
+                ("version", c.c_long),
+                ("info", c.c_void_p),
+                ("retain", c.c_void_p),
+                ("release", c.c_void_p),
+                ("copyDescription", c.c_void_p),
+            ]
+
+        self.Context = Context
+        self.create = services.FSEventStreamCreate
+        self.create.restype = c.c_void_p
+        self.create.argtypes = [
+            c.c_void_p,
+            self.callbackType,
+            c.POINTER(Context),
+            c.c_void_p,
+            c.c_uint64,
+            c.c_double,
+            c.c_uint32,
+        ]
+        for name, restype in (
+            ("FSEventStreamSetDispatchQueue", None),
+            ("FSEventStreamStart", c.c_ubyte),
+            ("FSEventStreamStop", None),
+            ("FSEventStreamInvalidate", None),
+            ("FSEventStreamRelease", None),
+        ):
+            function = getattr(services, name)
+            function.restype = restype
+            function.argtypes = [c.c_void_p, c.c_void_p] if name == "FSEventStreamSetDispatchQueue" else [c.c_void_p]
+        self.setQueue = services.FSEventStreamSetDispatchQueue
+        self.start = services.FSEventStreamStart
+        self.stop = services.FSEventStreamStop
+        self.invalidate = services.FSEventStreamInvalidate
+        self.release = services.FSEventStreamRelease
+        self.stringFromPath = foundation.CFStringCreateWithFileSystemRepresentation
+        self.stringFromPath.restype = c.c_void_p
+        self.stringFromPath.argtypes = [c.c_void_p, c.c_char_p]
+        self.arrayCreate = foundation.CFArrayCreate
+        self.arrayCreate.restype = c.c_void_p
+        self.arrayCreate.argtypes = [c.c_void_p, c.POINTER(c.c_void_p), c.c_long, c.c_void_p]
+        self.cfRelease = foundation.CFRelease
+        self.cfRelease.restype = None
+        self.cfRelease.argtypes = [c.c_void_p]
+        self.typeArrayCallBacks = c.addressof(c.c_char.in_dll(foundation, "kCFTypeArrayCallBacks"))
+        queueCreate = system.dispatch_queue_create
+        queueCreate.restype = c.c_void_p
+        queueCreate.argtypes = [c.c_char_p, c.c_void_p]
+        self.dispatchAsync = system.dispatch_async_f
+        self.dispatchAsync.restype = None
+        self.dispatchAsync.argtypes = [c.c_void_p, c.c_void_p, self.workType]
+        self.dispatchSync = system.dispatch_sync_f
+        self.dispatchSync.restype = None
+        self.dispatchSync.argtypes = [c.c_void_p, c.c_void_p, self.workType]
+        self.realpath = system.realpath
+        self.realpath.restype = c.c_void_p
+        self.realpath.argtypes = [c.c_char_p, c.c_char_p]
+        self.free = system.free
+        self.free.restype = None
+        self.free.argtypes = [c.c_void_p]
+        # One serial queue delivers every stream's events and recreates the streams, on a thread of its own.
+        self.queue = queueCreate(b"misaka.durable.watch", None)
+        self.lock = threading.Lock()
+        self.inert = False
+        self.loops: dict[int, _FSEventsLoop] = {}
+        # Both outlive every stream: an event or a rescheduling queued for a loop that is gone finds nothing.
+        self.callback = self.callbackType(self._events)
+        self.work = self.workType(self._reschedule)
+        self.closeWork = self.workType(self._closeOnQueue)
+        # A stream left running at exit would call into a finalized interpreter.
+        atexit.register(self._closeAll)
+
+    @classmethod
+    def get(cls) -> _FSEvents:
+        if cls.instance is None:
+            try:
+                cls.instance = _FSEvents()
+            except (OSError, AttributeError, ValueError) as error:
+                raise OSError(errno.ENOSYS, f"FSEvents is not available: {error}") from None
+        return cls.instance
+
+    @classmethod
+    def afterFork(cls) -> None:
+        """In a forked child: forget the parent's streams without touching them (CoreFoundation would crash)."""
+        instance = cls.instance
+        if instance is None:
+            return
+        import atexit
+        import threading
+
+        cls.forked = True
+        cls.instance = None
+        atexit.unregister(instance._closeAll)
+        instance.inert = True
+        instance.lock = threading.Lock()
+        instance.loops = {}
+
+    def resolve(self, path: str) -> str:
+        """``realpath(3)``, as libuv resolves the watched path: on macOS it also takes each name's case and Unicode form
+        from the disk, as FSEvents reports them."""
+        import ctypes
+
+        resolved = self.realpath(os.fsencode(path), None)
+        if not resolved:
+            number = ctypes.get_errno() or errno.ENOENT
+            raise OSError(number, os.strerror(number), path)
+        try:
+            return os.fsdecode(ctypes.string_at(resolved))
+        finally:
+            self.free(resolved)
+
+    def open(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        path: str,
+        recursive: bool,
+        listener: Callable[[str | None], None],
+        onError: Callable[[], None],
+    ) -> Callable[[], None]:
+        handle = _FSEventsHandle(self.resolve(path), recursive, listener, onError, loop)
+        with self.lock:
+            state = self.loops.get(id(loop))
+            if state is None:
+                state = self.loops[id(loop)] = _FSEventsLoop(id(loop), loop)
+            # Events reach it from now on through any path of the running stream above it; its own path joins the
+            # stream when the rescheduling runs (libuv: `uv__fsevents_init` queues the handle, then signals).
+            state.handles.append(handle)
+            stale = self._dropClosedLoops()
+            state.needReschedule = True
+        for id_ in {state.id, *stale}:
+            self._schedule(id_)
+        return lambda: self._close(handle)
+
+    def _close(self, handle: _FSEventsHandle) -> None:
+        handle.closed = True
+        if self.inert:
+            return
+        with self.lock:
+            state = self.loops.get(id(handle.loop))
+            if state is None:
+                return
+            if handle in state.handles:
+                state.handles.remove(handle)
+                state.needReschedule = True
+        self._schedule(state.id)
+
+    def _dropClosedLoops(self) -> list[int]:
+        """Under the lock: forget the handles of loops that closed without closing them; their streams go next."""
+        stale = []
+        for state in self.loops.values():
+            if state.loop.is_closed() and len(state.handles) > 0:
+                for handle in state.handles:
+                    handle.closed = True
+                state.handles = []
+                state.needReschedule = True
+                stale.append(state.id)
+        return stale
+
+    def _schedule(self, id: int) -> None:
+        if not self.inert:
+            self.dispatchAsync(self.queue, id, self.work)
+
+    def _reschedule(self, info: Any) -> None:
+        """On the dispatch queue: libuv's ``uv__fsevents_reschedule``. Unless nothing asked for it since the last run
+        (``needReschedule``, which coalesces many watches opened at once), the loop's stream is destroyed, then a new one
+        is created over the real path of every watch, from ``kFSEventStreamEventIdSinceNow``, even when the paths are
+        the same. So, as in Node, a change made between the old stream's stop and the new stream's start, or still held
+        back in the old stream's 50 ms latency when it stops, is reported to no watch of the loop. A stream that cannot
+        be created is reported to every watch (``onError``), as libuv's error broadcast. Teardown and creation run only
+        on this serial queue, and a stream is claimed under the lock before it is destroyed, so none is destroyed twice
+        (``_closeAll``). MISAKA fork: libuv does this in native code on its CF thread; here it is Python on the
+        dispatch queue, taking the GIL around each CoreServices call and each delivery, so while other Python threads
+        are busy the switch and the old stream's undelivered backlog last longer (tens to hundreds of ms) and more is
+        lost than in Node. Idle, the loss is Node's."""
+        try:
+            with self.lock:
+                state = self.loops.get(info or 0)
+                if state is None or not state.needReschedule or self.inert:
+                    return
+                state.needReschedule = False
+                old, state.stream = state.stream, None
+            if old is not None:
+                self._destroyStream(old)
+            with self.lock:
+                watching = list(state.handles)
+            stream = None
+            if len(watching) > 0:
+                stream = self._createStream(state.id, [handle.real for handle in watching])
+                if stream is None:
+                    for handle in watching:
+                        with contextlib.suppress(RuntimeError):
+                            handle.loop.call_soon_threadsafe(handle.fail)
+            with self.lock:
+                if self.inert and stream is not None:
+                    # Closed meanwhile (`_closeAll` runs its teardown on this queue next): nothing new survives it.
+                    self._destroyStream(stream)
+                    stream = None
+                state.stream = stream
+                if len(state.handles) == 0 and stream is None and self.loops.get(state.id) is state:
+                    del self.loops[state.id]
+        except Exception:  # noqa: BLE001, S110 - nothing may raise out of a ctypes callback
+            pass
+
+    def _createStream(self, id: int, paths: list[str]) -> Any:
+        """libuv's ``uv__fsevents_create_stream``: one path per watch, as libuv lists them (duplicates included)."""
+        import ctypes
+
+        strings = [self.stringFromPath(None, os.fsencode(path)) for path in paths]
+        try:
+            if not all(strings):
+                return None
+            values = (ctypes.c_void_p * len(strings))(*strings)
+            array = self.arrayCreate(None, values, len(strings), self.typeArrayCallBacks)
+        finally:
+            for string in strings:
+                if string:
+                    self.cfRelease(string)
+        if not array:
+            return None
+        context = self.Context(0, id, None, None, None)
+        stream = self.create(
+            None,
+            self.callback,
+            ctypes.byref(context),
+            array,
+            _kFSEventStreamEventIdSinceNow,
+            _FSEVENTS_LATENCY,
+            _kFSEventStreamCreateFlagNoDefer | _kFSEventStreamCreateFlagFileEvents,
+        )
+        self.cfRelease(array)
+        if not stream:
+            return None
+        self.setQueue(stream, self.queue)
+        if not self.start(stream):
+            self.invalidate(stream)
+            self.release(stream)
+            return None
+        return stream
+
+    def _destroyStream(self, stream: Any) -> None:
+        """libuv's ``uv__fsevents_destroy_stream``, on the dispatch queue: stop, invalidate, release."""
+        self.stop(stream)
+        self.invalidate(stream)
+        self.release(stream)
+
+    def _events(self, _stream: Any, info: Any, count: int, paths: Any, flags: Any, _ids: Any) -> None:
+        """On the dispatch queue: libuv's ``uv__fsevents_event_cb``. Each event goes to every watch whose real path is the
+        event's path or one of its ancestors (libuv's prefix match per handle, here a lookup per path component), named
+        as libuv names it; each watch gets its events in order, watches in the order they were added."""
+        try:
+            with self.lock:
+                state = self.loops.get(info or 0)
+                if state is None:
+                    return
+                order = {handle: position for position, handle in enumerate(state.handles)}
+            if len(order) == 0:
+                return
+            index: dict[str, list[_FSEventsHandle]] = {}
+            for handle in order:
+                index.setdefault(handle.real, []).append(handle)
+            out: dict[_FSEventsHandle, list[str]] = {}
+            for position in range(count):
+                if int(flags[position]) & _kFSEventsSystem:
+                    continue
+                path = os.fsdecode(paths[position])
+                candidate = path
+                while True:
+                    for handle in index.get(candidate, ()):
+                        name = handle.names(path)
+                        if name is not None:
+                            out.setdefault(handle, []).append(name)
+                    if candidate == "/" or "/" not in candidate:
+                        break
+                    parent = candidate.rsplit("/", 1)[0]
+                    candidate = parent if parent != "" else "/"
+            gone = False
+            for handle in sorted(out, key=order.__getitem__):
+                if handle.closed:
+                    continue
+                try:
+                    handle.loop.call_soon_threadsafe(handle.deliver, out[handle])
+                except RuntimeError:
+                    # Its loop closed without closing the watch: stop watching for it.
+                    gone = True
+            if gone:
+                with self.lock:
+                    stale = self._dropClosedLoops()
+                for id_ in stale:
+                    self._schedule(id_)
+        except Exception:  # noqa: BLE001, S110 - nothing may raise out of a ctypes callback
+            pass
+
+    def openStreams(self) -> int:
+        """How many streams are running (for tests)."""
+        with self.lock:
+            return sum(1 for state in self.loops.values() if state.stream is not None)
+
+    def _closeAll(self) -> None:
+        """At exit: no stream outlives the interpreter. The teardown runs on the serial queue, after whatever it is
+        running (an event, a rescheduling), as libuv tears down on its CF thread; nothing is scheduled afterwards."""
+        with self.lock:
+            if self.inert:
+                return
+            self.inert = True
+        self.dispatchSync(self.queue, None, self.closeWork)
+
+    def _closeOnQueue(self, _info: Any) -> None:
+        try:
+            with self.lock:
+                states = list(self.loops.values())
+                self.loops = {}
+                streams = [state.stream for state in states if state.stream is not None]
+                for state in states:
+                    state.stream = None
+            for stream in streams:
+                self._destroyStream(stream)
+        except Exception:  # noqa: BLE001, S110 - nothing may raise out of a ctypes callback
+            pass
+
+
+os.register_at_fork(after_in_child=_FSEvents.afterFork)
+
+
+def _fseventsWatch(
+    loop: asyncio.AbstractEventLoop,
+    path: str,
+    recursive: bool,
+    listener: Callable[[str | None], None],
+    onError: Callable[[], None],
+) -> _NativeWatcher:
+    """A directory watch on macOS, as libuv's: the loop's one stream gets ``path``'s real path (``realpath(3)``) added,
+    asynchronously, as libuv's CF thread does; events name paths below it relative to it (only its own entries unless
+    ``recursive``), an event about the directory itself names its base name, and system events are dropped."""
+    return _NativeWatcher(_FSEvents.get().open(loop, path, recursive, listener, onError))
 
 
 __all__ = ["NodeFileWatcher", "NodeWatchOptions"]

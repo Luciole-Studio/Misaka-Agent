@@ -1,11 +1,12 @@
-"""Translated from pi-tui's ``test/stdin-buffer.test.ts`` (v1.1.0).
+"""Translated from pi-tui's ``test/stdin-buffer.test.ts`` (v1.3.0).
 
 Tests for StdinBuffer
 
 Based on code from OpenTUI (https://github.com/anomalyco/opentui)
 MIT License - Copyright (c) 2025 opentui
 
-The tests run on the event loop, as upstream's do: the buffer's timers are loop timers.
+The tests run on the event loop, as upstream's do: the buffer's timers are loop timers. ``t.mock.timers`` is the
+editor tests' patched ``loop.call_later`` (``mockTimers``).
 """
 
 import asyncio
@@ -14,6 +15,7 @@ import pytest
 
 from misaka.ui.tui.keys import matchesKey
 from misaka.ui.tui.stdin_buffer import StdinBuffer
+from tests.test_tui_editor import mockTimers
 
 
 class Harness:
@@ -199,6 +201,127 @@ async def test_keeps_fragmented_mouse_sequences_buffered_across_delayed_chunks_b
     delayedBuffer.process("<65;48;39M")
     assert delayedSequences == ["\x1b[<65;48;39M"]
     delayedBuffer.destroy()
+
+
+# --- Terminal Reply Strings -----------------------------------------------------------------------
+
+replies = [
+    {"header": "\x1b]4;1;", "reply": "\x1b]4;1;rgb:eaea/6c6c/6d6d\x07"},  # Ghostty's Ayu Light palette color 1.
+    {"header": "\x1b]10;", "reply": "\x1b]10;rgb:ffff/ffff/ffff\x1b\\"},
+    {"header": "\x1b]11;", "reply": "\x1b]11;rgb:0000/0000/0000\x07"},
+    {"header": "\x1b]4;1;", "reply": "\x1b]4;1;rgb:6464/6464/4d4d\x07"},  # Another reported color-reply tail.
+    {"header": "\x1bP>|", "reply": "\x1bP>|Ghostty 1.3.1\x1b\\"},
+    {"header": "\x1b_Gi=1;", "reply": "\x1b_Gi=1;OK\x1b\\"},
+    {"header": "\x1b]7501;?", "reply": "\x1b]7501;?\x1b\\"},
+]
+
+
+@pytest.mark.parametrize("header,reply", [(r["header"], r["reply"]) for r in replies])
+async def test_keeps_delayed_reply_intact_at_every_split_after_its_reply_header(header, reply):
+    with mockTimers() as timers:
+        for split in range(len(header), len(reply)):
+            delayedBuffer = StdinBuffer()
+            sequences: list[str] = []
+            delayedBuffer.on("data", sequences.append)
+            try:
+                delayedBuffer.process(reply[:split])
+                timers.tick(5000)
+                delayedBuffer.process(f"{reply[split:]}x")
+                assert any(matchesKey(sequence, "ctrl+g") for sequence in sequences) is False
+                assert sequences == [reply, "x"]
+            finally:
+                delayedBuffer.destroy()
+
+
+async def test_keeps_an_osc_reply_buffered_across_multiple_expired_sequence_timeouts(h):
+    with mockTimers() as timers:
+        h.processInput("\x1b]4;1;rgb:eaea/6c")
+        timers.tick(100)
+        assert h.emittedSequences == []
+        h.processInput("6c/6d6d")
+        timers.tick(100)
+        assert h.emittedSequences == []
+        h.processInput("\x07")
+        assert h.emittedSequences == [replies[0]["reply"]]
+
+
+async def test_still_times_out_bare_string_introducers_as_alt_keys(h):
+    with mockTimers() as timers:
+        for prefix in ["\x1b]", "\x1bP", "\x1b_"]:
+            h.processInput(prefix)
+            timers.tick(10)
+        assert h.emittedSequences == ["\x1b]", "\x1bP", "\x1b_"]
+
+
+@pytest.mark.parametrize(
+    "ambiguous",
+    [
+        "\x1b]a",
+        "\x1b]1",
+        "\x1b]10",
+        "\x1b]0;title",
+        "\x1b]4;",
+        "\x1b]4;a;",
+        "\x1bPa",
+        "\x1bP>",
+        "\x1b_a",
+        "\x1b_G",
+        "\x1b_Gi=1",
+    ],
+)
+async def test_recovers_batched_legacy_alt_input_within_the_sequence_timeout(ambiguous):
+    with mockTimers() as timers:
+        legacyBuffer = StdinBuffer()
+        sequences: list[str] = []
+        legacyBuffer.on("data", sequences.append)
+        try:
+            legacyBuffer.process(ambiguous)
+            timers.tick(20)
+            legacyBuffer.process("x\r\x03\x04")
+            timers.tick(49)
+            assert sequences == []
+            timers.tick(1)
+            assert sequences == [
+                ambiguous[:2],
+                *ambiguous[2:],
+                "x",
+                "\r",
+                "\x03",
+                "\x04",
+            ]
+            assert legacyBuffer.getBuffer() == ""
+
+            legacyBuffer.process("y\r\x03\x04")
+            assert sequences[-4:] == ["y", "\r", "\x03", "\x04"]
+        finally:
+            legacyBuffer.destroy()
+
+
+async def test_recognizes_a_reply_header_assembled_within_the_ambiguous_input_timeout(h):
+    with mockTimers() as timers:
+        h.processInput("\x1b]1")
+        timers.tick(5)
+        h.processInput("0;")
+        timers.tick(5000)
+        assert h.emittedSequences == []
+        h.processInput("rgb:ffff/ffff/ffff\x1b\\")
+        assert h.emittedSequences == [replies[1]["reply"]]
+
+
+async def test_recovers_from_an_unterminated_reply_when_a_new_escape_sequence_arrives(h):
+    with mockTimers() as timers:
+        h.processInput("\x1b]4;1;rgb:eaea/6c")
+        timers.tick(100)
+        h.processInput("\x1b")
+        timers.tick(100)
+        h.processInput("[Ahello")
+        assert h.emittedSequences == ["\x1b[A", "h", "e", "l", "l", "o"]
+
+
+async def test_discards_a_canceled_reply_without_swallowing_subsequent_input(h):
+    for cancel in ["\x18", "\x1a"]:
+        h.processInput(f"\x1b]11;rgb:0000{cancel}x")
+    assert h.emittedSequences == ["x", "x"]
 
 
 # --- Mixed Content --------------------------------------------------------------------------------
@@ -556,3 +679,35 @@ async def test_sgr_mouse_digits_are_ascii(h):
     h.processInput("\x1b[<²;1;1m")
     assert h.emittedSequences == []
     assert h.buffer.getBuffer() == "\x1b[<²;1;1m"
+
+
+async def test_an_ime_commit_batched_after_alt_bracket_is_reparsed_per_character():
+    # Upstream's flush recovery with CJK text: the Alt+] key, then each committed character, not one swallowed event.
+    with mockTimers() as timers:
+        imeBuffer = StdinBuffer()
+        sequences: list[str] = []
+        imeBuffer.on("data", sequences.append)
+        try:
+            imeBuffer.process("\x1b]日本語\r".encode())
+            timers.tick(50)
+            assert sequences == ["\x1b]", "日", "本", "語", "\r"]
+            assert imeBuffer.getBuffer() == ""
+        finally:
+            imeBuffer.destroy()
+
+
+async def test_a_background_reply_split_inside_a_multibyte_read_still_waits_for_its_terminator():
+    # Raw bytes go through the stream decoder first; the reply header then holds the buffer without a timer.
+    with mockTimers() as timers:
+        replyBuffer = StdinBuffer()
+        sequences: list[str] = []
+        replyBuffer.on("data", sequences.append)
+        try:
+            replyBuffer.process(b"\x1b]11;rgb:eaea/6c")
+            timers.tick(5000)
+            replyBuffer.process(b"6c/6d6d\x07" + "日".encode()[:2])
+            assert sequences == ["\x1b]11;rgb:eaea/6c6c/6d6d\x07"]
+            replyBuffer.process("日".encode()[2:])
+            assert sequences[-1] == "日"
+        finally:
+            replyBuffer.destroy()

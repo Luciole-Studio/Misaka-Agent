@@ -8,6 +8,7 @@ import asyncio
 import pytest
 
 from misaka.chord.context import BACKGROUND_CONTEXT
+from misaka.durable.errors import StorageRequestError
 from misaka.durable.session.session import SessionImpl
 from misaka.durable.storage.memory import MemoryStorage
 from misaka.durable.storage.memory import cursorId as memoryCursorId
@@ -27,7 +28,8 @@ async def test_a_memory_storage_call_starts_before_it_is_awaited():
 def test_a_null_cursor_position_is_refused_by_every_backend(cursorId):
     assert cursorId(None) is None
     assert cursorId({}) is None
-    with pytest.raises(TypeError, match="Invalid storage cursor"):
+    # pi 1.3.0: storages refuse an invalid cursor with StorageRequestError, which fails only that read.
+    with pytest.raises(StorageRequestError, match="Invalid storage cursor"):
         cursorId({"after": None})
 
 

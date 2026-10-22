@@ -1,6 +1,6 @@
 """Portable execution-environment contracts: results, file and execution errors, file system, shell.
 
-Translated from pi's ``packages/durable/src/env/index.ts``. A ``Result`` is ``{"ok": True, "value": ...}`` or
+Translated from pi's ``packages/durable/src/env/index.ts`` (v1.3.0). A ``Result`` is ``{"ok": True, "value": ...}`` or
 ``{"ok": False, "error": ...}``; a ``FileInfo`` is ``{"name", "path", "kind", "size", "mtimeMs"}``; a text line is
 ``{"text", "terminated"}``. ``FileSystem`` and ``Shell`` are Protocols; ``NodeExecutionEnv`` (``env.node``) implements
 both over the local machine.
@@ -190,6 +190,42 @@ class DirReader(Protocol):
     def close(self, context: Context) -> Awaitable[None]: ...
 
 
+class ListFilesOptions(TypedDict, total=False):
+    """What ``FileSystem.listFiles`` lists."""
+
+    hidden: bool
+    """Include names starting with ``.`` (on Windows also files with the hidden attribute); default true. Entries named
+    ``.git`` are never listed."""
+    gitignore: bool
+    """Inside a git work tree, skip what git ignores: the ``.gitignore`` files of the directory, its subdirectories and
+    its parents, ``.git/info/exclude``, and the global excludes file; default true. Unlike ``git ls-files``, a tracked
+    file that matches an ignore rule is skipped too. Outside work trees, ``.gitignore`` files have no effect."""
+    exclude: list[str]
+    """Names of entries to skip with everything below them, such as ``node_modules``."""
+    maxEntries: int
+    """Most entries to list; default 50 000."""
+    maxBytes: int
+    """Most bytes of the listing: each entry's UTF-8 path plus two; default 4 MiB, at most 15.9 MiB."""
+    timeoutMs: float
+    """Time after which the listing stops; default 10 000 ms."""
+
+
+class FileListEntry(TypedDict):
+    """One entry of a ``FileListing``. ``path`` is relative to the listed directory, with ``/`` separators on every
+    system; a symbolic link (``kind``) is listed as such and not followed."""
+
+    path: str
+    kind: FileKind
+
+
+class FileListing(TypedDict):
+    """``entries``: depth first, parents before their entries, siblings in byte order of their names. ``truncated``: a
+    bound in ``ListFilesOptions`` ended the listing early."""
+
+    entries: list[FileListEntry]
+    truncated: bool
+
+
 class FileSystem(Protocol):
     """Portable filesystem capability. Operations return failures rather than raising. ``id`` is the file namespace:
     equal ids see the same files at the same paths, whatever their ``cwd``."""
@@ -232,6 +268,14 @@ class FileSystem(Protocol):
     def fileInfo(self, path: str, context: Context) -> Awaitable[Result]: ...
 
     def listDir(self, path: str, context: Context) -> Awaitable[Result]: ...
+
+    def listFiles(self, path: str, options: ListFilesOptions | None, context: Context) -> Awaitable[Result]:
+        """Optional (an environment may lack the attribute): the files, directories and symbolic links below a directory,
+        at any depth, for indexes such as file completion, as a ``FileListing``. Symbolic links are not followed; other
+        kinds of files are not listed; entries that cannot be read are skipped. See ``ListFilesOptions`` for hidden and
+        ignored files and for the bounds. Fails with ``not_supported`` when the environment cannot list right now (an
+        older remote daemon), so callers fall back to their own walk."""
+        ...
 
     def openDirReader(self, path: str, context: Context) -> Awaitable[Result]: ...
 
@@ -286,7 +330,8 @@ class ShellOutputWindow(TypedDict):
 
 class ShellOutputSkip(TypedDict):
     """Output an environment omitted, measured on the decoded text ``onOutput`` would have received: every U+FFFD counts
-    as three bytes, and no sanitizing is applied. ``bytes``: UTF-8 byte length of the omitted text; ``newlines``:
+    as three bytes, and no sanitizing is applied. The shape of ``OutputSkip`` from ``misaka.chord.output``, which
+    ``OutputBuffer.push()`` accepts. ``bytes``: UTF-8 byte length of the omitted text; ``newlines``:
     newlines (U+000A) in the omitted text; ``endsWithNewline``: whether the omitted text ends with a newline."""
 
     bytes: int
@@ -350,10 +395,13 @@ __all__ = [
     "FileErrorCode",
     "FileInfo",
     "FileKind",
+    "FileListEntry",
+    "FileListing",
     "FileSystem",
     "FileWatcher",
     "LineScan",
     "LineScanner",
+    "ListFilesOptions",
     "Result",
     "Shell",
     "ShellExecOptions",

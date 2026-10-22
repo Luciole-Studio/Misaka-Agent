@@ -1,5 +1,5 @@
-"""A port of the npm package ``proper-lockfile`` (4.1.2), which pi's experimental server and session workers lock their
-directories with, together with the part of ``retry`` it relies on.
+"""A port of the npm package ``proper-lockfile`` (4.1.2), which pi's coding agent locks files with (here the MCP OAuth
+extension, ``misaka/extensions/mcp/oauth.py``), together with the part of ``retry`` it relies on.
 
 The lock is the directory ``<file>.lock``: ``mkdir`` is the atomic acquire, a held lock keeps the directory's modification
 time fresh, and a lock whose directory has not been touched for ``stale`` milliseconds is taken over. ``lock(file,

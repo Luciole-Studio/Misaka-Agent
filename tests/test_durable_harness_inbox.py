@@ -77,7 +77,7 @@ def holdTool(setup: Any, gate: Any, result: dict[str, Any] | None = None) -> Non
 
     async def execute(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         await gate.promise
-        return result if result is not None else {"content": []}
+        return result if result is not None else {"output": []}
 
     addTool(
         setup.registry,
@@ -85,6 +85,11 @@ def holdTool(setup: Any, gate: Any, result: dict[str, Any] | None = None) -> Non
             {"name": "hold", "description": "Waits for the test", "parameters": EMPTY_OBJECT, "execute": execute}
         ),
     )
+
+
+def queuedNote(text: str) -> dict[str, Any]:
+    """A write that affects model context, so it queues while busy; a data-only write would be appended at once."""
+    return {"kind": "note", "model": [{"role": "user", "content": text, "timestamp": 0}]}
 
 
 HOLD = fauxAssistantMessage([fauxToolCall("hold", {}, {"id": "c1"})], {"stopReason": "toolUse"})
@@ -133,7 +138,7 @@ async def test_inbox_queues_busy_submissions_and_places_writes_before_user_items
     input = await root.submit({"type": "input", "content": "a"}, context)
     await first.reached
     f1 = await root.submit({"type": "input", "content": "f1"}, context)
-    write = await root.submit({"type": "write", "entry": {"kind": "note", "data": "w"}}, context)
+    write = await root.submit({"type": "write", "entry": queuedNote("w")}, context)
     f2 = await root.submit({"type": "input", "content": "f2", "whenBusy": "followUp"}, context)
     for submission in (f1, write, f2):
         assert (await status(submission))["status"] == "queued"
@@ -145,7 +150,7 @@ async def test_inbox_queues_busy_submissions_and_places_writes_before_user_items
     assert transcript(await allEntries(root)) == [
         "pi.user:a",
         "pi.assistant:first",
-        "note",
+        "note:w",
         "pi.user:f1",
         "pi.assistant:second",
         "pi.user:f2",
@@ -376,7 +381,7 @@ async def test_inbox_ends_the_run_with_a_pi_reset_entry_when_a_tool_requests_a_h
     setup = chatSetup()
     gate = deferred()
     gate.resolve()
-    holdTool(setup, gate, {"content": [], "control": {"handoff": "continue here"}})
+    holdTool(setup, gate, {"output": [], "control": {"handoff": "continue here"}})
     setup.faux.setResponses([HOLD])
     opened = await openChat(MemoryStorage(), setup)
     harness, root = opened.harness, opened.root
@@ -428,7 +433,7 @@ async def test_inbox_withdraws_a_queued_submission_and_removes_its_item():
     harness, root = opened.harness, opened.root
     input = await root.submit({"type": "input", "content": "a"}, context)
     await first.reached
-    kept = await root.submit({"type": "write", "entry": {"kind": "note"}}, context)
+    kept = await root.submit({"type": "write", "entry": queuedNote("kept")}, context)
     withdrawn = await root.submit({"type": "input", "content": "f"}, context)
     assert await withdrawn.abort(context) == "aborted"
     toMatchObject(await withdrawn.wait(context), {"status": "unanswered", "reason": "aborted"})
@@ -502,17 +507,17 @@ async def test_inbox_commits_inbox_changes_as_positional_chord_operations_and_a_
     harness.subscribeCommits(onCommit)
     input = await root.submit({"type": "input", "content": "a"}, context)
     await first.reached
-    w1 = await root.submit({"type": "write", "entry": {"kind": "note"}}, context)
+    w1 = await root.submit({"type": "write", "entry": queuedNote("w")}, context)
     f1 = await root.submit({"type": "input", "content": "f1"}, context)
-    w2 = await root.submit({"type": "write", "entry": {"kind": "note"}}, context)
+    w2 = await root.submit({"type": "write", "entry": queuedNote("w")}, context)
     f2 = await root.submit({"type": "input", "content": "f2"}, context)
-    w3 = await root.submit({"type": "write", "entry": {"kind": "note"}}, context)
+    w3 = await root.submit({"type": "write", "entry": queuedNote("w")}, context)
     assert ops == [
-        [["p", ["items"], 0, 0, [{"id": w1.id, "mode": "write", "entry": {"kind": "note"}}]]],
+        [["p", ["items"], 0, 0, [{"id": w1.id, "mode": "write", "entry": queuedNote("w")}]]],
         [["p", ["items"], 1, 0, [{"id": f1.id, "mode": "followUp", "content": "f1"}]]],
-        [["p", ["items"], 2, 0, [{"id": w2.id, "mode": "write", "entry": {"kind": "note"}}]]],
+        [["p", ["items"], 2, 0, [{"id": w2.id, "mode": "write", "entry": queuedNote("w")}]]],
         [["p", ["items"], 3, 0, [{"id": f2.id, "mode": "followUp", "content": "f2"}]]],
-        [["p", ["items"], 4, 0, [{"id": w3.id, "mode": "write", "entry": {"kind": "note"}}]]],
+        [["p", ["items"], 4, 0, [{"id": w3.id, "mode": "write", "entry": queuedNote("w")}]]],
     ]
     first.release()
     await input.wait(context)
@@ -566,14 +571,14 @@ async def test_inbox_keeps_an_on_yield_continuation_across_a_queued_plain_write_
     harness, root = opened.harness, opened.root
     input = await root.submit({"type": "input", "content": "a"}, context)
     await first.reached
-    write = await root.submit({"type": "write", "entry": {"kind": "note"}}, context)
+    write = await root.submit({"type": "write", "entry": queuedNote("w")}, context)
     first.release()
     await input.wait(context)
     entries = await allEntries(root)
     assert transcript(entries) == [
         "pi.user:a",
         "pi.assistant:first",
-        "note",
+        "note:w",
         "pi.user:more",
         "pi.assistant:second",
     ]
@@ -655,7 +660,7 @@ async def test_inbox_queues_an_idle_steer_behind_waiting_items_and_places_it_wit
 async def test_inbox_starts_a_queued_follow_up_after_a_terminating_round():
     setup = chatSetup()
     gate = deferred()
-    holdTool(setup, gate, {"content": [], "control": {"terminate": True}})
+    holdTool(setup, gate, {"output": [], "control": {"terminate": True}})
     setup.faux.setResponses([HOLD, answer("follow-up")])
     opened = await openChat(MemoryStorage(), setup)
     harness, root = opened.harness, opened.root
@@ -680,11 +685,11 @@ async def test_inbox_writes_the_last_handoff_in_call_order_and_then_runs_queued_
     setup = chatSetup()
     firstGate = deferred()
     secondGate = deferred()
-    holdTool(setup, firstGate, {"content": [], "control": {"handoff": "one"}})
+    holdTool(setup, firstGate, {"output": [], "control": {"handoff": "one"}})
 
     async def later(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         await secondGate.promise
-        return {"content": [], "control": {"handoff": "two"}}
+        return {"output": [], "control": {"handoff": "two"}}
 
     addTool(
         setup.registry,
@@ -839,7 +844,7 @@ async def test_usage_totals_assistant_usage_per_model_and_tool_usage_per_tool_an
     }
     gate = deferred()
     gate.resolve()
-    holdTool(setup, gate, {"content": [], "usage": spent})
+    holdTool(setup, gate, {"output": [], "usage": spent})
     setup.faux.setResponses([HOLD, answer("done"), answer("other")])
     opened = await openChat(MemoryStorage(), setup)
     harness, root = opened.harness, opened.root

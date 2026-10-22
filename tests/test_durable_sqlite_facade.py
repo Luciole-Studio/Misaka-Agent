@@ -334,20 +334,18 @@ async def test_rejects_a_transaction_handle_used_after_its_transaction_settles()
     await database.close()
 
 
-async def test_does_not_preserve_a_guaranteed_rejection_when_rollback_itself_fails():
-    from misaka.durable.errors import StorageRejected
-
+async def test_does_not_preserve_the_callback_error_when_rollback_itself_fails():
     database = await openNodeSqliteDatabase(":memory:")
     await database.exec("CREATE TABLE rollback_probe (value INTEGER)")
 
     async def escapesCommit(transaction):
         await transaction.exec("INSERT INTO rollback_probe (value) VALUES (1)")
         await transaction.exec("COMMIT")
-        raise StorageRejected("rejected after an escaped commit")
+        raise RuntimeError("rejected after an escaped commit")
 
     with pytest.raises(ExceptionGroup) as raised:
         await database.transaction(escapesCommit)
-    assert [type(error) for error in raised.value.exceptions] == [StorageRejected, sqlite3.OperationalError]
+    assert [type(error) for error in raised.value.exceptions] == [RuntimeError, sqlite3.OperationalError]
     assert await database.get("SELECT value FROM rollback_probe") == {"value": 1}
     await database.close()
 

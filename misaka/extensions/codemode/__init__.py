@@ -14,12 +14,16 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from misaka.core.extensions.types import ExtensionFactory
+from misaka.core.settings_defaults import SETTINGS_DEFAULTS
 from misaka.core.settings_manager import CodemodeMode
 from misaka.core.wiring import KINDS
 from misaka.utils.js import isNumber
 from misaka.utils.values import read_field
 
-from .tool import CodemodeToolOptions, createCodemodeToolDefinition
+from .tool import (
+    CodemodeToolOptions,
+    createCodemodeToolDefinition,
+)
 
 EXTENSION_NAME = "codemode"
 # MISAKA fork: bundled-extension metadata for misaka's loader.
@@ -44,7 +48,11 @@ class CodemodeExtensionOptions:
 
 
 def readMode(pi: Any) -> CodemodeMode:
-    return "only" if read_field(read_field(pi.getSettings(), "codemode"), "mode") == "only" else "on"
+    return (
+        "only"
+        if read_field(read_field(pi.getSettings(), "codemode"), "mode") == "only"
+        else SETTINGS_DEFAULTS["codemode"]["mode"]
+    )
 
 
 def readInlineBudget(pi: Any) -> float | None:

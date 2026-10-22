@@ -119,8 +119,15 @@ async def test_does_not_cancel_the_underlying_work_and_reports_an_error_it_ends_
 
 # -- package boundary ----------------------------------------------------------------------------
 
-# The modules outside misaka.chord that chord may import: the JavaScript built-ins it relies on and the identity set.
-ALLOWED = {"misaka.utils.js", "misaka.utils.identity", "misaka.utils.collation"}
+# The modules outside misaka.chord that chord may import: the JavaScript built-ins it relies on, Node's `path` (the
+# loader names facets as `pathToFileURL` does) and the identity set.
+ALLOWED = {
+    "misaka.utils.js",
+    "misaka.utils.js_regexp",
+    "misaka.utils.node_path",
+    "misaka.utils.identity",
+    "misaka.utils.collation",
+}
 
 
 def test_does_not_depend_on_other_harness_packages():

@@ -241,7 +241,10 @@ async def createAgentSession(options: CreateAgentSessionOptions | None = None) -
             provider, modelId = settingsManager.getDefaultProvider(), settingsManager.getDefaultModel()
             model = modelRuntime.getModel(provider, modelId)
             if model is None:
-                raise RuntimeError(f"Role default model is not available: {provider}/{modelId}")
+                from misaka.core.model_runtime import personalizedCatalogHint
+
+                hint = personalizedCatalogHint(provider)
+                raise RuntimeError(f"Role default model is not available: {provider}/{modelId}" + (f".{hint}" if hint else ""))
             if not modelRuntime.hasConfiguredAuth(model.provider):
                 modelFallbackMessage = (
                     f"No configured authentication for role default {provider}/{modelId}. "

@@ -1,7 +1,8 @@
-"""Translated from pi's ``coding-agent/test/suite/regressions/5433-extension-oauth-prompt-input.test.ts`` (v1.1.0)."""
+"""Translated from pi's ``coding-agent/test/suite/regressions/5433-extension-oauth-prompt-input.test.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -32,7 +33,10 @@ def createDialog() -> LoginDialogComponent:
 
 
 def renderDialog(dialog: LoginDialogComponent) -> list[str]:
-    return [line.rstrip() for line in stripAnsi("\n".join(dialog.render(120))).split("\n")]
+    # stripAnsi keeps APC sequences, so drop the TUI's zero-width cursor markers (e.g. \x1b_pi:fc\x07) first
+    return [
+        line.rstrip() for line in stripAnsi(re.sub(r"\x1b_[^\x07]*\x07", "", "\n".join(dialog.render(120)))).split("\n")
+    ]
 
 
 def countRenderedValue(lines: list[str], value: str) -> int:

@@ -1,4 +1,4 @@
-"""Translated from pi's ``coding-agent/test/session-share.test.ts`` and ``export-jsonl-share.test.ts`` (v1.1.0).
+"""Translated from pi's ``coding-agent/test/session-share.test.ts`` (v1.3.0) and ``export-jsonl-share.test.ts`` (v1.1.0).
 
 ``vi.mock("node:child_process")`` becomes ``monkeypatch`` of the module's ``subprocess.run`` (``spawnSync``) and
 ``asyncio.create_subprocess_exec`` (``spawn``). The JSONL export case uses the suite harness session in place of
@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -79,6 +80,7 @@ async def test_keeps_concurrent_session_exports_isolated(monkeypatch: pytest.Mon
             session=SimpleNamespace(
                 sessionManager=SimpleNamespace(getSessionId=lambda: name, getCwd=lambda: "/tmp", getBranch=list),
                 state=SimpleNamespace(systemPrompt=name, tools=[]),
+                settingsManager=SimpleNamespace(getSessionShareDestination=lambda: "auto"),
                 modelRuntime=SimpleNamespace(getProvider=lambda _id: None),
                 exportToHtml=exportToHtml,
             ),
@@ -99,6 +101,112 @@ async def test_keeps_concurrent_session_exports_isolated(monkeypatch: pytest.Mon
 
     assert uploads == ["A", "B"]
     assert errors == []
+
+
+def _shareContext(destination: str, session: dict[str, Any], statuses: list[str], errors: list[str]):
+    return SessionShareContext(
+        session=SimpleNamespace(
+            sessionManager=SimpleNamespace(getSessionId=lambda: destination, getCwd=lambda: "/tmp", getBranch=list),
+            state=SimpleNamespace(systemPrompt="", tools=[]),
+            settingsManager=SimpleNamespace(getSessionShareDestination=lambda: destination),
+            **session,
+        ),
+        ui=SimpleNamespace(setFocus=lambda _component: None, requestRender=lambda *_args: None),
+        editorContainer=SimpleNamespace(clear=lambda: None, addChild=lambda _component: None),
+        editor=SimpleNamespace(),
+        showStatus=statuses.append,
+        showError=errors.append,
+    )
+
+
+# #10870: users need persistent gist shares even when Radius authentication is configured.
+async def test_forces_gist_sharing_without_checking_radius_authentication(monkeypatch: pytest.MonkeyPatch):
+    getProviderCalls: list[str] = []
+    spawned: list[tuple[Any, ...]] = []
+
+    def getProvider(providerId: str) -> Any:
+        getProviderCalls.append(providerId)
+        return SimpleNamespace(id="radius")
+
+    class _Process:
+        returncode: int | None = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            self.returncode = 0
+            return b"https://gist.github.com/test/forced-gist\n", b""
+
+        def kill(self) -> None:
+            pass
+
+    async def spawn(*args: Any, **_kwargs: Any) -> _Process:
+        assert Path(args[-1]).read_text(encoding="utf-8") == "html"
+        spawned.append(args)
+        return _Process()
+
+    async def exportToHtml(filePath: str, _options: Any = None) -> None:
+        Path(filePath).write_text("html", encoding="utf-8")
+
+    monkeypatch.setattr(session_share.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(session_share.asyncio, "create_subprocess_exec", spawn)
+    statuses: list[str] = []
+    errors: list[str] = []
+
+    await shareSession(_shareContext(
+        "gist", {"modelRuntime": SimpleNamespace(getProvider=getProvider), "exportToHtml": exportToHtml}, statuses, errors
+    ))
+
+    assert getProviderCalls == []
+    assert len(spawned) == 1
+    assert spawned[0][:4] == ("gh", "gist", "create", "--public=false")
+    assert errors == []
+    # MISAKA fork: the gist URL itself, no pi.dev viewer link.
+    assert "https://gist.github.com/test/forced-gist" in statuses[0]
+    assert "pi.dev" not in statuses[0]
+
+
+async def test_reports_missing_radius_authentication_when_radius_is_forced(monkeypatch: pytest.MonkeyPatch):
+    calls: list[str] = []
+
+    def run(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append("spawnSync")
+        return SimpleNamespace(returncode=0)
+
+    async def spawn(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append("spawn")
+        raise AssertionError("no gist")
+
+    monkeypatch.setattr(session_share.subprocess, "run", run)
+    monkeypatch.setattr(session_share.asyncio, "create_subprocess_exec", spawn)
+    errors: list[str] = []
+
+    await shareSession(_shareContext(
+        "radius", {"modelRuntime": SimpleNamespace(getProvider=lambda _id: None)}, [], errors
+    ))
+
+    assert errors == ["Radius authentication is not configured. Run '/login radius' first."]
+    assert calls == []
+
+
+async def test_reports_missing_radius_authentication_when_the_forced_radius_sign_in_has_no_token(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # MISAKA: a Radius provider whose stored sign-in yields no credential is the same "not configured" case.
+    async def getAuth(_providerId: str, _overrides: Any = None) -> Any:
+        return None
+
+    calls: list[str] = []
+    monkeypatch.setattr(session_share.subprocess, "run", lambda *_a, **_k: calls.append("spawnSync"))
+    errors: list[str] = []
+
+    await shareSession(_shareContext(
+        "radius",
+        {"modelRuntime": SimpleNamespace(getProvider=lambda _id: SimpleNamespace(id="radius"), getAuth=getAuth)},
+        [],
+        errors,
+    ))
+
+    assert errors == ["Radius authentication is not configured. Run '/login radius' first."]
+    assert calls == []
 
 
 def _shareTool() -> AgentTool:

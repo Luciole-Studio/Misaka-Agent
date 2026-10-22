@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/src/api/openai-codex-responses.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/src/api/openai-codex-responses.ts`` (v1.3.0).
 
 MISAKA fork, kept to what the Python platform forces (each is marked where it happens):
 

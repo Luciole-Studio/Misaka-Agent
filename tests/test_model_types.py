@@ -514,8 +514,8 @@ def _capture_posts(monkeypatch, reply: dict) -> list:
 
 @pytest.mark.parametrize(("provider", "id", "url"), [
     ("vercel-ai-gateway", "typesafe-ai/jev", "https://ai-gateway.vercel.sh/typesafe/v1/systemone"),
-    ("opencode", "jev-1.13", "https://opencode.ai/zen/v1/systemone"),
-    ("opencode", "jev-1.13-free", "https://opencode.ai/zen/v1/systemone"),
+    ("opencode", "jev-1.13", "https://opencode.ai/inference/v1/systemone"),
+    ("opencode", "jev-1.13-free", "https://opencode.ai/inference/v1/systemone"),
 ])
 async def test_routes_jev_to_its_typesafe_compatible_endpoint(monkeypatch, provider, id, url):
     models = builtinModels()

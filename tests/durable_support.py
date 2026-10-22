@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import os
+import time
 from collections.abc import Sequence
 from typing import Any
 
 from misaka.chord.context import BACKGROUND_CONTEXT, Context
-from misaka.durable.session.session import SessionImpl
+from misaka.durable.session.session import SessionImpl, setDefaultDocumentRetention
 from misaka.durable.storage.memory import MemoryStorage
+from misaka.utils.js import jsNumber
+
+# MISAKA fork: pi's ``test/setup-document-retention.ts``, a vitest setup file loaded for every test file. misaka has no
+# durable conftest, so this runs when this helper is first imported (directly or through the chat, harness, and task
+# helpers), which pytest's collection does before any test runs: ``MISAKA_DURABLE_DOCUMENT_RETENTION_MS`` (upstream
+# ``PI_DURABLE_DOCUMENT_RETENTION_MS``) sets the document retention of every Session that keeps the default, so the
+# suite can run with each unattached document evicted right after use.
+_forcedRetention = os.environ.get("MISAKA_DURABLE_DOCUMENT_RETENTION_MS")
+if _forcedRetention is not None:
+    setDefaultDocumentRetention(jsNumber(_forcedRetention))
 
 context: Context = BACKGROUND_CONTEXT
 
@@ -61,6 +73,11 @@ class ControlledStorage(MemoryStorage):
     def failNextCommit(self, error: Exception) -> None:
         self._commitFailure = error
 
+    def reopen(self) -> ControlledStorage:
+        """Reopen after ``close()``, as a fresh process would reopen the same database, keeping every committed record."""
+        self._closed = False
+        return self
+
     def _release(self, kind: str, held: dict[str, Deferred]) -> None:
         if kind == "commit" and self._commitGate is held:
             self._commitGate = None
@@ -104,7 +121,8 @@ class TestSession:
 
     def __init__(self) -> None:
         self.storage = ControlledStorage()
-        self.session = SessionImpl(self.storage)
+        # These tests pin the cache's identities and loads, so documents stay as long as the default keeps them.
+        self.session = SessionImpl(self.storage, lambda: int(time.time() * 1000), lambda: 600_000)
         self.publications: list[dict[str, Any]] = []
         self.session.subscribeCommits(lambda publication, _context: self.publications.append(publication))
 

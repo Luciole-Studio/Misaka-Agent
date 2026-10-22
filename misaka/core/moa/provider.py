@@ -391,6 +391,15 @@ async def _slot_auth(model: Model) -> tuple[Model, dict[str, Any]]:
     }
 
 
+def _catalogHint(slot) -> str:
+    """Why a slot's model may be missing, after the slot's label: an OpenRouter model leaves the catalog when the
+    user's key may not use it (pi 1.2 per-key lists). Empty for other providers."""
+    from misaka.core.model_runtime import personalizedCatalogHint
+
+    hint = personalizedCatalogHint(str(slot.get("provider") or ""))
+    return f".{hint}" if hint else ""
+
+
 def _resolve_slot_model(slot) -> Model | None:
     if _MODEL_RESOLVER is None:
         return None
@@ -433,7 +442,7 @@ async def _run_reference(slot, view, *, preset, options) -> tuple[str, str, Usag
     label = slot_label(slot)
     m = _resolve_slot_model(slot)
     if m is None:
-        return label, f"[failed: model slot is unavailable: {label}]", None, None
+        return label, f"[failed: model slot is unavailable: {label}{_catalogHint(slot)}]", None, None
     m, auth = await _slot_auth(m)
     reserve = slot.get("max_tokens") or preset.get("reference_max_tokens")
     trimmed = trim_view_for_window(view, m.contextWindow, reserve=reserve)
@@ -777,7 +786,7 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
                 raise RuntimeError("An MoA aggregator cannot itself use the MoA provider.")
             agg_model = _resolve_slot_model(agg_slot)
             if agg_model is None:
-                raise RuntimeError(f"Aggregator model is unavailable: {slot_label(agg_slot)}")
+                raise RuntimeError(f"Aggregator model is unavailable: {slot_label(agg_slot)}{_catalogHint(agg_slot)}")
 
             agg_messages = list(context.messages)
             if guidance:

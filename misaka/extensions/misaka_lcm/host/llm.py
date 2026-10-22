@@ -362,7 +362,8 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
             failed = False
             stream = None
             fixed = auxiliary_options._fixed_temperature_for_model(selected.id, selected.baseUrl)
-            if fixed is auxiliary_options.OMIT_TEMPERATURE or auxiliary_options._forbids_sampling_params(selected.id):
+            if (fixed is auxiliary_options.OMIT_TEMPERATURE or auxiliary_options._forbids_sampling_params(selected.id)
+                    or _profile_omits_temperature(selected.provider)):
                 temperature = None
             elif fixed is not None:
                 temperature = fixed
@@ -384,7 +385,8 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                     headers['Authorization'] = f'Bearer {wire_key}'
                     wire_key = None  # native header-only auth omits X-Api-Key
             try:
-                streamed = latency_info is not None or selected.api in {'anthropic-messages', 'openai-codex-responses'}
+                streamed = (latency_info is not None or selected.api in {'anthropic-messages', 'openai-codex-responses'}
+                            or _kimi_code_endpoint(selected.baseUrl))
                 hard_budget = auxiliary_options._aux_stream_total_ceiling(budget) if streamed else budget
                 async with asyncio.timeout(hard_budget):
                     def on_response(_response, _model):
@@ -398,6 +400,7 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                             _responses_cache(payload, wire_model, main_runtime, cache_id,
                                              system_prompt=context.systemPrompt)
                         body = dict(extra_body or {})
+                        sent_by_pi = _KIMI_REASONING_CONTROLS & payload.keys()
                         if selected.provider == 'nous' and selected.api == 'anthropic-messages':
                             body = {**profile.build_extra_body(), **body}
                         if projection is not None:
@@ -405,6 +408,7 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                                             if key != 'extra_headers'})
                             body = auxiliary_options._merge_aux_extra_body(body, projection, reasoning, wire_model.provider)
                         payload.update(body)
+                        _one_kimi_reasoning_control(payload, wire_model, sent_by_pi)
                         return payload
 
                     options = SimpleStreamOptions(
@@ -636,6 +640,49 @@ def _responses_cache(payload, model, main_runtime, request_id, *, system_prompt=
         payload.pop("prompt_cache_retention", None)
         if retention:
             payload["prompt_cache_retention"] = retention
+
+
+_KIMI_REASONING_CONTROLS = frozenset({'thinking', 'reasoning_effort'})
+
+
+def _one_kimi_reasoning_control(payload, model, sent_by_pi):
+    """Kimi rejects a request carrying both ``thinking`` and ``reasoning_effort`` (``KimiProfile``). Since pi 1.3.0
+    kimi-coding is an openai-completions provider, so the profile's projection lands on pi's own request. pi's catalog
+    compat knows which control each Kimi Code model takes (``reasoning_effort`` on the K3-style models, the
+    ``thinking`` toggle on the deepseek-format one), so when the projection adds the other one, pi's stays.
+
+    The catalog also knows which models always think (``thinkingLevelMap.off`` is null: every Kimi Code model). pi
+    never sends those ``thinking: disabled``, so a projection of disabled reasoning is dropped rather than asking
+    the model for something it cannot do."""
+    from misaka.ai.models import getSupportedThinkingLevels
+
+    from ..native.profile_kimi_coding import KimiProfile
+    from .profiles import get_provider_profile
+    if not isinstance(get_provider_profile(model.provider), KimiProfile):
+        return
+    if _KIMI_REASONING_CONTROLS <= payload.keys() and len(sent_by_pi) == 1:
+        payload.pop(next(iter(_KIMI_REASONING_CONTROLS - sent_by_pi)))
+    if ('thinking' not in sent_by_pi and payload.get('thinking') == {'type': 'disabled'}
+            and 'off' not in getSupportedThinkingLevels(model)):
+        payload.pop('thinking')
+
+
+def _profile_omits_temperature(provider):
+    """Hermes' provider profile says the server manages temperature (``fixed_temperature=OMIT_TEMPERATURE``: Kimi
+    and Moonshot), as its main agent applies it. The auxiliary rule ``_is_kimi_model`` matches ``kimi-*`` names only,
+    which missed Kimi Code's bare ``k3`` once pi 1.3.0 moved kimi-coding to openai-completions: that wire sends the
+    temperature the Anthropic route used to drop with thinking on."""
+    from ..native.provider_profile import OMIT_TEMPERATURE
+    from .profiles import get_provider_profile
+    return getattr(get_provider_profile(provider), 'fixed_temperature', None) is OMIT_TEMPERATURE
+
+
+def _kimi_code_endpoint(base_url):
+    """Hermes sends Kimi Code's auxiliary calls through its Anthropic client, which streams them under the idle
+    window and the total ceiling (``_client_streams_internally``). pi 1.3.0 serves the same endpoint over
+    openai-completions; the call keeps Hermes' streamed timing rather than falling back to one flat timeout."""
+    from ..native.profile_kimi_coding import _is_confirmed_kimi_coding_url
+    return _is_confirmed_kimi_coding_url((base_url or '').rstrip('/'))
 
 
 def _omit_default_output_limit(payload, model):

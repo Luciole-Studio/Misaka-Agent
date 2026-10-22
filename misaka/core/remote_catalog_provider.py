@@ -1,13 +1,14 @@
 """A persisted remote catalog overlay on a static built-in provider.
 
-Translated from pi's ``coding-agent/src/core/remote-catalog-provider.ts``.
+Translated from pi's ``coding-agent/src/core/remote-catalog-provider.ts`` (v1.3.0).
 """
 
 from __future__ import annotations
 
 import math
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -24,7 +25,9 @@ from misaka.utils.management_http import FetchRetryOptions, fetchWithRetry
 from misaka.utils.values import signal_aborted
 from misaka.utils.whatwg_url import URL
 
-DEFAULT_CATALOG_BASE_URL = "https://pi.dev"
+# MISAKA fork: no default catalog endpoint (pi: "https://pi.dev"). misaka does not send users' traffic to pi's service;
+# an embedder that runs a catalog server passes its URL as `catalogBaseUrl`.
+DEFAULT_CATALOG_BASE_URL: str | None = None
 REMOTE_CATALOG_ATTEMPT_TIMEOUT_MS = 4_000
 REMOTE_CATALOG_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000
 # Model types this client can consume. Sent as `?types=` so the catalog server
@@ -80,14 +83,6 @@ def _parseCatalog(providerId: str, value: Any) -> list[AnyModel]:
     return [model for model in models if model is not None]
 
 
-def _remoteModels(entry: ModelsStoreEntry | None, localGeneratedAt: int | None) -> list[AnyModel]:
-    if entry is None:
-        return []
-    if localGeneratedAt is not None and (entry.lastModified is None or entry.lastModified <= localGeneratedAt):
-        return []
-    return list(entry.models)
-
-
 def _parseHttpDate(value: str | None) -> float:
     """``Date.parse`` of an HTTP date: epoch milliseconds, NaN when unreadable."""
     try:
@@ -99,12 +94,66 @@ def _parseHttpDate(value: str | None) -> float:
     return parsed.timestamp() * 1000
 
 
+@dataclass(slots=True)
+class _Catalog:
+    models: list[AnyModel]
+    lastModified: int
+    etag: str | None
+
+
+async def _readCatalog(providerId: str, response: Any) -> _Catalog:
+    """Read a successful pi.dev catalog response. A missing or invalid Last-Modified header is 0."""
+    lastModified = _parseHttpDate(response.headers.get("last-modified"))
+    return _Catalog(
+        models=_parseCatalog(providerId, await response.json()),
+        lastModified=0 if math.isnan(lastModified) else int(lastModified),
+        etag=response.headers.get("etag"),
+    )
+
+
+def _isNewer(lastModified: int | None, localGeneratedAt: int | None) -> bool:
+    """Whether a pi.dev catalog is newer than the model data shipped with pi."""
+    return localGeneratedAt is None or (lastModified is not None and lastModified > localGeneratedAt)
+
+
+def _remoteModels(entry: ModelsStoreEntry | None, localGeneratedAt: int | None) -> list[AnyModel]:
+    return list(entry.models) if entry is not None and _isNewer(entry.lastModified, localGeneratedAt) else []
+
+
+async def _requestCatalog(providerId: str, catalogBaseUrl: str, signal: Any, validator: str | None = None) -> Any:
+    # `encodeURIComponent` leaves !~*'() alone too.
+    url = URL(f"/api/models/providers/{quote(providerId, safe="!~*'()")}", catalogBaseUrl)
+    url.searchParams.set("types", ",".join(REMOTE_CATALOG_MODEL_TYPES))
+    return await fetchWithRetry(
+        url,
+        {
+            "headers": {
+                "accept": "application/json",
+                # MISAKA fork: misaka's anonymous user agent (ai/utils/pi_user_agent.py), not pi's `pi/<version>` one.
+                "User-Agent": getPiUserAgent(),
+                **({"if-none-match": validator} if validator else {}),
+            },
+            "signal": signal,
+        },
+        FetchRetryOptions(attemptTimeoutMs=REMOTE_CATALOG_ATTEMPT_TIMEOUT_MS),
+    )
+
+
+# Replaces the catalog with a credential-specific model list.
+type PersonalizeCatalog = Callable[[Sequence[AnyModel], RefreshModelsContext], Awaitable[Sequence[AnyModel]]]
+
+
 def withRemoteCatalog(
     provider: Any,
-    catalogBaseUrl: str = DEFAULT_CATALOG_BASE_URL,
+    catalogBaseUrl: str | None = DEFAULT_CATALOG_BASE_URL,
     localGeneratedAt: int | None = None,
 ) -> Any:
-    """Add a persisted pi.dev catalog overlay to a static built-in provider."""
+    """Add a persisted remote catalog overlay to a static built-in provider.
+
+    MISAKA fork: without a ``catalogBaseUrl`` there is no overlay and the provider is returned as it is, as
+    ``withPersonalizedCatalog`` skips its catalog request (see ``DEFAULT_CATALOG_BASE_URL``)."""
+    if catalogBaseUrl is None:
+        return provider
     dynamicModels: list[AnyModel] = []
 
     class _RemoteCatalogProvider:
@@ -133,6 +182,9 @@ def withRemoteCatalog(
                 return
             if not context.allowNetwork or signal_aborted(context.signal):
                 return
+            # Skip the request if the catalog was checked less than REMOTE_CATALOG_REFRESH_INTERVAL_MS ago.
+            # An entry without lastModified (saved by an older pi, or after a failed first request) is
+            # always refetched: _remoteModels() ignores it, so waiting would leave the overlay empty.
             if (
                 not context.force
                 and stored is not None
@@ -145,22 +197,7 @@ def withRemoteCatalog(
             # Only revalidate when a cached body backs the validator, so a 304 can never
             # leave the overlay empty.
             validator = stored.etag if stored is not None and len(stored.models) > 0 else None
-            # `encodeURIComponent` leaves !~*'() alone too.
-            url = URL(f"/api/models/providers/{quote(provider.id, safe="!~*'()")}", catalogBaseUrl)
-            url.searchParams.set("types", ",".join(REMOTE_CATALOG_MODEL_TYPES))
-            response = await fetchWithRetry(
-                url,
-                {
-                    "headers": {
-                        "accept": "application/json",
-                        # MISAKA fork: misaka's anonymous user agent (ai/utils/pi_user_agent.py), not pi's `pi/<version>` one.
-                        "User-Agent": getPiUserAgent(),
-                        **({"if-none-match": validator} if validator else {}),
-                    },
-                    "signal": context.signal,
-                },
-                FetchRetryOptions(attemptTimeoutMs=REMOTE_CATALOG_ATTEMPT_TIMEOUT_MS),
-            )
+            response = await _requestCatalog(provider.id, catalogBaseUrl, context.signal, validator)
             if signal_aborted(context.signal):
                 return
             checkedAt = _now()
@@ -191,15 +228,11 @@ def withRemoteCatalog(
                     )
                 )
                 raise RuntimeError(f"Model catalog request failed for {provider.id}: {response.status}")
-            refreshed = _parseCatalog(provider.id, await response.json())
-            lastModified = _parseHttpDate(response.headers.get("last-modified"))
+            catalog = await _readCatalog(provider.id, response)
             if signal_aborted(context.signal):
                 return
             entry = ModelsStoreEntry(
-                models=refreshed,
-                checkedAt=checkedAt,
-                lastModified=0 if math.isnan(lastModified) else int(lastModified),
-                etag=response.headers.get("etag"),
+                models=catalog.models, lastModified=catalog.lastModified, etag=catalog.etag, checkedAt=checkedAt
             )
             published = _remoteModels(entry, localGeneratedAt)
 
@@ -212,9 +245,92 @@ def withRemoteCatalog(
     return _RemoteCatalogProvider()
 
 
+def withPersonalizedCatalog(
+    provider: Any,
+    personalize: PersonalizeCatalog,
+    catalogBaseUrl: str | None = None,
+    localGeneratedAt: int | None = None,
+) -> Any:
+    """Like ``withRemoteCatalog``, but on each network refresh the catalog (built-in models plus a newer
+    pi.dev catalog) is passed through ``personalize`` and the result is saved. The saved entry holds
+    the personalized list, not the pi.dev catalog, and replaces the catalog, including offline.
+    The refresh interval and etag revalidation are skipped. An empty list (nothing saved yet, or an
+    empty catalog saved by an older pi after a failed or missing pi.dev catalog) falls back to the
+    built-in models.
+
+    MISAKA fork: ``catalogBaseUrl`` defaults to None, which skips the catalog request and personalizes the built-in
+    catalog alone: misaka does not send users' traffic to pi's service, so the only request a refresh makes is
+    ``personalize``'s own (OpenRouter's ``/models/user``, with the user's key).
+    """
+    personalModels: list[AnyModel] = []
+
+    def builtinModels() -> list[AnyModel]:
+        getAllModels = getattr(provider, "getAllModels", None)
+        return list(getAllModels() if getAllModels is not None else provider.getModels())
+
+    def getAllModels() -> list[AnyModel]:
+        return list(personalModels) if len(personalModels) > 0 else builtinModels()
+
+    class _PersonalizedCatalogProvider:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(provider, name)
+
+        def getModels(self) -> list[AnyModel]:
+            return [model for model in getAllModels() if isModelType(model, "chat")]
+
+        def getAllModels(self) -> list[AnyModel]:
+            return getAllModels()
+
+        async def refreshModels(self, context: RefreshModelsContext) -> None:
+            restored = [
+                model for model in (context.stored.models if context.stored is not None else []) if model.provider == provider.id
+            ]
+
+            def applyRestored() -> None:
+                nonlocal personalModels
+                personalModels = restored
+
+            if not await context.publish(ModelsPublication(update=applyRestored)):
+                return
+            if not context.allowNetwork or signal_aborted(context.signal):
+                return
+
+            remote: list[AnyModel] = []
+            # MISAKA fork: no catalog endpoint, no catalog request (see the docstring).
+            if catalogBaseUrl is not None:
+                response = await _requestCatalog(provider.id, catalogBaseUrl, context.signal)
+                if signal_aborted(context.signal):
+                    return
+                if response.status != 404 and response.status != 501:
+                    if not response.ok:
+                        raise RuntimeError(f"Model catalog request failed for {provider.id}: {response.status}")
+                    catalog = await _readCatalog(provider.id, response)
+                    if _isNewer(catalog.lastModified, localGeneratedAt):
+                        remote = catalog.models
+            personalized = list(await personalize(_mergeModels(builtinModels(), remote), context))
+            if signal_aborted(context.signal):
+                return
+
+            def applyPersonalized() -> None:
+                nonlocal personalModels
+                personalModels = personalized
+
+            await context.publish(
+                ModelsPublication(
+                    persist=ModelsStoreEntry(models=personalized, checkedAt=_now()),
+                    persist_is_set=True,
+                    update=applyPersonalized,
+                )
+            )
+
+    return _PersonalizedCatalogProvider()
+
+
 __all__ = [
     "DEFAULT_CATALOG_BASE_URL",
     "REMOTE_CATALOG_MODEL_TYPES",
     "REMOTE_CATALOG_REFRESH_INTERVAL_MS",
+    "PersonalizeCatalog",
+    "withPersonalizedCatalog",
     "withRemoteCatalog",
 ]

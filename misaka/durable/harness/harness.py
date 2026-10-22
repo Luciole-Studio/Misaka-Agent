@@ -1,6 +1,7 @@
 """The durable agent Harness over one Session: conversation handles, a registry, scheduling and submissions.
 
-Translated from pi's ``packages/durable/src/harness/harness.ts``. ``Harness.open(storage, options, context)`` opens one;
+Translated from pi's ``packages/durable/src/harness/harness.ts`` (v1.3.0). ``Harness.open(storage, options, context)``
+opens one;
 the options are a ``dict`` (``models``, ``registry``, ``settings``, ``env``, ``conversationCreated``, ``now``,
 ``onReport``). A conversation handle is a ``ConversationImpl`` and the handle a task or tool gets is a
 ``types.SimpleNamespace`` (``id``, ``submit``, ``abort``, ``waitForIdle``). Public async methods are ``@eager``.
@@ -8,6 +9,7 @@ the options are a ``dict`` (``models``, ``registry``, ``settings``, ``env``, ``c
 
 from __future__ import annotations
 
+import contextlib
 import time
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -17,7 +19,7 @@ from misaka.chord.context import Context, withAbortSignal, withoutAbortSignal
 from misaka.utils.js import awaitValue, eager
 
 from ..entries import ResetEntry
-from ..session.session import SessionImpl
+from ..session.session import SessionImpl, contained
 from ..types import (
     ROOT_CONVERSATION_ID,
     ConversationId,
@@ -41,6 +43,10 @@ from .util import scanAll
 from .view import ConversationViews
 
 SCAN_PAGE_SIZE = 256
+
+SCHEDULER_INDEX_SIZES = "pi-durable.schedulerIndexSizes"
+"""Key of the Harness's internal index-size getter, for tests: ``getattr(harness, SCHEDULER_INDEX_SIZES)``. (Upstream's
+``Symbol.for("pi-durable.schedulerIndexSizes")``; a Python attribute named by the same string.)"""
 
 
 class _ConversationHost:
@@ -148,12 +154,16 @@ class ConversationImpl:
 class HarnessImpl(SessionImpl):
     """Session kernel extended with conversation handles and a registry."""
 
-    def __init__(self, storage: Storage, options: dict[str, Any], context: Context) -> None:
-        super().__init__(storage, options.get("now"))
+    def __init__(self, rawStorage: Storage, options: dict[str, Any], context: Context) -> None:
+        report = safeReport(options.get("onReport"))
+        now = safeNow(options.get("now"), report)
+        # Read at each use, as all settings are, but only this field: it is read on every commit.
+        super().__init__(rawStorage, now, lambda: (options.get("settings") or {}).get("documentRetentionMs"))
+        # Every component reads and writes through the Session's failure guard: `rawStorage` serves only `super()`.
+        storage = self.storage
         self._options = options
-        self._report: Callable[[BaseException], None] = options.get("onReport") or (lambda error: None)
-        self._now: Callable[[], int] = options.get("now") or (lambda: int(time.time() * 1000))
-        self._closed = False
+        self._report: Callable[[Any], None] = report
+        self._now: Callable[[], int] = now
 
         def settings() -> dict[str, Any]:
             return resolveSettings(options.get("settings"))
@@ -213,11 +223,16 @@ class HarnessImpl(SessionImpl):
 
     def resume(self) -> None:
         """Enable task scheduling. Idempotent; throws after close. Calls that ask for progress enable it too."""
-        self._assertOpen()
+        self.assertUsable()
         self._tasks.resume()
 
     def getTask(self, id: TaskId, context: Context) -> Any:
-        return self.readOnLine(lambda: self._storage.task(id, context))
+        return self.readOnLine(lambda: self.storage.task(id, context))
+
+    @property
+    def schedulerIndexSizes(self) -> dict[str, int]:
+        """Internal, for tests: sizes of the scheduler's ownership indexes (``SCHEDULER_INDEX_SIZES``)."""
+        return self._tasks.indexSizes
 
     def inspect(self, context: Context) -> Any:
         """Live tasks and unsettled submissions. Writes nothing and runs no task code."""
@@ -227,7 +242,7 @@ class HarnessImpl(SessionImpl):
 
             async def scan(status: str) -> list[dict[str, Any]]:
                 return await scanAll(
-                    lambda cursor: self._storage.scanSubmissions({"status": status}, SCAN_PAGE_SIZE, cursor, context)
+                    lambda cursor: self.storage.scanSubmissions({"status": status}, SCAN_PAGE_SIZE, cursor, context)
                 )
 
             submissions = sorted([*(await scan("queued")), *(await scan("placed"))], key=lambda record: record["id"])
@@ -262,7 +277,7 @@ class HarnessImpl(SessionImpl):
     async def usage(self, context: Context) -> dict[str, Any]:
         """Sum every conversation's committed ``pi.usage``. Each document is read at its own point; totals only grow."""
         conversations = await self.readOnLine(
-            lambda: scanAll(lambda cursor: self._storage.scanConversations({}, SCAN_PAGE_SIZE, cursor, context))
+            lambda: scanAll(lambda cursor: self.storage.scanConversations({}, SCAN_PAGE_SIZE, cursor, context))
         )
         total: dict[str, Any] = UsageDoc["definition"]["initial"]()
         for conversation in conversations:
@@ -286,24 +301,24 @@ class HarnessImpl(SessionImpl):
 
     @eager
     async def conversation(self, id: ConversationId, context: Context) -> ConversationImpl | None:
-        self._assertOpen()
-        record = await self.readOnLine(lambda: self._storage.conversation(id, context))
+        self.assertUsable()
+        record = await self.readOnLine(lambda: self.storage.conversation(id, context))
         return None if record is None else ConversationImpl(record["id"], self._conversationHost)
 
     def createConversation(self, options: dict[str, Any], context: Context) -> Any:
         return self._create({"kind": "independent", "ownership": options["ownership"]}, options, context)
 
-    def close(self, context: Context) -> Any:
-        self._closed = True
-        return super().close(context)
+    def report(self, error: Any) -> None:
+        self._report(error)
 
     def beforeClose(self) -> Any:
-        """Join task invocations after admission is sealed and before Storage closes; writes no task outcome."""
+        """Signal and join task invocations after the close listeners and before Storage closes; writes no task
+        outcome."""
         return self._tasks.join()
 
     @eager
     async def _create(self, target: dict[str, Any], options: dict[str, Any], context: Context) -> ConversationImpl:
-        self._assertOpen()
+        self.assertUsable()
 
         async def create(tx: Any) -> int:
             if target["kind"] == "root" and (await tx.conversation(ROOT_CONVERSATION_ID)) is not None:
@@ -336,9 +351,43 @@ class HarnessImpl(SessionImpl):
         if created is not None:
             await awaitValue(created(tx, record))
 
-    def _assertOpen(self) -> None:
-        if self._closed:
-            raise RuntimeError("Harness is closed")
+
+# `harness[SCHEDULER_INDEX_SIZES]`: the getter under the key's name.
+setattr(HarnessImpl, SCHEDULER_INDEX_SIZES, HarnessImpl.schedulerIndexSizes)
+
+
+def safeReport(onReport: Callable[[Any], Any] | None) -> Callable[[Any], None]:
+    """``onReport`` that cannot fail: it is the last place an error goes, so its own throw or rejection is dropped."""
+
+    def report(error: Any) -> None:
+        contained(lambda: None if onReport is None else onReport(error), lambda _error: None)
+
+    return report
+
+
+def _dateNow() -> int:
+    return int(time.time() * 1000)
+
+
+def safeNow(now: Callable[[], int] | None, report: Callable[[Any], None]) -> Callable[[], int]:
+    """The host clock, falling back to ``Date.now`` when it throws: a broken clock must not stop commits. The first
+    throw is reported; the clock is read in every task change, so later ones are not."""
+    if now is None:
+        return _dateNow
+    reported = False
+
+    def clock() -> int:
+        nonlocal reported
+        try:
+            return now()
+        except Exception as error:  # noqa: BLE001 - a broken clock must not stop commits
+            # Set first: a report handler that reads the clock again must not report again.
+            if not reported:
+                reported = True
+                report(error)
+            return _dateNow()
+
+    return clock
 
 
 def boundConversation(id: ConversationId, binding: dict[str, Any], submissions: Submissions, tasks: TaskScheduler) -> Any:
@@ -401,15 +450,12 @@ class Harness:
         try:
             await harness.openTasks(context)
         except BaseException:
-            # The caller's context may be what failed open: close without it, and rethrow the open error.
-            try:
+            # The caller's context may be what failed open: close without it, and rethrow the open error. A failing
+            # Storage close fails the Session, which reports it.
+            with contextlib.suppress(Exception):
                 await harness.close(withoutAbortSignal(context))
-            except Exception as closeError:  # noqa: BLE001 - the open error is the one to raise
-                onReport = options.get("onReport")
-                if onReport is not None:
-                    onReport(closeError)
             raise
         return harness
 
 
-__all__ = ["ConversationImpl", "Harness", "HarnessImpl"]
+__all__ = ["SCHEDULER_INDEX_SIZES", "ConversationImpl", "Harness", "HarnessImpl", "safeNow", "safeReport"]

@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from ai_gateway_pricing import getAiGatewayCost
 from openrouter_catalog import buildOpenRouterCatalog
 
+from misaka.ai.providers.openrouter_api import openRouterCost
+
 
 def openRouterChatCost(pricing: dict[str, Any]) -> dict[str, Any] | None:
     catalog = buildOpenRouterCatalog(
@@ -72,6 +74,35 @@ class TestOpenRouterPricingOverrides:
                 ],
             }
         ) == {"input": 0.132, "output": 0.528, "cacheRead": 0, "cacheWrite": 0}
+
+    # Regression for #10672: OpenRouter reports -1 for router models such as `openrouter/auto`.
+    def test_uses_zero_for_negative_invalid_and_missing_base_prices(self) -> None:
+        assert openRouterChatCost({"prompt": "-1", "completion": "abc", "input_cache_read": ""}) == {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+        }
+
+    def test_keeps_base_rates_for_negative_or_invalid_override_rates(self) -> None:
+        cost = openRouterChatCost(
+            {
+                "prompt": "0.000002",
+                "completion": "0.000012",
+                "overrides": [{"min_prompt_tokens": 200000, "prompt": "-1", "completion": "n/a"}],
+            }
+        )
+        assert cost is not None
+        assert cost["tiers"] == [{"inputTokensAbove": 200000, "input": 2, "output": 12, "cacheRead": 0, "cacheWrite": 0}]
+
+    def test_treats_zero_as_free(self) -> None:
+        assert openRouterCost({"prompt": "0", "completion": "0.000001"}) == {
+            "input": 0,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+        }
+        assert openRouterCost(None) == {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
 
 
 class TestVercelAiGatewayPricingTiers:

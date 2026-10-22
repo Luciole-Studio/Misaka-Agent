@@ -1,6 +1,6 @@
 """One connection to a pi-env daemon over its stdin and stdout.
 
-Translated from pi's ``packages/env/src/connection.ts`` (v1.1.0). The daemon is a child process driven through asyncio;
+Translated from pi's ``packages/env/src/connection.ts`` (v1.3.0). The daemon is a child process driven through asyncio;
 a request returns a future that starts at the call, as a JavaScript promise does.
 """
 
@@ -66,7 +66,8 @@ class RemoteError(Exception):
 class RemoteInfo(TypedDict):
     """What ``hello`` reports about the remote machine. ``separator``: ``/``, or ``\\`` on Windows. ``cwd``: the daemon's
     working directory, where Node's ``path.resolve`` would fall back to ``process.cwd()``. ``driveCwds``: Windows'
-    per-drive working directories (``C:`` → ``C:\\work``) of the ``=C:`` variables."""
+    per-drive working directories (``C:`` → ``C:\\work``) of the ``=C:`` variables. ``features``: operations added to
+    protocol 1 that this daemon supports, such as ``listFiles``; absent from older daemons."""
 
     protocol: int
     version: str
@@ -78,6 +79,16 @@ class RemoteInfo(TypedDict):
     cwd: str
     driveCwds: dict[str, str]
     pid: int
+    features: NotRequired[list[str]]
+
+
+def nodePlatform(info: dict[str, Any]) -> dict[str, str]:
+    """Node's names for the daemon's system and architecture, which ``hello`` reports in Rust's spelling: ``windows`` is
+    ``win32``, ``macos`` is ``darwin``, ``x86_64`` is ``x64``, ``aarch64`` is ``arm64``, so they compare with
+    ``process.platform`` and ``process.arch``. Other names are kept."""
+    platforms = {"windows": "win32", "macos": "darwin"}
+    archs = {"x86_64": "x64", "aarch64": "arm64", "x86": "ia32"}
+    return {"platform": platforms.get(info["os"], info["os"]), "arch": archs.get(info["arch"], info["arch"])}
 
 
 class ConnectionOptions(TypedDict):
@@ -543,4 +554,5 @@ __all__ = [
     "Reply",
     "RequestOptions",
     "isConnectionLost",
+    "nodePlatform",
 ]

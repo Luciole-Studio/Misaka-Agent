@@ -1,4 +1,4 @@
-"""Translated from pi's ``modes/interactive/components/settings-selector.ts`` (v1.1.0).
+"""Translated from pi's ``modes/interactive/components/settings-selector.ts`` (v1.3.0).
 
 MISAKA forks:
 - (D1) The fullscreen rows (``tui-mode``, ``fullscreen-exit-output``, ``fullscreen-scrollbar``,
@@ -22,12 +22,14 @@ from misaka.core.http_dispatcher import (
     HTTP_IDLE_TIMEOUT_CHOICES,
     formatHttpIdleTimeoutMs,
 )
+from misaka.core.settings_defaults import SETTINGS_DEFAULTS
 from misaka.core.settings_manager import (
     CACHE_WARMING_MODES,
     CacheWarmingMode,
     DefaultProjectTrust,
     MermaidRenderingMode,
     QuietStartup,
+    SessionShareDestination,
     WarningSettings,
 )
 from misaka.modes.interactive.theme.theme import (
@@ -95,6 +97,7 @@ class SettingsConfig:
     steeringMode: SteeringMode
     followUpMode: SteeringMode
     transport: Transport
+    sessionShareDestination: SessionShareDestination
     httpIdleTimeoutMs: int
     cacheWarmingMode: CacheWarmingMode
     thinkingLevel: ThinkingLevel
@@ -132,6 +135,7 @@ class SettingsCallbacks:
     onSteeringModeChange: Callable[[SteeringMode], None]
     onFollowUpModeChange: Callable[[SteeringMode], None]
     onTransportChange: Callable[[Transport], None]
+    onSessionShareDestinationChange: Callable[[SessionShareDestination], None]
     onHttpIdleTimeoutMsChange: Callable[[int], None]
     onCacheWarmingModeChange: Callable[[CacheWarmingMode], None]
     # MISAKA fork: the global default thinking level row (see `thinking` below).
@@ -178,7 +182,15 @@ class WarningSettingsSubmenu(Container):
                 id="anthropic-extra-usage",
                 label="Anthropic extra usage",
                 description="Warn when Anthropic subscription auth may use paid extra usage",
-                currentValue="true" if (anthropicExtraUsage if anthropicExtraUsage is not None else True) else "false",
+                currentValue=(
+                    "true"
+                    if (
+                        anthropicExtraUsage
+                        if anthropicExtraUsage is not None
+                        else SETTINGS_DEFAULTS["warnings"]["anthropicExtraUsage"]
+                    )
+                    else "false"
+                ),
                 values=["true", "false"],
             ),
         ]
@@ -642,6 +654,16 @@ class SettingsSelectorComponent(Container):
                 values=["sse", "websocket", "websocket-cached", "auto"],
             ),
             SettingItem(
+                id="share-destination",
+                label="Session share destination",
+                description=(
+                    "Where to upload sessions with /share (auto prefers Radius when authenticated, otherwise GitHub "
+                    "Gist)"
+                ),
+                currentValue=config.sessionShareDestination,
+                values=["auto", "gist", "radius"],
+            ),
+            SettingItem(
                 id="http-idle-timeout",
                 label="HTTP idle timeout",
                 description=(
@@ -831,7 +853,8 @@ class SettingsSelectorComponent(Container):
             SettingItem(
                 id="show-hardware-cursor",
                 label="Show hardware cursor",
-                description="Show the terminal cursor while still positioning it for IME support",
+                # MISAKA fork: MISAKA's drawn cursor (pi: "Pi's").
+                description="Use the terminal cursor instead of MISAKA's drawn cursor",
                 currentValue="true" if config.showHardwareCursor else "false",
                 values=["true", "false"],
             ),
@@ -926,6 +949,8 @@ class SettingsSelectorComponent(Container):
                     callbacks.onFollowUpModeChange(value)
                 case "transport":
                     callbacks.onTransportChange(value)
+                case "share-destination":
+                    callbacks.onSessionShareDestinationChange(value)
                 case "http-idle-timeout":
                     choice: Any = next((item for item in HTTP_IDLE_TIMEOUT_CHOICES if item["label"] == newValue), None)
                     if choice:

@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/src/utils/validation.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/src/utils/validation.ts`` (v1.3.0).
 
 MISAKA fork: TypeBox's ``Compile`` is a jsonschema Draft 2020-12 validator, and a TypeBox schema
 (``Object.getOwnPropertySymbols(...).includes(TYPEBOX_KIND)``) is a pydantic model class, validated with
@@ -306,6 +306,8 @@ def validateToolArguments(tool: Tool, toolCall: ToolCall) -> Any:
 
     Returns the validated (and potentially coerced) arguments; raises with a formatted message if validation fails.
     """
+    if toolCall.argumentsError:
+        raise ValueError(f'Invalid arguments for tool "{toolCall.name}": {toolCall.argumentsError}')
     # MISAKA fork: a pydantic model class is the TypeBox schema of a MISAKA tool.
     if isinstance(tool.parameters, type) and issubclass(tool.parameters, BaseModel):
         return _validatePydanticToolArguments(tool, toolCall)

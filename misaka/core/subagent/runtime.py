@@ -1251,7 +1251,10 @@ class SubagentManager:
         )
         selected = registry.find(provider, normalize_model_for_api(model_id))
         if selected is None:
-            raise ValueError(f"Unknown sub-agent model: {provider}/{model_id}")
+            from misaka.core.model_runtime import personalizedCatalogHint
+
+            hint = personalizedCatalogHint(provider)
+            raise ValueError(f"Unknown sub-agent model: {provider}/{model_id}" + (f".{hint}" if hint else ""))
         if not registry.hasConfiguredAuth(selected):
             raise ValueError(f"No configured authentication for sub-agent model: {provider}/{model_id}")
         return provider, model_id

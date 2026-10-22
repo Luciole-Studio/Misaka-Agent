@@ -40,7 +40,7 @@ def createWriteTool() -> dict[str, Any]:
             getOrThrow(await env.writeFile(absolutePath, content, context))
             if signal is not None and signal.aborted:
                 raise RuntimeError("Operation aborted")
-            return {"content": [{"type": "text", "text": f"Successfully wrote to {path}"}]}
+            return {"output": [{"type": "text", "text": f"Successfully wrote to {path}"}]}
 
         return await withFileMutationQueue(env, absolutePath, write, context)
 

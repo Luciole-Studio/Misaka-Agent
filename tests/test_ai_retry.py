@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/test/retry.test.ts`` (v1.1.0)."""
+"""Translated from pi's ``packages/ai/test/retry.test.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
@@ -90,6 +90,32 @@ def test_matches_dns_transport_failure_wording(errorMessage):
 )
 def test_matches_http2_pending_stream_cancellation(errorMessage):
     # Regression for #10379.
+    assert isRetryableAssistantError(_failed(errorMessage)) is True
+
+
+@pytest.mark.parametrize(
+    "errorMessage",
+    [
+        # Regression for #10965 (provider unknown, no status code in the message).
+        "The service is temporarily unavailable. Please retry later.",
+        # Bedrock ServiceUnavailableException as formatted by formatBedrockError.
+        "Service unavailable: The service is temporarily unavailable.",
+    ],
+)
+def test_matches_service_unavailable_wording(errorMessage):
+    assert isRetryableAssistantError(_failed(errorMessage)) is True
+
+
+@pytest.mark.parametrize(
+    "errorMessage",
+    [
+        # pi 1.2.0 (#10842): gateway wording of a transient upstream failure.
+        "The upstream provider returned an error",
+        # pi 1.3.0 (#10920): a `response.failed` event without an error code from a relaying gateway.
+        "Unable to forward upstream stream",
+    ],
+)
+def test_matches_gateway_upstream_failure_wording(errorMessage):
     assert isRetryableAssistantError(_failed(errorMessage)) is True
 
 

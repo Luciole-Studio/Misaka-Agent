@@ -142,7 +142,8 @@ institution runs. Describe it in `~/.misaka/models.json`:
 | `models[].samplingParams` | sampling values sent with every request, such as `temperature` or `top_p` |
 | `models[].samplingParamsByThinkingLevel` | sampling values for one thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), applied over `samplingParams` |
 
-The model then appears in `/model` as `ollama/qwen3:32b`.
+The model then appears in `/model` as `ollama/qwen3:32b`. An editor can check the file as you
+type: see [Schemas for your editor](../reference/configuration.md#schemas-for-your-editor).
 
 Some local thinking models want different sampling with thinking on and off. For example:
 

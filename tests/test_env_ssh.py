@@ -25,8 +25,10 @@ import pytest
 from misaka.chord.context import BACKGROUND_CONTEXT
 from misaka.durable.env import getOrThrow
 from misaka.env import (
+    Connection,
     HostKeyChangedError,
     HostKeyUnknownError,
+    LocalExecutionEnv,
     RemoteExecutionEnv,
     acceptHostKey,
     connectSsh,
@@ -35,7 +37,7 @@ from misaka.env import (
     sshConnection,
 )
 from misaka.env.ssh import POSIX_PROBE, launchCommand, parseProbe, sshArguments
-from tests.env_support import closeConnection, daemon
+from tests.env_support import closeConnection, daemon, daemonCommand
 
 context = BACKGROUND_CONTEXT
 windows = sys.platform == "win32"
@@ -206,6 +208,42 @@ async def test_verifies_the_daemon_again_before_starting_it_after_a_lost_connect
         assert Path(file).read_bytes() == Path(daemon).read_bytes()
     finally:
         await closeConnection(connection)
+
+
+@needsSshd
+async def test_lists_files_over_ssh_as_the_local_environment_lists_them(server):
+    await listsFilesOverSsh(server["target"], server["home"])
+
+
+async def listsFilesOverSsh(target: dict[str, Any], home: str) -> None:
+    tree = os.path.join(home, "tree")
+    for file in ["a/b.txt", "a/c/d.txt", ".hidden", "out/x.js", "skip/y.txt", ".git/HEAD"]:
+        os.makedirs(os.path.dirname(os.path.join(tree, file)), exist_ok=True)
+        Path(tree, file).write_text("", encoding="utf-8")
+    os.mkdir(os.path.join(tree, "empty"))
+    Path(tree, ".gitignore").write_text("out/\n", encoding="utf-8")
+    connection = (await connectSsh({**target, "binary": daemon}))["connection"]
+    local = Connection({"command": daemonCommand()})
+    try:
+        remote = RemoteExecutionEnv({"connection": connection, "id": "pi-env:test", "cwd": home})
+        listing = getOrThrow(await remote.listFiles("tree", {"exclude": ["skip"]}, context))
+        assert listing == {
+            "entries": [
+                {"path": ".gitignore", "kind": "file"},
+                {"path": ".hidden", "kind": "file"},
+                {"path": "a", "kind": "directory"},
+                {"path": "a/b.txt", "kind": "file"},
+                {"path": "a/c", "kind": "directory"},
+                {"path": "a/c/d.txt", "kind": "file"},
+                {"path": "empty", "kind": "directory"},
+            ],
+            "truncated": False,
+        }
+        env = LocalExecutionEnv({"connection": local, "cwd": home})
+        assert getOrThrow(await env.listFiles("tree", {"exclude": ["skip"]}, context)) == listing
+    finally:
+        await closeConnection(connection)
+        await closeConnection(local)
 
 
 @needsSshd
@@ -422,6 +460,11 @@ async def test_a_verified_daemon_is_reused_and_a_tampered_one_replaced_also_afte
         assert Path(file).read_bytes() == Path(daemon).read_bytes()
     finally:
         await closeConnection(connection)
+
+
+@needsPosix
+async def test_lists_files_over_the_stand_in_ssh_as_the_local_environment_lists_them(fake):
+    await listsFilesOverSsh(fake["target"], fake["home"])
 
 
 @needsPosix

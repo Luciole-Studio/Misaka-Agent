@@ -28,7 +28,7 @@ def exampleTool(name: str, description: str) -> dict[str, Any]:
     """Apps may attach their own metadata to tools, such as a prompt snippet."""
 
     async def execute(args: dict[str, Any], api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": [{"type": "text", "text": f"{name} {args['path']}"}]}
+        return {"output": [{"type": "text", "text": f"{name} {args['path']}"}]}
 
     tool = defineTool(
         {

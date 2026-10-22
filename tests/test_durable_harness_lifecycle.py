@@ -124,7 +124,7 @@ async def test_open_closes_without_a_cancelled_caller_context_and_rethrows_the_o
     assert await storageOpen(storage) is False
 
 
-async def test_open_reports_a_failing_close_and_still_rethrows_the_open_error():
+async def test_open_rethrows_the_open_error_and_reports_it_once_though_closing_then_fails_too():
     class FailingClose(ControlledStorage):
         async def close(self, closeContext: Any) -> None:
             await super().close(closeContext)
@@ -139,7 +139,8 @@ async def test_open_reports_a_failing_close_and_still_rethrows_the_open_error():
     )
     with pytest.raises(Exception, match="disk full"):
         await opening
-    assert [str(error) for error in reports] == ["close failed"]
+    # The storage failure that failed open is the cause; the close that fails after it adds no report.
+    assert [str(error) for error in reports] == ["disk full"]
     assert all(isinstance(error, RuntimeError) for error in reports)
 
 
@@ -186,7 +187,7 @@ async def test_close_joins_a_tool_execute_and_a_hook_that_ignore_their_signal_be
     async def execute(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         if where == "tool":
             await stubborn()
-        return {"content": []}
+        return {"output": []}
 
     addTool(
         setup.registry,

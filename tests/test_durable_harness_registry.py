@@ -27,7 +27,7 @@ from tests.durable_support import context
 
 def tool(name: str, **extra: Any) -> dict[str, Any]:
     async def execute(args: Any, api: Any, ctx: Any) -> dict[str, Any]:
-        return {"content": []}
+        return {"output": []}
 
     return {
         "name": name,

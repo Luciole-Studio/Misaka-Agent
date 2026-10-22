@@ -575,5 +575,7 @@ async def test_skill_preflight_keeps_unaccepted_next_turn_notifications(host, mo
             await host.session.prompt('/agent-reach inspect')
     else:
         await host.session.prompt('/agent-reach inspect')
+    # pi 1.2: the run takes the nextTurn messages once its hooks ran, so one that arrives during them goes
+    # into the starting run too; a run that does not start leaves every one pending.
     assert [text_of(m) for m in host.session._pendingNextTurnMessages] == (
-        ['before', 'during'] if fail_preflight else ['during'])
+        ['before', 'during'] if fail_preflight else [])

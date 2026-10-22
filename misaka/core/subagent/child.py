@@ -557,7 +557,10 @@ async def amain() -> int:
             )
             model = session.modelRegistry.find(provider, normalize_model_for_api(model_id))
             if model is None:
-                raise RuntimeError(f"Hook model is not available: {provider}/{model_id}")
+                from misaka.core.model_runtime import personalizedCatalogHint
+
+                hint = personalizedCatalogHint(provider)
+                raise RuntimeError(f"Hook model is not available: {provider}/{model_id}" + (f".{hint}" if hint else ""))
             if not session.modelRegistry.hasConfiguredAuth(model):
                 raise RuntimeError(f"No configured authentication for hook model: {provider}/{model_id}")
         else:

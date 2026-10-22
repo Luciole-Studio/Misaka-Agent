@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from misaka.mcp.client import McpClient
-from misaka.mcp.protocol.jsonrpc import McpError
+from misaka.mcp.protocol.jsonrpc import McpAbortError, McpError, McpTimeoutError
 from misaka.mcp.protocol.types import LATEST_PROTOCOL_VERSION
 from misaka.mcp.transports.streamable_http import (
     McpAuthRequiredError,
@@ -20,6 +20,7 @@ from misaka.mcp.transports.streamable_http import (
     consumeSseStream,
 )
 from misaka.utils import whatwg_fetch as _fetch
+from misaka.utils.js import AbortController
 from tests.mcp_helpers import closeServers, listen, readBody
 
 
@@ -369,6 +370,89 @@ async def test_hands_401_and_insufficient_scope_403_responses_to_the_auth_provid
     }))
     assert await client.callTool("echo") == {"content": [{"type": "text", "text": "hello"}]}
     assert seen == [{"status": 401, "token": "old"}, {"status": 403, "token": "new"}]
+    await client.close()
+
+
+# #10598: a request cancelled or timed out while waiting for a shared refresh must not be retried.
+async def test_does_not_retry_requests_that_were_cancelled_while_authorization_was_recovering():
+    token = "old"
+    executed: list = []
+
+    async def handler(request, response, requests):
+        if request.method != "POST":
+            return await protocolHandler(request, response, requests)
+        message = json.loads(await readBody(request))
+        if message.get("method") == "tools/call" and request.headers.get("authorization") == "Bearer old":
+            response.writeHead(401, {"www-authenticate": "Bearer"}).end()
+            return
+        if message.get("method") == "tools/call":
+            executed.append(message["params"]["name"])
+        return await protocolHandler(request, response, requests, message)
+
+    url = (await startServer(handler))["url"]
+    loop = asyncio.get_running_loop()
+    refreshGate: asyncio.Future[None] = loop.create_future()
+    waitingGate: asyncio.Future[None] = loop.create_future()
+    refresh: asyncio.Future[None] | None = None
+    refreshes = 0
+    waiting = 0
+
+    async def currentToken():
+        return token
+
+    async def refreshed():
+        nonlocal token
+        await refreshGate
+        token = "new"
+
+    async def onUnauthorized(_context):
+        nonlocal refresh, refreshes, waiting
+        if refresh is None:
+            refreshes += 1
+            refresh = asyncio.ensure_future(refreshed())
+        waiting += 1
+        if waiting == 3:
+            waitingGate.set_result(None)
+        await asyncio.shield(refresh)
+
+    client = McpClient({"name": "http-test", "version": "1.0.0"})
+    await client.connect(StreamableHttpTransport({
+        "url": url,
+        "openGetStream": False,
+        "authProvider": SimpleNamespace(token=currentToken, onUnauthorized=onUnauthorized),
+    }))
+    controller = AbortController()
+    aborted = asyncio.ensure_future(client.callTool("aborted", {}, {"signal": controller.signal}))
+    timedOut = asyncio.ensure_future(client.callTool("timed-out", {}, {"timeoutMs": 200}))
+    kept = asyncio.ensure_future(client.callTool("kept"))
+    await waitingGate
+    controller.abort()
+    with pytest.raises(McpAbortError) as abortedError:
+        await aborted
+    assert abortedError.value.name == "AbortError"
+    with pytest.raises(McpTimeoutError) as timeoutError:
+        await timedOut
+    assert timeoutError.value.name == "McpTimeoutError"
+    refreshGate.set_result(None)
+    assert await kept == {"content": [{"type": "text", "text": "hello"}]}
+    assert executed == ["kept"]
+    assert refreshes == 1
+    await client.close()
+
+
+async def test_a_send_whose_signal_already_aborted_never_reaches_the_server():
+    """MISAKA adaptation: the dispatch check sits after the token read, so a message whose sender gave up
+    before ``send`` ran is not posted at all."""
+    started = await startServer(protocolHandler)
+    transport = StreamableHttpTransport({"url": started["url"], "openGetStream": False})
+    client = McpClient({"name": "http-test", "version": "1.0.0"})
+    await client.connect(transport)
+    before = len(started["requests"])
+    controller = AbortController()
+    controller.abort()
+    with pytest.raises(McpAbortError):
+        await transport.send({"jsonrpc": "2.0", "method": "notifications/ping"}, {"signal": controller.signal})
+    assert len(started["requests"]) == before
     await client.close()
 
 

@@ -1,8 +1,9 @@
-"""Translated from pi's ``packages/ai/scripts/openrouter-catalog.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/scripts/openrouter-catalog.ts`` (v1.3.0).
 
-An OpenRouter list item is the API's JSON object (``id``, ``name``, ``supported_parameters``, ``architecture``,
-``pricing`` with prompt-length or time-of-day ``overrides``, ``top_provider``, ``context_length``, ``reasoning``); the
-catalog is ``{"chat": [...], "images": [...], "classifiers": [...]}`` of model records. A property the source lacks is
+An OpenRouter list item (``OpenRouterModelListItem``) is the API's JSON object: the ``OpenRouterModel`` fields
+(``id``, ``context_length``, ``top_provider``, ``pricing``, see ``misaka.ai.providers.openrouter_api``) plus ``name``,
+``supported_parameters``, ``architecture`` and ``reasoning``; the catalog is
+``{"chat": [...], "images": [...], "classifiers": [...]}`` of model records. A property the source lacks is
 ``UNDEFINED``, which ``jsonStringify`` leaves out as ``JSON.stringify`` does.
 """
 
@@ -13,11 +14,8 @@ from typing import Any
 
 from openrouter_reasoning_options import getOpenRouterThinkingLevelMap
 
-from misaka.utils.js import UNDEFINED, parseFloat, toFixed
-
-
-def roundCost(value: float) -> float:
-    return float(toFixed(value, 6))
+from misaka.ai.providers.openrouter_api import openRouterCost
+from misaka.utils.js import UNDEFINED
 
 
 def modalities(values: list[Any] | None) -> list[str]:
@@ -26,42 +24,6 @@ def modalities(values: list[Any] | None) -> list[str]:
         if (value == "text" or value == "image") and value not in result:
             result.append(value)
     return result
-
-
-def perMillion(value: str | None, fallback: float) -> float:
-    """Convert pricing from $/token to $/million tokens."""
-    return roundCost(parseFloat(value) * 1_000_000) if value else fallback
-
-
-def cost(model: dict[str, Any]) -> dict[str, Any]:
-    pricing = model.get("pricing") or {}
-    base: dict[str, Any] = {
-        "input": perMillion(pricing.get("prompt"), 0),
-        "output": perMillion(pricing.get("completion"), 0),
-        "cacheRead": perMillion(pricing.get("input_cache_read"), 0),
-        "cacheWrite": perMillion(pricing.get("input_cache_write"), 0),
-    }
-    # Prompt-length overrides become request-wide tiers. Time-of-day overrides are skipped
-    # because ModelCost cannot express them.
-    tiers: list[dict[str, Any]] = []
-    for override in pricing.get("overrides") or []:
-        if (
-            "min_prompt_tokens" not in override
-            or "utc_start" in override
-            or "utc_end" in override
-            or "utc_days" in override
-        ):
-            continue
-        tiers.append(
-            {
-                "inputTokensAbove": override["min_prompt_tokens"],
-                "input": perMillion(override.get("prompt"), base["input"]),
-                "output": perMillion(override.get("completion"), base["output"]),
-                "cacheRead": perMillion(override.get("input_cache_read"), base["cacheRead"]),
-                "cacheWrite": perMillion(override.get("input_cache_write"), base["cacheWrite"]),
-            }
-        )
-    return {**base, "tiers": tiers} if len(tiers) > 0 else base
 
 
 def _architecture(model: dict[str, Any]) -> dict[str, Any]:
@@ -108,7 +70,7 @@ def buildOpenRouterCatalog(
                 "reasoning": "reasoning" in (model.get("supported_parameters") or []) or False,
                 **({"thinkingLevelMap": thinkingLevelMap} if thinkingLevelMap else {}),
                 "input": input,
-                "cost": cost(model),
+                "cost": openRouterCost(model.get("pricing")),
                 "contextWindow": _contextWindow(model),
                 "maxTokens": (model.get("top_provider") or {}).get("max_completion_tokens") or 4096,
             }
@@ -132,7 +94,7 @@ def buildOpenRouterCatalog(
                 "baseUrl": "https://openrouter.ai/api/v1",
                 "input": input if len(input) > 0 else ["text"],
                 "output": output,
-                "cost": cost(model),
+                "cost": openRouterCost(model.get("pricing")),
             }
         )
 
@@ -154,7 +116,7 @@ def buildOpenRouterCatalog(
                 "provider": "openrouter",
                 "baseUrl": "https://openrouter.ai/api/v1",
                 "input": input if len(input) > 0 else ["text"],
-                "cost": cost(model),
+                "cost": openRouterCost(model.get("pricing")),
                 "contextWindow": _contextWindow(model),
             }
         )
@@ -162,4 +124,4 @@ def buildOpenRouterCatalog(
     return {"chat": chat, "images": images, "classifiers": classifiers}
 
 
-__all__ = ["buildOpenRouterCatalog", "cost", "modalities", "perMillion", "roundCost"]
+__all__ = ["buildOpenRouterCatalog", "modalities"]

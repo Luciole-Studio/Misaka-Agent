@@ -1,4 +1,4 @@
-"""Translated from pi's ``modes/interactive/session-share.ts`` (v1.1.0).
+"""Translated from pi's ``modes/interactive/session-share.ts`` (v1.3.0).
 
 MISAKA forks: the gist result shows the gist URL only. pi also prints a share-viewer link on pi.dev
 (``getShareViewerUrl``), which MISAKA does not use. The Radius artifact is titled "MISAKA session".
@@ -85,8 +85,13 @@ async def shareSession(context: SessionShareContext) -> None:
         except Exception as error:  # noqa: BLE001 - upstream `catch (error)` reports any export failure
             context.showError(f"Failed to export session: {errorMessage(error)}")
             return
-        if await tryShareViaRadius(jsonlFile, context):
-            return
+        destination = context.session.settingsManager.getSessionShareDestination()
+        if destination != "gist":
+            if await tryShareViaRadius(jsonlFile, context):
+                return
+            if destination == "radius":
+                context.showError("Radius authentication is not configured. Run '/login radius' first.")
+                return
 
         try:
             authResult = subprocess.run(  # noqa: ASYNC221 - upstream spawnSync

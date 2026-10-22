@@ -1,20 +1,26 @@
-"""The unit tests of pi env's Rust daemon (``#[cfg(test)]`` in ``frame.rs``, ``decode.rs``, ``scan.rs``, ``window.rs`` and
-``sys/windows.rs``), and MISAKA's checks of the Python daemon: Python 3.9 syntax, standard-library-only imports, the
+"""The unit tests of pi env's Rust daemon (``#[cfg(test)]`` in ``frame.rs``, ``decode.rs``, ``scan.rs``, ``window.rs``,
+``list.rs`` and ``sys/windows.rs``; ``pty.rs`` has none), and MISAKA's checks of the Python daemon: Python 3.9 syntax, standard-library-only imports, the
 reproducible zip application, and that only the experimental side reaches ``misaka.env`` (D5)."""
 
 from __future__ import annotations
 
 import ast
 import io
+import os
+import shutil
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
+from typing import Any, Self
 
 import pytest
 
 from misaka.env.bundle import DAEMON_PACKAGE, SHEBANG, daemonArchive
 from misaka.env.daemon.decode import StreamDecoder
+from misaka.env.daemon.errors import Failure
 from misaka.env.daemon.frame import RESULT, Frame, read_frame, write_frame
+from misaka.env.daemon.list import Options, list_files
 from misaka.env.daemon.scan import LineScanner
 from misaka.env.daemon.window import Pending, Window, newline_count
 
@@ -139,6 +145,124 @@ def test_delivers_streams_apart_without_skips():
     assert [event.stream for event in pending.take()] == ["stdout", "stderr", "stdout"]
 
 
+# list.rs
+
+
+class Tree:
+    """A directory of files for a test, removed after it."""
+
+    def __init__(self, files: list[str]) -> None:
+        self.root = tempfile.mkdtemp(prefix=f"pi-env-list-{os.getpid()}-")
+        for file in files:
+            self.write(file, "")
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def write(self, path: str, content: str) -> None:
+        target = os.path.join(self.root, path)
+        if path.endswith("/"):
+            os.makedirs(target, exist_ok=True)
+            return
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        Path(target).write_text(content, encoding="utf-8")
+
+    def list(self, options: Options) -> tuple[list[str], bool]:
+        listing = list_files(self.root, options, lambda: False)
+        entries = [
+            f"{chr(record[0])} {record[1:].decode('utf-8', 'replace')}"
+            for record in bytes(listing.payload).split(b"\0")
+            if record
+        ]
+        assert len(entries) == listing.count
+        return entries, listing.truncated
+
+
+def options(**fields: Any) -> Options:
+    """``Options::from_json(&json!({}))``, with ``fields`` replaced as ``Options { field, ..options() }`` does."""
+    parsed = Options.from_json({})
+    for key, value in fields.items():
+        assert hasattr(parsed, key)
+        setattr(parsed, key, value)
+    return parsed
+
+
+def test_lists_files_and_directories_depth_first_in_name_order():
+    with Tree(["b.txt", "a/z.txt", "a/b/c.txt", "empty/", ".hidden/x", "A.txt"]) as tree:
+        entries, truncated = tree.list(options())
+        assert entries == [
+            "d .hidden",
+            "f .hidden/x",
+            "f A.txt",
+            "d a",
+            "d a/b",
+            "f a/b/c.txt",
+            "f a/z.txt",
+            "f b.txt",
+            "d empty",
+        ]
+        assert not truncated
+        entries, _ = tree.list(options(hidden=False))
+        assert not any(".hidden" in entry for entry in entries)
+
+
+def test_skips_what_git_ignores_only_in_work_trees():
+    with Tree(["keep.txt", "out/x.js", "sub/keep.txt", "sub/drop.log", "node_modules/m/i.js"]) as tree:
+        tree.write(".gitignore", "out/\n*.log\n")
+        tree.write("sub/.gitignore", "!keep.txt\n")
+        # Not a work tree yet: everything is listed.
+        entries, _ = tree.list(options())
+        assert "f out/x.js" in entries
+        tree.write(".git/HEAD", "ref: refs/heads/main\n")
+        tree.write(".git/info/exclude", "keep.txt\n")
+        entries, _ = tree.list(options(exclude=["node_modules"]))
+        assert entries == ["f .gitignore", "d sub", "f sub/.gitignore", "f sub/keep.txt"]
+        entries, _ = tree.list(options(gitignore=False))
+        assert "f out/x.js" in entries
+        assert not any(".git/" in entry for entry in entries)
+        # A subdirectory of a work tree applies the rules of its parents.
+        sub = list_files(os.path.join(tree.root, "sub"), options(), lambda: False)
+        assert bytes(sub.payload) == b"f.gitignore\0fkeep.txt\0"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="#[cfg(unix)]")
+def test_lists_symbolic_links_without_following_them():
+    with Tree(["dir/inner.txt"]) as tree:
+        os.symlink(os.path.join(tree.root, "dir"), os.path.join(tree.root, "link"))
+        os.symlink("missing", os.path.join(tree.root, "dangling"))
+        os.symlink(tree.root, os.path.join(tree.root, "dir", "loop"))
+        entries, _ = tree.list(options())
+        assert entries == ["l dangling", "d dir", "f dir/inner.txt", "l dir/loop", "l link"]
+
+
+def test_stops_at_bounds_with_truncated():
+    with Tree(["a", "b", "c"]) as tree:
+        entries, truncated = tree.list(options(max_entries=2))
+        assert (len(entries), truncated) == (2, True)
+        entries, truncated = tree.list(options(max_entries=3))
+        assert (len(entries), truncated) == (3, False)
+        entries, truncated = tree.list(options(max_bytes=6))
+        assert (entries, truncated) == (["f a", "f b"], True)
+        entries, truncated = tree.list(options(timeout=0))
+        assert truncated and entries == []
+
+
+def test_fails_on_missing_roots_files_and_aborts():
+    with Tree(["file"]) as tree:
+        with pytest.raises(Failure) as missing:
+            list_files(os.path.join(tree.root, "missing"), options(), lambda: False)
+        assert missing.value.code == "ENOENT"
+        with pytest.raises(Failure) as file:
+            list_files(os.path.join(tree.root, "file"), options(), lambda: False)
+        assert file.value.code == "ENOTDIR"
+        with pytest.raises(Failure) as aborted:
+            list_files(tree.root, options(), lambda: True)
+        assert aborted.value.code == "aborted"
+
+
 # sys/windows.rs
 
 
@@ -193,12 +317,11 @@ def test_the_daemon_archive_is_reproducible_and_runs_the_package():
         assert b"\r\n" not in opened.read(f"{DAEMON_PACKAGE}/main.py")
 
 
-ALLOWED = ("misaka/env/", "misaka/experimental/", "misaka/cli/experimental/")
+ALLOWED = ("misaka/env/",)
 
 
-def test_only_the_experimental_side_imports_misaka_env():
-    """D5: like pi's package, which nothing in pi's coding agent imports, ``misaka.env`` is reachable only from the
-    experimental side."""
+def test_nothing_outside_misaka_env_imports_it():
+    """D5: like pi's package, which nothing in pi's coding agent imports, nothing in misaka imports ``misaka.env``."""
     offenders = []
     for path in sorted((ROOT / "misaka").rglob("*.py")):
         relative = path.relative_to(ROOT).as_posix()

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import re
 import shutil
+import sys
 import tempfile
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
@@ -16,7 +19,6 @@ from misaka.chord.context import withAbortSignal
 from misaka.durable import (
     LiveDoc,
     MemoryStorage,
-    StorageRejected,
     configure,
     createSession,
     defineDoc,
@@ -26,7 +28,7 @@ from misaka.durable import (
 from misaka.durable.storage.sqlite.node import openNodeSqliteStorage
 from misaka.utils.js import AbortController
 from tests.chat_support import chatSetup, openChat, waitFor
-from tests.durable_support import context, toMatchObject
+from tests.durable_support import ControlledStorage, context, toMatchObject
 from tests.harness_support import addTask, addTool
 from tests.task_support import aborted, deferred, openTasks, race, settled
 
@@ -97,6 +99,29 @@ Waiter = defineTask(
         "version": 1,
         "initial": lambda input: {"phase": "wait"},
         "phases": {"wait": waiterWait, "done": waiterDone},
+        "abort": waiterAbort,
+    }
+)
+
+
+async def spawnerSpawn(task: Any, runtime: Any, ctx: Any) -> None:
+    async def spawn(tx: Any, current: Any) -> dict[str, Any]:
+        child = await tx.createConversation({"ownership": {"kind": "task", "taskId": task["id"]}})
+        await tx.createTask(
+            Hold, {"name": task["input"]["name"]}, {"ownership": {"kind": "conversation"}, "conversationId": child["id"]}
+        )
+        return {"status": "terminal", "outcome": {"status": "completed", "result": None}}
+
+    await runtime.commit(spawn, ctx)
+
+
+# Tries to create, in the commit that ends it, a conversation it owns with a held task in it, named by its input.
+Spawner = defineTask(
+    {
+        "name": "test.spawner",
+        "version": 1,
+        "initial": lambda input: {"phase": "spawn"},
+        "phases": {"spawn": spawnerSpawn},
         "abort": waiterAbort,
     }
 )
@@ -187,8 +212,15 @@ async def status(harness: Any, id: int) -> dict[str, Any]:
     return (await harness.getTask(id, context))["state"]  # type: ignore[no-any-return]
 
 
+def queuedNote(text: str) -> dict[str, Any]:
+    """A write that affects model context, so it queues while busy; a data-only write would be appended at once."""
+    return {"kind": "note", "model": [{"role": "user", "content": text, "timestamp": 0}]}
+
+
 async def openHarness(storage: Any = None) -> SimpleNamespace:
-    harness, registry, reports = await openTasks(storage if storage is not None else MemoryStorage(), [Hold, Waiter])
+    harness, registry, reports = await openTasks(
+        storage if storage is not None else MemoryStorage(), [Hold, Waiter, Spawner]
+    )
     root = await harness.root(context)
     harness.resume()
     return SimpleNamespace(harness=harness, registry=registry, reports=reports, root=root)
@@ -221,6 +253,412 @@ async def test_keeps_a_conversation_busy_while_its_owned_foreground_subtree_has_
     await idle
     await harness.waitForIdle(context)
     assert (await status(harness, tree.owner))["outcome"]["status"] == "completed"
+    await harness.close(context)
+
+
+async def test_holds_an_owner_for_work_in_a_conversation_its_ended_child_task_owns():
+    opened = await openHarness()
+    harness, root = opened.harness, opened.root
+
+    async def create(tx: Any) -> SimpleNamespace:
+        owner = await tx.createTask(Hold, {"name": "owner"}, {"ownership": {"kind": "conversation"}})
+        child = await tx.createTask(Hold, {"name": "child"}, {"ownership": {"kind": "task", "taskId": owner}})
+        conversation = await tx.createConversation({"ownership": {"kind": "task", "taskId": child}})
+        return SimpleNamespace(owner=owner, child=child, conversation=conversation["id"])
+
+    tree = await root.commit(create, context)
+    openGate("child", "completed")
+    assert (await harness.waitForTask(tree.child, context))["state"]["outcome"]["status"] == "completed"
+    # The ended child's conversation still belongs to the owner above it.
+    handle = await harness.conversation(tree.conversation, context)
+    await handle.commit(lambda tx: tx.createTask(Hold, {"name": "late"}, {"ownership": {"kind": "conversation"}}), context)
+    openGate("owner", "completed")
+    await waitUntil(hasStatus(harness, tree.owner, "completing"))
+    openGate("late", "completed")
+    assert (await harness.waitForTask(tree.owner, context))["state"]["outcome"]["status"] == "completed"
+    await harness.close(context)
+
+
+async def test_cascades_through_ended_tasks_into_an_owned_background_subtree_when_aborting_across_background():
+    opened = await openHarness()
+    harness, root = opened.harness, opened.root
+
+    # root conversation -> A -> B -> conversation -> background C -> D
+    async def create(tx: Any) -> SimpleNamespace:
+        a = await tx.createTask(Hold, {"name": "a"}, {"ownership": {"kind": "conversation"}})
+        b = await tx.createTask(Hold, {"name": "b"}, {"ownership": {"kind": "task", "taskId": a}})
+        conversation = await tx.createConversation({"ownership": {"kind": "task", "taskId": b}})
+        c = await tx.createTask(
+            Hold,
+            {"name": "c"},
+            {"ownership": {"kind": "conversation"}, "conversationId": conversation["id"], "background": True},
+        )
+        d = await tx.createTask(Hold, {"name": "d"}, {"ownership": {"kind": "task", "taskId": c}})
+        return SimpleNamespace(a=a, b=b, c=c, d=d)
+
+    tree = await root.commit(create, context)
+    openGate("b", "completed")
+    openGate("a", "completed")
+    assert (await harness.waitForTask(tree.a, context))["state"]["outcome"]["status"] == "completed"
+    await root.abort(context, {"background": True})
+    for id in (tree.c, tree.d):
+        assert (await harness.waitForTask(id, context))["state"]["outcome"]["status"] == "aborted"
+    await harness.close(context)
+
+
+class CountingSet(dict):  # type: ignore[type-arg]
+    """One of the scheduler's ordered sets (a ``dict`` of ``None`` values) whose iterations count every entry."""
+
+    def __init__(self, items: Any, counter: list[int]) -> None:
+        super().__init__(dict.fromkeys(items))
+        self.counter = counter
+
+    def __iter__(self) -> Iterator[Any]:
+        for value in dict.__iter__(self):
+            self.counter[0] += 1
+            yield value
+
+
+@contextlib.contextmanager
+def countedSetIterations(harness: Any) -> Iterator[list[int]]:
+    """Count the entries iterated over the scheduler's sets while the block runs, in ``counter[0]``. MISAKA fork:
+    upstream replaces ``Set.prototype[Symbol.iterator]``, which counts every Set of the process; a builtin ``dict`` or
+    ``set`` cannot be patched, so the scheduler's own sets, those its indexes hold and those ``addTo`` creates, are
+    swapped for counting ones."""
+    counter = [0]
+    scheduler = harness._tasks
+    module = sys.modules[type(scheduler).__module__]
+    for name in (
+        "_dropQueue",
+        "_roots",
+        "_unloaded",
+        "_intent",
+        "_runnable",
+        "_finalizeChecks",
+        "_failFastChecks",
+        "_abandoned",
+    ):
+        setattr(scheduler, name, CountingSet(getattr(scheduler, name), counter))
+    for name in ("_below", "_waiters"):
+        index = getattr(scheduler, name)
+        for key in list(index.keys()):
+            index[key] = CountingSet(index[key], counter)
+    original = module.addTo
+
+    def addTo(map: dict[Any, Any], key: Any, value: Any) -> None:
+        values = map.get(key)
+        if values is None:
+            map[key] = CountingSet([value], counter)
+        else:
+            values[value] = None
+
+    module.addTo = addTo
+    try:
+        yield counter
+    finally:
+        module.addTo = original
+
+
+async def test_keeps_ownership_queries_off_finished_subtrees():
+    opened = await openHarness()
+    harness, root = opened.harness, opened.root
+    # Ended chains under a live owner, each ending in an empty owned conversation.
+    owner = await root.commit(
+        lambda tx: tx.createTask(Hold, {"name": "owner"}, {"ownership": {"kind": "conversation"}}), context
+    )
+    chains = 50
+    tasks: list[int] = []
+    for n in range(chains):
+
+        async def create(tx: Any, n: int = n) -> list[int]:
+            first = await tx.createTask(Hold, {"name": f"c{n}.0"}, {"ownership": {"kind": "task", "taskId": owner}})
+            second = await tx.createTask(Hold, {"name": f"c{n}.1"}, {"ownership": {"kind": "task", "taskId": first}})
+            await tx.createConversation({"ownership": {"kind": "task", "taskId": second}})
+            return [first, second]
+
+        tasks.extend(await root.commit(create, context))
+    for n in range(chains):
+        openGate(f"c{n}.1", "completed")
+        openGate(f"c{n}.0", "completed")
+    for id in tasks:
+        await harness.waitForTask(id, context)
+    # Set iterations while the owner settles, a measure of the walks down: one through every ended task iterates
+    # hundreds of entries; one over live work alone, none below the owner.
+    with countedSetIterations(harness) as counter:
+        openGate("owner", "completed")
+        assert (await harness.waitForTask(owner, context))["state"]["outcome"]["status"] == "completed"
+    assert counter[0] < chains
+    await harness.close(context)
+
+
+async def test_tracks_ownership_chains_deeper_than_the_call_stack():
+    opened = await openHarness()
+    harness, root = opened.harness, opened.root
+    # 20,000 tasks, each owning the next, created in one commit above a live leaf; they end top-down and hold.
+    depth = 20_000
+
+    async def create(tx: Any) -> SimpleNamespace:
+        top = await tx.createTask(Hold, {"name": "top"}, {"ownership": {"kind": "conversation"}})
+        owner = top
+        for n in range(depth):
+            owner = await tx.createTask(Hold, {"name": f"link{n}"}, {"ownership": {"kind": "task", "taskId": owner}})
+        leaf = await tx.createTask(Hold, {"name": "leaf"}, {"ownership": {"kind": "task", "taskId": owner}})
+        return SimpleNamespace(top=top, leaf=leaf)
+
+    tree = await root.commit(create, context)
+    for n in range(depth):
+        openGate(f"link{n}", "completed")
+    openGate("top", "completed")
+    await waitUntil(hasStatus(harness, tree.top, "completing"))
+    openGate("leaf", "completed")
+    assert (await harness.waitForTask(tree.leaf, context))["state"]["outcome"]["status"] == "completed"
+    assert (await harness.waitForTask(tree.top, context))["state"]["outcome"]["status"] == "completed"
+    await harness.close(context)
+
+
+async def test_holds_an_owner_for_work_a_commit_creates_below_ended_tasks_loaded_from_storage(sqliteDirectory):
+    path = os.path.join(sqliteDirectory, "session.sqlite")
+    opened = await openHarness(await openNodeSqliteStorage(path))
+
+    # Live P owns B, which owns A, which owns the empty conversation C; B and A end.
+    async def create(tx: Any) -> SimpleNamespace:
+        p = await tx.createTask(Hold, {"name": "p"}, {"ownership": {"kind": "conversation"}})
+        b = await tx.createTask(Hold, {"name": "b"}, {"ownership": {"kind": "task", "taskId": p}})
+        a = await tx.createTask(Hold, {"name": "a"}, {"ownership": {"kind": "task", "taskId": b}})
+        c = await tx.createConversation({"ownership": {"kind": "task", "taskId": a}})
+        return SimpleNamespace(p=p, a=a, b=b, c=c["id"])
+
+    tree = await opened.root.commit(create, context)
+    openGate("a", "completed")
+    openGate("b", "completed")
+    await opened.harness.waitForTask(tree.a, context)
+    await opened.harness.waitForTask(tree.b, context)
+    await opened.harness.close(context)
+    # After reopen, B and A are known only once a chain load reads them.
+    opened = await openHarness(await openNodeSqliteStorage(path))
+    c = await opened.harness.conversation(tree.c, context)
+    d = await c.commit(lambda tx: tx.createTask(Hold, {"name": "d"}, {"ownership": {"kind": "conversation"}}), context)
+    openGate("p", "completed")
+    await waitUntil(hasStatus(opened.harness, tree.p, "completing"))
+    openGate("d", "completed")
+    assert (await opened.harness.waitForTask(d, context))["state"]["outcome"]["status"] == "completed"
+    assert (await opened.harness.waitForTask(tree.p, context))["state"]["outcome"]["status"] == "completed"
+    await opened.harness.close(context)
+
+
+async def test_holds_an_owner_for_work_created_later_below_ended_tasks_without_a_reopen():
+    opened = await openHarness()
+    harness, root = opened.harness, opened.root
+
+    # Live P owns B, which owns A, which owns the empty conversation C; B and A end, C stays.
+    async def create(tx: Any) -> SimpleNamespace:
+        p = await tx.createTask(Hold, {"name": "p"}, {"ownership": {"kind": "conversation"}})
+        b = await tx.createTask(Hold, {"name": "b"}, {"ownership": {"kind": "task", "taskId": p}})
+        a = await tx.createTask(Hold, {"name": "a"}, {"ownership": {"kind": "task", "taskId": b}})
+        c = await tx.createConversation({"ownership": {"kind": "task", "taskId": a}})
+        return SimpleNamespace(p=p, a=a, b=b, c=c["id"])
+
+    tree = await root.commit(create, context)
+    openGate("a", "completed")
+    openGate("b", "completed")
+    await harness.waitForTask(tree.b, context)
+    c = await harness.conversation(tree.c, context)
+    d = await c.commit(lambda tx: tx.createTask(Hold, {"name": "d"}, {"ownership": {"kind": "conversation"}}), context)
+    openGate("p", "completed")
+    await waitUntil(hasStatus(harness, tree.p, "completing"))
+    openGate("d", "completed")
+    assert (await harness.waitForTask(d, context))["state"]["outcome"]["status"] == "completed"
+    assert (await harness.waitForTask(tree.p, context))["state"]["outcome"]["status"] == "completed"
+    await harness.close(context)
+
+
+async def endedBridge(depth: int) -> SimpleNamespace:
+    """Live P owns ``depth`` ended tasks in a chain, the last owning conversation C, empty when they ended. Work started
+    in C later is still P's: every case below must reach it through the ended tasks."""
+    opened = await openHarness()
+    harness, root = opened.harness, opened.root
+
+    async def build(tx: Any) -> SimpleNamespace:
+        p = await tx.createTask(Hold, {"name": "p", "slowAbort": True}, {"ownership": {"kind": "conversation"}})
+        links: list[int] = []
+        owner = p
+        for n in range(depth):
+            owner = await tx.createTask(Hold, {"name": f"link{n}"}, {"ownership": {"kind": "task", "taskId": owner}})
+            links.append(owner)
+        c = await tx.createConversation({"ownership": {"kind": "task", "taskId": owner}})
+        return SimpleNamespace(p=p, links=links, c=c["id"])
+
+    tree = await root.commit(build, context)
+    for n in range(depth - 1, -1, -1):
+        openGate(f"link{n}", "completed")
+    for id in tree.links:
+        await harness.waitForTask(id, context)
+    c = await harness.conversation(tree.c, context)
+
+    def create(name: str) -> Any:
+        return c.commit(lambda tx: tx.createTask(Hold, {"name": name}, {"ownership": {"kind": "conversation"}}), context)
+
+    return SimpleNamespace(harness=harness, root=root, p=tree.p, create=create)
+
+
+@pytest.mark.parametrize("depth", [2, 5])
+async def test_aborts_work_below_ended_tasks_with_their_live_owner_which_waits_for_it(depth):
+    bridge = await endedBridge(depth)
+    harness = bridge.harness
+    d = await bridge.create("d")
+    await harness.abortTask(bridge.p, context)
+    assert (await harness.waitForTask(d, context))["state"]["outcome"]["status"] == "aborted"
+    # P's abort handler ran only after D ended.
+    openGate("abort.p", "completed")
+    assert (await harness.waitForTask(bridge.p, context))["state"]["outcome"]["status"] == "aborted"
+    await harness.close(context)
+
+
+@pytest.mark.parametrize("depth", [2, 5])
+async def test_keeps_the_root_busy_and_aborts_with_it_work_below_ended_tasks(depth):
+    bridge = await endedBridge(depth)
+    harness, root = bridge.harness, bridge.root
+    openGate("p", "completed")
+    await harness.waitForTask(bridge.p, context)
+    # P has ended: D and D2 hang below ended tasks only, and are still the root conversation's work.
+    d = await bridge.create("d")
+    d2 = await bridge.create("d2")
+    assert await settled(root.waitForIdle(context)) is False
+    assert await settled(harness.waitForIdle(context)) is False
+    await root.abort(context)
+    for id in (d, d2):
+        assert (await harness.waitForTask(id, context))["state"]["outcome"]["status"] == "aborted"
+    await harness.close(context)
+
+
+async def test_reaches_work_below_ended_tasks_across_two_owned_conversations():
+    opened = await openHarness()
+    harness, root = opened.harness, opened.root
+
+    # Live P -> ended B -> conversation C -> ended X -> ended A -> conversation C2; work starts in C2 later. X owns no
+    # conversation, only the task A, so only owning a known task keeps it.
+    async def create(tx: Any) -> SimpleNamespace:
+        p = await tx.createTask(Hold, {"name": "p"}, {"ownership": {"kind": "conversation"}})
+        b = await tx.createTask(Hold, {"name": "b"}, {"ownership": {"kind": "task", "taskId": p}})
+        c = await tx.createConversation({"ownership": {"kind": "task", "taskId": b}})
+        x = await tx.createTask(Hold, {"name": "x"}, {"ownership": {"kind": "conversation"}, "conversationId": c["id"]})
+        a = await tx.createTask(Hold, {"name": "a"}, {"ownership": {"kind": "task", "taskId": x}})
+        c2 = await tx.createConversation({"ownership": {"kind": "task", "taskId": a}})
+        return SimpleNamespace(p=p, b=b, x=x, c2=c2["id"])
+
+    tree = await root.commit(create, context)
+    openGate("a", "completed")
+    openGate("x", "completed")
+    openGate("b", "completed")
+    await harness.waitForTask(tree.b, context)
+    c2 = await harness.conversation(tree.c2, context)
+    d = await c2.commit(lambda tx: tx.createTask(Hold, {"name": "d"}, {"ownership": {"kind": "conversation"}}), context)
+    openGate("p", "completed")
+    await waitUntil(hasStatus(harness, tree.p, "completing"))
+    assert await settled(root.waitForIdle(context)) is False
+    await root.abort(context)
+    assert (await harness.waitForTask(d, context))["state"]["outcome"]["status"] == "aborted"
+    assert (await harness.waitForTask(tree.p, context))["state"]["outcome"]["status"] == "completed"
+    await harness.close(context)
+
+
+@pytest.mark.parametrize("ending", ["completes", "is aborted"])
+async def test_frees_an_owner_once_the_last_work_below_ended_tasks_ends_after_a_background_task_there(ending):
+    opened = await openHarness()
+    harness, root = opened.harness, opened.root
+
+    # Live P owns B, which owns A, which owns conversation C with background Z and, later, foreground D.
+    async def create(tx: Any) -> SimpleNamespace:
+        p = await tx.createTask(Hold, {"name": "p"}, {"ownership": {"kind": "conversation"}})
+        b = await tx.createTask(Hold, {"name": "b"}, {"ownership": {"kind": "task", "taskId": p}})
+        a = await tx.createTask(Hold, {"name": "a"}, {"ownership": {"kind": "task", "taskId": b}})
+        c = await tx.createConversation({"ownership": {"kind": "task", "taskId": a}})
+        z = await tx.createTask(
+            Hold, {"name": "z"}, {"ownership": {"kind": "conversation"}, "conversationId": c["id"], "background": True}
+        )
+        return SimpleNamespace(p=p, a=a, b=b, c=c["id"], z=z)
+
+    tree = await root.commit(create, context)
+    openGate("a", "completed")
+    openGate("b", "completed")
+    await harness.waitForTask(tree.b, context)
+    c = await harness.conversation(tree.c, context)
+    d = await c.commit(
+        lambda tx: tx.createTask(Hold, {"name": "d", "slowAbort": True}, {"ownership": {"kind": "conversation"}}),
+        context,
+    )
+    if ending == "completes":
+        openGate("p", "completed")
+        await waitUntil(hasStatus(harness, tree.p, "completing"))
+    else:
+        # P waits for D's abort before its own abort handler runs.
+        await harness.abortTask(tree.p, context)
+        await waitUntil(abortRequested(harness, d))
+    # Z ends first, D last.
+    openGate("z", "completed")
+    await harness.waitForTask(tree.z, context)
+    if ending == "completes":
+        openGate("d", "completed")
+    else:
+        openGate("abort.d", "completed")
+    await harness.waitForTask(d, context)
+    expected = "completed" if ending == "completes" else "aborted"
+    assert (await harness.waitForTask(tree.p, context))["state"]["outcome"]["status"] == expected
+    await harness.close(context)
+
+
+async def test_finalizes_many_held_siblings_that_end_together_in_one_pass():
+    opened = await openHarness()
+    harness, root = opened.harness, opened.root
+    # Top holds 1000 held children, each holding one live leaf; the leaves end in one commit.
+    count = 1000
+
+    async def create(tx: Any) -> SimpleNamespace:
+        top = await tx.createTask(Hold, {"name": "top"}, {"ownership": {"kind": "conversation"}})
+        siblings: list[int] = []
+        for n in range(count):
+            siblings.append(await tx.createTask(Hold, {"name": f"s{n}"}, {"ownership": {"kind": "task", "taskId": top}}))
+        # Leaves in reverse sibling order: the last sibling is freed first, so a holder checked after each freed sibling
+        # would scan the siblings already finalized each time.
+        leaves: list[int] = []
+        for n in range(count - 1, -1, -1):
+            owner = siblings[n]
+            leaves.append(await tx.createTask(Hold, {"name": f"l{n}"}, {"ownership": {"kind": "task", "taskId": owner}}))
+        return SimpleNamespace(top=top, leaves=leaves)
+
+    tree = await root.commit(create, context)
+    for n in range(count):
+        openGate(f"s{n}", "completed")
+    openGate("top", "completed")
+    await waitUntil(hasStatus(harness, tree.top, "completing"))
+
+    async def endLeaves(tx: Any) -> None:
+        # Reads before the first write. Ended last to first, so a holder checked after each sibling would scan the ones
+        # already finalized every time.
+        records = []
+        for id in tree.leaves:
+            records.append(await tx.task(id))
+        for record in records:
+            tx.setTask({**record, "state": {"status": "terminal", "outcome": {"status": "completed", "result": None}}})
+
+    await root.commit(endLeaves, context)
+    # Set entries iterated while it all finalizes: one pass is linear, a recheck per sibling quadratic (~500,000).
+    with countedSetIterations(harness) as counter:
+        assert (await harness.waitForTask(tree.top, context))["state"]["outcome"]["status"] == "completed"
+    assert counter[0] < count * 20
+    await harness.close(context)
+
+
+# Pins the Transaction rule that a conversation cannot be created in the commit that ends its owner task.
+async def test_rejects_a_conversation_created_in_the_commit_that_ends_its_owner_task():
+    opened = await openHarness()
+    harness, root = opened.harness, opened.root
+    spawner = await root.commit(
+        lambda tx: tx.createTask(Spawner, {"name": "spawned"}, {"ownership": {"kind": "conversation"}}), context
+    )
+    outcome = (await harness.waitForTask(spawner, context))["state"]["outcome"]
+    assert outcome == {"status": "faulted", "error": {"message": outcome["error"]["message"]}}
+    assert re.fullmatch(rf"Conversation owner task {spawner} is (completing|terminal)", outcome["error"]["message"])
     await harness.close(context)
 
 
@@ -292,7 +730,7 @@ async def test_aborts_a_conversation_queued_inputs_withdrawn_writes_kept_foregro
     background = await ownedChild(root, "background", {"background": True})
     await busy(root, foreground.owner)
     input = (await root.submit({"type": "input", "content": "later"}, context)).id
-    write = (await root.submit({"type": "write", "entry": {"kind": "note"}}, context)).id
+    write = (await root.submit({"type": "write", "entry": queuedNote("w")}, context)).id
     await root.abort(context)
     for id in (foreground.owner, foreground.inner):
         assert (await status(harness, id))["status"] == "terminal"
@@ -336,7 +774,7 @@ async def test_withdraws_queued_inputs_below_the_aborted_task_but_keeps_its_own_
     await busy(child, tree.inner)
     own = (await root.submit({"type": "input", "content": "own"}, context)).id
     below = (await child.submit({"type": "input", "content": "below"}, context)).id
-    write = (await child.submit({"type": "write", "entry": {"kind": "note"}}, context)).id
+    write = (await child.submit({"type": "write", "entry": queuedNote("w")}, context)).id
     await harness.abortTask(tree.owner, context)
     await harness.waitForTask(tree.inner, context)
 
@@ -555,7 +993,9 @@ async def test_aborts_a_waiting_child_whose_awaited_task_completes_in_the_commit
     await harness.close(context)
 
 
-async def test_retries_marks_found_through_an_edge_loaded_after_reopen_when_their_commit_is_rejected(sqliteDirectory):
+async def test_applies_marks_found_through_an_edge_loaded_after_reopen_once_a_failed_cascade_commit_is_reopened(
+    sqliteDirectory,
+):
     path = os.path.join(sqliteDirectory, "session.sqlite")
     opened = await openHarness(await openNodeSqliteStorage(path))
     tree = await ownedChild(opened.root, "owner", {"slowOwner": True})
@@ -568,17 +1008,17 @@ async def test_retries_marks_found_through_an_edge_loaded_after_reopen_when_thei
     rejectMark: int | None = None
     commit = storage.commit
 
-    async def rejecting(writes: Any, ctx: Any) -> Any:
+    async def failing(writes: Any, ctx: Any) -> Any:
         nonlocal rejectMark
         if any(
             write["type"] == "task" and write["value"]["id"] == rejectMark and write["value"]["abortRequested"]
             for write in writes
         ):
             rejectMark = None
-            raise StorageRejected("rejected once")
+            raise RuntimeError("disk gone")
         return await commit(writes, ctx)
 
-    storage.commit = rejecting  # type: ignore[method-assign, assignment]
+    storage.commit = failing  # type: ignore[method-assign, assignment]
     opened = await openHarness(storage)
     child = await opened.harness.conversation(tree.child, context)
 
@@ -589,41 +1029,45 @@ async def test_retries_marks_found_through_an_edge_loaded_after_reopen_when_thei
         return id  # type: ignore[no-any-return]
 
     late = await child.commit(createLate, context)
-    await waitUntil(lambda: rejectMark is None)
-    # Any later commit, here the reservation of the new task, retries the cascade.
-    assert (await opened.harness.waitForTask(late, context))["state"]["outcome"]["status"] == "aborted"
+    # The failed cascade commit fails the Harness. `closed` settles once its invocations have ended, and the owner's
+    # abort handler ignores its signal: let it return.
     openGate("abort.owner", "completed")
+    toMatchObject(await opened.harness.closed, {"reason": "failed"})
+    await opened.harness.close(context)
+    # Reopening derives the mark again.
+    opened = await openHarness(await openNodeSqliteStorage(path))
+    assert (await opened.harness.waitForTask(late, context))["state"]["outcome"]["status"] == "aborted"
     await opened.harness.close(context)
 
 
-async def test_retries_a_cascade_whose_commit_the_storage_rejected():
-    rejectMark: int | None = None
+async def test_fails_the_harness_on_a_failed_cascade_commit_and_reopening_applies_the_cascade():
+    failure = RuntimeError("disk gone")
+    failMark: int | None = None
 
-    class Rejecting(MemoryStorage):
+    class Failing(ControlledStorage):
         async def commit(self, writes: Any, ctx: Any) -> int:  # type: ignore[override]
-            nonlocal rejectMark
+            nonlocal failMark
             marks = any(
-                write["type"] == "task" and write["value"]["id"] == rejectMark and write["value"]["abortRequested"]
+                write["type"] == "task" and write["value"]["id"] == failMark and write["value"]["abortRequested"]
                 for write in writes
             )
             if marks:
-                rejectMark = None
-                raise StorageRejected("rejected once")
+                failMark = None
+                raise failure
             return await super().commit(writes, ctx)
 
-    opened = await openHarness(Rejecting())
+    storage = Failing()
+    opened = await openHarness(storage)
     harness, root, reports = opened.harness, opened.root, opened.reports
     tree = await ownedChild(root, "owner")
-    rejectMark = tree.inner
+    failMark = tree.inner
     openGate("owner", "failed")
-    await waitUntil(lambda: any(isinstance(error, StorageRejected) for error in reports))
-    assert (await status(harness, tree.owner))["status"] == "completing"
-    assert (await status(harness, tree.inner))["status"] != "terminal"
-    # The next commit retries the cascade.
-    await root.commit(lambda tx: tx.appendEntry(root.id, {"kind": "note"}), context)
-    assert (await harness.waitForTask(tree.inner, context))["state"]["outcome"]["status"] == "aborted"
-    assert (await harness.waitForTask(tree.owner, context))["state"]["outcome"]["status"] == "failed"
+    assert await harness.closed == {"reason": "failed", "error": failure}
+    assert reports == [failure]
     await harness.close(context)
+    reopened = await openHarness(storage.reopen())
+    assert (await reopened.harness.waitForTask(tree.inner, context))["state"]["outcome"]["status"] == "aborted"
+    await reopened.harness.close(context)
 
 
 EMPTY_OBJECT = {"type": "object", "properties": {}}
@@ -648,7 +1092,7 @@ async def test_owned_gives_a_tool_an_invocation_bound_handle_whose_submissions_s
         handle = await api.conversation(child, callContext)
         submission = await handle.submit({"type": "input", "content": "child task", "requestId": "child"}, callContext)
         settledChild = await submission.wait(callContext)
-        return {"content": [{"type": "text", "text": settledChild["status"]}]}
+        return {"output": [{"type": "text", "text": settledChild["status"]}]}
 
     addTool(
         setup.registry,
@@ -755,7 +1199,7 @@ async def test_owned_aborts_a_subagent_run_with_its_parents_conversation_rejecti
             {"type": "input", "content": "child task"}, callContext
         )
         try:
-            return {"content": [{"type": "text", "text": (await submission.wait(callContext))["status"]}]}
+            return {"output": [{"type": "text", "text": (await submission.wait(callContext))["status"]}]}
         except Exception as error:
             toolWait.resolve(str(error))
             raise
@@ -801,7 +1245,7 @@ async def test_owned_lets_a_running_tool_abort_its_owned_child_and_continue():
         await childRun.reached
         await handle.abort(callContext)
         settledChild = await submission.wait(callContext)
-        return {"content": [{"type": "text", "text": f"child {settledChild['status']}"}]}
+        return {"output": [{"type": "text", "text": f"child {settledChild['status']}"}]}
 
     addTool(
         setup.registry,
@@ -905,7 +1349,7 @@ async def test_owned_reruns_a_replay_safe_subagent_tool_after_a_restart_with_the
         request = {"type": "input", "content": "child task", "requestId": f"subagent:{api.taskId}"}
         submission = await (await api.conversation(child, callContext)).submit(request, callContext)
         settledChild = await submission.wait(callContext)
-        return {"content": [{"type": "text", "text": settledChild["status"]}]}
+        return {"output": [{"type": "text", "text": settledChild["status"]}]}
 
     addTool(
         setup.registry,

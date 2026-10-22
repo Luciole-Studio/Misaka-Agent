@@ -320,6 +320,32 @@ async def test_defaults_missing_tool_result_content_to_an_empty_list(servers):
     await client.close()
 
 
+async def test_the_in_memory_transport_takes_send_options():
+    """MISAKA adaptation: the client passes ``send(message, {"signal": ...})`` to every transport (#10598); the
+    in-memory pair takes the options and ignores them, as upstream's one-parameter ``send`` does."""
+    pair = createInMemoryTransportPair()
+    received: list = []
+    pair["server"].onMessage(received.append)
+    await pair["server"].start()
+    await pair["client"].start()
+    aborted = AbortController()
+    aborted.abort()
+    await pair["client"].send({"jsonrpc": "2.0", "method": "notifications/initialized"}, {"signal": aborted.signal})
+    await pair["client"].send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    await flush()
+    assert len(received) == 2
+    await pair["client"].close()
+
+
+# #10416: MCP 2026-07-28 allows any JSON value as structured content.
+async def test_accepts_structured_content_that_is_not_an_object(servers):
+    client, server = await connect(servers)
+    for structuredContent in ([{"id": 1}, {"id": 2}], None, "text", 3, False):
+        server.setHandler("tools/call", lambda _request, value=structuredContent: {"content": [], "structuredContent": value})
+        assert await client.callTool("structured") == {"content": [], "structuredContent": structuredContent}
+    await client.close()
+
+
 async def test_does_not_send_notifications_cancelled_for_a_timed_out_initialize(servers):
     clientTransport, server = await createServer(servers)
     server.setHandler("initialize", lambda _request: never())
@@ -444,6 +470,9 @@ def test_passes_text_and_images_through_and_replaces_other_blocks_with_text():
 
 
 def test_falls_back_to_the_structured_content_as_json_when_there_are_no_blocks():
+    # #10416: structured content may be any JSON value.
+    assert toLlmContent({"content": [], "structuredContent": [1, 2]}) == [{"type": "text", "text": "[\n  1,\n  2\n]"}]
+    assert toLlmContent({"content": [], "structuredContent": None}) == [{"type": "text", "text": "null"}]
     assert toLlmContent({"content": [], "structuredContent": {"n": 1}}) == [{"type": "text", "text": '{\n  "n": 1\n}'}]
     assert toLlmContent({"content": [{"type": "text", "text": "n=1"}], "structuredContent": {"n": 1}}) == [
         {"type": "text", "text": "n=1"},

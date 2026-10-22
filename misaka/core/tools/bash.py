@@ -34,9 +34,6 @@ from misaka.core.tools.renderers.bash import (
     BASH_UPDATE_THROTTLE_MS,
     createShellRenderers,
 )
-from misaka.core.tools.renderers.bash import (
-    formatDuration as _format_duration,  # noqa: F401 - misaka/core/subagent imports this name, and that package is not edited
-)
 from misaka.core.tools.tool_definition_wrapper import wrapToolDefinition
 from misaka.core.tools.truncate import (
     DEFAULT_MAX_BYTES,

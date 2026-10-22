@@ -501,6 +501,7 @@ def test_resolves_settings_over_the_built_in_defaults():
         "steeringMode": "one-at-a-time",
         "followUpMode": "one-at-a-time",
         "contextRetentionMs": 600_000,
+        "documentRetentionMs": AnyOf(int, float),
     }
     toMatchObject(
         resolveSettings({"retry": {"enabled": False}, "compaction": {"backgroundTokens": 0}}),

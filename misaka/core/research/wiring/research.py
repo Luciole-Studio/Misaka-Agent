@@ -658,7 +658,9 @@ class ResearchPart:
                             "I chose \"Chat about this\" in the research-options picker. Ask me what I want "
                             "to clarify and talk through depth, LO parallelism, Sister cards per LO, follow-up rounds, revisions, "
                             "the node limit, plan approval, the compaction threshold and the output limit; do not start "
-                            "research yet."
+                            "research yet.",
+                            # A run a notification woke may be starting by now; the session is busy then.
+                            {"deliverAs": "followUp"},
                         )
                         return
                     answers = result.get("answers") or {}

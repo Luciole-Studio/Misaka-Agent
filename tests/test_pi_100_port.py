@@ -353,8 +353,8 @@ async def test_restored_tools_wait_for_their_registration(tmp_path):
     async with session_with(
         tmp_path, [createToolSearchExtension(), _late_deferred_tools], sessionManager=manager, settings=settings
     ) as second:
-        # pi's test harness builds the session without `initialActiveToolNames`, which restores the
-        # transcript's loadout on construction; the SDK path always passes them, so restore here.
+        # Since pi 1.2 the SDK path restores the transcript's loadout on construction too (`usesDefaultTools`);
+        # restoring again leaves it as it is.
         second._restoreToolsFromTranscript()
         assert "weather_lookup" not in second.getActiveToolNames()
         assert "weather_lookup" in second._pendingToolNames

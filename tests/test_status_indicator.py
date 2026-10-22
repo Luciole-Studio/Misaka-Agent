@@ -1,4 +1,4 @@
-"""Translated from pi's ``coding-agent/test/status-indicator.test.ts`` (v1.1.0).
+"""Translated from pi's ``coding-agent/test/status-indicator.test.ts`` (v1.3.0, unchanged since v1.1.0).
 
 ``vi.useFakeTimers()`` becomes ``fakeTimers``: the tests run without an event loop, so the Loader and CountdownTimer
 schedule through ``threading.Timer``, which the fixture swaps for timers that ``FakeTimers.advance`` runs.
@@ -29,7 +29,7 @@ from misaka.modes.interactive.theme.theme import getEditorTheme, initTheme, them
 from misaka.ui.tui import visibleWidth
 from misaka.ui.tui.components import loader as loaderModule
 from misaka.utils.ansi import stripAnsi
-from tests.experimental_support import FakeTimers
+from tests.fake_timers import FakeTimers
 
 
 @pytest.fixture
@@ -131,6 +131,33 @@ def test_embeds_compaction_summary_and_retry_labels_within_the_border_width(fake
     finally:
         for indicator in indicators:
             indicator.dispose()
+
+
+def test_colors_an_embedded_compaction_indicator_like_the_editor_border(fakeTimers):
+    # MISAKA: #10809. A compaction indicator given the border color draws spinner and label in it; without one it
+    # keeps accent and muted.
+    initTheme("dark")
+    tui = _tui()
+    editor = CustomEditor(
+        tui,
+        getEditorTheme(),
+        KeybindingsManager.create(),
+        CustomEditorOptions(embedWorkingStatus=True),
+    )
+    editor.borderColor = theme.getThinkingBorderColor("high")
+    indicator = CompactionStatusIndicator(tui, "manual", lambda text: editor.borderColor(text))
+    editor.setWorkingStatusIndicator(indicator)
+    topBorder = editor.render(60)[0]
+    assert theme.getFgAnsi("accent") not in topBorder
+    assert theme.getFgAnsi("muted") not in topBorder
+    assert len(topBorder.split(theme.getFgAnsi("thinkingHigh"))) == 5
+    indicator.dispose()
+
+    standalone = CompactionStatusIndicator(tui, "manual")
+    line = standalone.render(60)[1]
+    assert theme.getFgAnsi("accent") in line
+    assert theme.getFgAnsi("muted") in line
+    standalone.dispose()
 
 
 def test_disposes_retry_countdown_updates(fakeTimers):

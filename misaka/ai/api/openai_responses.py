@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/src/api/openai-responses.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/src/api/openai-responses.ts`` (v1.3.0).
 
 MISAKA fork, kept to what the Python SDK and platform force (each is marked where it happens):
 
@@ -61,6 +61,8 @@ _OPENAI_TOOL_CALL_PROVIDERS = {"openai", "openai-codex", "opencode"}
 # OpenAI Responses rejects max_output_tokens below 16: https://github.com/earendil-works/pi/issues/6265
 _OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16
 _CHATGPT_USAGE_URL = "https://chatgpt.com/settings/usage"
+# Fixed reasoning.effort while configuration_update items carry the thinking level.
+_CONFIGURATION_UPDATE_REQUEST_EFFORT = "medium"
 
 
 # OpenAI API keys start with `sk-`; a different credential sent directly to OpenAI
@@ -121,7 +123,26 @@ def _getCompat(model: Model) -> dict[str, Any]:
         "supportsToolSearch": nullishCoalesce(_compat_value(model, "supportsToolSearch"), False),
         "supportsExplicitPromptCacheMode": nullishCoalesce(_compat_value(model, "supportsExplicitPromptCacheMode"), False),
         "supportsMaxOutputTokens": nullishCoalesce(_compat_value(model, "supportsMaxOutputTokens"), True),
+        "supportsMidConvoEffort": nullishCoalesce(_compat_value(model, "supportsMidConvoEffort"), False),
     }
+
+
+def _getConfigurationUpdateEffort(
+    model: Model,
+    options: OpenAIResponsesOptions | Mapping[str, Any] | None,
+    compat: Mapping[str, Any],
+) -> str | None:
+    """Effort to send in configuration_update items, or None to send it as reasoning.effort."""
+    if (
+        not compat["supportsMidConvoEffort"]
+        or not _option(options, "reasoningEffort")
+        # Sign in with ChatGPT rejects configuration_update items.
+        or _isChatGPTSignIn(model, _option(options, "apiKey"))
+    ):
+        return None
+    return nullishCoalesce(
+        (model.thinkingLevelMap or {}).get(_option(options, "reasoningEffort")), _option(options, "reasoningEffort")
+    )
 
 
 def _getPromptCacheRetention(compat: Mapping[str, Any], cacheRetention: CacheRetention) -> str | None:
@@ -181,11 +202,14 @@ def stream(
 
     # Start async processing
     async def run() -> None:
+        compat = _getCompat(model)
+        configurationUpdateEffort = _getConfigurationUpdateEffort(model, options, compat)
         output = AssistantMessage(
             content=[],
             api=model.api,
             provider=model.provider,
             model=model.id,
+            **({} if configurationUpdateEffort is None else {"providerThinkingLevel": configurationUpdateEffort}),
             usage=Usage(
                 input=0,
                 output=0,
@@ -205,7 +229,6 @@ def stream(
             apiKey = _getClientApiKey(model.provider, _option(options, "apiKey"), _option(options, "headers"))
             cacheRetention = _resolveCacheRetention(_option(options, "cacheRetention"), _option(options, "env"))
             cacheSessionId = None if cacheRetention == "none" else _option(options, "sessionId")
-            compat = _getCompat(model)
             grammarToolInputProperties = createGrammarToolInputProperties(
                 getDeclaredTools(normalizedContext.messages),
                 compat["supportsOpenAIGrammarTools"],
@@ -217,7 +240,14 @@ def stream(
                 _option(options, "headers"),
                 cacheSessionId,
             )
-            params = _buildParams(model, normalizedContext, options, compat, grammarToolInputProperties)
+            params = _buildParams(
+                model,
+                normalizedContext,
+                options,
+                compat,
+                grammarToolInputProperties,
+                configurationUpdateEffort,
+            )
             onPayload = _option(options, "onPayload")
             nextParams = await maybe_await(onPayload(params, model)) if onPayload else None
             if nextParams is not None:
@@ -359,16 +389,10 @@ def _buildParams(
     model: Model,
     context: TranscriptContext,
     options: OpenAIResponsesOptions | Mapping[str, Any] | None,
-    compat: Mapping[str, Any] | None = None,
-    grammarToolInputProperties: Mapping[str, str] | None = None,
+    compat: Mapping[str, Any],
+    grammarToolInputProperties: Mapping[str, str],
+    configurationUpdateEffort: str | None,
 ) -> dict[str, Any]:
-    if compat is None:
-        compat = _getCompat(model)
-    if grammarToolInputProperties is None:
-        grammarToolInputProperties = createGrammarToolInputProperties(
-            getDeclaredTools(context.messages),
-            compat["supportsOpenAIGrammarTools"],
-        )
     transcriptTools = resolveTranscriptTools(
         context.messages,
         compat["supportsAdditionalTools"] or compat["supportsToolSearch"],
@@ -386,6 +410,7 @@ def _buildParams(
                 "supportsStrictMode": compat["supportsStrictMode"],
                 "supportsOpenAIGrammarTools": compat["supportsOpenAIGrammarTools"],
             },
+            **({} if configurationUpdateEffort is None else {"configurationUpdateEffort": configurationUpdateEffort}),
         },
     )
 
@@ -429,11 +454,12 @@ def _buildParams(
     if model.reasoning:
         thinkingLevelMap = model.thinkingLevelMap
         if reasoningEffort:
-            effort = (
+            requestedEffort = (
                 nullishCoalesce((thinkingLevelMap or {}).get(_option(options, "reasoningEffort")), _option(options, "reasoningEffort"))
                 if _option(options, "reasoningEffort")
                 else reasoningEffort
             )
+            effort = requestedEffort if configurationUpdateEffort is None else _CONFIGURATION_UPDATE_REQUEST_EFFORT
             params["reasoning"] = {
                 "effort": effort,
                 "summary": _option(options, "reasoningSummary") or "auto",

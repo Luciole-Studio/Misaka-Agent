@@ -1,7 +1,8 @@
-"""pi durable's ``test/tools-read-differential.test.ts`` (v1.1.0)."""
+"""pi durable's ``test/tools-read-differential.test.ts``."""
 
 from __future__ import annotations
 
+import base64
 import math
 import shutil
 import tempfile
@@ -10,8 +11,8 @@ from types import SimpleNamespace
 from typing import Any
 
 from misaka.chord.context import BACKGROUND_CONTEXT
+from misaka.chord.output import characterEnd
 from misaka.durable.env.node import NodeExecutionEnv
-from misaka.durable.harness.output import characterEnd
 from misaka.durable.tools.image import detectSupportedImageMimeType
 from misaka.durable.tools.read import createReadTool
 from misaka.durable.truncate import DEFAULT_MAX_BYTES, formatSize, truncateHead
@@ -53,15 +54,8 @@ def referenceRead(data: bytes, path: str, offset: float | None, limit: float | N
     mimeType = detectSupportedImageMimeType(data)
     if mimeType:
         return {
-            "content": [],
-            "isError": True,
-            "diagnostics": [
-                {
-                    "severity": "error",
-                    "code": "unsupported_image",
-                    "message": f"{path} is an image ({mimeType}); reading images is not supported",
-                }
-            ],
+            "output": [{"type": "image", "data": base64.b64encode(data).decode("ascii"), "mimeType": mimeType}],
+            "diagnostics": [{"severity": "info", "code": "image", "message": f"Read image file [{mimeType}]."}],
         }
     textContent = _decode(data)
     allLines = textContent.split("\n")
@@ -118,7 +112,7 @@ def referenceRead(data: bytes, path: str, offset: float | None, limit: float | N
             }
         )
     return {
-        "content": [] if outputText == "" else [{"type": "text", "text": outputText}],
+        "output": [] if outputText == "" else [{"type": "text", "text": outputText}],
         **({} if details is None else {"details": details}),
         "diagnostics": diagnostics,
     }
@@ -165,7 +159,12 @@ def apiFor(env: NodeExecutionEnv) -> Any:
     async def details(*_args: Any) -> None:
         return None
 
-    return SimpleNamespace(env=env, output=lambda *_args: None, outputWindow=None, diagnostic=lambda *_args: None, details=details)
+    async def agent(*_args: Any) -> dict[str, Any]:
+        return {}
+
+    return SimpleNamespace(
+        env=env, output=lambda *_args: None, outputWindow=None, diagnostic=lambda *_args: None, details=details, agent=agent
+    )
 
 
 async def outcome(run) -> Any:

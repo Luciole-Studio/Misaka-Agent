@@ -1,4 +1,4 @@
-"""Translated from pi's ``modes/interactive/theme/theme.ts`` (v1.1.0).
+"""Translated from pi's ``modes/interactive/theme/theme.ts`` (v1.3.0).
 
 MISAKA forks, each marked where it happens:
 
@@ -10,7 +10,8 @@ MISAKA forks, each marked where it happens:
 - ``theme`` is a real object, loaded at import, and ``setGlobalTheme`` copies a new theme into it: components hold
   ``theme`` directly, so rebinding the module name alone would leave them on the old palette.
 - Unknown tokens raise ``KeyError`` (upstream ``Error``) with the upstream message.
-- ``ThemeColor`` also has MISAKA's ``sectionTitle``, ``appTitle`` and ``appTitleOnLight`` tokens.
+- ``THEME_TOKENS`` (``theme_tokens.py``) also has MISAKA's optional ``sectionTitle``, ``appTitle`` and
+  ``appTitleOnLight`` tokens.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import os
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal, NotRequired, TypedDict, cast, get_args
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
 from misaka.agent.types import ThinkingLevel
 from misaka.config import get_custom_themes_dir, get_themes_dir
@@ -51,12 +52,31 @@ from misaka.utils.js import Timeout, clearTimeout, jsonParse, jsTrim, setTimeout
 from misaka.utils.js_regexp import RegExp
 from misaka.utils.syntax_highlight import highlight, supportsLanguage
 
-from .theme_json import ThemeColorValue as ColorValue
-from .theme_json import ValidatedThemeJson as ThemeJson
+# The schema that validates this shape lives in `theme_schema.py`; importing the type is free.
+from .theme_schema import ThemeColorValue as ColorValue
+from .theme_schema import ValidatedThemeJson as ThemeJson
+from .theme_tokens import (
+    THEME_TOKENS,
+    ResolvedThemeColorValues,
+    ThemeBg,
+    ThemeColor,
+    ThemeColorValues,
+    ThemeToken,
+)
 
 # ============================================================================
 # Types & Schema
 # ============================================================================
+
+
+class ThemeStyle(TextAttributes, total=False):
+    """Tokens are only accepted in their own slot, because "" (terminal default) means the default foreground
+    or background depending on the slot. Use ``theme.colors[token]`` to use a token's color in the other slot.
+    """
+
+    fg: ThemeColor | Color
+    bg: ThemeBg | Color
+
 
 type ThemeJsonValidator = Callable[[str, Any], ThemeJson]
 
@@ -71,87 +91,6 @@ def setThemeJsonValidator(validator: ThemeJsonValidator) -> None:
     global themeJsonValidator
     themeJsonValidator = validator
 
-
-type ThemeColor = Literal[
-    "accent",
-    "border",
-    "borderAccent",
-    "borderMuted",
-    "success",
-    "error",
-    "warning",
-    "muted",
-    "dim",
-    "text",
-    "thinkingText",
-    "scrollbarTrack",
-    "scrollbarThumb",
-    "searchMatchText",
-    "userMessageText",
-    "customMessageText",
-    "customMessageLabel",
-    "toolTitle",
-    "toolOutput",
-    "mdHeading",
-    "mdLink",
-    "mdLinkUrl",
-    "mdCode",
-    "mdCodeBlock",
-    "mdCodeBlockBorder",
-    "mdQuote",
-    "mdQuoteBorder",
-    "mdHr",
-    "mdListBullet",
-    "toolDiffAdded",
-    "toolDiffRemoved",
-    "toolDiffContext",
-    "syntaxComment",
-    "syntaxKeyword",
-    "syntaxFunction",
-    "syntaxVariable",
-    "syntaxString",
-    "syntaxNumber",
-    "syntaxType",
-    "syntaxOperator",
-    "syntaxPunctuation",
-    "thinkingOff",
-    "thinkingMinimal",
-    "thinkingLow",
-    "thinkingMedium",
-    "thinkingHigh",
-    "thinkingXhigh",
-    "thinkingMax",
-    "bashMode",
-    # MISAKA fork: startup section titles and the app title, on dark and light terminals.
-    "sectionTitle",
-    "appTitle",
-    "appTitleOnLight",
-]
-
-type ThemeBg = Literal[
-    "selectedBg",
-    "searchMatchBg",
-    "userMessageBg",
-    "customMessageBg",
-    "toolPendingBg",
-    "toolSuccessBg",
-    "toolErrorBg",
-]
-
-type ThemeToken = ThemeColor | ThemeBg
-
-
-class ThemeStyle(TextAttributes, total=False):
-    """Tokens are only accepted in their own slot, because "" (terminal default) means the default foreground
-    or background depending on the slot. Use ``theme.colors[token]`` to use a token's color in the other slot.
-    """
-
-    fg: ThemeColor | Color
-    bg: ThemeBg | Color
-
-
-type OptionalThemeColor = Literal["scrollbarTrack", "scrollbarThumb", "thinkingMax", "searchMatchText"]
-type OptionalThemeBg = Literal["searchMatchBg"]
 
 # ============================================================================
 # Color Utilities
@@ -188,15 +127,18 @@ def resolveThemeColors(
     return resolved
 
 
-def withThemeColorFallbacks(colors: Mapping[str, ColorValue]) -> dict[str, ColorValue]:
-    return {
-        **colors,
-        "scrollbarTrack": _nullish(colors.get("scrollbarTrack"), colors.get("muted")),
-        "scrollbarThumb": _nullish(colors.get("scrollbarThumb"), colors.get("text")),
-        "thinkingMax": _nullish(colors.get("thinkingMax"), colors.get("thinkingXhigh")),
-        "searchMatchBg": _nullish(colors.get("searchMatchBg"), colors.get("selectedBg")),
-        "searchMatchText": _nullish(colors.get("searchMatchText"), colors.get("text")),
-    }
+def withThemeTokenFallbacks[Value](values: ThemeColorValues[Value]) -> ResolvedThemeColorValues[Value]:
+    resolved: dict[str, Value] = {**values}
+    for name, descriptor in THEME_TOKENS.items():
+        if "fallback" not in descriptor:
+            continue
+        if name in resolved:
+            continue
+        fallback = descriptor["fallback"]
+        if fallback not in resolved:
+            raise ValueError(f"Theme token {name} has unresolved fallback {descriptor['fallback']}")
+        resolved[name] = resolved[fallback]
+    return cast(ResolvedThemeColorValues[Value], resolved)
 
 
 def _nullish(value: Any, fallback: Any) -> Any:
@@ -286,17 +228,9 @@ class Theme:
         self.defaultForegroundTokens: list[ThemeToken] = []
         self.defaultBackgroundTokens: list[ThemeToken] = []
         self.resolvedColors: _ResolvedColors | None = None
-        foregrounds: dict[ThemeColor, str | int] = {
-            **fgColors,
-            "scrollbarTrack": _nullish(fgColors.get("scrollbarTrack"), fgColors.get("muted")),
-            "scrollbarThumb": _nullish(fgColors.get("scrollbarThumb"), fgColors.get("text")),
-            "thinkingMax": _nullish(fgColors.get("thinkingMax"), fgColors.get("thinkingXhigh")),
-            "searchMatchText": _nullish(fgColors.get("searchMatchText"), fgColors.get("text")),
-        }
-        backgrounds: dict[ThemeBg, str | int] = {
-            **bgColors,
-            "searchMatchBg": _nullish(bgColors.get("searchMatchBg"), bgColors.get("selectedBg")),
-        }
+        split = splitThemeColors(withThemeTokenFallbacks({**fgColors, **bgColors}))
+        foregrounds = split["fgColors"]
+        backgrounds = split["bgColors"]
         concreteForegrounds: list[Color] = []
         concreteBackgrounds: list[Color] = []
 
@@ -554,29 +488,16 @@ def loadThemeJson(name: str) -> ThemeJson:
     return parseThemeJsonContent(name, content)
 
 
-BACKGROUND_TOKENS: frozenset[str] = frozenset(
-    {
-        "selectedBg",
-        "searchMatchBg",
-        "userMessageBg",
-        "customMessageBg",
-        "toolPendingBg",
-        "toolSuccessBg",
-        "toolErrorBg",
-    }
-)
-
-
 class _SplitThemeColors(TypedDict):
     fgColors: dict[ThemeColor, str | int]
     bgColors: dict[ThemeBg, str | int]
 
 
-def splitThemeColors(colors: Mapping[str, str | int]) -> _SplitThemeColors:
+def splitThemeColors(colors: ResolvedThemeColorValues[str | int]) -> _SplitThemeColors:
     fgColors: dict[ThemeColor, str | int] = {}
     bgColors: dict[ThemeBg, str | int] = {}
     for key, value in colors.items():
-        if key in BACKGROUND_TOKENS:
+        if THEME_TOKENS[key]["slot"] == "background":
             bgColors[cast(ThemeBg, key)] = value
         else:
             fgColors[cast(ThemeColor, key)] = value
@@ -585,7 +506,7 @@ def splitThemeColors(colors: Mapping[str, str | int]) -> _SplitThemeColors:
 
 def createTheme(themeJson: ThemeJson, mode: TerminalColorMode | None = None, sourcePath: str | None = None) -> Theme:
     colorMode = _nullish(mode, getTerminalColorMode())
-    resolvedColors = resolveThemeColors(withThemeColorFallbacks(themeJson["colors"]), themeJson.get("vars"))
+    resolvedColors = withThemeTokenFallbacks(resolveThemeColors(themeJson["colors"], themeJson.get("vars")))
     split = splitThemeColors(resolvedColors)
     options: ThemeOptions = {"name": themeJson["name"]}
     if sourcePath is not None:
@@ -1145,12 +1066,8 @@ def _defaultTerminalTheme() -> Theme:
     try:
         return loadTheme(getTerminalTheme())
     except Exception:  # noqa: BLE001 - the module must import even with a broken built-in theme
-        return Theme(
-            dict.fromkeys(get_args(ThemeColor.__value__), ""),
-            dict.fromkeys(get_args(ThemeBg.__value__), ""),
-            "256color",
-            {"name": "uninitialized"},
-        )
+        split = splitThemeColors(dict.fromkeys(THEME_TOKENS, ""))
+        return Theme(split["fgColors"], split["bgColors"], "256color", {"name": "uninitialized"})
 
 
 theme: Theme = _defaultTerminalTheme()

@@ -165,6 +165,8 @@ def install_effort_adapter(agent: Any, env: Mapping[str, str]) -> None:
     (CCB configureEffortParams). Numeric Claude overrides replace the private
     effort_override field, matching the source object spread. Numeric values
     remain ant-only. Other MISAKA providers keep their native request contract.
+    The effort goes where pi itself puts a model's effort, and only into a request
+    that carries no reasoning control of pi's (``_add_effort``).
     """
     from misaka.config.product import setting
 
@@ -186,27 +188,135 @@ def install_effort_adapter(agent: Any, env: Mapping[str, str]) -> None:
             result = await maybe_await(previous(payload, model))
             if result is not None:
                 payload = result
-        api = read_field(model, "api", "")
-        model_id = str(read_field(model, "id", "")).lower()
-        if api in {"anthropic-messages", "bedrock-converse-stream"}:
-            supported = any(name in model_id for name in ("opus-4-7", "opus-4-6", "sonnet-4-6", "deepseek-v4-pro"))
-            known_legacy = any(name in model_id for name in ("haiku", "sonnet", "opus"))
-            if not supported and (known_legacy or api != "anthropic-messages"):
-                return payload
-            target = payload if api == "anthropic-messages" else payload.setdefault("additionalModelRequestFields", {})
-            if "effort" in target.get("output_config", {}):
-                return payload
-            if isinstance(effort, str):
-                target.setdefault("output_config", {})["effort"] = effort
-                if api == "anthropic-messages":
-                    payload.setdefault("betas", []).append("effort-2025-11-24")
-            elif env.get("USER_TYPE") == "ant":
-                internal_target = target.setdefault("extra_body", {}) if api == "anthropic-messages" else target
-                internal_target.setdefault("anthropic_internal", {})["effort_override"] = effort
-        elif api in {"openai-responses", "openai-codex-responses"}:
-            payload.setdefault("reasoning", {}).setdefault("effort", effort if isinstance(effort, str) else "high")
-        elif api == "openai-completions":
-            payload.setdefault("reasoning_effort", effort if isinstance(effort, str) else "high")
-        return payload
+        return _add_effort(payload, model, effort, env)
 
     agent.onPayload = on_payload
+
+
+# What pi's openai-completions request carries a model's reasoning in, by compat `thinkingFormat`: toggles
+# (`thinking`, `enable_thinking`, `reasoning.enabled`, chat-template values) and effort fields (`reasoning_effort`,
+# `reasoning.effort`, a string `thinking`). A request that already holds one of them gets no second.
+_COMPLETIONS_REASONING_FIELDS = ("thinking", "reasoning_effort", "reasoning", "enable_thinking",
+                                 "chat_template_kwargs", "chat_template_args")
+# The formats whose effort pi sends as `reasoning_effort` (with `supportsReasoningEffort`), and those whose effort
+# sits elsewhere. `chat-template`/`qwen-chat-template` carry it in configured template values: nothing to add there.
+_REASONING_EFFORT_FORMATS = frozenset({"openai", "zai", "qwen", "baseten", "deepseek", "together"})
+
+
+def _effort_level(model: Any, effort: str | int) -> str | None:
+    """The sub-agent effort as one of pi's thinking levels for this model: clamped to the levels the catalog gives it
+    (``clampThinkingLevel``, as pi clamps a session's level), a numeric effort as "high". None when that is "off"."""
+    from misaka.ai.models import clampThinkingLevel
+
+    level = clampThinkingLevel(model, effort if isinstance(effort, str) else "high")
+    return None if level == "off" else level
+
+
+def _add_effort(payload: dict[str, Any], model: Any, effort: str | int, env: Mapping[str, str]) -> dict[str, Any]:
+    """Add the sub-agent's effort to a request pi built, in the field pi itself uses for this model's effort, and only
+    where pi sent no reasoning control of its own: never a second control next to pi's (a thinking toggle or an
+    effort), and nothing at all for a model that does not reason. pi's own control, which follows the session's
+    thinking level, always wins. The one addition next to a pi control: Claude's `output_config.effort` beside
+    Anthropic's `thinking: disabled`, where effort is not a reasoning switch (see the anthropic-messages branch)."""
+    if not read_field(model, "reasoning", False):
+        return payload
+    api = read_field(model, "api", "")
+    level = _effort_level(model, effort)
+    if api == "anthropic-messages":
+        from misaka.ai.api._common import _compat_value
+        from misaka.ai.api.anthropic_messages import _mapThinkingLevelToEffort
+
+        # pi's effort models are the adaptive-thinking ones (`forceAdaptiveThinking`): with thinking on it sends
+        # `thinking: adaptive` and `output_config.effort` itself, so pi's effort stands. With thinking off it sends
+        # `thinking: disabled` or nothing. Nothing: the effort is added. `thinking: disabled`: only for Claude
+        # (Anthropic, and the gateways that pass Anthropic's request through), as CCB adds it next to its own
+        # disabled thinking (a sub-agent always runs with thinking off): Anthropic's effort also governs text and
+        # tool calls and does not turn thinking on. An Anthropic-compatible service maps both onto its own reasoning
+        # switch (Fireworks: `disabled` is `reasoning_effort: "none"`, `output_config.effort` is `reasoning_effort`),
+        # so there an added effort would turn the reasoning the sub-agent runs without back on. Third-party models
+        # without adaptive thinking (MiniMax, most of Fireworks, gateways) get no effort from pi, so none from here.
+        thinking = payload.get("thinking")
+        thinking_off = isinstance(thinking, dict) and thinking.get("type") == "disabled" and _is_claude(model)
+        if _compat_value(model, "forceAdaptiveThinking") is not True or (thinking is not None and not thinking_off) \
+                or "effort" in (payload.get("output_config") or {}):
+            return payload
+        if isinstance(effort, str):
+            if level is not None:
+                value = _mapThinkingLevelToEffort(model, level)
+                if thinking_off and value in {"xhigh", "max"} and _disabled_thinking_only_at_high(model):
+                    value = "high"
+                payload.setdefault("output_config", {})["effort"] = value
+        elif env.get("USER_TYPE") == "ant":
+            payload.setdefault("extra_body", {}).setdefault("anthropic_internal", {})["effort_override"] = effort
+    elif api == "bedrock-converse-stream":
+        from misaka.ai.api import bedrock_converse_stream as bedrock
+
+        fields = payload.get("additionalModelRequestFields") or {}
+        # pi sends `output_config.effort` to the adaptive-thinking Claude models only, beside their `thinking`.
+        if not (bedrock._isAnthropicClaudeModel(model)
+                and bedrock._supportsAdaptiveThinking(model.id, read_field(model, "name"))) \
+                or "thinking" in fields or "effort" in (fields.get("output_config") or {}):
+            return payload
+        if isinstance(effort, str):
+            if level is None:
+                return payload
+            addition = {"output_config": {**(fields.get("output_config") or {}),
+                                          "effort": bedrock._mapThinkingLevelToEffort(model, level)}}
+        elif env.get("USER_TYPE") == "ant":
+            addition = {"anthropic_internal": {**(fields.get("anthropic_internal") or {}), "effort_override": effort}}
+        else:
+            return payload
+        # pi leaves `additionalModelRequestFields` None when it has nothing for it.
+        payload["additionalModelRequestFields"] = {**fields, **addition}
+    elif api in {"openai-responses", "openai-codex-responses"}:
+        # pi sends `reasoning` (an effort, or "none" with thinking off) to every reasoning model it can turn off.
+        if "reasoning" not in payload and level is not None:
+            payload["reasoning"] = {"effort": _mapped(model, level)}
+    elif api == "openai-completions":
+        from misaka.ai.api.openai_completions import _getCompat
+
+        if level is None or any(field in payload for field in _COMPLETIONS_REASONING_FIELDS):
+            return payload
+        compat = _getCompat(model)
+        thinkingFormat = compat["thinkingFormat"]
+        if thinkingFormat in _REASONING_EFFORT_FORMATS:
+            # kimi-for-coding-highspeed (deepseek format) and Xiaomi MiMo (pi 1.3.0 #10818) refuse it.
+            if compat["supportsReasoningEffort"]:
+                payload["reasoning_effort"] = _mapped(model, level)
+        elif thinkingFormat == "openrouter":
+            payload["reasoning"] = {"effort": _mapped(model, level)}
+        elif thinkingFormat == "ant-ling":
+            mapped = (read_field(model, "thinkingLevelMap") or {}).get(level)
+            if isinstance(mapped, str):
+                payload["reasoning"] = {"effort": mapped}
+        elif thinkingFormat == "string-thinking":
+            payload["thinking"] = _mapped(model, level)
+    return payload
+
+
+# pi's generate-models `ANTHROPIC_DISABLED_THINKING_MODELS`: the Claude models that think by default yet accept
+# `thinking: {type: "disabled"}` -- Anthropic's thinking guide: "at `high` effort or below"; `xhigh` or `max` with
+# disabled thinking is a 400 error. (The other 5.x models reject `disabled` outright, and pi never sends it to them;
+# the 4.x models and Sonnet 5 turn thinking off at any effort.)
+_DISABLED_THINKING_AT_HIGH_OR_BELOW = frozenset({"claude-opus-5", "claude-haiku-5-5", "claude-haiku-5.5"})
+
+
+def _is_claude(model: Any) -> bool:
+    """A Claude model, by its id: Anthropic's own ids and the gateways' (``anthropic/claude-...``)."""
+    return "claude" in str(read_field(model, "id", "")).lower()
+
+
+def _disabled_thinking_only_at_high(model: Any) -> bool:
+    """pi's ``supportsAnthropicDisabledThinkingWithMidConvoEffort`` id test: its OpenRouter ``anthropic/`` prefix and a
+    dated snapshot suffix stripped. MISAKA: also a gateway's ``-batch``/``-fast`` variant of the same model (Vercel AI
+    Gateway)."""
+    model_id = re.sub(r"^~?anthropic/", "", str(read_field(model, "id", "")).lower(), count=1)
+    model_id = re.sub(r"-[0-9]{8}\Z", "", model_id, count=1)
+    model_id = re.sub(r"-(?:batch|fast)\Z", "", model_id, count=1)
+    return model_id in _DISABLED_THINKING_AT_HIGH_OR_BELOW
+
+
+def _mapped(model: Any, level: str) -> Any:
+    """``model.thinkingLevelMap?.[level] ?? level``, as pi's providers write a level onto the wire."""
+    mapped = (read_field(model, "thinkingLevelMap") or {}).get(level)
+    return level if mapped is None else mapped

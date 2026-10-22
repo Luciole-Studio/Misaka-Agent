@@ -153,7 +153,12 @@ class Wizard:
             if selected is not None:
                 cfg = {**cfg, "provider": selected.provider, "default_model": selected.id}
             else:
-                ui.print_warning(f"Saved role default {pinned!r} is not uniquely identified in the catalog; choose it below.")
+                from misaka.core.model_runtime import personalizedCatalogHint
+
+                # A pin the user's OpenRouter key no longer lists has left the catalog, not become ambiguous.
+                hint = personalizedCatalogHint(pinned.partition("/")[0] if "/" in pinned else None)
+                ui.print_warning(f"Saved role default {pinned!r} is not uniquely identified in the catalog; choose it below."
+                                 + hint)
         known = sorted({model.provider for model in runtime.getModels()})
         current = cfg["provider"] if cfg["provider"] in known else None
         ui.print_info(f"{target}: {pinned or cfg['provider'] + '/' + cfg['default_model']}"

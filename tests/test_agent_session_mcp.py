@@ -685,6 +685,41 @@ async def test_warns_when_deferred_mcp_tools_have_neither_tool_search_nor_codemo
     ]
 
 
+async def test_tells_scripts_what_directly_exposed_mcp_tools_resolve_to(stack):
+    harness, *_rest = await setup(stack, "direct")
+    harness.session.setActiveToolsByName([*harness.session.getActiveToolNames(), "codemode"])
+    assert (
+        "Codemode: `tools.mcp__docs__search(args)` resolves to `{ content, structuredContent?: { hits }, isError? }`."
+        in toolDescription(harness, "mcp__docs__search")
+    )
+    assert (
+        "Codemode: `tools.mcp__docs__fail(args)` resolves to `{ content, structuredContent?, isError? }`."
+        in toolDescription(harness, "mcp__docs__fail")
+    )
+
+
+async def test_activates_another_extensions_codemode_tool_when_it_reaches_other_tools(stack):
+    def otherExec(pi) -> None:
+        async def execute(*_args: Any) -> AgentToolResult:
+            return AgentToolResult(content=[], details=None)
+
+        pi.registerTool(ToolDefinition(
+            name="codemode",
+            label="codemode",
+            description="Another extension's codemode tool.",
+            parameters={"type": "object", "properties": {}},
+            defaultActive=False,
+            reachesTools=lambda _input: "all",
+            execute=execute,
+        ))
+
+    harness, *_rest = await setup(stack, "codemode", extensionFactories=[otherExec])
+    harness.setResponses([fauxAssistantMessage("ready")])
+    await prompt(harness, "start")
+
+    assert harness.session.getActiveToolNames() == ["codemode"]
+
+
 async def test_does_not_activate_another_extensions_tool_named_codemode(stack):
     # Registered first, so it wins over the codemode extension's codemode.
     def otherExec(pi) -> None:
@@ -827,7 +862,11 @@ async def test_waits_for_servers_whose_script_identifiers_differ_from_their_name
         fauxAssistantMessage(
             [
                 fauxToolCall("codemode", {
-                    "code": 'await tools.mcp__slow_docs__search({ query: "q" }); return (await describeNamespace("slow_docs")).name;',
+                    "code": (
+                        'await tools.mcp__slow_docs__search({ query: "q" });\n'
+                        'const names = ["slow-docs", "slow_docs", "mcp__slow-docs", "mcp__slow_docs"];\n'
+                        "return [...new Set(await Promise.all(names.map(async (name) => (await describeNamespace(name))?.name)))];"
+                    ),
                 }),
             ],
             {"stopReason": "toolUse"},
@@ -838,7 +877,7 @@ async def test_waits_for_servers_whose_script_identifiers_differ_from_their_name
     await prompt(harness, "go")
 
     assert toolResult(harness, "codemode").isError is False
-    assert lastLine(toolResult(harness, "codemode")) == "mcp__slow_docs"
+    assert lastLine(toolResult(harness, "codemode")) == '["mcp__slow_docs"]'
     assert calls == ['search:{"query":"q"}']
 
 

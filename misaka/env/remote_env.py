@@ -1,6 +1,6 @@
 """An ``ExecutionEnv`` on another machine, reached through a pi-env daemon.
 
-Translated from pi's ``packages/env/src/remote-env.ts`` (v1.1.0). Records are plain ``dict`` objects with the upstream
+Translated from pi's ``packages/env/src/remote-env.ts`` (v1.3.0). Records are plain ``dict`` objects with the upstream
 keys, as in ``misaka.durable.env``; ``Buffer.toString("utf8")`` is ``bytes.decode("utf-8", "replace")`` (the same WHATWG
 decoding, byte-order mark kept).
 """
@@ -39,8 +39,9 @@ from misaka.utils.js import (
     toWellFormed,
 )
 
-from .connection import Connection, Json, RemoteError, RequestOptions
+from .connection import Connection, Json, RemoteError, RequestOptions, nodePlatform
 from .errors import abortResult, toFileError
+from .list_files import listFilesOver
 from .watch import RemoteWatcher, RemoteWatchOptions
 
 MAX_TIMEOUT_MS = 2_147_483_647
@@ -80,7 +81,7 @@ def _observe(future: asyncio.Future[Any]) -> None:
 
 async def remotePath(connection: Connection) -> SimpleNamespace:
     """Node's path rules of the remote system."""
-    return node_path.win32 if (await connection.info())["os"] == "windows" else node_path.posix
+    return node_path.win32 if nodePlatform(await connection.info())["platform"] == "win32" else node_path.posix
 
 
 def toInfo(path: str, remote: Json, paths: SimpleNamespace) -> Result:
@@ -357,7 +358,7 @@ class RemoteExecutionEnv:
     async def _resolve(self, path: str) -> str:
         """Node's ``resolvePath`` on the remote system, with its home directory and working directories."""
         info = await self.connection.info()
-        windows = info["os"] == "windows"
+        windows = nodePlatform(info)["platform"] == "win32"
         paths = node_path.win32 if windows else node_path.posix
         normalized = path
         if normalized == "~":
@@ -665,6 +666,14 @@ class RemoteExecutionEnv:
             return infos
 
         return await self._fileOp(path, context, run)
+
+    async def listFiles(self, path: str, options: dict[str, Any] | None, context: Context) -> Result:
+        """Through the daemon; ``not_supported`` with a daemon released before ``listFiles``."""
+        try:
+            resolved = await self._resolve(path)
+        except Exception as error:  # noqa: BLE001 - failures are returned, not raised
+            return err(toFileError(error, path))
+        return await listFilesOver(self.connection, resolved, options, context)
 
     async def _openDir(self, resolved: str) -> Handle:
         reply = await self.connection.request("opendir", {"path": resolved})

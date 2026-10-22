@@ -370,6 +370,7 @@ async def createHarness(
             resourceLoader=loader,
             baseToolsOverride=toolMap,
             initialActiveToolNames=initialActiveToolNames,
+            usesDefaultTools=initialActiveToolNames is None,
             allowedToolNames=allowedToolNames,
             excludedToolNames=excludedToolNames,
             extensionRunnerRef=extensionRunnerRef,

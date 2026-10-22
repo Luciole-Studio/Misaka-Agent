@@ -1,4 +1,4 @@
-"""Translated from pi's ``modes/interactive/interactive-mode.ts`` (v1.1.0).
+"""Translated from pi's ``modes/interactive/interactive-mode.ts`` (v1.3.0).
 
 Interactive mode for the coding agent.
 Handles TUI rendering and user interaction, delegating business logic to AgentSession.
@@ -134,6 +134,7 @@ from misaka.ui.tui import (
     matchesKey,
     setCapabilityOverrides,
     setKeybindings,
+    stripTerminalSequences,
     visibleWidth,
 )
 from misaka.ui.tui.autocomplete import AutocompleteItem
@@ -273,7 +274,7 @@ class WorkingStatusEditor(Protocol):
     def setWorkingStatusIndicator(self, indicator: StatusIndicator | None) -> None: ...
 
 
-def isWorkingStatusEditor(editor: Any) -> TypeGuard[WorkingStatusEditor]:
+def isEmbeddedStatus(editor: Any) -> TypeGuard[WorkingStatusEditor]:
     return getattr(editor, "embedWorkingStatus", None) is True and callable(
         getattr(editor, "setWorkingStatusIndicator", None)
     )
@@ -1868,12 +1869,8 @@ class InteractiveMode:
             return
 
         def sectionHeader(name: str, color: str = "mdHeading") -> str:
-            # MISAKA fork: section titles use MISAKA's `sectionTitle` theme slot, falling back to accent for themes
-            # without it.
-            try:
-                return theme.fg("sectionTitle", f"[{name}]")  # type: ignore[arg-type]
-            except KeyError:
-                return theme.fg("accent", f"[{name}]")
+            # MISAKA fork: section titles use MISAKA's `sectionTitle` theme token (falls back to accent).
+            return theme.fg("sectionTitle", f"[{name}]")
 
         def formatCompactList(items: list[str], sort: bool = True) -> str:
             labels = [label for label in (jsTrim(item) for item in items) if len(label) > 0]
@@ -2363,7 +2360,7 @@ class InteractiveMode:
 
     def setEditorWorkingStatusIndicator(self, indicator: StatusIndicator | None) -> bool:
         self.defaultEditor.setWorkingStatusIndicator(None)
-        if not isWorkingStatusEditor(self.editor):
+        if not isEmbeddedStatus(self.editor):
             return False
         self.editor.setWorkingStatusIndicator(indicator)
         return True
@@ -2403,7 +2400,7 @@ class InteractiveMode:
                     or theme.getThinkingBorderColor(self.session.thinkingLevel or "off")
                 )(text)
             )
-            if isWorkingStatusEditor(self.editor)
+            if isEmbeddedStatus(self.editor)
             else None
         )
         self.showStatusIndicator(
@@ -2985,7 +2982,7 @@ class InteractiveMode:
 
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         component: Any = None
-        handle: Any = None
+        overlayHandle: Any = None
         closed = False
 
         def close(result: Any) -> None:
@@ -2993,11 +2990,10 @@ class InteractiveMode:
             if closed:
                 return
             closed = True
-            # MISAKA fork: the overlay is hidden through its own handle; pi hides the topmost overlay, which is another
-            # one when the component closes before its overlay opens.
+            # Remove this overlay, not the topmost one: another overlay may have opened above it.
             if isOverlay:
-                if handle is not None:
-                    handle.hide()
+                if overlayHandle is not None:
+                    overlayHandle.hide()
             else:
                 restoreEditor()
             # Note: both branches above already call requestRender
@@ -3048,11 +3044,11 @@ class InteractiveMode:
                     w = getattr(component, "width", None)
                     return {"width": w} if w else None
 
-                handle = self.ui.showOverlay(component, resolveOptions())
+                overlayHandle = self.ui.showOverlay(component, resolveOptions())
                 # Expose handle to caller for visibility control
                 onHandle = read_field(options, "onHandle")
                 if onHandle:
-                    onHandle(handle)
+                    onHandle(overlayHandle)
             else:
                 self.disposeActiveSelector()
                 self.editorContainer.clear()
@@ -3677,7 +3673,17 @@ class InteractiveMode:
                 # Keep editor active; submissions are queued during compaction.
                 self.autoCompactionEscapeHandler = self.defaultEditor.onEscape
                 self.defaultEditor.onEscape = lambda: self.session.abortCompaction()
-                self.showStatusIndicator(CompactionStatusIndicator(self.ui, read_field(event, "reason")))
+                colorFn = (
+                    (
+                        lambda text: (
+                            getattr(self.editor, "borderColor", None)
+                            or theme.getThinkingBorderColor(self.session.thinkingLevel or "off")
+                        )(text)
+                    )
+                    if isEmbeddedStatus(self.editor)
+                    else None
+                )
+                self.showStatusIndicator(CompactionStatusIndicator(self.ui, read_field(event, "reason"), colorFn))
                 self.ui.requestRender()
 
             case "compaction_end":
@@ -3767,7 +3773,17 @@ class InteractiveMode:
                 if read_field(event, "source") == "branchSummary":
                     self.showStatusIndicator(BranchSummaryStatusIndicator(self.ui))
                 else:
-                    self.showStatusIndicator(CompactionStatusIndicator(self.ui, read_field(event, "reason")))
+                    colorFn = (
+                        (
+                            lambda text: (
+                                getattr(self.editor, "borderColor", None)
+                                or theme.getThinkingBorderColor(self.session.thinkingLevel or "off")
+                            )(text)
+                        )
+                        if isEmbeddedStatus(self.editor)
+                        else None
+                    )
+                    self.showStatusIndicator(CompactionStatusIndicator(self.ui, read_field(event, "reason"), colorFn))
                 self.ui.requestRender()
 
             case "summarization_retry_finished":
@@ -4957,6 +4973,9 @@ class InteractiveMode:
                 self.settingsManager.setTransport(transport)
                 self.session.agent.transport = transport
 
+            def onSessionShareDestinationChange(destination: Any) -> None:
+                self.settingsManager.setSessionShareDestination(destination)
+
             def onHttpIdleTimeoutMsChange(timeoutMs: int) -> None:
                 self.settingsManager.setHttpIdleTimeoutMs(timeoutMs)
                 configureHttpDispatcher(timeoutMs)
@@ -5056,6 +5075,7 @@ class InteractiveMode:
                     steeringMode=self.session.steeringMode,
                     followUpMode=self.session.followUpMode,
                     transport=self.settingsManager.getTransport(),
+                    sessionShareDestination=self.settingsManager.getSessionShareDestination(),
                     httpIdleTimeoutMs=self.settingsManager.getHttpIdleTimeoutMs(),
                     cacheWarmingMode=self.settingsManager.getCacheWarmingMode(),
                     thinkingLevel=self.settingsManager.getDefaultThinkingLevel() or DEFAULT_THINKING_LEVEL,
@@ -5093,6 +5113,7 @@ class InteractiveMode:
                     onSteeringModeChange=lambda mode: self.session.setSteeringMode(mode),
                     onFollowUpModeChange=lambda mode: self.session.setFollowUpMode(mode),
                     onTransportChange=onTransportChange,
+                    onSessionShareDestinationChange=onSessionShareDestinationChange,
                     onHttpIdleTimeoutMsChange=onHttpIdleTimeoutMsChange,
                     onCacheWarmingModeChange=onCacheWarmingModeChange,
                     # MISAKA fork: the panel's thinking level row saves the default (this agent's own in a Last Order
@@ -6996,7 +7017,12 @@ class InteractiveMode:
                 f"Total lines: {len(allLines)}",
                 "",
                 "=== All rendered lines with visible widths ===",
-                *[f"[{idx}] (w={visibleWidth(line)}) {jsonStringify(line)}" for idx, line in enumerate(allLines)],
+                # MISAKA fork: the lines without their escape sequences, so the dump stays readable: since 1.2 a
+                # rendered line also carries the fake cursor's APC markers.
+                *[
+                    f"[{idx}] (w={visibleWidth(line)}) {jsonStringify(stripTerminalSequences(line))}"
+                    for idx, line in enumerate(allLines)
+                ],
                 "",
                 "=== Agent messages (JSONL) ===",
                 *[json.dumps(msg, default=jsonDefault, ensure_ascii=False) for msg in self.session.messages],

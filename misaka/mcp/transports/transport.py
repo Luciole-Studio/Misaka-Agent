@@ -6,7 +6,7 @@ Translated from pi's ``packages/mcp/src/transports/transport.ts``.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Final, Protocol
+from typing import Any, Final, Protocol, TypedDict
 
 from misaka.mcp.protocol.jsonrpc import JsonRpcMessage, toError
 from misaka.utils.js import liveKeys
@@ -18,12 +18,22 @@ type McpTransportErrorListener = Callable[[Exception], None]
 type McpTransportCloseListener = Callable[[], None]
 
 
+class McpTransportSendOptions(TypedDict, total=False):
+    # Aborted once the sender no longer waits for a reply (the request was cancelled, timed out, answered,
+    # or the client closed). A transport must not dispatch the message after that, for example when
+    # retrying it after an authorization refresh. It does not undo a message already dispatched.
+    signal: Any
+
+
 class McpTransport(Protocol):
-    """A transport. ``setProtocolVersion(version)`` is optional; callers look it up with ``getattr``."""
+    """A transport. ``setProtocolVersion(version)`` is optional; callers look it up with ``getattr``.
+
+    MISAKA fork: every transport takes ``send``'s ``options``, also those that ignore it; a TypeScript
+    implementation may omit a trailing parameter, a Python one raises ``TypeError`` when it is passed."""
 
     async def start(self) -> None: ...
 
-    async def send(self, message: JsonRpcMessage) -> None: ...
+    async def send(self, message: JsonRpcMessage, options: McpTransportSendOptions | None = None) -> None: ...
 
     async def close(self) -> None: ...
 
@@ -79,5 +89,6 @@ __all__ = [
     "McpTransportCloseListener",
     "McpTransportErrorListener",
     "McpTransportMessageListener",
+    "McpTransportSendOptions",
     "TransportEvents",
 ]

@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/src/api/bedrock-converse-stream.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/src/api/bedrock-converse-stream.ts`` (v1.3.0).
 
 MISAKA fork, kept to what boto3 and the platform force (each is marked where it happens):
 
@@ -7,7 +7,8 @@ MISAKA fork, kept to what boto3 and the platform force (each is marked where it 
   JavaScript SDK throws.
 - Stream events are botocore's dicts; pi's per-block scratch fields (``index``, ``partialJson``, ``redactedChunks``)
   live beside the strict content blocks (``_Blocks``).
-- A tool call's streamed arguments are parsed sparingly (``StreamingArgs``) and finalized through ``finish_into``.
+- A tool call's streamed arguments are parsed sparingly (``StreamingArgs``) and finalized through ``finish_into``
+  (upstream's ``parseToolCallArguments``).
 """
 
 from __future__ import annotations
@@ -32,7 +33,10 @@ from misaka.ai.api.simple_options import (
     clampMaxTokensToContext,
     clampReasoning,
 )
-from misaka.ai.api.transform_messages import transformMessages
+from misaka.ai.api.transform_messages import (
+    splitErrorToolResultImages,
+    transformMessages,
+)
 from misaka.ai.models import calculateCost
 from misaka.ai.types import (
     AssistantMessage,
@@ -1101,37 +1105,35 @@ def _convertMessages(
                 # Collect all consecutive toolResult messages into a single user message
                 # Bedrock requires all tool results to be in one message
                 toolResults: list[dict[str, Any]] = []
-
-                # Add current tool result with all content blocks combined
-                toolResults.append(
-                    {
-                        "toolResult": {
-                            "toolUseId": m.toolCallId,
-                            "content": _convertToolResultContent(m.content),
-                            "status": "error" if m.isError else "success",
-                        }
-                    }
-                )
-
-                # Look ahead for consecutive toolResult messages
-                j = i + 1
+                # Claude rejects error tool results that contain anything but text, so for Claude their
+                # images follow all tool results of the turn (#10794). Other models keep them in place.
+                errorImages: list[dict[str, Any]] = []
+                j = i
                 while j < len(transformedMessages) and transformedMessages[j].role == "toolResult":
-                    nextMsg: ToolResultMessage = transformedMessages[j]  # type: ignore[assignment]
+                    toolMsg: ToolResultMessage = transformedMessages[j]  # type: ignore[assignment]
+                    split = splitErrorToolResultImages(toolMsg) if _isAnthropicClaudeModel(model) else None
                     toolResults.append(
                         {
                             "toolResult": {
-                                "toolUseId": nextMsg.toolCallId,
-                                "content": _convertToolResultContent(nextMsg.content),
-                                "status": "error" if nextMsg.isError else "success",
+                                "toolUseId": toolMsg.toolCallId,
+                                "content": _convertToolResultContent(split.content if split else toolMsg.content),
+                                "status": "error" if toolMsg.isError else "success",
                             }
                         }
                     )
+                    if split:
+                        errorImages.extend(
+                            [
+                                {"text": split.caption},
+                                *({"image": _createImageBlock(image.mimeType, image.data)} for image in split.images),
+                            ]
+                        )
                     j += 1
 
                 # Skip the messages we've already processed
                 i = j - 1
 
-                result.append({"role": "user", "content": toolResults})
+                result.append({"role": "user", "content": [*toolResults, *errorImages]})
             case _:
                 i += 1
                 continue

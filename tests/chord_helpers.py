@@ -1,12 +1,11 @@
-"""Helpers shared by the chord tests (pi chord's ``test/helpers.ts`` and the small utilities its tests share)."""
+"""Small utilities the chord and durable tests share. (pi chord's ``test/helpers.ts``, which re-exported the loopback
+service transport, went with the service runtime in 1.2.0.)"""
 
 from __future__ import annotations
 
 import asyncio
 
-from misaka.chord.services.loopback import createLoopbackServiceTransport
-
-__all__ = ["Deferred", "createLoopbackServiceTransport", "matches", "waitFor"]
+__all__ = ["Deferred", "matches", "waitFor"]
 
 
 def matches(actual, expected) -> bool:

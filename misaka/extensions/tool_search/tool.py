@@ -198,11 +198,6 @@ class ToolSearchInput(TypedDict, total=False):
     limit: float
 
 
-def isToolSearchTool(tool: Any) -> bool:
-    """Whether the tool is this ``tool_search``, not another extension's tool of the same name."""
-    return read_field(tool, "name") == TOOL_SEARCH_TOOL_NAME and read_field(tool, "parameters") is toolSearchSchema
-
-
 @dataclass(frozen=True, slots=True)
 class ToolSearchResultTool:
     name: str
@@ -316,6 +311,8 @@ def createToolSearchToolDefinition(
         parameters=toolSearchSchema,
         # Searching is not something scripts need; it changes what the model sees.
         exposure="model-only",
+        # A query can match any tool that is not declared yet.
+        reachesTools=lambda _input: "all",
         execute=execute,
     )
 
@@ -335,7 +332,6 @@ __all__ = [
     "ToolSearchToolOptions",
     "createToolSearchDocument",
     "createToolSearchToolDefinition",
-    "isToolSearchTool",
     "tokenize",
     "toolSearchSchema",
 ]

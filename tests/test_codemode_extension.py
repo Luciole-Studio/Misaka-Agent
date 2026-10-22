@@ -337,6 +337,13 @@ async def test_applies_the_timeout_ms_option_and_rejects_invalid_options(tmp_pat
         assert invalid.isError is True
         assert invalid.content == [TextContent(text="@options only supports `max_output_tokens` and `timeout_ms`; got `yield`")]
 
+        # #10631: a misplaced options line fails before the script runs instead of running without a deadline.
+        misplaced = await run(session, '// count\n// @options: {"timeout_ms": 200}\nwhile (true) {}')
+        assert misplaced.isError is True
+        assert misplaced.content == [
+            TextContent(text="The // @options: line must be the first line of the input; found one on line 2")
+        ]
+
 
 async def test_limits_script_memory_so_runaway_allocations_fail_inside_the_script(tmp_path):
     async with session_with(tmp_path, [createCodemodeExtension()], settings={"defaultTools": ["codemode"]}) as session:
@@ -350,6 +357,36 @@ async def test_limits_script_memory_so_runaway_allocations_fail_inside_the_scrip
         assert "out of memory" in outcome["error"]
         # Each entry holds at least 1 MiB, so the limit stops the script well before wasm32's 4 GiB.
         assert outcome["n"] < 512
+
+
+# #10678: joining the text items was quadratic, about 10 s here for the item limit.
+async def test_formats_output_at_the_item_limit_in_linear_time(tmp_path):
+    import time
+
+    from misaka.extensions.codemode.execute import formatOutput, joinAdjacentText
+
+    async with session_with(tmp_path, [createCodemodeExtension()], settings={"defaultTools": ["codemode"]}) as session:
+        result = await run(session, 'for (let i = 0; i < 100000; i++) text("");')
+        Path(result.details.get("fullOutputPath") or "").unlink(missing_ok=True)
+        assert not result.isError
+        assert "==> text 100000/100000 <==" in resultText(result)
+    # MISAKA fork: timed apart from the script. Crossing the Python bridge 100,000 times takes about 5 s here by
+    # itself (upstream's whole run, V8 bridge included, must stay under 5 s); the formatting is what was quadratic.
+    startedAt = time.perf_counter()
+    joinAdjacentText(formatOutput([{"type": "text", "text": ""}] * 100_000))
+    assert time.perf_counter() - startedAt < 1
+
+
+def test_joins_adjacent_text_like_upstream():
+    from misaka.extensions.codemode.execute import joinAdjacentText
+
+    image = ImageContent(data=TINY_PNG_BASE64, mimeType="image/png")
+    joined = joinAdjacentText([
+        TextContent(text="a"), TextContent(text=""), TextContent(text="b\n"), TextContent(text="c"),
+        image, TextContent(text=""), TextContent(text="d"),
+    ])
+    # The separator follows the last non-empty part; an image starts a new text item.
+    assert joined == [TextContent(text="a\nb\nc"), image, TextContent(text="d")]
 
 
 async def test_truncates_output_to_the_token_budget_and_spills_the_full_text(tmp_path):
@@ -684,6 +721,24 @@ async def test_reports_provider_errors_as_results_and_invalid_arguments_as_excep
                     models.classify(model, {{ state: {{}}, questions: {{ kind: {{ type: "choice", instructions: "Kind?", criteria: ["a", "b"] }} }} }}),
                 ),
                 badImage: await attempt(() => models.generateImages({{ provider: "scorer", id: "painter" }}, {{ prompt: "a fox" }})),
+                arrayModel: await attempt(() => models.classify(["scorer", "judge"], {{}})),
+                arrayContext: await attempt(() => models.classify(model, [])),
+                arrayState: await attempt(() => models.classify(model, {{ state: [], questions: {QUESTIONS} }})),
+                arrayQuestions: await attempt(() => models.classify(model, {{ state: {{}}, questions: [] }})),
+                arrayQuestion: await attempt(() => models.classify(model, {{ state: {{}}, questions: {{ kind: [] }} }})),
+                noInstructions: await attempt(() =>
+                    models.classify(model, {{ state: {{}}, questions: {{ kind: {{ type: "bool", criteria: {{ true: "y", false: "n" }} }} }} }}),
+                ),
+                badBool: await attempt(() =>
+                    models.classify(model, {{ state: {{}}, questions: {{ kind: {{ type: "bool", instructions: "Ok?", criteria: ["y", "n"] }} }} }}),
+                ),
+                badKind: await attempt(() =>
+                    models.classify(model, {{ state: {{}}, questions: {{ kind: {{ type: "rank", instructions: "Rank?" }} }} }}),
+                ),
+                arrayImagesContext: await attempt(() => models.generateImages({{ provider: "scorer", id: "painter" }}, [])),
+                badImageBlock: await attempt(() =>
+                    models.generateImages({{ provider: "scorer", id: "painter" }}, {{ input: [{{ type: "text", text: "a fox" }}, {{ type: "image", data: "aW1hZ2U=" }}] }}),
+                ),
                 badSplit: await attempt(() => models.getModelOfType("classifier", "scorer/judge")),
             }};
         """)
@@ -701,6 +756,16 @@ async def test_reports_provider_errors_as_results_and_invalid_arguments_as_excep
         assert 'context.questions.kind is a "choice" question, so criteria must map each label to its meaning.' in value["badQuestion"]
         assert "models.generateImages() context.input must be a non-empty array of blocks, got undefined." in value["badImage"]
         assert "The provider and the id are separate arguments" in value["badSplit"]
+        assert "models.classify() expects a classifier model as its first argument, got an array." in value["arrayModel"]
+        assert "models.classify() expects a context object as its second argument, got an empty array." in value["arrayContext"]
+        assert "models.classify() context.state must be an object, got an empty array." in value["arrayState"]
+        assert "models.classify() context.questions must map question IDs to questions, got an empty array." in value["arrayQuestions"]
+        assert "models.classify() context.questions.kind must be a question object, got an empty array." in value["arrayQuestion"]
+        assert "models.classify() context.questions.kind.instructions must be a string." in value["noInstructions"]
+        assert 'context.questions.kind is a "bool" question, so criteria must be { true: string, false: string }.' in value["badBool"]
+        assert 'context.questions.kind.type must be "choice", "score", or "bool", got "rank".' in value["badKind"]
+        assert "models.generateImages() expects a context object as its second argument, got an empty array." in value["arrayImagesContext"]
+        assert "models.generateImages() context.input[1] must be a text or image block, got { type, data }." in value["badImageBlock"]
         assert [[call["name"], call["status"], call.get("error")] for call in result.details["calls"]] == [
             ["models.classify", "error", "classifier exploded"],
             ["models.classify", "error", "Model scorer/judge does not accept image input"],
@@ -727,6 +792,37 @@ def _render(result, isError=False, expanded=True, width=200) -> str:
 
 
 HEADER = {"type": "text", "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"}
+
+
+# #10708
+def test_renderer_shows_the_elapsed_time_while_the_script_runs_and_the_total_once_it_finished(monkeypatch):
+    from misaka.core.tools import render_utils
+    from misaka.extensions.codemode.tool import createCodemodeToolDefinition
+    from misaka.modes.interactive.components.tool_execution import (
+        ToolExecutionComponent,
+    )
+    from misaka.modes.interactive.theme.theme import initTheme
+    from misaka.utils.ansi import stripAnsi
+
+    initTheme("dark")
+    # `vi.useFakeTimers()` + `vi.setSystemTime(0)`.
+    clock = {"now": 0}
+    monkeypatch.setattr(render_utils, "_now", lambda: clock["now"])
+    tui = SimpleNamespace(requestRender=lambda: None)
+    component = ToolExecutionComponent("codemode", "call", {"code": ""}, {}, createCodemodeToolDefinition(), tui, "/")
+
+    def text() -> str:
+        return stripAnsi("\n".join(component.render(120)))
+
+    component.markExecutionStarted()
+    component.updateResult({"content": [], "details": {"calls": []}, "isError": False}, True)
+    clock["now"] += 3_000
+    component.invalidate()
+    assert "Elapsed 3.0s" in text()
+
+    component.updateResult({"content": [], "details": {"calls": []}, "isError": False, "durationMs": 5_100}, False)
+    assert "Took 5.1s" in text()
+    assert "Elapsed" not in text()
 
 
 def test_renderer_hides_the_script_header_and_shows_the_output():
@@ -861,3 +957,16 @@ async def test_shows_null_returned_by_a_script(tmp_path):
     async with session_with(tmp_path, [createCodemodeExtension()], settings={"defaultTools": ["codemode"]}) as session:
         assert resultText(await run(session, "return null;")) == "null"
         assert resultText(await run(session, "return undefined;")) == ""
+
+
+def test_describe_fields_lists_properties_in_object_entries_order():
+    # `Object.entries(properties)`: integer-like names come first in ascending order, the rest as written (upstream's
+    # one-line result description, checked against v1.3.0 tool.ts under node).
+    from misaka.extensions.codemode.tool import describeFields
+
+    schema = {
+        "type": "object",
+        "properties": {"b": {}, "1": {"type": "object", "properties": {"z": {}, "0": {}}}},
+        "required": ["1"],
+    }
+    assert describeFields(schema, 1) == "{ 1: { 0?, z? }, b? }"

@@ -7,9 +7,10 @@ with wasi-sdk 32, whose licences are collected in ``LICENSES/quickjs-wasi.txt``.
 
 MISAKA fork:
 
-- Only what pi's ``packages/codemode/src/runtime/worker.ts`` uses is here: ``QuickJS.create`` with a memory limit, a
-  stack limit, an interrupt handler and WASI overrides; ``newFunction``, ``newString``, ``newNumber``, ``newError``,
-  the ``undefined``/``true``/``false`` singletons, ``evalCode``, ``callFunction``, ``getException``,
+- Only what pi's ``packages/codemode/src/runtime/vm.ts`` uses is here: ``QuickJS.create`` with a memory limit, a
+  stack limit, an interrupt handler, WASI overrides, ``intrinsics`` (``Intrinsics``) and ``timezoneOffset``;
+  ``versions``, ``_getExports()``, ``newFunction``, ``newString``, ``newNumber``, ``newError``, the
+  ``undefined``/``true``/``false`` singletons, ``evalCode``, ``callFunction``, ``getException``,
   ``executePendingJobs`` and ``withScope``; and on handles ``getProp``, ``setProp``, ``toString``, ``toNumber``,
   ``toBoolean``, ``isUndefined``, ``consume``, ``dup`` and ``dispose``. No snapshots, extensions, module loaders or
   promise helpers; the imports that serve them answer as upstream does when no handler is set.
@@ -49,6 +50,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import ctypes
+import math
 import os
 import re
 import struct
@@ -68,6 +70,47 @@ WASM_PATH = Path(__file__).with_name("quickjs.wasm")
 
 MAX_STACK_SIZE = 512 * 1024
 
+
+class Intrinsics:
+    """Intrinsic flags for ``QuickJS.create(intrinsics=...)`` controlling which built-in JavaScript features are
+    available in the VM.
+
+    By default all intrinsics are enabled. Pass a bitmask of these flags to create a minimal context. For example,
+    omit ``Intrinsics.EVAL`` to prevent ``eval()`` usage, or omit ``Intrinsics.PROXY`` to disallow ``Proxy``.
+
+    ``BaseObjects`` (Object, Array, Number, String, Boolean, Error, etc.) is always included and cannot be disabled.
+    """
+
+    # `Date` constructor and prototype methods.
+    DATE = 1 << 0
+    # `eval()` and `Function()` constructor.
+    EVAL = 1 << 1
+    # `RegExp` constructor, prototype methods, and regex literals.
+    REGEXP = 1 << 2
+    # `JSON.parse()` and `JSON.stringify()`.
+    JSON = 1 << 3
+    # `Proxy` and `Reflect`.
+    PROXY = 1 << 4
+    # `Map`, `Set`, `WeakMap`, `WeakSet`.
+    MAP_SET = 1 << 5
+    # `ArrayBuffer`, `TypedArray` variants, `DataView`.
+    TYPED_ARRAYS = 1 << 6
+    # `Promise`, `async`/`await`.
+    PROMISE = 1 << 7
+    # `BigInt`. Note: BigInt is part of BaseObjects in quickjs-ng and cannot be fully removed.
+    BIG_INT = 1 << 8
+    # `WeakRef` and `FinalizationRegistry`.
+    WEAK_REF = 1 << 9
+    # `performance.now()`.
+    PERFORMANCE = 1 << 10
+    # `DOMException` class.
+    DOM_EXCEPTION = 1 << 11
+    # `atob()` and `btoa()` global functions. Also pulls in `DOMException` as a dependency (errors thrown by these
+    # functions are `DOMException`s).
+    ATOB_BTOA = 1 << 12
+    # All intrinsics enabled (default).
+    ALL = 0xFFFFFFFF
+
 # MISAKA fork: native stack the wasm frames may use. wasmtime's default (512 KiB) runs out before QuickJS's own guard
 # (MAX_STACK_SIZE, measured on the wasm shadow stack) in recursion that passes through native functions -- getters,
 # Proxy traps, Array callbacks -- which then traps instead of throwing a catchable RangeError; Node's worker threads
@@ -77,6 +120,11 @@ MAX_WASM_STACK = 2 * 1024 * 1024
 
 _engine: wasmtime.Engine | None = None
 _engineLock = threading.Lock()
+# MISAKA fork: wasmtime-py keeps every host function of every store in one process-wide table (`wasmtime._func.FUNCTIONS`)
+# whose allocate and free are not atomic. Creating a VM's host functions and closing a VM's store (which frees them) run
+# on the worker threads of different executions at once -- a run's result no longer waits for its worker to end -- so
+# both hold this lock; unguarded, an allocation can pick a slot another thread is freeing and fail the VM's creation.
+_hostFunctionsLock = threading.Lock()
 
 
 def _wasmtime() -> Any:
@@ -304,6 +352,17 @@ class Scope(Protocol):
 
 type HostCallback = Callable[..., JSValueHandle]
 type WasiOverrides = Callable[[Memory], Mapping[str, WasiFunction]]
+type TimezoneOffset = str | float | Callable[[int], float]
+
+
+def _hostTimezoneOffset(timeSecs: int) -> float:
+    """``-new Date(timeSecs * 1000).getTimezoneOffset() * 60``: the host's UTC offset in seconds at that instant.
+    MISAKA fork: Python reads ``TZ`` when ``time.tzset()`` runs, not on every call as Node does; an instant the
+    platform's ``localtime`` cannot represent gets offset 0, where JavaScript's Date would give NaN (also 0)."""
+    try:
+        return time.localtime(timeSecs).tm_gmtoff
+    except (OverflowError, OSError, ValueError):
+        return 0
 
 
 class _Scope:
@@ -403,9 +462,11 @@ class QuickJS:
         self.module = module
         self.hostCallbacks: dict[str, HostCallback] = {}
         self.interruptHandler: Callable[[], bool] | None = None
+        self.timezoneOffsetHandler: Callable[[int], float] | None = None
         self.disposed = False
         # The innermost active `withScope()` batch, if any; new non-singleton handles register here.
         self._activeScope: dict[JSValueHandle, None] | None = None
+        self._versions: dict[str, str] | None = None
         self._undefined: JSValueHandle | None = None
         self._true: JSValueHandle | None = None
         self._false: JSValueHandle | None = None
@@ -415,6 +476,18 @@ class QuickJS:
         self._lengthSlot = 0
 
     # ---- Cached property accessors ----
+
+    @property
+    def versions(self) -> dict[str, str]:
+        """Version information for the runtime and loaded native libraries. Always includes ``"quickjs-wasi"`` (the
+        npm package version) and ``"quickjs"`` (the QuickJS engine version)."""
+        self.assertNotDisposed()
+        if self._versions is None:
+            self._versions = {
+                "quickjs-wasi": VERSION,
+                "quickjs": self.readCString(self._e.qjs_get_quickjs_version()),
+            }
+        return self._versions
 
     @property
     def undefined(self) -> JSValueHandle:
@@ -445,27 +518,56 @@ class QuickJS:
         maxStackSize: int | None = None,
         interruptHandler: Callable[[], bool] | None = None,
         wasi: WasiOverrides | None = None,
+        intrinsics: int | None = None,
+        timezoneOffset: TimezoneOffset | None = None,
     ) -> QuickJS:
         """A fresh VM from the compiled ``quickjs.wasm``. ``memoryLimit`` and ``maxStackSize`` are in bytes; the
         interrupt handler is polled while code runs and ends it with an uncatchable error when it returns true;
-        ``wasi`` returns WASI functions that replace the built-in ones."""
+        ``wasi`` returns WASI functions that replace the built-in ones; ``intrinsics`` is a bitmask of
+        ``Intrinsics`` flags (default: all).
+
+        ``timezoneOffset`` controls the timezone ``Date`` uses: ``"host"`` (default) mirrors the host's timezone;
+        a number is a fixed UTC offset in minutes, with ``getTimezoneOffset()``'s sign (west of UTC is positive);
+        a callback is called with seconds since the epoch and returns the offset in minutes for that instant."""
         vm = QuickJS(wasm)
         vm._instantiate(wasi)
-        # Initialize the WASI reactor
-        vm._e._initialize()
-        # Initialize QuickJS runtime and context
-        if vm._e.qjs_init() != 0:
-            raise RuntimeError("Failed to initialize QuickJS runtime")
-        vm._lengthSlot = vm._e.wasm_malloc(4)
-        if vm._lengthSlot == 0:
-            raise MemoryError("wasm_malloc failed")
-        if memoryLimit is not None:
-            vm._e.qjs_set_memory_limit(memoryLimit)
-        if maxStackSize is not None:
-            vm._e.qjs_set_max_stack_size(maxStackSize)
-        if interruptHandler is not None:
-            vm.interruptHandler = interruptHandler
-            vm._e.qjs_set_interrupt_handler(1)
+        try:
+            # Initialize the WASI reactor
+            vm._e._initialize()
+            # Initialize QuickJS runtime and context
+            result = vm._e.qjs_init2(_i32(intrinsics)) if intrinsics is not None else vm._e.qjs_init()
+            if result != 0:
+                raise RuntimeError("Failed to initialize QuickJS runtime")
+            vm._lengthSlot = vm._e.wasm_malloc(4)
+            if vm._lengthSlot == 0:
+                raise MemoryError("wasm_malloc failed")
+            if memoryLimit is not None:
+                vm._e.qjs_set_memory_limit(memoryLimit)
+            if maxStackSize is not None:
+                vm._e.qjs_set_max_stack_size(maxStackSize)
+            if interruptHandler is not None:
+                vm.interruptHandler = interruptHandler
+                vm._e.qjs_set_interrupt_handler(1)
+            # Configure timezone handler.
+            # The internal handler always returns the UTC offset in *seconds* (positive east of UTC), which is what
+            # libc's __secs_to_zone expects.
+            tz = "host" if timezoneOffset is None else timezoneOffset
+            if callable(tz):
+                # User callback returns minutes (getTimezoneOffset convention: positive west of UTC). Convert to
+                # seconds with sign flip.
+                vm.timezoneOffsetHandler = lambda timeSecs: -tz(timeSecs) * 60
+            elif isinstance(tz, int | float):
+                # Fixed offset in minutes, convert to seconds with sign flip.
+                offsetSecs = -tz * 60
+                vm.timezoneOffsetHandler = lambda _timeSecs: offsetSecs
+            else:
+                # 'host' (default): use the host's timezone
+                vm.timezoneOffsetHandler = _hostTimezoneOffset
+        except BaseException:
+            # MISAKA fork: a VM that failed to start closes its store now. The bound host functions keep it alive
+            # in wasmtime's function table, so the garbage collector would never free its linear memory.
+            vm.dispose()
+            raise
         return vm
 
     def _instantiate(self, wasi: WasiOverrides | None) -> None:
@@ -484,14 +586,23 @@ class QuickJS:
             "host_get_timezone_offset": self._hostGetTimezoneOffset,
         }
         imports = {"env": env, "wasi_snapshot_preview1": wasiShim}
-        for item in self.module.imports:
-            function = imports.get(item.module, {}).get(item.name or "")
-            if function is None:
-                raise RuntimeError(f"quickjs.wasm imports {item.module}.{item.name}, which this host does not provide")
-            linker.define(store, item.module, item.name, wasmtime_.Func(store, item.type, function))
-        instance = linker.instantiate(store, self.module)
-        self._e = _Exports(instance, store)
-        memory.attach(instance.exports(store)["memory"])
+        try:
+            with _hostFunctionsLock:
+                for item in self.module.imports:
+                    function = imports.get(item.module, {}).get(item.name or "")
+                    if function is None:
+                        raise RuntimeError(
+                            f"quickjs.wasm imports {item.module}.{item.name}, which this host does not provide"
+                        )
+                    linker.define(store, item.module, item.name, wasmtime_.Func(store, item.type, function))
+            instance = linker.instantiate(store, self.module)
+            self._e = _Exports(instance, store)
+            memory.attach(instance.exports(store)["memory"])
+        except BaseException:
+            # MISAKA fork: as in `create`, a store whose instance never came up is closed now.
+            with _hostFunctionsLock:
+                store.close()
+            raise
         self._memory = memory
 
     # ---- Imports ----
@@ -511,8 +622,14 @@ class QuickJS:
     def _hostModuleLoad(self, _namePtr: int, _outLenPtr: int) -> int:
         return 0
 
-    def _hostGetTimezoneOffset(self, _hi: int, _lo: int) -> int:
-        return 0
+    def _hostGetTimezoneOffset(self, hi: int, lo: int) -> int:
+        """Receives the time as split i32 (hi, lo) and returns the UTC offset in seconds."""
+        timeSecs = (hi << 32) | _u32(lo)
+        if self.timezoneOffsetHandler is None:
+            return 0
+        offset = self.timezoneOffsetHandler(timeSecs)
+        # A JS number crosses into the i32 result as ToInt32 makes it: NaN and infinities become 0.
+        return _i32(int(offset)) if math.isfinite(offset) else 0
 
     def _handleHostCall(self, namePtr: int, nameLen: int, _thisPtr: int, argc: int, argvPtr: int) -> int:
         """Called from WASM when a host function is invoked from QuickJS code."""
@@ -668,6 +785,16 @@ class QuickJS:
             nameHandle.dispose()
         return errHandle
 
+    def assertNotDisposed(self) -> None:
+        if self.disposed:
+            raise RuntimeError("QuickJS instance has been disposed")
+
+    # ---- Internal accessors for JSValueHandle ----
+
+    def _getExports(self) -> _Exports:
+        """@internal The instance's exports."""
+        return self._e
+
     def dispose(self) -> None:
         """Release the VM. Handles disposed afterwards free nothing. MISAKA fork: the store is closed at once, which
         frees the wasm instance and its linear memory; upstream drops its references and leaves the memory to the
@@ -678,10 +805,12 @@ class QuickJS:
         self._undefined = self._true = self._false = None
         self.hostCallbacks.clear()
         self.interruptHandler = None
+        self.timezoneOffsetHandler = None
         self._activeScope = None
         store = self._e._store
         del self._e, self._memory
-        store.close()
+        with _hostFunctionsLock:
+            store.close()
 
 
 # ---- JSValue Handle ----
@@ -782,6 +911,7 @@ __all__ = [
     "MAX_WASM_STACK",
     "VERSION",
     "WASM_PATH",
+    "Intrinsics",
     "JSException",
     "JSValueHandle",
     "Memory",

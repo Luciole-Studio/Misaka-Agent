@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/src/api/openai-responses-shared.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/src/api/openai-responses-shared.ts`` (v1.3.0).
 
 MISAKA fork, kept to what the Python SDK and platform force (each is marked where it happens):
 
@@ -6,7 +6,7 @@ MISAKA fork, kept to what the Python SDK and platform force (each is marked wher
 - A streaming tool call's ``partialJson`` / ``customInput`` scratch fields ride beside the block, keyed by
   content index, because the content blocks are strict models.
 - A tool call's streamed arguments are parsed sparingly (``StreamingArgs``) and finalized through
-  ``finish_into``, which records a malformed object as ``argumentsError``.
+  ``finish_into`` (upstream's ``parseToolCallArguments``).
 """
 
 from __future__ import annotations
@@ -130,6 +130,14 @@ class ConvertResponsesMessagesOptions(TypedDict, total=False):
     supportsAdditionalTools: bool
     supportsToolSearch: bool
     toolOptions: ConvertResponsesToolsOptions
+    configurationUpdateEffort: str
+    """Effort for the reply being generated. When set, the thinking level is sent as
+    configuration_update items instead of a changing reasoning.effort, which would invalidate the
+    prompt cache. Each item sets the effort from that point on: one goes before every earlier
+    reply with the level recorded on it (`providerThinkingLevel`), and one with this effort goes
+    at the end. Earlier input therefore never changes. OpenAI documents the item before user
+    messages only. After tool results it was verified on gpt-6-luna (October 2026) to be accepted
+    and to apply to the next reply."""
 
 
 class ConvertResponsesToolsOptions(TypedDict, total=False):
@@ -214,6 +222,11 @@ def convertResponsesMessages(
         })
 
     includeInitialSystemMessage = nullishCoalesce(None if options is None else options.get("includeSystemPrompt"), True)
+
+    def pushConfigurationUpdate(effort: str) -> None:
+        messages.append({"type": "configuration_update", "reasoning": {"effort": effort}})
+
+    configurationUpdateEffort = None if options is None else options.get("configurationUpdateEffort")
     compat = model.compat
     instructionRole = (
         "developer" if model.reasoning and getattr(compat, "supportsDeveloperRole", None) is not False else "system"
@@ -334,6 +347,8 @@ def convertResponsesMessages(
                         })
             if len(output) == 0:
                 continue
+            if configurationUpdateEffort is not None and isSameModel and assistantMsg.providerThinkingLevel is not None:
+                pushConfigurationUpdate(assistantMsg.providerThinkingLevel)
             messages.extend(output)
         elif msg.role == "toolResult":
             callId = msg.toolCallId.split("|")[0]
@@ -353,6 +368,8 @@ def convertResponsesMessages(
                 })
         if not isLeadingSystemMessage:
             msgIndex += 1
+    if configurationUpdateEffort is not None:
+        pushConfigurationUpdate(configurationUpdateEffort)
 
     return messages
 
@@ -778,8 +795,7 @@ async def processResponsesStream(
                 and scratch is not None
                 and scratch.partialJson is not None
             ):
-                # MISAKA fork: the final arguments go through `finish_into`, which records a
-                # malformed object as `argumentsError` instead of running a repaired prefix.
+                # `parseToolCallArguments(item.arguments || partialJson)`.
                 (StreamingArgs(item["arguments"]) if item.get("arguments") else scratch.partialJson).finish_into(slot.block)
                 if item.get("namespace") is not None:
                     slot.block.namespace = item["namespace"]

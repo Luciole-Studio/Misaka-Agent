@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/coding-agent/src/core/slash-commands.ts`` (v1.1.0).
+"""Translated from pi's ``packages/coding-agent/src/core/slash-commands.ts`` (v1.3.0).
 
 MISAKA forks:
 - No ``bug`` (pi's reports go to the Pi developers) and no ``changelog`` (no changelog ships).
@@ -41,7 +41,7 @@ BUILTIN_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
     BuiltinSlashCommand(name="scoped-models", description="Enable/disable models for Ctrl+P cycling"),
     BuiltinSlashCommand(name="export", description="Export session (HTML default, or specify path: .html/.jsonl)"),
     BuiltinSlashCommand(name="import", description="Import and resume a session from a JSONL file"),
-    BuiltinSlashCommand(name="share", description="Share session as a secret GitHub gist"),
+    BuiltinSlashCommand(name="share", description="Share session via a Radius artifact or a GitHub gist"),
     BuiltinSlashCommand(name="copy", description="Copy last agent message to clipboard"),
     BuiltinSlashCommand(name="name", description="Set session display name"),
     BuiltinSlashCommand(name="session", description="Show session info and stats"),

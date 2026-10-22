@@ -1,4 +1,4 @@
-"""Translated from pi's ``coding-agent/test/scrollbar-theme.test.ts`` (v1.1.0).
+"""Translated from pi's ``coding-agent/test/scrollbar-theme.test.ts`` (v1.3.0).
 
 The scrollbar and search tokens are only drawn by pi's fullscreen renderer (D1), but themes carry them as data.
 """
@@ -17,7 +17,7 @@ from misaka.modes.interactive.theme.theme import (
     loadThemeFromPath,
     setThemeJsonValidator,
 )
-from misaka.modes.interactive.theme.theme_json import validateThemeJson
+from misaka.modes.interactive.theme.theme_schema import validateThemeJson
 
 
 @pytest.fixture(autouse=True)

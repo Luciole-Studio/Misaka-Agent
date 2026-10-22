@@ -658,7 +658,10 @@ async def test_keeps_ctx_get_system_prompt_in_sync_with_chained_system_prompt_up
     runner.onError(lambda error: errors.append(read_field(error, "error")))
     runner.bindCore(extensionActions, extensionContextActions)
 
-    chained = await runner.emitBeforeAgentStart("hello", None, {"cwd": str(tmp_path), "customPrompt": "base"})
+    chained = await runner.emitBeforeAgentStart(
+        {"messageType": "user", "prompt": "hello"},
+        {"cwd": str(tmp_path), "customPrompt": "base"},
+    )
 
     assert errors == []
     assert read_field(chained, "messages") == []

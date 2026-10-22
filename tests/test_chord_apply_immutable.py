@@ -222,6 +222,51 @@ def test_allows_one_immutable_batch_to_fan_out_without_mutating_shared_payloads(
     assert payload["nested"]["value"] == 1
 
 
+def test_appends_to_an_array_not_yet_copied_in_one_copy_sharing_everything_else():
+    entries = [{"index": index} for index in range(1_000)]
+    base = {"log": {"entries": entries, "meta": {"count": 1_000}}, "other": {"value": 1}}
+    before = clone(base)
+    result = applyImmutable(
+        base,
+        [
+            ["p", ["log", "entries"], 1_000, 0, [{"index": 1_000}]],
+            ["p", ["log", "entries"], 1_001, 0, [{"index": 1_001}]],
+        ],
+    )
+    assert len(result["log"]["entries"]) == 1_002
+    assert result["log"]["entries"][-2:] == [{"index": 1_000}, {"index": 1_001}]
+    assert len(base["log"]["entries"]) == 1_000
+    assert base == before
+    assert result["log"]["entries"][0] is entries[0]
+    assert result["log"]["meta"] is base["log"]["meta"]
+    assert result["other"] is base["other"]
+    assert result["log"] is not base["log"]
+
+    rootArray = [1, 2]
+    assert applyImmutable(rootArray, [["p", [], 2, 0, [3]]]) == [1, 2, 3]
+    assert rootArray == [1, 2]
+    # An appended item that is itself an array stays one element.
+    assert applyImmutable(rootArray, [["p", [], 2, 0, [[3, 4]]]]) == [1, 2, [3, 4]]
+    # Invalid paths fail with the general path's errors.
+    invalid = [
+        (["p", ["values", "missing"], 0, 0, []], PathError),
+        (["p", ["missing"], 0, 0, []], PathError),
+        (["p", ["values", 0], 0, 0, []], PathError),
+        (["p", ["__proto__"], 0, 0, []], UnsafePathError),
+        (["p", ["list", "x"], 0, 0, []], PathError),
+        (["p", ["text"], 0, 0, []], PathError),
+        (["p", ["list", -1], 0, 0, []], UnsafePathError),
+        (["p", ["list", 1.5], 0, 0, []], UnsafePathError),
+        (["p", ["list", 0, "constructor"], 0, 0, []], UnsafePathError),
+    ]
+    document = {"values": [], "list": [[1]], "text": "a"}
+    for op, error in invalid:
+        with pytest.raises(error):
+            applyImmutable(document, [op])
+    # An insert that is not at the end takes the general path.
+    assert applyImmutable(rootArray, [["p", [], 1, 0, [9]]]) == [1, 9, 2]
+
+
 def test_copies_a_wide_object_for_repeated_writes():
     base = {f"field{index}": index for index in range(20_000)}
     operations = [["s", [f"field{index}"], -index] for index in range(1_000)]

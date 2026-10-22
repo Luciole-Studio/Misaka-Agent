@@ -1,4 +1,4 @@
-"""Ported from: pi packages/durable/src/env/line-scan.ts @ v1.1.0"""
+"""Ported from: pi packages/durable/src/env/line-scan.ts @ v1.3.0"""
 
 from __future__ import annotations
 

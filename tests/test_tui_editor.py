@@ -1,4 +1,4 @@
-"""Translated from pi-tui's ``test/editor.test.ts`` (v1.1.0).
+"""Translated from pi-tui's ``test/editor.test.ts`` (v1.3.0).
 
 MISAKA forks: offsets and lengths count code points where upstream counts UTF-16 code units (the affected
 expectations say so where they change); ``mock.timers`` is a patched ``loop.call_later``; word navigation has no ICU
@@ -25,8 +25,9 @@ from misaka.ui.tui.autocomplete import (
     CombinedAutocompleteProvider,
 )
 from misaka.ui.tui.components.editor import Editor, EditorOptions, wordWrapLine
+from misaka.ui.tui.tui import FAKE_CURSOR_START, renderFakeCursor
 from misaka.ui.tui.tui_main_screen import TuiMainScreen
-from misaka.ui.tui.utils import visibleWidth
+from misaka.ui.tui.utils import stripTerminalSequences, visibleWidth
 from tests.tui_test_themes import defaultEditorTheme
 from tests.tui_virtual_terminal import VirtualTerminal
 
@@ -914,7 +915,7 @@ def test_wraps_cjk_characters_correctly_each_is_2_columns_wide():
         assert lineWidth == width, f"Line {i} has width {lineWidth}, expected {width}"
 
     # Verify content split correctly
-    contentLines = [stripVTControlCharacters(line).strip() for line in lines[1:-1]]
+    contentLines = [stripTerminalSequences(line).strip() for line in lines[1:-1]]
     assert len(contentLines) == 2
     assert contentLines[0] == "日本語テス"  # 5 chars = 10 columns
     assert contentLines[1] == "ト"  # 1 char = 2 columns (+ padding)
@@ -946,7 +947,7 @@ def test_renders_cursor_correctly_on_wide_characters():
 
     # The cursor (reverse video space) should be visible
     contentLine = lines[1]
-    assert "\x1b[7m" in contentLine, "Should have reverse video cursor"
+    assert FAKE_CURSOR_START in contentLine, "Should have fake cursor"
 
     # Line should still be correct width
     assert visibleWidth(contentLine) == width
@@ -977,7 +978,7 @@ def test_shows_cursor_at_end_of_line_before_wrap_wraps_on_next_char():
         lines = editor.render(width + paddingX)
         contentLines = lines[1:-1]
         assert len(contentLines) == 1, "Should be 1 content line before wrap"
-        assert contentLines[0].endswith("\x1b[7m \x1b[0m"), "Cursor should be at end of line"
+        assert contentLines[0].endswith(renderFakeCursor(" ")), "Cursor should be at end of line"
 
         # Type 1 more → text wraps to second line
         editor.handleInput("a")
@@ -1003,7 +1004,7 @@ def test_wraps_at_word_boundaries_instead_of_mid_word():
     lines = editor.render(width)
 
     # Get content lines (between borders)
-    contentLines = [stripVTControlCharacters(line).strip() for line in lines[1:-1]]
+    contentLines = [stripTerminalSequences(line).strip() for line in lines[1:-1]]
 
     # Should NOT break mid-word
     # Line 1 should end with a complete word

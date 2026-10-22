@@ -2,7 +2,7 @@
 streaming decoder with BOM handling can drop a U+FEFF that follows a chunk boundary, not only a leading byte-order
 mark, so these decoders turn BOM handling off and drop a leading mark themselves.
 
-Ported from: pi packages/durable/src/env/decode.ts @ v1.1.0
+Ported from: pi packages/durable/src/env/decode.ts @ v1.3.0
 """
 
 from __future__ import annotations

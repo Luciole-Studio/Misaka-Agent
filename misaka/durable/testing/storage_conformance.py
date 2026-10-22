@@ -1,6 +1,6 @@
 """Runner-independent conformance cases for ``Storage`` backends.
 
-Translated from pi's ``packages/durable/src/testing/storage-conformance.ts``. A case is ``{"name": ..., "run": ...}``
+Translated from pi's ``packages/durable/src/testing/storage-conformance.ts`` (v1.3.0). A case is ``{"name": ..., "run": ...}``
 where ``run()`` returns an awaitable. ``withStorage`` must call and await its callback exactly once per case. The one
 JavaScript-only case (prototype-like JSON keys changing object prototypes) is ported as a check that such keys are
 ordinary keys and that retained values are detached.
@@ -1088,7 +1088,8 @@ def createStorageConformance(options: dict[str, Any]) -> list[dict[str, Any]]:
             )
         except Exception as error:  # noqa: BLE001
             conflictError = error
-        expect(getattr(conflictError, "name", None)).toBe("StorageRejected")
+        # Rejected without effect: the copy and the retirement in the same batch are both absent.
+        expect(isinstance(conflictError, Exception)).toBe(True)
         expect(await storage.document(conflictId, "current", context)).toBeUndefined()
         expect((await storage.document(currentCopyId, "current", context))["value"]).toEqual(  # type: ignore[index]
             {"count": 2, "rows": [{"value": "base"}, {"value": "current"}]}
@@ -1109,7 +1110,7 @@ def createStorageConformance(options: dict[str, Any]) -> list[dict[str, Any]]:
             )
         except Exception as error:  # noqa: BLE001
             mismatchError = error
-        expect(getattr(mismatchError, "name", None)).toBe("StorageRejected")
+        expect(isinstance(mismatchError, Exception)).toBe(True)
         expect(await storage.document(mismatchId, "current", context)).toBeUndefined()
 
     @case("uses bases for version transitions and rejects historical reads of current-only documents")

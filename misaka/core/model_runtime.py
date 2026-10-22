@@ -1,6 +1,6 @@
 """The configured ``Models`` collection misaka's sessions, tools and CLI share.
 
-Translated from pi's ``coding-agent/src/core/model-runtime.ts``.
+Translated from pi's ``coding-agent/src/core/model-runtime.ts`` (v1.3.0).
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from misaka.ai.models import (
     createModels,
 )
 from misaka.ai.providers.all import builtinProviders, getBuiltinModelDataGeneratedAt
+from misaka.ai.providers.openrouter import personalizeOpenRouterCatalog
 from misaka.ai.providers.radius import RadiusProviderOptions, radiusProvider
 from misaka.ai.types import (
     AnyModel,
@@ -84,7 +85,10 @@ from misaka.core.provider_composer import (
     resolveConfiguredModelHeaders,
     validateExtensionProvider,
 )
-from misaka.core.remote_catalog_provider import withRemoteCatalog
+from misaka.core.remote_catalog_provider import (
+    withPersonalizedCatalog,
+    withRemoteCatalog,
+)
 from misaka.core.runtime_credentials import RuntimeCredentials
 from misaka.core.virtual_models import (
     FailedRoute,
@@ -238,6 +242,18 @@ def _authToken(auth: ModelAuth) -> str | None:
     return None
 
 
+def personalizedCatalogHint(providerId: str | None) -> str:
+    """MISAKA fork: what an error about a model missing from ``providerId``'s catalog adds when that catalog is the
+    user's key's own list (``withPersonalizedCatalog`` in ``ModelRuntime.create``): the model may well exist, and the
+    key may not use it. Empty for every other provider."""
+    if (providerId or "").lower() != "openrouter":
+        return ""
+    return (
+        " MISAKA lists only the OpenRouter models your OpenRouter API key may use: if the key restricts its models"
+        " (its guardrails on openrouter.ai), allow this one there, or choose another model."
+    )
+
+
 def _modelsStorePath(modelsPath: str) -> str:
     # MISAKA fork: pi keeps the store beside models.json. The home keeps it with its state; a
     # models.json somewhere else still gets its store as a sibling.
@@ -333,14 +349,26 @@ class ModelRuntime:
                 else InMemoryCodingAgentModelsStore()
             )
         builtinModelDataGeneratedAt = getBuiltinModelDataGeneratedAt()
-        # MISAKA fork: the remote catalog overlay needs an endpoint named by the caller; upstream
-        # defaults to its own service, which misaka does not send users' traffic to.
-        providers = [
-            provider
-            if provider.id == "radius" or catalogBaseUrl is None
-            else withRemoteCatalog(provider, catalogBaseUrl, builtinModelDataGeneratedAt)
-            for provider in builtinProviders()
-        ]
+
+        def wrap(provider: Any) -> Any:
+            if provider.id == "radius":
+                return provider
+            # OpenRouter narrows the catalog to the models, limits and prices of the user's key.
+            if provider.id == "openrouter":
+                # MISAKA fork: without a `catalogBaseUrl` the built-in catalog alone is personalized: the one
+                # request is OpenRouter's own `/models/user`, with the user's key (remote_catalog_provider.py).
+                return withPersonalizedCatalog(
+                    provider,
+                    personalizeOpenRouterCatalog,
+                    catalogBaseUrl,
+                    builtinModelDataGeneratedAt,
+                )
+            # MISAKA fork: the remote catalog overlay needs an endpoint named by the caller; upstream
+            # defaults to its own service, which misaka does not send users' traffic to (no endpoint:
+            # `withRemoteCatalog` returns the provider as it is).
+            return withRemoteCatalog(provider, catalogBaseUrl, builtinModelDataGeneratedAt)
+
+        providers = [wrap(provider) for provider in builtinProviders()]
         runtime = cls(
             runtimeCredentials,
             config,

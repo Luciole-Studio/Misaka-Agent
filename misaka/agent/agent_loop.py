@@ -1,7 +1,7 @@
 """Agent loop that works with AgentMessage throughout.
 Transforms to Message[] only at the LLM call boundary.
 
-Translated from pi's ``packages/agent/src/agent-loop.ts`` (v1.1.0).
+Translated from pi's ``packages/agent/src/agent-loop.ts`` (v1.3.0).
 """
 
 from __future__ import annotations
@@ -821,10 +821,6 @@ async def _prepareToolCall(
 ) -> _PreparedToolCall | _ImmediateToolCallOutcome:
     if tools is None:
         tools = currentContext.tools or []
-    # MISAKA fork: a call whose final arguments failed the strict parse carries `argumentsError` and is answered with
-    # it instead of running on a lossy streaming preview.
-    if toolCall.argumentsError is not None:
-        return _ImmediateToolCallOutcome(result=_createErrorToolResult(toolCall.argumentsError), isError=True)
     tool = next((t for t in tools if t.name == toolCall.name), None)
     if tool is None:
         # MISAKA fork: a legacy alias resolves to its tool. Exact names win; permission and schema checks see the
@@ -865,7 +861,8 @@ async def _prepareToolCall(
                 if beforeResult.terminate is True:
                     result.terminate = True
                 return _ImmediateToolCallOutcome(result=result, isError=True)
-            # MISAKA fork: CCB PreToolUse.updatedInput replaces the arguments, validated again.
+            # MISAKA fork: CCB PreToolUse.updatedInput replaces the arguments, validated again. A call whose own
+            # arguments failed to parse never gets here: validateToolArguments refused it above.
             if beforeResult is not None and beforeResult.updatedInput is not None:
                 validatedArgs = validateToolArguments(
                     tool, toolCall.model_copy(update={"arguments": beforeResult.updatedInput})

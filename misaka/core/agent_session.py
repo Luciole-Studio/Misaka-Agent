@@ -16,7 +16,7 @@ from collections.abc import Set as AbstractSet
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NoReturn, TypedDict
 
 from misaka.agent.agent import Agent
 from misaka.agent.agent_loop import RunToolCallOptions, runToolCall
@@ -59,7 +59,12 @@ from misaka.ai.utils.retry import (
     isRetryableAssistantError,
     retryDelayMs,
 )
-from misaka.ai.utils.transcript import getCurrentSystemMessage
+from misaka.ai.utils.transcript import (
+    getCurrentSystemMessage,
+    getCurrentTools,
+    getToolStateChanges,
+    toToolDeclaration,
+)
 from misaka.core.auth_guidance import (
     formatNoApiKeyFoundMessage,
     formatNoModelSelectedMessage,
@@ -93,7 +98,11 @@ from misaka.core.export_html.tool_renderer import (
     ToolHtmlRendererDeps,
     createToolHtmlRenderer,
 )
-from misaka.core.extensions.runner import ExtensionRunner, emitSessionShutdownEvent
+from misaka.core.extensions.runner import (
+    BeforeAgentStartTrigger,
+    ExtensionRunner,
+    emitSessionShutdownEvent,
+)
 from misaka.core.extensions.types import (
     ExecuteToolOptions,
     ExtensionCommandContextActions,
@@ -215,8 +224,9 @@ class AgentSessionConfig:
     # MISAKA fork: the session's own subsystems, called from core.moments ahead of extensions.
     parts: list[Any] = field(default_factory=list)
     initialActiveToolNames: list[str] | None = None
-    # Whether the initial tools come from the `defaultTools` setting. When true, reload activates
-    # tools newly added to the setting. Tools removed from it stay active.
+    # Whether the initial tools come from the `defaultTools` setting. When true, a resumed session
+    # replaces them with the loadout its transcript records, with `defaultToolModifiers` applied, and
+    # reload activates tools newly added to the setting. Tools removed from it stay active.
     usesDefaultTools: bool = False
     # `+name`/`-name` entries applied on top of the `defaultTools` setting, from `--tools`. Reload
     # applies them to the reloaded setting too, so a removed tool stays removed.
@@ -410,7 +420,7 @@ class AgentSession:
         self._compactionAbortController: AbortController | None = None
         self._branchSummaryAbortController: AbortController | None = None
         self._overflow_recovery_attempted = False
-        # True for the whole run driven by _runAgentPrompt, not just the inner agent loop:
+        # True for the whole run driven by _startRun, not just the inner agent loop:
         # retries, auto-compaction and every continue_() between them are still "busy"
         # (pi agent-session.ts _isAgentRunActive).
         self._isAgentRunActive = False
@@ -451,6 +461,8 @@ class AgentSession:
         self._runSystemPromptOptions: dict[str, Any] | None = None
         self._toolScopes: list[dict[str, Any]] = []
         self._unscopedToolNames: list[str] = []
+        # MISAKA fork: the last tool scope ended while a run was working; see `toolScope`.
+        self._recordLoadoutAfterRun = False
 
         self._installAgentToolHooks()
         self._installAgentNextTurnRefresh()
@@ -464,8 +476,8 @@ class AgentSession:
                 "includeAllExtensionTools": True,
             }
         )
-        if self._initialActiveToolNames is None:
-            self._restoreToolsFromTranscript()
+        if self._usesDefaultTools:
+            self._restoreToolsFromTranscript(self._defaultToolModifiers)
 
     @property
     def extensionRunner(self) -> ExtensionRunner:
@@ -902,9 +914,6 @@ class AgentSession:
                 "message."
             )
 
-        self._flushPendingBashMessages()
-        self._flushPendingCustomMessages()
-
         if self.model is None:
             raise RuntimeError(formatNoModelSelectedMessage())
         has_configured_auth = (
@@ -920,73 +929,30 @@ class AgentSession:
                 )
             raise RuntimeError(formatNoApiKeyFoundMessage(self.model.provider))
 
-        # Catch a response that was aborted or overflowed before the new prompt goes out.
-        # The user's new prompt is sent below, so do not continue the agent here
-        # (pi agent-session.ts:1230-1234): continuing would emit a whole agent run —
-        # agent_start / turn_* / agent_end — that the user never asked for.
-        last_assistant = self._findLastAssistantMessage()
-        if last_assistant is not None:
-            await self._checkCompaction(last_assistant, False)
+        await self._startRun(
+            {"messageType": "user", "prompt": current_text, "images": current_images},
+            lambda: report_preflight("started"),
+            # MISAKA fork: a core prompt command's text must not land in a conversation that a
+            # compaction started during the hooks is about to replace.
+            admit=assert_not_compacting if prompt_command is not None else None,
+        )
 
-        pending_next_turn = self._pendingNextTurnMessages
-        self._pendingNextTurnMessages = []
-        try:
-            # Emit before_agent_start before normalizing images so extension-driven model
-            # selection determines the resize profile used for the request and history.
-            contributed, start_options = await self._emitBeforeAgentStart(current_text, current_images)
-            normalized_images, hints = await self._normalizePromptImages(current_images)
-            user_text = f"{current_text}\n\n" + "\n".join(hints) if hints else current_text
-            # Build messages only after hooks and image normalization have completed.
-            messages: list[Any] = [self._buildUserMessage(user_text, normalized_images), *pending_next_turn]
-            messages = self._assembleAgentStart(messages, contributed, start_options)
-            if prompt_command is not None:
-                assert_not_compacting()
-        except BaseException:
-            # Preflight did not accept this turn; preserve its notifications,
-            # including any which arrived while the hooks were running.
-            self._pendingNextTurnMessages = [*pending_next_turn, *self._pendingNextTurnMessages]
-            raise
-        report_preflight("started")
-        await self._runAgentPrompt(messages)
-
-    async def _prepareAgentStart(self, messages, current_text, current_images):
-        """One hook/prompt assembly path for ordinary prompts and opted-in custom turns.
-
-        Handlers see and may edit the mutable prompt options (pi `emitBeforeAgentStart`); the
-        options they leave become the run's, the executable tools are set from them, and a
-        system message patching the prompt sections the model currently has is put first."""
-        contributed, options = await self._emitBeforeAgentStart(current_text, current_images)
-        return self._assembleAgentStart(messages, contributed, options)
-
-    async def _emitBeforeAgentStart(self, current_text, current_images):
+    async def _emitBeforeAgentStart(self, trigger: BeforeAgentStartTrigger):
         """The before_agent_start hooks: the messages they contribute and the run's prompt options."""
         selected_tools_before = list(self._baseSystemPromptOptions["selectedTools"])
         # MISAKA fork: the session's own parts run first; an extension sees the prompt
         # options and the messages as core left them.
-        core = await self.moments.before_agent_start(
-            current_text,
-            current_images,
-            self._baseSystemPromptOptions,
-        )
+        core = await self.moments.before_agent_start(trigger, self._baseSystemPromptOptions)
         if core.block:
-            raise RuntimeError(core.reason or "a core part blocked the turn")
+            _raiseRunBlocked(trigger, core.reason or "a core part blocked the turn")
         contributed: list[Any] = list(core.messages)
         options = core.system_prompt_options
         if self._extensionRunner.hasHandlers("before_agent_start"):
-            before_result = await self._extensionRunner.emitBeforeAgentStart(
-                current_text,
-                current_images,
-                options,
-            )
+            before_result = await self._extensionRunner.emitBeforeAgentStart(trigger, options)
             if before_result and _event_field(before_result, "block", False):
-                raise RuntimeError(
-                    str(
-                        _event_field(
-                            before_result,
-                            "reason",
-                            "before_agent_start hook blocked the turn",
-                        )
-                    )
+                _raiseRunBlocked(
+                    trigger,
+                    str(_event_field(before_result, "reason", "before_agent_start hook blocked the turn")),
                 )
             contributed.extend(_event_field(before_result, "messages") or [])
             options = _event_field(before_result, "systemPromptOptions", options)
@@ -997,28 +963,6 @@ class AgentSession:
         if not handler_edited_tools:
             options["selectedTools"] = self.getActiveToolNames()
         return contributed, options
-
-    def _assembleAgentStart(self, messages, contributed, options):
-        """Append the hooks' messages and put the prompt patch first."""
-        for message in contributed:
-            normalized_message = _message_dict(message)
-            messages.append(
-                _normalize_nullish_message_content(
-                    {
-                        "role": "custom",
-                        "customType": read_field(normalized_message, "customType"),
-                        "content": _message_content(normalized_message),
-                        "display": bool(read_field(normalized_message, "display")),
-                        "details": read_field(normalized_message, "details"),
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-            )
-        update_message = self._preparePromptAndToolLoadout(options)
-        self._runSystemPromptOptions = options
-        if update_message is not None:
-            messages.insert(0, update_message)
-        return messages
 
     async def _runInputHandlers(
         self,
@@ -1434,6 +1378,7 @@ class AgentSession:
             definition = entry.definition
             namespace = _definition_attr(definition, "namespace")
             annotations = _definition_attr(definition, "annotations")
+            reaches_tools = _definition_attr(definition, "reachesTools")
             tools.append(
                 ToolInfo(
                     name=definition.name,
@@ -1443,6 +1388,7 @@ class AgentSession:
                     exposure=self._getToolExposure(definition.name),
                     namespace=namespace if namespace else None,
                     annotations=dict(annotations) if annotations else None,
+                    reachesTools=reaches_tools if reaches_tools else None,
                     sourceInfo=entry.sourceInfo,
                 )
             )
@@ -1548,6 +1494,41 @@ class AgentSession:
             self._toolScopes = [item for item in self._toolScopes if item is not scope]
             names = self._toolScopes[-1]["active"] if self._toolScopes else self._unscopedToolNames
             self._setActiveTools(names)
+            if not self._toolScopes:
+                # MISAKA fork: a run inside the scope declared the scope's tools in the transcript,
+                # which a resume or `/tree` restores as the lasting loadout. Declare the loadout the
+                # scope gave back now; a run still working could declare the scope's tools after it.
+                if self._isAgentRunActive:
+                    self._recordLoadoutAfterRun = True
+                else:
+                    self._recordUnscopedLoadout()
+
+    def _recordUnscopedLoadout(self) -> None:
+        """MISAKA fork: declare the live loadout in the transcript when it differs from the loadout
+        the transcript declares, as the tool patch the next run would write. Used when the last
+        tool scope ends: pi's invariant that the transcript's declarations are the lasting loadout
+        (restored on resume and `/tree`) then holds for the scope's runs too. A transcript that
+        declares no loadout is left alone: restoring it keeps the default tools."""
+        if self._toolScopes:
+            return
+        messages = self.sessionManager.buildSessionContext().messages
+        if getCurrentSystemMessage(messages) is None:
+            return
+        changes = getToolStateChanges(
+            getCurrentTools(messages), [toToolDeclaration(tool) for tool in self.agent.state.tools]
+        )
+        if len(changes.toolsAdded) == 0 and len(changes.toolsRemoved) == 0:
+            return
+        update = SystemMessage(
+            content="",
+            toolsAdded=changes.toolsAdded or None,
+            toolsRemoved=changes.toolsRemoved or None,
+            timestamp=int(time.time() * 1000),
+        )
+        # Recorded as a run records its messages (`message_end`): appended to the conversation and the transcript.
+        entry_id = self.sessionManager.appendMessage(_message_dict(update))
+        self.agent.state.messages = [*self.agent.state.messages, update]
+        self._entryIdsByMessage[id(update)] = (update, entry_id)
 
     def _setActiveTools(self, toolNames: Sequence[str]) -> None:
         tools = self._applyToolLoadout(list(toolNames))
@@ -1794,6 +1775,16 @@ class AgentSession:
             self._customMessageReceipts[delivery_id] = resolved_options
             if already_queued:
                 return
+        await self._routeCustomMessage(app_message, resolved_options)
+
+    async def _routeCustomMessage(self, app_message: dict[str, Any], resolved_options: dict[str, Any]) -> None:
+        """Deliver a custom message whose receipt `sendCustomMessage` has taken: queue it, start a
+        run with it, or append it.
+
+        MISAKA fork: pi's `sendCustomMessage` is one method. Here the receipt bookkeeping for
+        `_deliveryId` stays there, so a run deferred past `agent_settled` re-runs this routing
+        alone: re-calling `sendCustomMessage` with the same delivery id would meet its own receipt
+        and return without delivering the message."""
         try:
             deliver_as = resolved_options.get("deliverAs")
             if deliver_as == "nextTurn":
@@ -1817,14 +1808,19 @@ class AgentSession:
                 else:
                     self.agent.steer(app_message)
             elif resolved_options.get("triggerTurn"):
-                prepare = bool(resolved_options.get("prepareTurn"))
                 if self._isEmittingAgentSettled:
-                    async def deferred_run(message: Any = app_message, prepare: bool = prepare) -> None:
-                        await self._runAgentPrompt(message, prepare=prepare)
+                    # Re-evaluated when it runs: by then another deferred action may have started a
+                    # run, which this message then joins as a queued message.
+                    async def deferred_route() -> None:
+                        await self._routeCustomMessage(app_message, resolved_options)
 
-                    self._deferredSettledActions.append(deferred_run)
+                    # MISAKA fork: a route a cancellation keeps from running is handed back (`_emitAgentSettled`).
+                    deferred_route.handBack = lambda error: self._keepOrFailCustomMessage(  # type: ignore[attr-defined]
+                        app_message, resolved_options, error, keepWithoutReceipt=True
+                    )
+                    self._deferredSettledActions.append(deferred_route)
                     return
-                await self._runAgentPrompt(app_message, prepare=prepare)
+                await self._startRun({"messageType": "custom", "message": app_message})
             else:
                 self._appendCustomMessage(app_message)
                 self._refreshFinalizedContext()
@@ -1832,8 +1828,26 @@ class AgentSession:
                 self._emit({"type": "message_end", "message": app_message})
 
         except BaseException as error:
-            self._failCustomReceipt(delivery_id, error)
+            self._keepOrFailCustomMessage(app_message, resolved_options, error)
             raise
+
+    def _keepOrFailCustomMessage(
+        self, app_message: dict[str, Any], resolved_options: dict[str, Any], error: BaseException,
+        *, keepWithoutReceipt: bool = False,
+    ) -> None:
+        """MISAKA fork: a custom message that could not be delivered now (the run it started failed to start, or a
+        cancellation kept its deferred route from running). One whose sender redelivers it (a receipt with
+        `_onError`: the Sister outbox, mail) is failed back to that sender. One nobody redelivers (a sub-agent's or
+        a background shell's completion notice, `_onPersist` only) keeps its receipt and waits in the follow-up
+        queue for the next run, as `_handBackQueuedReceipts` leaves queued ones: failing it would lose it for
+        good. A message with no receipt at all fails with its caller, as upstream, unless `keepWithoutReceipt`
+        (a deferred route has no caller left to tell)."""
+        delivery_id = resolved_options.get("_deliveryId")
+        receipt = self._customMessageReceipts.get(delivery_id) if delivery_id else None
+        if receipt is not None and receipt.get("_onError") is not None:
+            self._failCustomReceipt(delivery_id, error)
+        elif receipt is not None or (keepWithoutReceipt and not delivery_id):
+            self.agent.followUp(app_message)
 
     def _customMessageRecorded(self, delivery_id):
         return bool(self.sessionManager.flushed and any(
@@ -1854,6 +1868,13 @@ class AgentSession:
     def _failCustomReceipt(self, delivery_id, error):
         receipt = self._customMessageReceipts.pop(delivery_id, None)
         if receipt and receipt.get("_onError"):
+            if not isinstance(error, Exception):
+                # MISAKA fork: a sender never gets the `CancelledError` (or another exit) of the task that was
+                # delivering its message: it would take it for its own cancellation (the mail inbox's pump ended
+                # with it, and the session read no more mail). It gets an ordinary failure and redelivers.
+                logging.getLogger(__name__).warning(
+                    "delivery %s was interrupted (%s); handed back to its sender", delivery_id, type(error).__name__)
+                error = RuntimeError(f"The delivery was interrupted ({type(error).__name__}); it is to be redelivered")
             self._customReceiptCallback(receipt, "_onError", error)
 
     def _appendCustomMessage(self, message) -> str | None:
@@ -2601,6 +2622,10 @@ class AgentSession:
     async def _handleAgentEvent(self, event: Any, _signal: Any | None = None) -> None:
         event_type = _event_type(event)
         message = _event_field(event, "message")
+        # An abort requested while the run was starting, e.g. during before_agent_start, stops it
+        # here. agent_start is awaited before the first request.
+        if event_type == "agent_start" and self._agentRunAbortRequested:
+            self.agent.abort()
         # Record the calls a tool made through ctx.executeTool() and their usage on its result message.
         if self._nestedToolCalls is not None:
             if event_type == "message_start" and _message_role(message) == "toolResult":
@@ -3375,15 +3400,17 @@ class AgentSession:
 
         self.agent.transformContext = transform_context
 
-    def _restoreToolsFromTranscript(self) -> None:
+    def _restoreToolsFromTranscript(self, modifiers: Sequence[str] = ()) -> None:
         """Restore the active tool loadout declared by the session transcript, if it declares one.
         Tools reachable only from other tools are never declared, but they do not depend on the
-        active set, so the transcript's declarations are the whole loadout."""
+        active set, so the transcript's declarations are the whole loadout.
+
+        `modifiers` are `+name`/`-name` entries applied to the restored loadout."""
         self._pendingToolNames.clear()
         current = getCurrentSystemMessage(self.sessionManager.buildSessionContext().messages)
         if not current:
             return
-        names = [tool.name for tool in current.toolsAdded or []]
+        names = applyToolModifiers([tool.name for tool in current.toolsAdded or []], modifiers)
         if self._toolScopes:
             # MISAKA fork: inside a tool scope (a research window) the transcript's loadout is the
             # scope's own; it must not become the user's lasting selection, nor wait as pending.
@@ -3989,30 +4016,59 @@ class AgentSession:
                 self._emit({"type": "entry_appended", "entry": entry})
         self._refreshFinalizedContext()
 
-    async def _runAgentPrompt(self, messages: AgentMessage | list[AgentMessage], *, prepare: bool = False) -> None:
+    async def _startRun(
+        self,
+        trigger: BeforeAgentStartTrigger,
+        onStarted: Callable[[], None] | None = None,
+        *,
+        admit: Callable[[], None] | None = None,
+    ) -> None:
+        """Start a run from a user or custom message. The session counts as busy from here on, so
+        messages sent while before_agent_start handlers run are queued into this run instead of
+        starting another, and an abort requested meanwhile aborts the run as soon as it exists.
+
+        `onStarted` is called once the run's messages are prepared, before the first request.
+        MISAKA fork: `admit` is called once the hooks ran, before the run takes its messages; a
+        failure there undoes the start like a failing hook. The busy flag is set before the first
+        await, so a caller that awaits this directly owns the session from that point (a research
+        window's phase)."""
+        self._isAgentRunActive = True
         self._agentRunAbortRequested = False
+        try:
+            messages = await self._prepareRun(trigger, admit)
+        except BaseException as error:
+            self._isAgentRunActive = False
+            self._flushPendingBashMessages()
+            self._flushPendingCustomMessages()
+            self._handBackQueuedReceipts(error)
+            if isinstance(error, _CustomRunBlocked):
+                # MISAKA fork: a hook that blocks a run a custom message starts does not lose the
+                # message. It is recorded, and its receipt acknowledged, without a turn: failing it
+                # would have the durable outbox redeliver it into the same block indefinitely.
+                try:
+                    self._appendCustomMessage(trigger["message"])
+                    self._refreshFinalizedContext()
+                    self._emit({"type": "message_start", "message": trigger["message"]})
+                    self._emit({"type": "message_end", "message": trigger["message"]})
+                finally:
+                    self._settleAgentRun()
+                return
+            self._settleAgentRun()
+            raise
+        # Messages held while the run was starting go before its starting messages, as they would
+        # have while idle. No run exists yet, so they cannot split a tool call from its result.
+        self._flushPendingBashMessages()
+        self._flushPendingCustomMessages()
+        if onStarted is not None:
+            onStarted()
+
         # Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
         self._failedResponse = None
-        if not prepare:
-            self._recordSelection()
-            # The run records the loadout in the transcript; restored tools that did not register by now
-            # are dropped, so a tool that never registers does not stay pending.
-            self._pendingToolNames.clear()
-        self._isAgentRunActive = True
+        self._recordSelection()
+        # The run records the loadout in the transcript; restored tools that did not register by now
+        # are dropped, so a tool that never registers does not stay pending.
+        self._pendingToolNames.clear()
         try:
-            if prepare:
-                # MISAKA fork: own the run BEFORE awaiting hooks: a notification cannot take
-                # this window while the Research turn prepares its capabilities.
-                messages = list(messages) if isinstance(messages, list) else [messages]
-                content = _message_content(messages[0])
-                text = content if isinstance(content, str) else "".join(
-                    str(read_field(part, "text", "")) for part in content or [])
-                messages.extend(self._pendingNextTurnMessages)
-                self._pendingNextTurnMessages = []
-                messages = await self._prepareAgentStart(messages, text, None)
-                # MISAKA fork: before_agent_start runs inside the run here, and may select a model.
-                self._recordSelection()
-                self._pendingToolNames.clear()
             await self.agent.prompt(messages)
             while not self._agentRunAbortRequested:
                 if await self._handlePostAgentRun():
@@ -4034,6 +4090,88 @@ class AgentSession:
             self._flushPendingCustomMessages()
             await self._emitAgentSettled()
 
+    def _handBackQueuedReceipts(self, error: BaseException) -> None:
+        """MISAKA fork: custom messages whose sender redelivers them (a receipt with `_onError`: the Sister
+        outbox, mail) that were queued into a run that then did not start (a hook blocked it, or preparing it
+        failed) leave the Agent's queues and are failed back to that sender, which redelivers each into a fresh
+        run. Left queued they would wait for some unrelated later run, and every redelivery would meet the receipt
+        (`sendCustomMessage`) and be dropped. Every other message stays queued for the next run, as upstream leaves
+        it: one without a receipt, or with a receipt nobody redelivers (a sub-agent's or a background shell's
+        completion notice, `_onPersist` only) -- failing that one would lose it for good."""
+
+        def receipt_of(message: Any) -> str | None:
+            details = read_field(message, "details")
+            delivery_id = details.get("delivery_id") if isinstance(details, dict) else None
+            receipt = self._customMessageReceipts.get(delivery_id) if delivery_id else None
+            return delivery_id if receipt is not None and receipt.get("_onError") is not None else None
+
+        taken = self.agent.takeQueuedMessages(
+            lambda message: read_field(message, "role") == "custom" and receipt_of(message) is not None
+        )
+        if not taken:
+            return
+        reason = RuntimeError(f"The run this message was queued into did not start: {error}")
+        for message in taken:
+            self._failCustomReceipt(receipt_of(message), reason)
+
+    async def _prepareRun(
+        self, trigger: BeforeAgentStartTrigger, admit: Callable[[], None] | None = None
+    ) -> list[AgentMessage]:
+        """Prepare a run and return its starting messages: compact first when needed, emit
+        before_agent_start, apply the run's prompt options and tool loadout, and build the starting
+        message followed by pending nextTurn messages (consumed here) and handler messages, with a
+        system patch first when the prompt changed."""
+        # Check if we need to compact before sending (catches aborted responses).
+        # The starting message is sent below, so do not continue the agent here
+        # (pi agent-session.ts:1230-1234): continuing would emit a whole agent run —
+        # agent_start / turn_* / agent_end — that the user never asked for.
+        last_assistant = self._findLastAssistantMessage()
+        if last_assistant is not None:
+            await self._checkCompaction(last_assistant, False)
+
+        contributed, options = await self._emitBeforeAgentStart(trigger)
+
+        messages: list[Any] = []
+        if trigger["messageType"] == "custom":
+            messages.append(trigger["message"])
+        else:
+            # Normalize images after before_agent_start so extension-driven model selection
+            # determines the resize profile used for the request and history.
+            normalized_images, hints = await self._normalizePromptImages(trigger.get("images"))
+            text = f"{trigger['prompt']}\n\n" + "\n".join(hints) if hints else trigger["prompt"]
+            messages.append(self._buildUserMessage(text, normalized_images))
+        if admit is not None:
+            admit()
+        # Inject any pending "nextTurn" messages as context alongside the starting message
+        pending_next_turn = self._pendingNextTurnMessages
+        messages.extend(pending_next_turn)
+        self._pendingNextTurnMessages = []
+        try:
+            for message in contributed:
+                normalized_message = _message_dict(message)
+                messages.append(
+                    _normalize_nullish_message_content(
+                        {
+                            "role": "custom",
+                            "customType": read_field(normalized_message, "customType"),
+                            # Untyped extensions can pass null/missing content; normalize at ingestion.
+                            "content": _message_content(normalized_message),
+                            "display": bool(read_field(normalized_message, "display")),
+                            "details": read_field(normalized_message, "details"),
+                            "timestamp": int(time.time() * 1000),
+                        }
+                    )
+                )
+            update_message = self._preparePromptAndToolLoadout(options)
+        except BaseException:
+            # MISAKA fork: the run did not start; its notifications wait for the next one.
+            self._pendingNextTurnMessages = [*pending_next_turn, *self._pendingNextTurnMessages]
+            raise
+        self._runSystemPromptOptions = options
+        if update_message is not None:
+            messages.insert(0, update_message)
+        return messages
+
     def _settleAgentRun(self) -> None:
         """Release everyone waiting on idle, but only if the session really is idle.
 
@@ -4045,6 +4183,11 @@ class AgentSession:
         """
         if self._isAgentRunActive:
             return
+        # MISAKA fork: a tool scope that ended while a run was working records the loadout it gave
+        # back now that no run can still declare it (see `toolScope`).
+        if self._recordLoadoutAfterRun:
+            self._recordLoadoutAfterRun = False
+            self._recordUnscopedLoadout()
         waiters, self._idleWaiters = self._idleWaiters, []
         for waiter in waiters:
             if not waiter.done():
@@ -4075,14 +4218,61 @@ class AgentSession:
         # finished: they still observe `ctx.isIdle() === true`, but no longer see a reentrant
         # `agent_start` during the same notification dispatch.
         deferred, self._deferredSettledActions = self._deferredSettledActions, []
+        if deferred and _beingCancelled():
+            # MISAKA fork: this settle is the cleanup of a cancelled run (its `_startRun` finally): no new run
+            # starts inside the cancellation. The deferred routes are handed back instead (`_handBackDeferred`).
+            try:
+                self._handBackDeferred(deferred)
+            finally:
+                self._settleAgentRun()
+            return
         if deferred:
             try:
-                for action in deferred:
-                    await action()
+                # MISAKA fork: every deferred action runs even when an earlier one fails, and the first error is
+                # raised after them. Upstream stops at the failure; here a skipped route keeps its delivery
+                # receipt, so its outbox redeliveries are dropped as duplicates and the notification is lost.
+                # Each failure is logged, so the ones after the first are not lost either. A `CancelledError` the
+                # route raised itself is such a failure. A cancellation of this task stops the loop at once: the
+                # routes not run yet are handed back, so none keeps its receipt held.
+                failure: BaseException | None = None
+                for index, action in enumerate(deferred):
+                    try:
+                        await action()
+                    except Exception as error:  # re-raised below, after the rest ran
+                        logging.getLogger(__name__).warning("a run deferred past agent_settled failed", exc_info=True)
+                        if failure is None:
+                            failure = error
+                    except asyncio.CancelledError as error:
+                        if _beingCancelled():
+                            self._handBackDeferred(deferred[index + 1:])
+                            raise
+                        logging.getLogger(__name__).warning("a run deferred past agent_settled failed", exc_info=True)
+                        if failure is None:
+                            failure = error
+                if failure is not None:
+                    raise failure
             finally:
                 self._settleAgentRun()
             return
         self._settleAgentRun()
+
+    def _handBackDeferred(self, actions: list[Callable[[], Awaitable[None]]]) -> None:
+        """MISAKA fork: actions deferred past `agent_settled` that a cancellation keeps from running. A delivery is
+        handed back as its sender expects (`_keepOrFailCustomMessage`: the Sister outbox and the mail inbox
+        redeliver; a notice nobody redelivers waits in the follow-up queue for the next run); a deferred prompt is
+        dropped with the cancellation, as upstream drops it."""
+        if not actions:
+            return
+        reason = RuntimeError("A cancellation kept this delivery's run from starting")
+        handed = 0
+        for action in actions:
+            handBack = getattr(action, "handBack", None)
+            if handBack is not None:
+                handBack(reason)
+                handed += 1
+        logging.getLogger(__name__).warning(
+            "a cancellation kept %d run(s) deferred past agent_settled from starting; %d delivery(ies) handed back",
+            len(actions), handed)
 
     async def _handlePostAgentRun(self) -> bool:
         message = self._lastAssistantMessage
@@ -4665,6 +4855,25 @@ def _tool_execution_extension_event(event: Any) -> dict[str, Any]:
     if parent_tool_call_id:
         payload["parentToolCallId"] = parent_tool_call_id
     return payload
+
+
+def _beingCancelled() -> bool:
+    """Whether the running task has a cancellation requested of it (``Task.cancelling``): its `CancelledError` is the
+    caller's, not one a hook or route raised itself."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
+class _CustomRunBlocked(RuntimeError):
+    """MISAKA fork: a before_agent_start hook blocked a run that a custom message starts."""
+
+
+def _raiseRunBlocked(trigger: BeforeAgentStartTrigger, reason: str) -> NoReturn:
+    """MISAKA fork: pi has no block. A blocked prompt fails; a blocked custom run is recorded
+    without a turn by `_startRun`."""
+    if trigger["messageType"] == "custom":
+        raise _CustomRunBlocked(reason)
+    raise RuntimeError(reason)
 
 
 def _definition_attr(definition: Any, name: str) -> Any:

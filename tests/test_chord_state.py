@@ -1,393 +1,289 @@
-"""pi chord's ``test/state.test.ts``."""
+"""pi chord's ``test/state.test.ts``: state cells.
+
+MISAKA adaptations: ``setImmediate`` (a turn after the pending promise jobs) is ``tick()``, a few event-loop turns; a
+listener's event source is a small emitter class; a task waits for its abort with ``ctx.signal.wait()``; a mutating
+``change`` callback returns ``None`` (MISAKA fork of ``Cell.change``), so the "classic slip" of returning ``push``'s
+length is a lambda returning it.
+"""
 
 from __future__ import annotations
 
+import asyncio
+import json
+from typing import Any
+
 import pytest
 
-from misaka.chord import replicatedState
-from misaka.chord.context import BACKGROUND_CONTEXT
-from misaka.chord.services.state import ReplicatedStateReplica
-from misaka.chord.services.state_internals import getReplicatedStateInternals
-from misaka.utils.js import UNDEFINED
-
-# -- transactional replicated state --------------------------------------------------------------
+from misaka.chord import ChordError, createHost, isChordError, local, method
+from misaka.chord._typebox import Type
+from misaka.chord.delta import applyImmutable
 
 
-def test_publishes_one_immutable_structurally_shared_revision():
-    initial = {"changed": {"value": 1}, "retained": {"value": 2}}
-    state = replicatedState(initial)
-    previous = state.value
-    deliveries = []
-    state.subscribe(lambda _value, _context, delivery: deliveries.append(delivery["sequence"]))
-
-    def mutate(draft):
-        draft["changed"]["value"] = 3
-        draft["changed"]["value"] = 4
-
-    state.change(BACKGROUND_CONTEXT, mutate)
-    assert state.value == {"changed": {"value": 4}, "retained": {"value": 2}}
-    assert state.value is not previous
-    assert state.value["changed"] is not previous["changed"]
-    assert state.value["retained"] is previous["retained"]
-    assert deliveries == [0, 1]
+async def tick(turns: int = 20) -> None:
+    for _ in range(turns):
+        await asyncio.sleep(0)
 
 
-def test_rolls_back_callback_failures_and_revokes_escaped_drafts():
-    state = replicatedState({"nested": {"value": 1}})
-    previous = state.value
-    escaped = []
+class Emitter:
+    def __init__(self) -> None:
+        self.listeners: dict[Any, None] = {}
 
-    def mutate(draft):
-        escaped.append(draft["nested"])
-        draft["nested"]["value"] = 2
-        raise RuntimeError("stop")
+    def emit(self, event: Any) -> None:
+        for fn in list(self.listeners):
+            fn(event)
 
-    with pytest.raises(RuntimeError, match="stop"):
-        state.change(BACKGROUND_CONTEXT, mutate)
-    assert state.value is previous
-    with pytest.raises(TypeError):
-        escaped[0]["value"]
+    def subscribe(self, fn: Any) -> Any:
+        self.listeners[fn] = None
+        return lambda: self.listeners.pop(fn, None)
 
-
-def test_rejects_awaitable_callbacks_and_aborts_their_draft():
-    state = replicatedState({"value": 0})
-    previous = state.value
-
-    async def finished():
-        return None
-
-    def mutate(draft):
-        # The draft is written before the awaitable comes back, so the rollback is what keeps the value.
-        draft["value"] = 1
-        return finished()
-
-    with pytest.raises(TypeError, match="synchronous"):
-        state.change(BACKGROUND_CONTEXT, mutate)
-    assert state.value is previous
+    @property
+    def size(self) -> int:
+        return len(self.listeners)
 
 
-def test_rejects_nested_changes_and_replacements_without_losing_the_outer_rollback():
-    state = replicatedState({"left": 0, "right": 0})
+Item = Type.Object({"id": Type.Number(), "label": Type.String()})
+Items = Type.Object({"items": Type.Array(Item), "count": Type.Number()})
 
-    def nestedChange(draft):
-        draft["left"] = 1
-        state.change(BACKGROUND_CONTEXT, lambda nested: nested.__setitem__("right", 2))
+List = local(
+    "t.list",
+    {
+        "version": 1,
+        "input": Type.Object({}),
+        "members": {
+            "list": Items,
+            "labels": Type.Array(Type.String()),
+            "push": method(Item),
+            "set": method(Items),
+        },
+    },
+)
 
-    with pytest.raises(RuntimeError, match="reentrantly"):
-        state.change(BACKGROUND_CONTEXT, nestedChange)
-    assert state.value == {"left": 0, "right": 0}
-    with pytest.raises(RuntimeError, match="change callback"):
-        state.change(BACKGROUND_CONTEXT, lambda _draft: state.replace(BACKGROUND_CONTEXT, {"left": 1, "right": 2}))
-    assert state.value == {"left": 0, "right": 0}
+
+def serveList(host: Any) -> None:
+    def factory(_input: Any, _principal: Any, self: Any) -> Any:
+        listState = self.state("list", Items, {"items": [], "count": 0})
+        labels = self.derive([listState], lambda list_: [item["label"] for item in list_["items"]])
+
+        def push(item: Any, ctx: Any) -> None:
+            def mutate(draft: Any) -> None:
+                draft["items"].push(item)
+                draft["count"] += 1
+
+            listState.change(ctx, mutate)
+
+        def set_(value: Any, ctx: Any) -> None:
+            listState.replace(ctx, value)
+
+        return {"list": listState, "labels": labels, "push": push, "set": set_}
+
+    host.serve(List, factory)
 
 
-def test_queues_listener_triggered_changes_in_sequence_order():
-    state = replicatedState({"value": 0})
-    sourceSequences = []
-    deliveries = []
-    lateDeliveries = []
-    nested = [False]
+async def test_publishes_snapshots_then_exact_ops_derivations_follow():
+    host = createHost({"self": {"kind": "host"}, "onError": lambda _: None})
+    serveList(host)
+    ref = host.hold(List, {})
+    events: list[Any] = []
+    labels: list[Any] = []
+    ref.list.events(events.append)
+    ref.labels.events(labels.append)
+    await ref.push({"id": 1, "label": "a"})
+    # Subscribed while loading: the snapshot once live, then exact ops.
+    assert events[0] == {"type": "snap", "value": {"items": [], "count": 0}}
+    ops = sorted(json.dumps(op, separators=(",", ":")) for op in events[1]["ops"]) if events[1]["type"] == "ops" else []
+    assert ops == ['["p",["items"],0,0,[{"id":1,"label":"a"}]]', '["s",["count"],1]']
+    assert events[1]["value"] == {"items": [{"id": 1, "label": "a"}], "count": 1}
+    assert ref.labels.value == ["a"]
+    assert [event["type"] for event in labels] == ["snap", "ops"]
+    await ref.set({"items": [], "count": 0})
+    assert ref.labels.value == []
 
-    def onFirst(_operations, _sequence, _context):
-        if not nested[0]:
-            nested[0] = True
-            state.change(BACKGROUND_CONTEXT, lambda draft: draft.__setitem__("value", 2))
-            state.subscribe(lambda _value, _context, delivery: lateDeliveries.append(dict(delivery)))
 
-    getReplicatedStateInternals(state).subscribe(onFirst)
-    getReplicatedStateInternals(state).subscribe(lambda _operations, sequence, _context: sourceSequences.append(sequence))
-    state.subscribe(
-        lambda value, _context, delivery: delivery["kind"] == "update"
-        and deliveries.append({"value": value["value"], "sequence": delivery["sequence"]})
+async def test_supports_primitive_cells_and_value_returning_changes():
+    host = createHost({"self": {"kind": "host"}, "onError": lambda _: None})
+    Counter = local(
+        "t.prim",
+        {"version": 1, "input": Type.Object({}), "members": {"n": Type.Number(), "inc": method(None, Type.Number())}},
     )
-    state.change(BACKGROUND_CONTEXT, lambda draft: draft.__setitem__("value", 1))
-    assert sourceSequences == [1, 2]
-    assert deliveries == [{"value": 1, "sequence": 1}, {"value": 2, "sequence": 2}]
-    assert lateDeliveries == [{"kind": "hydrate", "sequence": 2}]
 
+    def factory(_input: Any, _principal: Any, self: Any) -> Any:
+        nState = self.state("n", Type.Number(), 0)
 
-def test_isolates_listener_failures_after_committing_the_revision():
-    state = replicatedState({"value": 0})
-    received = []
+        def inc(ctx: Any) -> Any:
+            nState.change(ctx, lambda n: n + 1)
+            return nState.value
 
-    def failing(_operations, _sequence, _context):
-        raise RuntimeError("listener failed")
+        return {"n": nState, "inc": inc}
 
-    getReplicatedStateInternals(state).subscribe(failing)
-    getReplicatedStateInternals(state).subscribe(lambda _operations, sequence, _context: received.append(sequence))
-    with pytest.raises(RuntimeError, match="listener failed"):
-        state.change(BACKGROUND_CONTEXT, lambda draft: draft.__setitem__("value", 1))
-    assert state.value == {"value": 1}
-    assert received == [1]
-
-
-def test_copies_assigned_values_by_value():
-    external = {"value": 1}
-    state = replicatedState({"left": None, "right": None})
-
-    def mutate(draft):
-        draft["left"] = external
-        draft["right"] = external
-        draft["left"]["value"] = 2
-
-    state.change(BACKGROUND_CONTEXT, mutate)
-    assert external["value"] == 1
-    assert state.value == {"left": {"value": 2}, "right": {"value": 1}}
-    assert state.value["left"] is not state.value["right"]
-
-
-def test_takes_immutable_ownership_of_alias_free_replacements():
-    state = replicatedState({"left": {"value": 1}, "right": {"value": 2}})
-    replacement = {"left": dict(state.value["left"]), "right": dict(state.value["left"])}
-    state.replace(BACKGROUND_CONTEXT, replacement)
-    assert state.value is replacement
-    assert state.value["left"] is not state.value["right"]
-    state.change(BACKGROUND_CONTEXT, lambda draft: draft["left"].__setitem__("value", 9))
-    assert state.value == {"left": {"value": 9}, "right": {"value": 1}}
-
-
-def test_preserves_compact_string_splice_and_permutation_operations():
-    a, b, c = {"id": "a"}, {"id": "b"}, {"id": "c"}
-    state = replicatedState({"text": "abcdefgh", "values": [a, b, c]})
-    batches = []
-    getReplicatedStateInternals(state).subscribe(lambda operations, _sequence, _context: batches.append(operations))
-
-    def first(draft):
-        draft["text"] = "defghxyz"
-        draft["values"].shift()
-
-    state.change(BACKGROUND_CONTEXT, first)
-    state.change(BACKGROUND_CONTEXT, lambda draft: draft["values"].reverse())
-    assert batches == [
-        [["t", ["text"], 3], ["a", ["text"], "xyz"], ["p", ["values"], 0, 1, []]],
-        [["m", ["values"], [1, 0]]],
+    host.serve(Counter, factory)
+    ref = host.hold(Counter, {})
+    values: list[Any] = []
+    await ref.ready
+    events: list[Any] = []
+    ref.n.events(events.append)
+    ref.n.subscribe(values.append)
+    assert await ref.inc() == 1
+    assert await ref.inc() == 2
+    assert values == [0, 1, 2]
+    assert events == [
+        {"type": "snap", "value": 0},
+        {"type": "ops", "ops": [["r", 1]], "value": 1},
+        {"type": "ops", "ops": [["r", 2]], "value": 2},
     ]
 
 
-def test_validates_replica_revisions_without_freezing_shared_immutable_payloads():
-    replica = ReplicatedStateReplica(lambda _error: None)
-    initial = {"rows": [{"value": 1}]}
-    replica.hydrate(0, [["r", initial]], BACKGROUND_CONTEXT)
-    assert replica.value is initial
+async def test_rejects_a_returned_value_that_does_not_fit_the_schema_even_outside_dev_mode():
+    host = createHost({"self": {"kind": "host"}, "onError": lambda _: None})
+    Box = local("t.box", {"version": 1, "input": Type.Object({}), "members": {"put": method()}})
 
-    inserted = {"value": 2}
-    replica.update(1, [["p", ["rows"], 1, 0, [inserted]]], BACKGROUND_CONTEXT)
-    assert replica.value is not initial
-    assert replica.value["rows"] == [{"value": 1}, {"value": 2}]
-    assert replica.value["rows"][0] is initial["rows"][0]
-    assert replica.value["rows"][1] is inserted
-    assert len(initial["rows"]) == 1
+    def factory(_input: Any, _principal: Any, self: Any) -> Any:
+        list_ = self.state("list", Type.Array(Type.Number()), [])
 
+        def put(ctx: Any) -> None:
+            # The classic slip: an expression-bodied lambda returns push()'s length.
+            list_.change(ctx, lambda draft: draft.push(1))
 
-def test_clears_a_replica_when_an_adopted_update_is_invalid():
-    errors = []
-    replica = ReplicatedStateReplica(errors.append)
-    replica.hydrate(0, [["r", {"value": 0}]], BACKGROUND_CONTEXT)
-    with pytest.raises(TypeError, match="strict JSON"):
-        replica.update(1, [["s", ["value"], float("nan")]], BACKGROUND_CONTEXT)
-    assert replica.value is UNDEFINED
-    with pytest.raises(Exception, match="before hydration"):
-        replica.update(2, [["s", ["value"], 2]], BACKGROUND_CONTEXT)
+        return {"put": put}
 
-    malformed = ReplicatedStateReplica(errors.append)
-    malformed.hydrate(0, [["r", {"values": [1, 2]}]], BACKGROUND_CONTEXT)
-    with pytest.raises(Exception):  # noqa: B017
-        malformed.update(1, [["m", ["values"], [0]]], BACKGROUND_CONTEXT)
-    assert malformed.value is UNDEFINED
-    assert errors == []
+    host.serve(Box, factory)
+    with pytest.raises(ChordError) as error:
+        await host.hold(Box, {}).put()
+    assert isChordError(error.value, "invalid")
 
 
-def test_replaces_atomically_and_ignores_deeply_equal_replacements():
-    state = replicatedState({"value": {"nested": 1}, "retained": {"nested": 2}})
-    previous = state.value
-    state.replace(BACKGROUND_CONTEXT, {"value": {"nested": 1}, "retained": {"nested": 2}})
-    assert state.value is previous
-    state.replace(BACKGROUND_CONTEXT, {**state.value, "value": {"nested": 2}})
-    assert state.value == {"value": {"nested": 2}, "retained": {"nested": 2}}
-    assert state.value["retained"] is previous["retained"]
+async def test_validates_initial_values_always_and_writes_only_in_dev_mode():
+    Bad = local("t.bad-initial", {"version": 1, "input": Type.Object({})})
+    host = createHost({"self": {"kind": "host"}, "onError": lambda _: None})
+
+    def bad(_input: Any, _principal: Any, self: Any) -> Any:
+        self.state("x", Type.Object({"n": Type.Number()}), {"n": "no"})
+        return {}
+
+    host.serve(Bad, bad)
+    with pytest.raises(ChordError, match="initial value of state x"):
+        await host.hold(Bad, {}).ready
+
+    lax = createHost({"self": {"kind": "host"}, "onError": lambda _: None})
+    serveList(lax)
+    await lax.hold(List, {}).set({"items": [], "count": "x"})
+
+    dev = createHost({"self": {"kind": "host"}, "dev": True, "onError": lambda _: None})
+    serveList(dev)
+    ref = dev.hold(List, {})
+    with pytest.raises(ChordError) as error:
+        await ref.set({"items": [], "count": "x"})
+    assert isChordError(error.value, "invalid") and error.value.reason == "state"
+    assert ref.list.value == {"items": [], "count": 0}
 
 
-# -- authoritative replicated state sources ------------------------------------------------------
+async def test_rejects_writes_from_inside_a_factory_and_placeholder_use_before_activation():
+    host = createHost({"self": {"kind": "host"}, "onError": lambda _: None})
+    Writer = local("t.writer", {"version": 1, "input": Type.Object({})})
+    captured: list[Any] = []
+    await host.root(captured.append)
+
+    def factory(_input: Any, _principal: Any, self: Any) -> Any:
+        x = self.state("x", Type.Object({}), {})
+        r = self.resource("r", {"version": 1, "open": lambda _options: 1})
+        with pytest.raises(ChordError) as error:
+            _ = r.value
+        assert isChordError(error.value, "not_ready")
+        x.replace(captured[0], {})
+        return {}
+
+    host.serve(Writer, factory)
+    with pytest.raises(ChordError, match="read_only"):
+        await host.hold(Writer, {}).ready
 
 
-class TestSourceAttachment:
-    __test__ = False
+async def test_listeners_run_each_event_in_a_fresh_root_tasks_get_an_abortable_ctx():
+    host = createHost({"self": {"kind": "host"}, "onError": lambda _: None})
+    events = Emitter()
+    Watcher = local(
+        "t.watcher",
+        {"version": 1, "input": Type.Object({}), "members": {"seen": Type.Object({"sum": Type.Number()})}},
+    )
+    roots: set[str] = set()
+    taskAborted = [False]
 
-    def __init__(self, snapshot, onDispose):
-        self.snapshot = snapshot
-        self._onDispose = onDispose
-        self._buffer = []
-        self._listener = None
-        self._activated = False
-        self._disposed = False
+    def factory(_input: Any, _principal: Any, self: Any) -> Any:
+        seen = self.state("seen", Type.Object({"sum": Type.Number()}), {"sum": 0})
+        sourceResource = self.resource("source", {"version": 1, "open": lambda _options: events})
 
-    def activate(self, listener):
-        if self._activated:
-            raise RuntimeError("attachment is already active")
-        self._activated = True
-        self._listener = listener
-        buffered, self._buffer = self._buffer, []
-        for frame in buffered:
-            listener(frame)
+        def onEvent(value: Any, ctx: Any) -> None:
+            roots.add(ctx.rootId)
 
-    def publish(self, frame):
-        if self._disposed:
-            return
-        if self._listener is None:
-            self._buffer.append(frame)
-        else:
-            self._listener(frame)
+            def mutate(draft: Any) -> None:
+                draft["sum"] += value
 
-    def dispose(self):
-        if self._disposed:
-            return
-        self._disposed = True
-        self._buffer.clear()
-        self._onDispose()
+            seen.change(ctx, mutate)
 
+        self.on("onEvent", sourceResource, lambda source: source, onEvent)
 
-class TestSource:
-    __test__ = False
+        async def task(ctx: Any) -> None:
+            await ctx.signal.wait()
+            taskAborted[0] = True
 
-    def __init__(self, value, cursor=0):
-        self.attachments = []
-        self.onAttach = None
-        self._value = value
-        self._cursor = cursor
+        self.task(task)
+        return {"seen": seen}
 
-    def attach(self):
-        attachment = TestSourceAttachment(
-            {"value": self._value, "cursor": self._cursor}, lambda: self.attachments.remove(attachment)
-        )
-        self.attachments.append(attachment)
-        if self.onAttach is not None:
-            self.onAttach()
-        return attachment
-
-    def commit(self, value, ops, context=BACKGROUND_CONTEXT, cursor=None):
-        cursor = self._cursor + 1 if cursor is None else cursor
-        self._value = value
-        self._cursor = cursor
-        frame = {"cursor": cursor, "value": value, "ops": ops, "context": context}
-        for attachment in list(self.attachments):
-            attachment.publish(frame)
+    host.serve(Watcher, factory)
+    ref = host.hold(Watcher, {})
+    await ref.ready
+    events.emit(2)
+    events.emit(3)
+    await tick()
+    assert ref.seen.value == {"sum": 5}
+    assert len(roots) == 2
+    ref.release()
+    await tick()
+    await tick()
+    assert events.size == 0
+    assert taskAborted[0]
 
 
-def test_captures_before_activation_and_drains_queued_commits_in_order():
-    initial, first, second = {"value": 0}, {"value": 1}, {"value": 2}
-    firstOps, secondOps = [["s", ["value"], 1]], [["s", ["value"], 2]]
-    source = TestSource(initial, 10)
-
-    def onAttach():
-        source.commit(first, firstOps)
-        source.commit(second, secondOps)
-
-    source.onAttach = onAttach
-
-    state = replicatedState(source)
-    deliveries = []
-    state.subscribe(lambda value, _context, delivery: deliveries.append({"value": value, "sequence": delivery["sequence"]}))
-    assert state.value is second
-    assert deliveries == [{"value": second, "sequence": 2}]
-    assert getReplicatedStateInternals(state).snapshot() == {"value": second, "sequence": 2}
-
-
-def test_hydrates_at_sequence_zero_when_attaching_after_existing_commits():
-    source = TestSource({"value": 0}, 40)
-    current = {"value": 1}
-    source.commit(current, [["s", ["value"], 1]])
-    state = replicatedState(source)
-    deliveries = []
-    state.subscribe(lambda _value, _context, delivery: deliveries.append(delivery["sequence"]))
-    assert state.value is current
-    assert deliveries == [0]
-
-
-def test_publishes_exact_source_value_and_operation_references_without_applying_or_re_diffing():
-    source = TestSource({"value": 0})
-    state = replicatedState(source)
-    next_ = {"value": 1}
-    ops = [["s", ["value"], 1]]
-    publishedOps = []
-    getReplicatedStateInternals(state).subscribe(lambda received, _sequence, _context: publishedOps.append(received))
-    publishedValue = []
-    state.subscribe(
-        lambda value, _context, delivery: delivery["kind"] == "update" and publishedValue.append(value)
+async def test_re_entrant_writes_publish_in_adoption_order_derivations_never_go_stale_sol_3():
+    host = createHost({"self": {"kind": "host"}, "onError": lambda _: None})
+    Echo = local(
+        "t.reentrant",
+        {
+            "version": 1,
+            "input": Type.Object({}),
+            "members": {"n": Type.Number(), "d": Type.Number(), "set": method(Type.Number())},
+        },
     )
 
-    source.commit(next_, ops)
-    assert state.value is next_
-    assert publishedValue[0] is next_
-    assert publishedOps[0] is ops
+    def factory(_input: Any, _principal: Any, self: Any) -> Any:
+        nState = self.state("n", Type.Number(), 0)
+        d = self.derive([nState], lambda n: n * 2)
 
+        # Subscribed first: re-enters the write while revision 1 is being published.
+        def bump(n: Any, ctx: Any) -> None:
+            if n == 1:
+                nState.replace(ctx, 2)
 
-def test_buffers_reentrant_frames_and_skips_updates_covered_by_a_late_hydration():
-    source = TestSource({"value": 0})
-    state = replicatedState(source)
-    received = []
-    late = []
-    nested = [False]
+        self.on("bump", nState, bump)
 
-    def onFirst(_ops, sequence, _context):
-        if sequence != 1 or nested[0]:
-            return
-        nested[0] = True
-        source.commit({"value": 2}, [["s", ["value"], 2]])
-        state.subscribe(lambda value, _context, delivery: late.append({**delivery, "value": value["value"]}))
+        def set_(value: Any, ctx: Any) -> None:
+            nState.replace(ctx, value)
 
-    getReplicatedStateInternals(state).subscribe(onFirst)
-    state.subscribe(lambda value, _context, delivery: delivery["kind"] == "update" and received.append(value["value"]))
+        return {"n": nState, "d": d, "set": set_}
 
-    source.commit({"value": 1}, [["s", ["value"], 1]])
-    assert received == [1, 2]
-    assert late == [{"kind": "hydrate", "sequence": 2, "value": 2}]
+    host.serve(Echo, factory)
+    ref = host.hold(Echo, {})
+    await ref.ready
+    values: list[Any] = []
+    replica: list[Any] = [None]
 
+    def onEvent(event: Any) -> None:
+        replica[0] = applyImmutable(replica[0], event["ops"]) if event["type"] == "ops" else event["value"]
+        values.append(replica[0])
 
-def test_reports_listener_failures_without_throwing_them_into_the_source():
-    source = TestSource({"value": 0})
-    errors = []
-    state = replicatedState(source, {"onError": errors.append})
-    received = []
-
-    def failing(_value, _context, delivery):
-        if delivery["kind"] == "update":
-            raise RuntimeError("listener failed")
-
-    state.subscribe(failing)
-    state.subscribe(lambda value, _context, delivery: delivery["kind"] == "update" and received.append(value["value"]))
-
-    source.commit({"value": 1}, [["s", ["value"], 1]])
-    source.commit({"value": 2}, [["s", ["value"], 2]])
-    assert received == [1, 2]
-    assert [str(error) for error in errors] == ["listener failed", "listener failed"]
-
-
-def test_reports_cursor_gaps_disposes_the_broken_attachment_and_ignores_later_frames():
-    source = TestSource({"value": 0}, 5)
-    errors = []
-    state = replicatedState(source, {"onError": errors.append})
-    source.commit({"value": 2}, [["s", ["value"], 2]], BACKGROUND_CONTEXT, 7)
-    assert "expected 6, received 7" in str(errors[0])
-    assert len(source.attachments) == 0
-    assert state.value == {"value": 0}
-    source.commit({"value": 3}, [["s", ["value"], 3]], BACKGROUND_CONTEXT, 8)
-    assert state.value == {"value": 0}
-
-
-def test_keeps_attachments_independent_and_disposes_each_idempotently():
-    source = TestSource({"value": 0})
-    first = replicatedState(source)
-    second = replicatedState(source)
-    assert len(source.attachments) == 2
-    source.commit({"value": 1}, [["s", ["value"], 1]])
-    assert first.value["value"] == 1
-    assert second.value["value"] == 1
-
-    first.dispose()
-    first.dispose()
-    assert len(source.attachments) == 1
-    source.commit({"value": 2}, [["s", ["value"], 2]])
-    assert first.value["value"] == 1
-    assert second.value["value"] == 2
-    second.dispose()
-    assert len(source.attachments) == 0
+    ref.n.events(onEvent)
+    doubled: list[Any] = []
+    ref.d.subscribe(doubled.append)
+    await ref.set(1)
+    await tick()
+    assert values == [0, 1, 2]
+    assert ref.d.value == 4
+    assert doubled == [0, 2, 4]

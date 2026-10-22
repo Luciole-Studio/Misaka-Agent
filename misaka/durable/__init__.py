@@ -1,8 +1,9 @@
 """Durable conversation, task, and document runtime.
 
-Translated from pi's ``packages/durable/src/index.ts``. Types are not exported here (the records are plain ``dict``
+Translated from pi's ``packages/durable/src/index.ts`` (v1.3.0). Types are not exported here (the records are plain ``dict``
 objects); the submodules hold the storages (``storage.memory``, ``storage.jsonl``, ``storage.sqlite``), the environment
-(``env``), the coding tools (``tools``) and the conformance suite (``testing``).
+(``env``), the coding tools (``tools``), ``codemode``, ``tool_search``, ``images`` and the conformance suite
+(``testing``).
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from .entries import (
     UserEntry,
     defineEntry,
 )
-from .errors import ConversationBusy, ReadAfterWrite, StorageRejected
+from .errors import ConversationBusy, ReadAfterWrite, SessionFailed, StorageRequestError
 from .harness.agent import (
     DEFAULT_COMPACTION_POLICY,
     DEFAULT_PROGRESS_POLICY,
@@ -41,7 +42,7 @@ from .harness.inbox import InboxDoc
 from .harness.live import LiveDoc
 from .harness.provider import ProviderDoc
 from .harness.registry import createRegistry
-from .harness.tool import ToolTask
+from .harness.tool import NestedCallDoc, ToolTask
 from .harness.usage import UsageDoc
 from .session.session import createSession
 from .storage.memory import MemoryStorage
@@ -63,10 +64,12 @@ __all__ = [
     "InboxDoc",
     "LiveDoc",
     "MemoryStorage",
+    "NestedCallDoc",
     "ProviderDoc",
     "ReadAfterWrite",
     "ResetEntry",
-    "StorageRejected",
+    "SessionFailed",
+    "StorageRequestError",
     "SystemEntry",
     "ToolResultEntry",
     "ToolTask",

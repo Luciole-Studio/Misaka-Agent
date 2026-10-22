@@ -1,8 +1,9 @@
-"""Translated from pi's ``packages/ai/src/providers/opencode-go.ts`` (v1.1.0)."""
+"""Translated from pi's ``packages/ai/src/providers/opencode-go.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
 from misaka.ai.api.anthropic_messages_lazy import anthropicMessagesApi
+from misaka.ai.api.google_generative_ai_lazy import googleGenerativeAIApi
 from misaka.ai.api.openai_completions_lazy import openAICompletionsApi
 from misaka.ai.api.openai_responses_lazy import openAIResponsesApi
 from misaka.ai.auth.helpers import envApiKeyAuth
@@ -21,6 +22,7 @@ def opencodeGoProvider() -> Provider:
             models=list(OPENCODE_GO_MODELS.values()),
             api={
                 "anthropic-messages": withOpenCodeSessionHeader(anthropicMessagesApi()),
+                "google-generative-ai": withOpenCodeSessionHeader(googleGenerativeAIApi()),
                 "openai-completions": withOpenCodeSessionHeader(openAICompletionsApi()),
                 "openai-responses": withOpenCodeSessionHeader(openAIResponsesApi()),
             },

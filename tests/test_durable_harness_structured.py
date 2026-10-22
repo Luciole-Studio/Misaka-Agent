@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import tempfile
@@ -17,7 +18,6 @@ from misaka.durable import (
     GenerationTask,
     LiveDoc,
     MemoryStorage,
-    StorageRejected,
     ToolResultEntry,
     createSession,
     defineDoc,
@@ -25,6 +25,7 @@ from misaka.durable import (
     defineTool,
     watchEvents,
 )
+from misaka.durable.errors import SessionFailed
 from misaka.durable.storage.sqlite.node import openNodeSqliteStorage
 from tests.chat_support import (
     WithOverrides,
@@ -34,7 +35,7 @@ from tests.chat_support import (
     openChat,
     waitFor,
 )
-from tests.durable_support import context, toMatchObject
+from tests.durable_support import ControlledStorage, context, toMatchObject
 from tests.harness_support import addHooks, addTask, addTool
 from tests.task_support import aborted, deferred, openTasks, race, settled
 
@@ -521,7 +522,7 @@ async def test_waiting_rejects_waits_on_itself_its_owner_a_missing_task_and_fail
     harness, root = opened.harness, opened.root
     other = await start(root, "other")
     cases: list[tuple[str, Callable[[Any], list[int]], str, str]] = [
-        ("self", lambda runtime: [runtime.taskId], "allSettled", "cannot wait on itself or its owner"),
+        ("self", lambda runtime: [runtime.taskId], "allSettled", "is a wait cycle"),
         ("missing", lambda runtime: [999_999], "allSettled", "does not exist"),
         ("foreign", lambda runtime: [other], "failFast", "only on tasks it owns"),
     ]
@@ -557,8 +558,236 @@ async def test_waiting_rejects_waits_on_itself_its_owner_a_missing_task_and_fail
     assert (await harness.waitForTask(holder["parent"], context))["state"]["outcome"]["status"] == "completed"
     outcome = (await harness.waitForTask(holder["child"], context))["state"]["outcome"]
     assert outcome["status"] == "faulted"
-    assert "cannot wait on itself or its owner" in outcome["error"]["message"]
+    assert "is a wait cycle" in outcome["error"]["message"]
     openGate("other")
+    await harness.close(context)
+
+
+def waitsOn(on: Callable[[], list[int]]) -> Callable[..., Any]:
+    """A run behavior that waits with ``allSettled`` on the tasks ``on`` returns when it runs."""
+
+    async def run(runtime: Any, ctx: Any) -> None:
+        await runtime.commit(lambda tx, current: waitOn(on(), "allSettled"), ctx)
+
+    return run
+
+
+# #10411; this test and the next two are from #10533 by @odysseus0.
+async def test_waiting_rejects_the_wait_that_closes_a_cycle():
+    opened = await openNodes()
+    harness, root = opened.harness, opened.root
+    ids: dict[str, int] = {}
+    script("a", {"run": waitsOn(lambda: [ids["b"]])})
+    script("b", {"run": waitsOn(lambda: [ids["a"]])})
+
+    async def create(tx: Any) -> None:
+        ids["a"] = await tx.createTask(Node, {"name": "a"}, OWN_CONVERSATION)
+        ids["b"] = await tx.createTask(Node, {"name": "b"}, OWN_CONVERSATION)
+
+    await root.commit(create, context)
+    # a -> b and b -> a are waits, and whichever comes second closes the cycle.
+    outcomes = await asyncio.gather(outcomeOf(harness, ids["a"]), outcomeOf(harness, ids["b"]))
+    assert sorted(outcomes) == ["completed", "faulted"]
+    await harness.close(context)
+
+
+# #10411
+async def test_waiting_rejects_the_wait_that_closes_a_cycle_through_a_held_owner():
+    opened = await openNodes()
+    harness, root = opened.harness, opened.root
+    ids: dict[str, int] = {}
+    child = spawnAndFinish("held", "child")
+    script("child", {"run": waitsOn(lambda: [ids["other"]])})
+    script("other", {"run": waitsOn(lambda: [ids["held"]])})
+
+    async def create(tx: Any) -> None:
+        ids["held"] = await tx.createTask(Node, {"name": "held"}, OWN_CONVERSATION)
+        ids["other"] = await tx.createTask(Node, {"name": "other"}, OWN_CONVERSATION)
+
+    await root.commit(create, context)
+    # held -> child is a hold; child -> other -> held are waits, and whichever wait comes second closes the cycle.
+    assert await outcomeOf(harness, ids["held"]) == "completed"
+    outcomes = await asyncio.gather(outcomeOf(harness, child["id"]), outcomeOf(harness, ids["other"]))
+    assert sorted(outcomes) == ["completed", "faulted"]
+    await harness.close(context)
+
+
+# #10411
+async def test_waiting_rejects_a_cycle_through_holds_two_levels_deep():
+    opened = await openNodes()
+    harness, root = opened.harness, opened.root
+    ids: dict[str, int] = {}
+    child = spawnAndFinish("held", "child")
+    grandchild = spawnAndFinish("child", "grandchild")
+    script("grandchild", {"run": waitsOn(lambda: [ids["other"]])})
+    script("other", {"run": waitsOn(lambda: [ids["held"]])})
+
+    async def create(tx: Any) -> None:
+        ids["held"] = await tx.createTask(Node, {"name": "held"}, OWN_CONVERSATION)
+        ids["other"] = await tx.createTask(Node, {"name": "other"}, OWN_CONVERSATION)
+
+    await root.commit(create, context)
+    # held -> child -> grandchild are holds; grandchild -> other -> held are waits.
+    await until(lambda: "id" in grandchild)
+    outcomes = await asyncio.gather(outcomeOf(harness, grandchild["id"]), outcomeOf(harness, ids["other"]))
+    assert sorted(outcomes) == ["completed", "faulted"]
+    assert await outcomeOf(harness, child["id"]) == "completed"
+    await harness.close(context)
+
+
+# #10411
+async def test_waiting_lets_a_background_task_wait_on_the_owner_of_its_conversation():
+    opened = await openNodes()
+    harness, root = opened.harness, opened.root
+    ids: dict[str, int] = {}
+    script("background", {"run": waitsOn(lambda: [ids["owner"]])})
+
+    async def create(tx: Any) -> int:
+        ids["owner"] = await tx.createTask(Node, {"name": "owner"}, OWN_CONVERSATION)
+        conversation = await tx.createConversation({"ownership": {"kind": "task", "taskId": ids["owner"]}})
+        options = {**OWN_CONVERSATION, "conversationId": conversation["id"], "background": True}
+        return await tx.createTask(Node, {"name": "background"}, options)  # type: ignore[no-any-return]
+
+    background = await root.commit(create, context)
+    # background -> owner is a wait but owner -> background is no hold, so there is no cycle.
+    await until(hasStatus(harness, background, "waiting"))
+    openGate("owner")
+    assert await outcomeOf(harness, background) == "completed"
+    await harness.close(context)
+
+
+# #10411: the issue's orchestrator, worker, and reviewer.
+async def test_waiting_rejects_a_cycle_of_a_hold_and_two_waits_that_each_look_reasonable():
+    opened = await openNodes()
+    harness, root = opened.harness, opened.root
+    ids: dict[str, int] = {}
+    reviewerWaits = deferred()
+
+    # The orchestrator spawns a worker and finishes; the running worker holds it as completing.
+    async def orchestrator(runtime: Any, ctx: Any) -> None:
+        async def change(tx: Any, current: Any) -> dict[str, Any]:
+            ids["worker"] = await spawn(tx, runtime.taskId, "worker")
+            return {"status": "running", "checkpoint": {"phase": "resume", "round": 1}}
+
+        await runtime.commit(change, ctx)
+
+    # The reviewer waits for the orchestrator's result.
+    async def reviewer(runtime: Any, ctx: Any) -> None:
+        await runtime.commit(lambda tx, current: waitOn([ids["orchestrator"]], "allSettled"), ctx)
+        reviewerWaits.resolve()
+
+    # The worker waits for the reviewer, closing the cycle.
+    async def worker(runtime: Any, ctx: Any) -> None:
+        await reviewerWaits.promise
+        await runtime.commit(lambda tx, current: waitOn([ids["reviewer"]], "allSettled"), ctx)
+
+    script("orchestrator", {"run": orchestrator})
+    script("reviewer", {"run": reviewer})
+    script("worker", {"run": worker})
+    ids["orchestrator"] = await start(root, "orchestrator")
+    await until(hasStatus(harness, ids["orchestrator"], "completing"))
+    ids["reviewer"] = await start(root, "reviewer")
+    outcomes = await asyncio.gather(
+        *[outcomeOf(harness, ids[name]) for name in ["orchestrator", "worker", "reviewer"]]
+    )
+    assert outcomes == ["completed", "faulted", "completed"]
+    workerOutcome = (await harness.waitForTask(ids["worker"], context))["state"]["outcome"]
+    assert (
+        f"{ids['worker']} -> {ids['reviewer']} -> {ids['orchestrator']} -> {ids['worker']} is a wait cycle"
+        in json.dumps(workerOutcome)
+    )
+    await harness.close(context)
+
+
+# #10411
+async def test_waiting_allows_a_diamond_of_waits():
+    opened = await openNodes()
+    harness, root = opened.harness, opened.root
+    ids: dict[str, int] = {}
+    # A diamond: top waits on left and right, both wait on bottom. No cycle.
+    script("top", {"run": waitsOn(lambda: [ids["left"], ids["right"]])})
+    script("left", {"run": waitsOn(lambda: [ids["bottom"]])})
+    script("right", {"run": waitsOn(lambda: [ids["bottom"]])})
+
+    async def create(tx: Any) -> None:
+        for name in ["bottom", "left", "right", "top"]:
+            ids[name] = await tx.createTask(Node, {"name": name}, OWN_CONVERSATION)
+
+    await root.commit(create, context)
+    openGate("bottom")
+    assert await outcomeOf(harness, ids["top"]) == "completed"
+    await harness.close(context)
+
+
+# #10411
+async def test_waiting_follows_no_wait_of_an_abort_marked_task_which_waits_only_for_its_owned_work():
+    opened = await openNodes()
+    harness, root = opened.harness, opened.root
+    ids: dict[str, int] = {}
+    cleanup = deferred()
+
+    # b owns c and waits on a; aborting b leaves c's cleanup pending, so b waits only for c.
+    async def b(runtime: Any, ctx: Any) -> None:
+        async def change(tx: Any, current: Any) -> dict[str, Any]:
+            ids["c"] = await spawn(tx, runtime.taskId, "c")
+            return waitOn([ids["a"]], "allSettled")
+
+        await runtime.commit(change, ctx)
+
+    async def cAbort(runtime: Any, ctx: Any) -> None:
+        await cleanup.promise
+        await runtime.commit(
+            lambda tx, current: {"status": "terminal", "outcome": {"status": "aborted", "result": "c"}}, ctx
+        )
+
+    script("b", {"run": b})
+    script("c", {"abort": cAbort})
+    aWaits = deferred()
+
+    async def a(runtime: Any, ctx: Any) -> None:
+        await aWaits.promise
+        await runtime.commit(lambda tx, current: waitOn([ids["b"]], "allSettled"), ctx)
+
+    async def aResume(runtime: Any, ctx: Any, _round: Any) -> None:
+        await runtime.commit(lambda tx, current: end("completed", "a"), ctx)
+
+    script("a", {"run": a, "resume": aResume})
+
+    async def create(tx: Any) -> None:
+        ids["a"] = await tx.createTask(Node, {"name": "a"}, OWN_CONVERSATION)
+        ids["b"] = await tx.createTask(Node, {"name": "b"}, OWN_CONVERSATION)
+
+    await root.commit(create, context)
+    await until(hasStatus(harness, ids["b"], "waiting"))
+    assert await harness.abortTask(ids["b"], context) == "marked"
+    await until(lambda: "abort:c" in log)
+    # a -> b would close a -> b -> a through b's stale wait; b now waits only for c.
+    aWaits.resolve()
+    await until(hasStatus(harness, ids["a"], "waiting"))
+    cleanup.resolve()
+    assert await outcomeOf(harness, ids["b"]) == "aborted"
+    assert await outcomeOf(harness, ids["a"]) == "completed"
+    await harness.close(context)
+
+
+# #10411
+async def test_waiting_rejects_a_longer_cycle_of_waits():
+    opened = await openNodes()
+    harness, root = opened.harness, opened.root
+    ids: dict[str, int] = {}
+    names = ["x", "y", "z"]
+    for index, name in enumerate(names):
+        following = names[(index + 1) % len(names)]
+        script(name, {"run": waitsOn(lambda following=following: [ids[following]])})
+
+    async def create(tx: Any) -> None:
+        for name in names:
+            ids[name] = await tx.createTask(Node, {"name": name}, OWN_CONVERSATION)
+
+    await root.commit(create, context)
+    outcomes = await asyncio.gather(*[outcomeOf(harness, ids[name]) for name in names])
+    assert len([outcome for outcome in outcomes if outcome == "faulted"]) == 1
+    assert len([outcome for outcome in outcomes if outcome == "completed"]) == 2
     await harness.close(context)
 
 
@@ -1106,7 +1335,7 @@ def toolCalls(*ids: tuple[str, str]) -> Any:
 
 
 async def noopExecute(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-    return {"content": []}
+    return {"output": []}
 
 
 def noopTool() -> dict[str, Any]:
@@ -1222,7 +1451,7 @@ async def test_tool_rounds_ends_a_turn_at_the_generations_hold_before_its_succes
     await harness.close(context)
 
 
-async def test_tool_rounds_keeps_run_control_with_a_faulted_generation_until_its_owned_work_drains_and_retries_a_rejected_final_commit():
+async def test_tool_rounds_keeps_run_control_with_a_faulted_generation_until_its_owned_work_drains_and_fails_the_harness_on_a_failed_final_commit():
     base = chatSetup()
     setup = SimpleNamespace(**{**vars(base), "models": WithOverrides(base.models, streamSimple=invalidFinalStream)})
     addTask(setup.registry, Node)
@@ -1236,8 +1465,9 @@ async def test_tool_rounds_keeps_run_control_with_a_faulted_generation_until_its
     addHooks(setup.registry, GenerationTask, {"beforeRequest": beforeRequest})
     script("hooked", {"abort": slowAbortOf("hooked")})
     reject: int | None = None
+    failure = RuntimeError("disk gone")
 
-    class Rejecting(MemoryStorage):
+    class Failing(ControlledStorage):
         async def commit(self, writes: Any, ctx: Any) -> int:  # type: ignore[override]
             nonlocal reject
             finalizes = any(
@@ -1246,10 +1476,11 @@ async def test_tool_rounds_keeps_run_control_with_a_faulted_generation_until_its
             )
             if finalizes:
                 reject = None
-                raise StorageRejected("rejected once")
+                raise failure
             return await super().commit(writes, ctx)
 
-    opened = await openChat(Rejecting(), setup)
+    storage = Failing()
+    opened = await openChat(storage, setup)
     harness, root = opened.harness, opened.root
     holder["opened"] = harness
     submission = await root.submit({"type": "input", "content": "hi"}, context)
@@ -1268,17 +1499,20 @@ async def test_tool_rounds_keeps_run_control_with_a_faulted_generation_until_its
     await waitFor(lambda: "abort:hooked" in log)
     reject = generation
     openGate("abort.hooked")
-    # The final commit, with the run's cleanup, is rejected once: nothing of the cleanup lands.
-    await waitFor(lambda: any(isinstance(error, StorageRejected) for error in setup.reports))
-    assert ((await harness.snapshot(LiveDoc, root.id, context)).get("run") or {}).get("taskId") == generation
-    assert [entry["kind"] for entry in await allEntries(root)] == ["pi.user"]
-    assert await settled(submission.wait(context)) is False
-    # The next commit retries it; the partial becomes one aborted entry.
-    await root.commit(lambda tx: tx.appendEntry(root.id, {"kind": "note"}), context)
-    toMatchObject(await submission.wait(context), {"status": "unanswered", "reason": "faulted"})
-    assert await harness.snapshot(LiveDoc, root.id, context) == {}
-    assert [entry["kind"] for entry in await allEntries(root)] == ["pi.user", "note", "pi.assistant"]
+    # The final commit, with the run's cleanup, fails: nothing of the cleanup lands, and the Harness fails.
+    assert await harness.closed == {"reason": "failed", "error": failure}
+    with pytest.raises(SessionFailed) as failed:
+        await submission.wait(context)
+    assert failed.value.cause is failure
     await harness.close(context)
+    # Reopening finalizes the run; the partial becomes one aborted entry.
+    reopened = await openChat(storage.reopen(), setup)
+    holder["opened"] = reopened.harness
+    again = await reopened.harness.submission(submission.id, context)
+    toMatchObject(await again.wait(context), {"status": "unanswered", "reason": "faulted"})
+    assert await reopened.harness.snapshot(LiveDoc, reopened.root.id, context) == {}
+    assert [entry["kind"] for entry in await allEntries(reopened.root)] == ["pi.user", "pi.assistant"]
+    await reopened.harness.close(context)
 
 
 # ─── Review follow-ups ──────────────────────────────────────────────────────
@@ -1505,10 +1739,11 @@ async def test_conversation_abort_stops_a_cascade_at_an_unmarked_background_task
     await harness.close(context)
 
 
-async def test_conversation_abort_retries_a_finalization_the_storage_rejected_with_the_next_commit():
+async def test_conversation_abort_fails_the_harness_on_a_failed_finalization_which_reopening_applies():
     reject: int | None = None
+    failure = RuntimeError("disk gone")
 
-    class Rejecting(MemoryStorage):
+    class Failing(ControlledStorage):
         async def commit(self, writes: Any, ctx: Any) -> int:  # type: ignore[override]
             nonlocal reject
             finalizes = any(
@@ -1517,22 +1752,23 @@ async def test_conversation_abort_retries_a_finalization_the_storage_rejected_wi
             )
             if finalizes:
                 reject = None
-                raise StorageRejected("rejected once")
+                raise failure
             return await super().commit(writes, ctx)
 
-    opened = await openNodes(Rejecting())
+    storage = Failing()
+    opened = await openNodes(storage)
     harness, root, reports = opened.harness, opened.root, opened.reports
-    child = spawnAndFinish("parent", "child")
+    spawnAndFinish("parent", "child")
     parent = await start(root, "parent")
     await until(hasStatus(harness, parent, "completing"))
     reject = parent
     openGate("child")
-    await harness.waitForTask(child["id"], context)
-    await until(lambda: any(isinstance(error, StorageRejected) for error in reports))
-    assert (await state(harness, parent))["status"] == "completing"
-    await root.commit(lambda tx: tx.appendEntry(root.id, {"kind": "note"}), context)
-    assert await outcomeOf(harness, parent) == "completed"
+    assert await harness.closed == {"reason": "failed", "error": failure}
+    assert reports == [failure]
     await harness.close(context)
+    reopened = await openNodes(storage.reopen())
+    assert await outcomeOf(reopened.harness, parent) == "completed"
+    await reopened.harness.close(context)
 
 
 async def test_recovery_through_ownership_edges_shows_an_abort_marked_owner_waiting_for_work_in_its_owned_conversation_before_resume_after_reopen(
@@ -1726,7 +1962,7 @@ async def test_tool_rounds_and_events_lets_a_tool_that_owns_live_work_finish_its
             await tx.createTask(Node, {"name": "sub"}, {**OWN_CONVERSATION, "conversationId": child["id"]})
 
         await api.commit(change, callContext)
-        return {"content": [{"type": "text", "text": "started"}]}
+        return {"output": [{"type": "text", "text": "started"}]}
 
     addTool(
         setup.registry,
@@ -1772,7 +2008,7 @@ async def test_tool_rounds_and_events_holds_a_faulted_tools_slot_and_task_failed
 
     async def broken(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         await api.commit(lambda tx: tx.createTask(Node, {"name": "held"}, owned(api.taskId)), callContext)
-        return {"content": [], "details": {"fn": lambda: 1}}
+        return {"output": [], "details": {"fn": lambda: 1}}
 
     addTool(
         setup.registry,

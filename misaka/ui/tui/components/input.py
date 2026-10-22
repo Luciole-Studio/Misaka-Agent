@@ -1,4 +1,4 @@
-"""Translated from pi-tui's ``components/input.ts`` (v1.1.0).
+"""Translated from pi-tui's ``components/input.ts`` (v1.3.0).
 
 MISAKA fork: no alt screen (D1), so ``handleMouse`` and the render geometry only it reads (``renderedStartColumn``)
 are not ported; only the alt screen produces mouse events. String offsets count code points (Python strings), where
@@ -14,7 +14,7 @@ from typing import Literal
 from misaka.ui.tui.keybindings import getKeybindings
 from misaka.ui.tui.keys import decodeKittyPrintable
 from misaka.ui.tui.kill_ring import KillRing
-from misaka.ui.tui.tui import CURSOR_MARKER, Component
+from misaka.ui.tui.tui import CURSOR_MARKER, Component, renderFakeCursor
 from misaka.ui.tui.undo_stack import UndoStack
 from misaka.ui.tui.utils import (
     getGraphemeSegmenter,
@@ -396,7 +396,7 @@ class Input(Component):
             atCursor = graphemes[0].segment if graphemes else " "
             afterCursor = placeholder[len(atCursor) :]
             marker = CURSOR_MARKER if self.focused else ""
-            cursorChar = f"\x1b[7m{self.placeholderStyle(atCursor)}\x1b[27m"
+            cursorChar = renderFakeCursor(self.placeholderStyle(atCursor))
             textWithCursor = marker + cursorChar + self.placeholderStyle(afterCursor)
             padding = " " * max(0, availableWidth - visibleWidth(textWithCursor))
             return [self.prompt + textWithCursor + padding]
@@ -447,8 +447,8 @@ class Input(Component):
         # Hardware cursor marker (zero-width, emitted before fake cursor for IME positioning)
         marker = CURSOR_MARKER if self.focused else ""
 
-        # Use inverse video to show cursor
-        cursorChar = f"\x1b[7m{atCursor}\x1b[27m"  # ESC[7m = reverse video, ESC[27m = normal
+        # TUI draws the fake cursor in reverse video, or omits it when the hardware cursor is shown
+        cursorChar = renderFakeCursor(atCursor)
         textWithCursor = beforeCursor + marker + cursorChar + afterCursor
 
         # Calculate visual width

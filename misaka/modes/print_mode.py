@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/coding-agent/src/modes/print-mode.ts`` (v1.1.0).
+"""Translated from pi's ``packages/coding-agent/src/modes/print-mode.ts`` (v1.3.0).
 
 Print mode for single-shot non-interactive execution.
 """
@@ -181,6 +181,9 @@ async def runPrintMode(runtime_host: Any, options: PrintModeOptions | dict[str, 
                 for content in _message_content(last_message) or []:
                     if _content_type(content) == "text":
                         writeRawStdout(f"{read_field(content, 'text', '')}\n")
+                if stop_reason == "length":
+                    print("Response was truncated: the model reached its output token limit.", file=sys.stderr)
+                    return 1
 
         return 0
     except Exception as error:  # noqa: BLE001

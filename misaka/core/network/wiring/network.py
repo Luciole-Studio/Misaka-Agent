@@ -1099,7 +1099,9 @@ class NetworkPart:
         self._pending_watch = asyncio.ensure_future(self._watch_pending(ctx))
 
     async def before_agent_start(self, event, ctx):
-        if self.receive_notifications:
+        # A user's turn collects what is pending. A run a notification woke does not: the watcher
+        # below already delivers, and each wake would repeat the board hint.
+        if self.receive_notifications and event.get("messageType", "user") == "user":
             asyncio.ensure_future(self._collect_pending(ctx))
 
     async def session_shutdown(self, event, ctx):

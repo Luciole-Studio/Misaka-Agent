@@ -1,6 +1,6 @@
 """Stable provider-facing identity of one conversation.
 
-Ported from: pi packages/durable/src/harness/provider.ts @ v1.1.0
+Ported from: pi packages/durable/src/harness/provider.ts @ v1.3.0
 """
 
 from __future__ import annotations

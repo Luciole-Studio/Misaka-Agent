@@ -1,7 +1,8 @@
 """The structural view of a conversation: its active transcript and built-in documents as a Chord state.
 
-Translated from pi's ``packages/durable/src/harness/view.ts`` (spec section 9.3). A view is ``{"conversation": record,
-"entries": [...], "docs": {kind: value}}``; an observer is any object with ``closeSession()`` and optionally
+Translated from pi's ``packages/durable/src/harness/view.ts`` (v1.3.0, spec section 9.3). A view is ``{"conversation":
+record, "entries": [...], "docs": {kind: value}}``; an observer is any object with ``closeSession(failure)`` (the
+Session's failure, ``None`` after a plain close) and optionally
 ``advance(value, ops, context)`` and ``publication(before, after, ops, publication, context)``. The views of a Harness
 hang off the Session object (upstream keeps them in a ``WeakMap``).
 """
@@ -18,6 +19,7 @@ from misaka.chord.delta import applyImmutable
 from misaka.utils.js import awaitValue, eager
 
 from ..session.observation import CommittedStateSource, CommittedWatch
+from ..session.session import contained
 from ..types import CommitPublication, ConversationId, Storage
 from .agent import AgentDoc
 from .context import activeEntries, captureContextBounds
@@ -72,24 +74,31 @@ class ConversationViews:
 
         def onCommit(publication: CommitPublication, context: Context) -> None:
             for id, mount in list(self._mounts.items()):
-                advance(id, mount, publication, context)
+                advance(id, mount, publication, context, lambda error: self.report(error))
 
         def onClose() -> None:
             self._closed = True
             for mount in list(self._mounts.values()):
                 for observer in list(mount.observers):
-                    observer.closeSession()
+                    contained(
+                        lambda observer=observer: observer.closeSession(self._session.failure),
+                        lambda error: self.report(error),
+                    )
             self._mounts.clear()
 
-        session.subscribeCommits(onCommit)
+        session.observeCommits(onCommit)
         session.subscribeClose(onClose)
+
+    def report(self, error: Any) -> None:
+        """Report an observer's listener error through the Harness."""
+        self._session.report(error)
 
     @eager
     async def state(self, id: ConversationId, context: Context) -> Any:
         """A disposable read-only Chord state of the view."""
         attached = await self.attach(id, lambda value, release, storage: CommittedStateSource(value, release), context)
         try:
-            return replicatedState(attached["observer"])
+            return replicatedState(attached["observer"], {"onError": lambda error: self._session.report(error)})
         except BaseException:
             attached["detach"]()
             raise
@@ -97,7 +106,11 @@ class ConversationViews:
     @eager
     async def watch(self, id: ConversationId, context: Context) -> Any:
         """A serialized exact-frame watch of the view; cancelling ``context`` stops it."""
-        attached = await self.attach(id, lambda value, release, storage: CommittedWatch(value, release), context)
+        attached = await self.attach(
+            id,
+            lambda value, release, storage: CommittedWatch(value, release, lambda error: self._session.report(error)),
+            context,
+        )
         observer = attached["observer"]
         signal = context.abortSignal
         if signal is not None and signal.aborted:
@@ -125,7 +138,7 @@ class ConversationViews:
             observer = await awaitValue(create(mount.value, detach, self._storage))
             # Close or cancellation may begin while the mount hydrates; register nothing then.
             if self._closed:
-                raise closedError()
+                raise closedError(self._session)
             signal = context.abortSignal
             if signal is not None:
                 signal.throwIfAborted()
@@ -153,8 +166,15 @@ class ConversationViews:
         return _Mount({"conversation": conversation, "entries": entries, "docs": docs}, incarnations)
 
 
-def advance(id: ConversationId, mount: _Mount, publication: CommitPublication, context: Context) -> None:
-    """Derive the mount's operations from one publication, apply them, and hand the revision to every observer."""
+def advance(
+    id: ConversationId,
+    mount: _Mount,
+    publication: CommitPublication,
+    context: Context,
+    report: Callable[[Any], None],
+) -> None:
+    """Derive the mount's operations from one publication, apply them, and hand the revision to every observer; one that
+    throws is reported through ``report``, and the others still get it."""
     docOps: list[Any] = []
     entryOps: list[Any] = []
     entries = mount.value["entries"]
@@ -204,11 +224,16 @@ def advance(id: ConversationId, mount: _Mount, publication: CommitPublication, c
         for observer in list(mount.observers):
             advanceObserver = getattr(observer, "advance", None)
             if advanceObserver is not None:
-                advanceObserver(mount.value, ops, frameContext)
+                contained(lambda advanceObserver=advanceObserver: advanceObserver(mount.value, ops, frameContext), report)
     for observer in list(mount.observers):
         publicationObserver = getattr(observer, "publication", None)
         if publicationObserver is not None:
-            publicationObserver(before, mount.value, ops, publication, frameContext)
+            contained(
+                lambda publicationObserver=publicationObserver: publicationObserver(
+                    before, mount.value, ops, publication, frameContext
+                ),
+                report,
+            )
 
 
 def prefixed(op: list[Any], prefix: list[Any]) -> list[Any]:

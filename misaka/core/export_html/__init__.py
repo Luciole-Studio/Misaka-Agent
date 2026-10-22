@@ -134,9 +134,10 @@ def deriveExportColors(base_color: str) -> dict[str, str]:
 # is handed to -- with the whole transcript in reach, since the page decodes and
 # renders it itself. The session-content path is already fenced (base64 + escapeHtml +
 # marked's html/tag tokenizers disabled); this is the one hole left.
-# The schema (theme-schema.json) admits only `#RRGGBB` and a 0-255 palette index, and
-# `adjustBrightness` emits `rgb(r, g, b)`, so the whitelist below is wider than any
-# legitimate theme needs. Anything outside it falls back rather than reaching the CSS.
+# The schema (misaka/schemas/theme.schema.json) admits any string -- hex such as `#RRGGBB`, a variable
+# name, "" -- or a 0-255 palette index, so it keeps nothing out of the CSS; `adjustBrightness` emits
+# `rgb(r, g, b)`. The whitelist below admits every color a legitimate theme produces; anything outside
+# it falls back rather than reaching the CSS.
 _SAFE_CSS_IDENT = re.compile(r"[A-Za-z0-9_-]+")
 _SAFE_CSS_COLOR = re.compile(
     r"#[0-9A-Fa-f]{3,8}"  # hex, the only literal the schema documents

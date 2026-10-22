@@ -1,6 +1,6 @@
 """The ``bash`` and ``powershell`` tools.
 
-Translated from pi's ``packages/durable/src/tools/bash.ts`` (v1.1.0). ``createBashTool(options)`` takes an optional
+Translated from pi's ``packages/durable/src/tools/bash.ts`` (v1.3.0). ``createBashTool(options)`` takes an optional
 ``dict`` with ``commandPrefix`` and ``prepare(execution, api, context)``; an execution is ``{"command", "cwd", "env",
 "inheritEnv"}`` and ``prepare`` edits it in place. ``createPowerShellTool(options)`` also takes ``programs``.
 """
@@ -38,6 +38,19 @@ powershellSchema: dict[str, Any] = {
 }
 
 
+shellStructuredOutputSchema: dict[str, Any] = {
+    "type": "object",
+    "required": ["output", "truncated", "exitCode"],
+    "properties": {
+        "output": {"type": "string", "description": "Combined stdout and stderr: the retained tail, as the model sees it"},
+        "truncated": {"type": "boolean", "description": "Whether earlier output was dropped"},
+        "fullOutputPath": {"type": "string", "description": "File with the complete output, when it was spilled"},
+        "exitCode": {"type": "number"},
+    },
+}
+"""What a program that calls ``bash`` or ``powershell`` receives (``ShellStructuredOutput``)."""
+
+
 def validateTimeout(timeout: float | None) -> None:
     if timeout is None:
         return
@@ -64,10 +77,10 @@ async def prepareExecution(command: str, options: dict[str, Any] | None, api: An
 
 async def runCommand(
     commands: list[str | list[str]], execution: dict[str, Any], timeout: float | None, api: Any, context: Context
-) -> None:
+) -> dict[str, Any]:
     """Run each command form in turn until one starts, streaming output to ``api.output()`` within the retained window,
-    and turn the result into the tool's outcome: a spill diagnostic, and a thrown error for a failure or a nonzero
-    exit."""
+    and turn the result into the tool's result: a spill diagnostic, an error result for a nonzero exit, and a thrown
+    error for a failure such as a timeout. The structured output repeats the retained output with the exit code."""
     env = requireEnv(api)
 
     def onOutput(text: str, _context: Any, info: dict[str, Any]) -> None:
@@ -107,28 +120,38 @@ async def runCommand(
         if error.code == "aborted":
             raise RuntimeError("Command aborted")
         raise error
-    if result["value"]["exitCode"] != 0:
-        raise RuntimeError(f"Command exited with code {result['value']['exitCode']}")
+    exitCode = result["value"]["exitCode"]
+    retained = api.retainedOutput()
+    structuredOutput = {
+        "output": retained["text"],
+        "truncated": retained["truncated"],
+        **({} if spillPath is None else {"fullOutputPath": spillPath}),
+        "exitCode": exitCode,
+    }
+    if exitCode == 0:
+        return {"structuredOutput": structuredOutput}
+    exited = {"severity": "error", "code": "exit_code", "message": f"Command exited with code {exitCode}"}
+    return {"structuredOutput": structuredOutput, "isError": True, "diagnostics": [exited]}
 
 
 def createBashTool(options: dict[str, Any] | None = None) -> dict[str, Any]:
     """Runs a command through the environment's shell. Its output streams to ``api.output()``, where the Harness keeps
     the tail within the default limits; the result content is that retained output. The retained window goes to the
     environment, which may omit output outside it and report how much it omitted, so dropped counts stay exact. Output
-    beyond the limits is spilled to a file whose path is reported as a diagnostic. A nonzero exit or timeout throws,
-    which makes an error result that still carries the output and diagnostics."""
+    beyond the limits is spilled to a file whose path is reported as a diagnostic. A nonzero exit is an error result
+    with the exit code; a timeout throws, which makes an error result that still carries the output and diagnostics."""
 
     async def execute(args: dict[str, Any], api: Any, context: Context) -> dict[str, Any]:
         validateTimeout(args.get("timeout"))
         execution = await prepareExecution(args["command"], options, api, context)
-        await runCommand([execution["command"]], execution, args.get("timeout"), api, context)
-        return {}
+        return await runCommand([execution["command"]], execution, args.get("timeout"), api, context)
 
     return defineTool(
         {
             "name": "bash",
             "description": f"Execute a bash command in the current working directory. Returns combined stdout and stderr. Output is truncated to last {DEFAULT_MAX_LINES} lines or {DEFAULT_MAX_BYTES // 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
             "parameters": bashSchema,
+            "structuredOutputSchema": shellStructuredOutputSchema,
             "outputLimits": {"retain": "tail"},
             "execute": execute,
         }
@@ -152,14 +175,14 @@ def createPowerShellTool(options: dict[str, Any] | None = None) -> dict[str, Any
         execution = await prepareExecution(args["command"], options, api, context)
         script = f"{UTF8_OUTPUT}\n{execution['command']}"
         commands: list[str | list[str]] = [[program, *POWERSHELL_ARGS, script] for program in programs]
-        await runCommand(commands, execution, args.get("timeout"), api, context)
-        return {}
+        return await runCommand(commands, execution, args.get("timeout"), api, context)
 
     return defineTool(
         {
             "name": "powershell",
             "description": f"Execute a PowerShell command in the current working directory. Returns combined stdout and stderr. Output is truncated to last {DEFAULT_MAX_LINES} lines or {DEFAULT_MAX_BYTES // 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
             "parameters": powershellSchema,
+            "structuredOutputSchema": shellStructuredOutputSchema,
             "outputLimits": {"retain": "tail"},
             "execute": execute,
         }

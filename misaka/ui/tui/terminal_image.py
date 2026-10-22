@@ -1,4 +1,4 @@
-"""Translated from pi-tui's ``packages/tui/src/terminal-image.ts`` (v1.1.0).
+"""Translated from pi-tui's ``packages/tui/src/terminal-image.ts`` (v1.3.0).
 
 MISAKA forks, each marked where it happens:
 
@@ -112,10 +112,10 @@ def detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: Callable[[], bool])
     if term.startswith("screen"):
         return TerminalCapabilities(images=None, trueColor=hasTrueColorHint, hyperlinks=False)
 
-    # Herdr forwards OSC 8 hyperlinks. It runs inside another terminal whose variables, such as
-    # KITTY_WINDOW_ID, may leak into its panes, so check it first and leave image protocols off.
+    # Herdr forwards OSC 8 hyperlinks and supports the Kitty graphics protocol. Check it before
+    # outer-terminal detection because variables like KITTY_WINDOW_ID can leak into its panes.
     if termProgram == "herdr":
-        return TerminalCapabilities(images=None, trueColor=hasTrueColorHint, hyperlinks=True)
+        return TerminalCapabilities(images="kitty", trueColor=hasTrueColorHint, hyperlinks=True)
 
     # MISAKA fork: a pane of MISAKA's panel draws through the panel's own emulator, which shows neither image
     # protocol nor hyperlinks. The host's variables may leak into the pane, so this comes before them too.

@@ -2,18 +2,55 @@
 
 Translated from pi's ``packages/chord/src/context/index.ts``. ``abortSignal`` answers ``None``, not
 ``undefined``, when a context carries no signal; ``value(key)`` answers ``UNDEFINED`` for an absent key.
+A key's ``token`` is a :class:`_Token`, the stand-in for upstream's ``Symbol``; the type-only ``valueType``
+marker has no runtime counterpart.
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from misaka.chord.types import Context, ContextKey, _Token
 from misaka.utils.js import UNDEFINED, AbortController, AbortSignal, DOMException
+
+
+class _Token:
+    """The unique identity of a context key; its ``description`` names it in a context's text form."""
+
+    __slots__ = ("description",)
+
+    def __init__(self, description: str | None) -> None:
+        self.description = description
+
+    def __repr__(self) -> str:
+        return f"Symbol({self.description or ''})"
+
+
+@dataclass(frozen=True, slots=True)
+class ContextKey[T]:
+    """Typed identity for one value carried by a :class:`Context`."""
+
+    token: _Token
+
+
+class Context(ABC):
+    """Immutable invocation-scoped values passed explicitly through operations."""
+
+    @property
+    @abstractmethod
+    def abortSignal(self) -> AbortSignal | None:
+        """The signal that cancels the invocation, or ``None``."""
+
+    @abstractmethod
+    def value[T](self, key: ContextKey[T]) -> T:
+        """The value for ``key``, or ``UNDEFINED`` when the context holds none."""
+
+    @abstractmethod
+    def __str__(self) -> str: ...
 
 ABORT_SIGNAL_CONTEXT_KEY: ContextKey[AbortSignal | None] = ContextKey(_Token("chord.abortSignal"))
 
@@ -140,6 +177,8 @@ __all__ = [
     "BACKGROUND_CONTEXT",
     "TODO_CONTEXT",
     "CancelableContext",
+    "Context",
+    "ContextKey",
     "awaitWithContext",
     "createContextKey",
     "withAbortSignal",

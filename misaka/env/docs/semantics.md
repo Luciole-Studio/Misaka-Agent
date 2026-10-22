@@ -1,6 +1,6 @@
 # Semantics
 
-Translated from pi's `packages/env/docs/semantics.md` (v1.1.0). MISAKA forks are marked where they apply.
+Translated from pi's `packages/env/docs/semantics.md` (v1.3.0). MISAKA forks are marked where they apply.
 
 The reference is Durable's `NodeExecutionEnv` (`packages/durable/src/env/node.ts`) on the remote machine. Durable's
 env conformance suite and `test/differential.test.ts` check each rule below.
@@ -39,6 +39,9 @@ MISAKA fork: the reference is `misaka/durable/env/node.py`, and the checks are `
 - `readBinaryFile`, `readTextFile` and `openTextLineReader` open any file like `open(path, "r")`: `/dev/null` reads
   empty, a FIFO blocks until it has a writer, and a directory fails when read (a line reader at `readLine`). A regular
   file is read up to its size at open; other files to their end.
+- `listFiles` has no `NodeExecutionEnv` counterpart: the daemon implements it for remote and local environments
+  alike (`LocalExecutionEnv` runs a daemon on the same machine), so both list with the same code. Unlike `fd`,
+  symbolic links are not followed; unlike `git ls-files`, a tracked file that matches an ignore rule is left out.
 - `readBinaryFile` returns a `Buffer`, reader reads a plain `Uint8Array`, as Node does.
 - Windows: error codes are libuv's translations; `rm` of a symbolic link or junction to a directory removes the link;
   creating a file where a directory exists fails with `EISDIR`; modification times before 1970 are negative.
@@ -62,7 +65,10 @@ MISAKA fork: the reference is `misaka/durable/env/node.py`, and the checks are `
   Node counts), the complete raw output goes to `pi-output-<uuid>.log` in a fresh `tmp-` directory.
 
 MISAKA fork: a thread cannot safely run code between `fork` and `exec`, so the daemon resets ignored signals and its
-signal mask once at startup, and every command inherits those defaults.
+signal mask once at startup, and every command inherits those defaults. "The daemon's environment" is the one it was
+started with: Python's startup adds to its own (PEP 538's `LC_CTYPE=C.UTF-8` when no locale is set, macOS's
+`__CF_USER_TEXT_ENCODING`), and the daemon restores it from the system's record of its start (`/proc/self/environ`,
+macOS's `KERN_PROCARGS2`) before it serves.
 
 ## Watching
 

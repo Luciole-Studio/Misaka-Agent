@@ -1,4 +1,4 @@
-"""Ported from pi's ``packages/coding-agent/test/model-resolver.test.ts`` (v1.1.0). ``console.warn`` spies read
+"""Ported from pi's ``packages/coding-agent/test/model-resolver.test.ts`` (v1.3.0). ``console.warn`` spies read
 stderr; the registry stand-ins are namespaces with the methods each case calls (``getAvailable`` is awaited)."""
 
 from __future__ import annotations
@@ -17,10 +17,11 @@ from misaka.ai.types import Model
 from misaka.core.agent_session import AgentSession, AgentSessionConfig
 from misaka.core.auth_storage import AuthStorage
 from misaka.core.model_resolver import (
+    ModelReferenceRequest,
     defaultModelPerProvider,
     findInitialModel,
-    parseModelPattern,
     resolveCliModel,
+    resolveModelReference,
     resolveModelScope,
     resolveModelScopeWithDiagnostics,
 )
@@ -106,148 +107,215 @@ def _available(models: list[Model]):
     return getAvailable
 
 
-# parseModelPattern -- simple patterns without colons
+def referenceModel(provider: str, id: str) -> Model:
+    return _model(
+        id=id,
+        name=id,
+        api="openai-completions",
+        provider=provider,
+        baseUrl="https://example.invalid",
+        reasoning=True,
+        input=["text"],
+        cost={"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        contextWindow=128000,
+        maxTokens=8192,
+    )
 
 
-def test_exact_match_returns_model_with_undefined_thinking_level():
-    result = parseModelPattern("claude-sonnet-4-5", allModels)
-    assert result.model.id == "claude-sonnet-4-5"
-    assert result.thinkingLevel is None
-    assert result.warning is None
+referenceCatalog = [
+    referenceModel("anthropic", "claude-sonnet-4-5"),
+    referenceModel("anthropic", "claude-sonnet-4-5-20250929"),
+    referenceModel("anthropic", "claude-opus-4-8"),
+    referenceModel("anthropic", "exact"),
+    # Fuzzy-matches "shared"; an ambiguous exact "shared" must not fall through to it.
+    referenceModel("anthropic", "shared-pro"),
+    referenceModel("openai", "gpt-4o"),
+    referenceModel("openrouter", "qwen/qwen3-coder:exacto"),
+    referenceModel("openrouter", "openai/gpt-4o:extended"),
+    referenceModel("gw-a", "shared"),
+    referenceModel("gw-a", "anthropic/future"),
+    referenceModel("gw-a", "anthropic/exact"),
+    referenceModel("gw-a", "anthropic/claude-opus-4.8"),
+    referenceModel("gw-a", "anthropic/claude-opus"),
+    referenceModel("gw-b", "shared"),
+    referenceModel("gw-b", "anthropic/future"),
+    referenceModel("gw-b", "claude-opus-4-8"),
+    referenceModel("gw-b", "gw-b/free"),
+    referenceModel("gw-b", "zz:free"),
+]
+
+# (name, text, expected, options): `expected` is {"model", "thinkingLevel"?, "warning"?}, {"ambiguous", "usableCount"}
+# or "not-found"; `options` holds `usable`, `provider`, `thinkingSuffix` and `fuzzy`.
+referenceCases: list[tuple[str, str, Any, dict[str, Any]]] = [
+    # Reference syntax
+    ("exact id", "claude-sonnet-4-5", {"model": "anthropic/claude-sonnet-4-5"}, {}),
+    ("exact id is case-insensitive", "GPT-4O", {"model": "openai/gpt-4o"}, {}),
+    ("fuzzy prefers aliases over dated ids", "sonnet", {"model": "anthropic/claude-sonnet-4-5"}, {}),
+    ("thinking suffix", "sonnet:high", {"model": "anthropic/claude-sonnet-4-5", "thinkingLevel": "high"}, {}),
+    (
+        "colon in a literal id is not a thinking suffix",
+        "qwen/qwen3-coder:exacto",
+        {"model": "openrouter/qwen/qwen3-coder:exacto"},
+        {},
+    ),
+    (
+        "provider prefix, colon id, and thinking suffix",
+        "openrouter/qwen/qwen3-coder:exacto:high",
+        {"model": "openrouter/qwen/qwen3-coder:exacto", "thinkingLevel": "high"},
+        {},
+    ),
+    (
+        "raw id wins when the provider prefix names no matching model",
+        "openai/gpt-4o:extended",
+        {"model": "openrouter/openai/gpt-4o:extended"},
+        {},
+    ),
+    ("fuzzy searches the prefixed provider first", "openrouter/qwen", {"model": "openrouter/qwen/qwen3-coder:exacto"}, {}),
+    ("strict keeps an invalid suffix in the id", "gpt-4o:random", "not-found", {}),
+    (
+        "lenient drops an invalid suffix with a warning",
+        "gpt-4o:random",
+        {"model": "openai/gpt-4o", "warning": 'Invalid thinking level "random"'},
+        {"thinkingSuffix": "lenient"},
+    ),
+    (
+        "lenient invalid outer suffix discards the inner thinking level",
+        "qwen/qwen3-coder:exacto:high:random",
+        {"model": "openrouter/qwen/qwen3-coder:exacto", "warning": 'Invalid thinking level "random"'},
+        {"thinkingSuffix": "lenient"},
+    ),
+    ("none keeps the suffix in the id", "gpt-4o:high", "not-found", {"thinkingSuffix": "none"}),
+    ("exact-only skips fuzzy matches", "sonnet", "not-found", {"fuzzy": False}),
+    ("empty text", "  ", "not-found", {}),
+    # Exact matches across providers
+    # #7327
+    ("sole usable provider wins", "shared", {"model": "gw-b/shared"}, {"usable": ["gw-b"]}),
+    (
+        "no usable provider is ambiguous instead of falling through to fuzzy",
+        "shared",
+        {"ambiguous": ["gw-a/shared", "gw-b/shared"], "usableCount": 0},
+        {},
+    ),
+    (
+        "several usable providers are ambiguous",
+        "shared",
+        {"ambiguous": ["gw-a/shared", "gw-b/shared"], "usableCount": 2},
+        {"usable": ["gw-a", "gw-b"]},
+    ),
+    (
+        "thinking suffix does not change provider selection",
+        "shared:high",
+        {"model": "gw-b/shared", "thinkingLevel": "high"},
+        {"usable": ["gw-b"]},
+    ),
+    (
+        "thinking suffix does not bypass ambiguity",
+        "shared:high",
+        {"ambiguous": ["gw-a/shared", "gw-b/shared"], "usableCount": 2},
+        {"usable": ["gw-a", "gw-b"]},
+    ),
+    # #10160
+    (
+        "provider prefix without a direct model selects the usable raw id",
+        "anthropic/future",
+        {"model": "gw-b/anthropic/future"},
+        {"usable": ["gw-b"]},
+    ),
+    # #5823
+    (
+        "usable qualified match beats a usable raw id",
+        "anthropic/exact",
+        {"model": "anthropic/exact"},
+        {"usable": ["anthropic", "gw-a"]},
+    ),
+    # #5643
+    (
+        "usable raw id beats an unusable qualified match",
+        "anthropic/exact",
+        {"model": "gw-a/anthropic/exact"},
+        {"usable": ["gw-a"]},
+    ),
+    ("unusable qualified match is kept when nothing is usable", "anthropic/exact", {"model": "anthropic/exact"}, {}),
+    # Like `mistral/codestral` -> mistral/codestral-latest despite gateway id `mistral/codestral`
+    (
+        "named provider's usable fuzzy match beats a raw id elsewhere",
+        "anthropic/claude-opus",
+        {"model": "anthropic/claude-opus-4-8"},
+        {"usable": ["anthropic"]},
+    ),
+    (
+        "usable raw id beats the named provider's unusable fuzzy match",
+        "anthropic/claude-opus",
+        {"model": "gw-a/anthropic/claude-opus"},
+        {"usable": ["gw-a"]},
+    ),
+    (
+        "named provider's fuzzy match is kept when nothing is usable",
+        "anthropic/claude-opus",
+        {"model": "anthropic/claude-opus-4-8"},
+        {},
+    ),
+    ("named provider's literal id beats its fuzzy matches", "gw-b/free", {"model": "gw-b/gw-b/free"}, {}),
+    # Fuzzy matches across providers
+    ("fuzzy prefers usable providers", "opus", {"model": "gw-a/anthropic/claude-opus-4.8"}, {"usable": ["gw-a"]}),
+    (
+        "fuzzy id tie across usable providers is ambiguous",
+        "opus",
+        {"ambiguous": ["anthropic/claude-opus-4-8", "gw-b/claude-opus-4-8"], "usableCount": 2},
+        {"usable": ["anthropic", "gw-a", "gw-b"]},
+    ),
+    (
+        "fuzzy id tie resolves to the sole usable provider",
+        "opus",
+        {"model": "anthropic/claude-opus-4-8"},
+        {"usable": ["anthropic"]},
+    ),
+    # Explicit provider constraint
+    (
+        "explicit provider ignores usable providers elsewhere",
+        "shared",
+        {"model": "gw-a/shared"},
+        {"provider": "gw-a", "usable": ["gw-b"]},
+    ),
+    ("explicit provider accepts its own prefix", "GW-B/shared", {"model": "gw-b/shared"}, {"provider": "gw-b"}),
+    ("explicit provider allows fuzzy matches", "4o", {"model": "openai/gpt-4o"}, {"provider": "openai"}),
+    ("explicit provider never leaves the provider", "gpt-4o", "not-found", {"provider": "gw-a"}),
+]
 
 
-def test_partial_match_returns_best_model_with_undefined_thinking_level():
-    result = parseModelPattern("sonnet", allModels)
-    assert result.model.id == "claude-sonnet-4-5"
-    assert result.thinkingLevel is None
-    assert result.warning is None
+def modelRef(m: Model) -> str:
+    return f"{m.provider}/{m.id}"
 
 
-def test_no_match_returns_undefined_model_and_thinking_level():
-    result = parseModelPattern("nonexistent", allModels)
-    assert result.model is None
-    assert result.thinkingLevel is None
-    assert result.warning is None
+# resolveModelReference
 
 
-# parseModelPattern -- patterns with valid thinking levels
-
-
-def test_sonnet_high_returns_sonnet_with_high_thinking_level():
-    result = parseModelPattern("sonnet:high", allModels)
-    assert result.model.id == "claude-sonnet-4-5"
-    assert result.thinkingLevel == "high"
-    assert result.warning is None
-
-
-def test_gpt_4o_medium_returns_gpt_4o_with_medium_thinking_level():
-    result = parseModelPattern("gpt-4o:medium", allModels)
-    assert result.model.id == "gpt-4o"
-    assert result.thinkingLevel == "medium"
-    assert result.warning is None
-
-
-def test_all_valid_thinking_levels_work():
-    for level in THINKING_LEVELS:
-        result = parseModelPattern(f"sonnet:{level}", allModels)
-        assert result.model.id == "claude-sonnet-4-5"
-        assert result.thinkingLevel == level
-        assert result.warning is None
-
-
-# parseModelPattern -- patterns with invalid thinking levels
-
-
-def test_sonnet_random_returns_sonnet_with_undefined_thinking_level_and_warning():
-    result = parseModelPattern("sonnet:random", allModels)
-    assert result.model.id == "claude-sonnet-4-5"
-    assert result.thinkingLevel is None
-    assert "Invalid thinking level" in result.warning
-    assert "random" in result.warning
-
-
-def test_gpt_4o_invalid_returns_gpt_4o_with_undefined_thinking_level_and_warning():
-    result = parseModelPattern("gpt-4o:invalid", allModels)
-    assert result.model.id == "gpt-4o"
-    assert result.thinkingLevel is None
-    assert "Invalid thinking level" in result.warning
-
-
-# parseModelPattern -- OpenRouter models with colons in IDs
-
-
-def test_qwen3_coder_exacto_matches_the_model_with_undefined_thinking_level():
-    result = parseModelPattern("qwen/qwen3-coder:exacto", allModels)
-    assert result.model.id == "qwen/qwen3-coder:exacto"
-    assert result.thinkingLevel is None
-    assert result.warning is None
-
-
-def test_openrouter_qwen_qwen3_coder_exacto_matches_with_provider_prefix():
-    result = parseModelPattern("openrouter/qwen/qwen3-coder:exacto", allModels)
-    assert result.model.id == "qwen/qwen3-coder:exacto"
-    assert result.model.provider == "openrouter"
-    assert result.thinkingLevel is None
-    assert result.warning is None
-
-
-def test_qwen3_coder_exacto_high_matches_model_with_high_thinking_level():
-    result = parseModelPattern("qwen/qwen3-coder:exacto:high", allModels)
-    assert result.model.id == "qwen/qwen3-coder:exacto"
-    assert result.thinkingLevel == "high"
-    assert result.warning is None
-
-
-def test_openrouter_qwen_qwen3_coder_exacto_high_matches_with_provider_and_thinking_level():
-    result = parseModelPattern("openrouter/qwen/qwen3-coder:exacto:high", allModels)
-    assert result.model.id == "qwen/qwen3-coder:exacto"
-    assert result.model.provider == "openrouter"
-    assert result.thinkingLevel == "high"
-    assert result.warning is None
-
-
-def test_gpt_4o_extended_matches_the_extended_model_with_undefined_thinking_level():
-    result = parseModelPattern("openai/gpt-4o:extended", allModels)
-    assert result.model.id == "openai/gpt-4o:extended"
-    assert result.thinkingLevel is None
-    assert result.warning is None
-
-
-# parseModelPattern -- invalid thinking levels with OpenRouter models
-
-
-def test_qwen3_coder_exacto_random_returns_model_with_undefined_thinking_level_and_warning():
-    result = parseModelPattern("qwen/qwen3-coder:exacto:random", allModels)
-    assert result.model.id == "qwen/qwen3-coder:exacto"
-    assert result.thinkingLevel is None
-    assert "Invalid thinking level" in result.warning
-    assert "random" in result.warning
-
-
-def test_qwen3_coder_exacto_high_random_returns_model_with_undefined_thinking_level_and_warning():
-    result = parseModelPattern("qwen/qwen3-coder:exacto:high:random", allModels)
-    assert result.model.id == "qwen/qwen3-coder:exacto"
-    assert result.thinkingLevel is None
-    assert "Invalid thinking level" in result.warning
-    assert "random" in result.warning
-
-
-# parseModelPattern -- edge cases
-
-
-def test_empty_pattern_matches_via_partial_matching():
-    # Empty string is included in all model IDs, so partial matching finds a match
-    result = parseModelPattern("", allModels)
-    assert result.model is not None
-    assert result.thinkingLevel is None
-
-
-def test_pattern_ending_with_colon_treats_empty_suffix_as_invalid():
-    result = parseModelPattern("sonnet:", allModels)
-    # Empty string after colon is not a valid thinking level
-    # So it tries to match "sonnet:" which won't match, then tries "sonnet"
-    assert result.model.id == "claude-sonnet-4-5"
-    assert "Invalid thinking level" in result.warning
+@pytest.mark.parametrize(("name", "text", "expected", "options"), referenceCases, ids=[case[0] for case in referenceCases])
+def test_resolve_model_reference(name: str, text: str, expected: Any, options: dict[str, Any]):
+    usable = set(options.get("usable", []))
+    request = ModelReferenceRequest(
+        text=text,
+        provider=options.get("provider"),
+        thinkingSuffix=options.get("thinkingSuffix", "strict"),
+        fuzzy=options.get("fuzzy", True),
+    )
+    # Catalog order must never decide the result.
+    for models in (referenceCatalog, list(reversed(referenceCatalog))):
+        result = resolveModelReference(request, models, lambda provider: provider in usable)
+        if expected == "not-found":
+            assert result.status == "not-found"
+        elif "ambiguous" in expected:
+            assert result.status == "ambiguous"
+            assert sorted(map(modelRef, result.candidates)) == expected["ambiguous"]
+            assert result.usableCount == expected["usableCount"]
+        else:
+            assert result.status == "resolved"
+            assert modelRef(result.model) == expected["model"]
+            assert result.thinkingLevel == expected.get("thinkingLevel")
+            if expected.get("warning"):
+                assert expected["warning"] in result.warning
+            else:
+                assert result.warning is None
 
 
 # resolveModelScopeWithDiagnostics
@@ -282,6 +350,27 @@ async def test_resolve_model_scope_preserves_cli_warning_output(capsys):
     warnings = capsys.readouterr().err.splitlines()
     assert len(warnings) == 1
     assert 'Warning: No models match pattern "missing"' in warnings[0]
+
+
+async def test_adds_every_provider_for_a_pattern_matching_the_same_id_on_several_providers_with_a_warning():
+    registry = _registry(getAvailable=_available([
+        *allModels,
+        mockModels[1].model_copy(update={"provider": "azure"}),
+        mockModels[1].model_copy(update={"provider": "openai-codex", "id": "gpt-4o-mini"}),
+    ]))
+
+    for pattern, thinkingLevel in (("gpt-4o:high", "high"), ("GPT-4o", None)):
+        result = await resolveModelScopeWithDiagnostics([pattern], registry)
+
+        assert sorted(
+            (f"{scoped.model.provider}/{scoped.model.id}", scoped.thinkingLevel) for scoped in result.scopedModels
+        ) == [("azure/gpt-4o", thinkingLevel), ("openai/gpt-4o", thinkingLevel)]
+        assert [(d.type, d.code, d.message, d.pattern) for d in result.diagnostics] == [(
+            "warning",
+            "ambiguous",
+            f'Pattern "{pattern}" matches several providers: azure, openai. Use provider/id to choose one.',
+            pattern,
+        )]
 
 
 def _bracketedModel() -> Model:
@@ -321,46 +410,6 @@ async def test_resolves_bracketed_model_ids_with_thinking_levels_as_exact_refere
 # resolveCliModel
 
 
-def test_resolves_model_provider_id_without_provider():
-    registry = _registry(getModels=lambda: allModels)
-
-    result = resolveCliModel({"cliModel": "openai/gpt-4o", "modelRuntime": registry})
-
-    assert result.error is None
-    assert result.model.provider == "openai"
-    assert result.model.id == "gpt-4o"
-
-
-def test_resolves_fuzzy_patterns_within_an_explicit_provider():
-    registry = _registry(getModels=lambda: allModels)
-
-    result = resolveCliModel({"cliProvider": "openai", "cliModel": "4o", "modelRuntime": registry})
-
-    assert result.error is None
-    assert result.model.provider == "openai"
-    assert result.model.id == "gpt-4o"
-
-
-def test_supports_model_pattern_thinking_without_explicit_thinking():
-    registry = _registry(getModels=lambda: allModels)
-
-    result = resolveCliModel({"cliModel": "sonnet:high", "modelRuntime": registry})
-
-    assert result.error is None
-    assert result.model.id == "claude-sonnet-4-5"
-    assert result.thinkingLevel == "high"
-
-
-def test_prefers_exact_model_id_match_over_provider_inference_openrouter_style_ids():
-    registry = _registry(getModels=lambda: allModels)
-
-    result = resolveCliModel({"cliModel": "openai/gpt-4o:extended", "modelRuntime": registry})
-
-    assert result.error is None
-    assert result.model.provider == "openrouter"
-    assert result.model.id == "openai/gpt-4o:extended"
-
-
 def test_does_not_strip_invalid_suffix_as_thinking_level_in_model_treat_as_raw_id():
     registry = _registry(getModels=lambda: allModels)
 
@@ -392,122 +441,46 @@ def test_returns_a_clear_error_when_there_are_no_models():
     assert "No models available" in result.error
 
 
-def _gpt56Sol(provider: str) -> Model:
-    return mockModels[1].model_copy(update={"id": "gpt-5.6-sol", "name": "GPT 5.6 Sol", "provider": provider})
+# resolveCliModel -- duplicate raw ids behind a known provider prefix (#10160)
+
+_direct = mockModels[0].model_copy(update={"id": "claude-sonnet-4-5", "provider": "anthropic"})
+_openrouter = mockModels[0].model_copy(update={"id": "anthropic/claude-opus-5.5", "provider": "openrouter"})
+_vercel = mockModels[0].model_copy(update={"id": "anthropic/claude-opus-5.5", "provider": "vercel-ai-gateway"})
 
 
-def test_prefers_the_sole_authenticated_provider_for_an_ambiguous_bare_exact_model_id():
-    registry = _registry(
-        getModels=lambda: [_gpt56Sol("azure"), _gpt56Sol("openai-codex")],
-        hasConfiguredAuth=lambda provider: provider == "openai-codex",
+def _duplicateRegistry(configured: list[str]) -> SimpleNamespace:
+    return _registry(
+        getModels=lambda: [_direct, _openrouter, _vercel],
+        hasConfiguredAuth=lambda provider: provider in configured,
     )
 
-    result = resolveCliModel({"cliModel": "gpt-5.6-sol", "modelRuntime": registry})
 
-    assert result.error is None
-    assert result.model.provider == "openai-codex"
-    assert result.model.id == "gpt-5.6-sol"
+def test_selects_the_authenticated_gateway_with_or_without_a_thinking_suffix():
+    for cliModel, thinkingLevel in (("anthropic/claude-opus-5.5", None), ("anthropic/claude-opus-5.5:high", "high")):
+        result = resolveCliModel({"cliModel": cliModel, "modelRuntime": _duplicateRegistry(["vercel-ai-gateway"])})
+
+        assert result.error is None
+        assert result.model.provider == "vercel-ai-gateway"
+        assert result.thinkingLevel == thinkingLevel
 
 
-def test_requires_an_explicit_provider_for_an_ambiguous_bare_exact_model_id_without_a_unique_authenticated_provider():
-    registry = _registry(
-        getModels=lambda: [_gpt56Sol("azure"), _gpt56Sol("openai-codex")],
-        hasConfiguredAuth=lambda _provider: False,
-    )
-
-    result = resolveCliModel({"cliModel": "gpt-5.6-sol", "modelRuntime": registry})
+def test_reports_ambiguity_instead_of_choosing_by_catalog_order():
+    result = resolveCliModel({"cliModel": "anthropic/claude-opus-5.5", "modelRuntime": _duplicateRegistry([])})
 
     assert result.model is None
-    assert 'Model "gpt-5.6-sol" is ambiguous across providers' in result.error
-    assert "azure/gpt-5.6-sol" in result.error
-    assert "openai-codex/gpt-5.6-sol" in result.error
-    assert "Use --provider or provider/model" in result.error
+    assert "openrouter/anthropic/claude-opus-5.5, vercel-ai-gateway/anthropic/claude-opus-5.5" in result.error
+    assert "No matching provider is authenticated. Use --provider or provider/model." in result.error
 
 
-def test_prefers_provider_model_split_over_gateway_model_with_matching_id():
-    # When a user writes "zai/glm-5", and both a zai provider model (id: "glm-5")
-    # and a gateway model (id: "zai/glm-5") exist, prefer the zai provider model.
-    zaiModel = _model(
-        id="glm-5",
-        name="GLM-5",
-        api="anthropic-messages",
-        provider="zai",
-        baseUrl="https://open.bigmodel.cn/api/paas/v4",
-        reasoning=True,
-        input=["text"],
-        cost={"input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1},
-        contextWindow=128000,
-        maxTokens=8192,
-    )
-    gatewayModel = _model(
-        id="zai/glm-5",
-        name="GLM-5",
-        api="anthropic-messages",
-        provider="vercel-ai-gateway",
-        baseUrl="https://ai-gateway.vercel.sh",
-        reasoning=True,
-        input=["text"],
-        cost={"input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1},
-        contextWindow=128000,
-        maxTokens=8192,
-    )
-    registry = _registry(
-        getModels=lambda: [*allModels, zaiModel, gatewayModel],
-        hasConfiguredAuth=lambda _provider: True,
-    )
+def test_does_not_let_stored_credentials_choose_the_provider_for_api_key():
+    result = resolveCliModel({
+        "cliModel": "anthropic/claude-opus-5.5",
+        "inlineApiKey": True,
+        "modelRuntime": _duplicateRegistry(["vercel-ai-gateway"]),
+    })
 
-    result = resolveCliModel({"cliModel": "zai/glm-5", "modelRuntime": registry})
-
-    assert result.error is None
-    assert result.model.provider == "zai"
-    assert result.model.id == "glm-5"
-
-
-def test_prefers_an_authenticated_exact_raw_model_id_over_an_unauthenticated_inferred_provider():
-    commandcodeModel = _model(
-        id="xiaomi/mimo-v2.5-pro",
-        name="Xiaomi MiMo via Commandcode",
-        api="anthropic-messages",
-        provider="commandcode",
-        baseUrl="https://example.invalid",
-        reasoning=False,
-        input=["text"],
-        cost={"input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1},
-        contextWindow=128000,
-        maxTokens=8192,
-    )
-    xiaomiModel = _model(
-        id="mimo-v2.5-pro",
-        name="Xiaomi MiMo",
-        api="anthropic-messages",
-        provider="xiaomi",
-        baseUrl="https://api.xiaomimimo.com",
-        reasoning=False,
-        input=["text"],
-        cost={"input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1},
-        contextWindow=128000,
-        maxTokens=8192,
-    )
-    registry = _registry(
-        getModels=lambda: [*allModels, commandcodeModel, xiaomiModel],
-        hasConfiguredAuth=lambda provider: provider == "commandcode",
-    )
-
-    result = resolveCliModel({"cliModel": "xiaomi/mimo-v2.5-pro", "modelRuntime": registry})
-
-    assert result.error is None
-    assert result.model.provider == "commandcode"
-    assert result.model.id == "xiaomi/mimo-v2.5-pro"
-
-
-def test_resolves_provider_prefixed_fuzzy_patterns_openrouter_qwen_to_openrouter_model():
-    registry = _registry(getModels=lambda: allModels)
-
-    result = resolveCliModel({"cliModel": "openrouter/qwen", "modelRuntime": registry})
-
-    assert result.error is None
-    assert result.model.provider == "openrouter"
-    assert result.model.id == "qwen/qwen3-coder:exacto"
+    assert result.model is None
+    assert "--api-key does not choose a provider." in result.error
 
 
 # resolveCliModel -- custom model fallback with :thinking suffix (#5552)
@@ -645,21 +618,6 @@ def test_qwen_token_plan_individual_default_tracks_current_model():
     assert defaultModelPerProvider["qwen-token-plan-individual"] == "qwen3.8-max"
 
 
-async def test_find_initial_model_accepts_explicit_provider_custom_model_ids():
-    registry = _registry(getModels=lambda: allModels)
-
-    result = await findInitialModel({
-        "cliProvider": "openrouter",
-        "cliModel": "openrouter/openai/ghost-model",
-        "scopedModels": [],
-        "isContinuing": False,
-        "modelRuntime": registry,
-    })
-
-    assert result.model.provider == "openrouter"
-    assert result.model.id == "openai/ghost-model"
-
-
 async def test_find_initial_model_selects_ai_gateway_default_when_available():
     aiGatewayModel = _model(
         id="anthropic/claude-opus-4-6",
@@ -793,3 +751,14 @@ async def test_keeps_session_only_model_changes_out_of_scope(tempDirs):
 
     assert _references(session) == [f"{sonnet.provider}/{sonnet.id}"]
     assert settingsManager.getEnabledModels() == [f"{sonnet.provider}/{sonnet.id}"]
+
+
+def test_is_alias_reads_a_dated_suffix_as_javascript_does():
+    # `/-\d{8}$/`: ASCII digits only, and no match before a trailing newline.
+    from misaka.core.model_resolver import isAlias
+
+    assert not isAlias("claude-sonnet-4-5-20250929")
+    assert isAlias("claude-sonnet-4-5")
+    assert isAlias("claude-latest-20250929-latest")
+    assert isAlias("model-٢٠٢٥٠٩٢٩")  # Arabic-Indic digits are not `\d` in JavaScript
+    assert isAlias("model-20250929\n")

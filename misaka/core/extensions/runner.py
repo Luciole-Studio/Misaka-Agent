@@ -9,7 +9,7 @@ import traceback
 from collections.abc import Callable, Mapping
 from copy import copy, deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, NotRequired, TypedDict
 
 from misaka.agent.types import AgentToolCallOutcome, AgentToolResult
 from misaka.ai.types import ImageContent, Model, TextContent, ToolCall
@@ -100,13 +100,35 @@ def isUserBashEventResult(value: Any) -> bool:
     )
 
 
+class _BeforeAgentStartUserTrigger(TypedDict):
+    """``Pick<BeforeAgentStartUserEvent, "messageType" | "prompt" | "images">``."""
+
+    messageType: Literal["user"]
+    prompt: str
+    images: NotRequired[list[ImageContent] | None]
+
+
+class _BeforeAgentStartCustomTrigger(TypedDict):
+    """``Pick<BeforeAgentStartCustomEvent, "messageType" | "message">``."""
+
+    messageType: Literal["custom"]
+    message: Any
+
+
+# The message that starts a run: the before_agent_start event without its prompt fields.
+type BeforeAgentStartTrigger = _BeforeAgentStartUserTrigger | _BeforeAgentStartCustomTrigger
+
+
 class _BeforeAgentStartEvent(dict[str, Any]):
     """The `before_agent_start` event: `systemPrompt` renders the current options on every
     read (pi's `get systemPrompt()`), so a handler that edited `systemPromptOptions` sees the
     result. Mapping-shaped like every other event, so handlers read it the same way."""
 
-    def __init__(self, *, prompt: str, images: Any, systemPromptOptions: Any, render: Any) -> None:
-        super().__init__(type="before_agent_start", prompt=prompt, images=images, systemPromptOptions=systemPromptOptions)
+    def __init__(self, *, trigger: BeforeAgentStartTrigger, systemPromptOptions: Any, render: Any) -> None:
+        # `{ ...trigger, type, systemPrompt, systemPromptOptions }`
+        super().__init__(trigger)
+        self["type"] = "before_agent_start"
+        self["systemPromptOptions"] = systemPromptOptions
         self._render = render
 
     def __getitem__(self, key: str) -> Any:
@@ -1328,8 +1350,7 @@ class ExtensionRunner:
 
     async def emitBeforeAgentStart(
         self,
-        prompt: str,
-        images: list[ImageContent] | None,
+        trigger: BeforeAgentStartTrigger,
         systemPromptOptions: Any,
     ) -> dict[str, Any]:
         """Handlers see and may edit the mutable prompt options; a returned `systemPrompt`
@@ -1346,8 +1367,7 @@ class ExtensionRunner:
             for handler in handlers:
                 try:
                     event = _BeforeAgentStartEvent(
-                        prompt=prompt,
-                        images=images,
+                        trigger=trigger,
                         systemPromptOptions=current_options,
                         render=render_current_system_prompt,
                     )
@@ -1551,6 +1571,7 @@ def _result_future(value: Any) -> Any:
 
 
 __all__ = [
+    "BeforeAgentStartTrigger",
     "ExtensionErrorListener",
     "ExtensionRunner",
     "ForkHandler",

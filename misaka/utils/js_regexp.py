@@ -11,6 +11,16 @@ The source is translated to an equivalent Python pattern once, where the two dia
   module's ASCII flag would also confine ``\\p{...}`` to ASCII).
 - ``(?<name>...)`` and ``\\k<name>`` are named groups; ``\\p{...}`` property classes need the ``regex`` module.
 - A ``{`` that does not start a quantifier is a literal, as in JavaScript's non-unicode mode.
+- A backreference (``\\N``, ``\\k<name>``) to a group that has not taken part in the match (later in the pattern, in
+  another alternative, not matched, or still open: a group's capture is set when it closes) matches the empty string,
+  as in JavaScript (``(?(N)\\N)``; inside its own group, nothing). Without ``u``/``v``, Annex B's readings: ``\\N``
+  beyond the group count is a legacy octal escape (``\\8``/``\\9`` themselves), ``\\0`` followed by digits too,
+  and ``\\k`` is the letter in a pattern without named groups.
+
+Not emulated: JavaScript clears the captures inside a quantified atom at each iteration, and rejects an iteration
+of a ``*``/``?``/``{0,}`` quantifier that matches the empty string (its groups then stay ``undefined``); here a group
+keeps an earlier iteration's capture (``/(?:(a)|b)+/`` on ``"ab"`` gives ``"a"`` for group 1 where JavaScript gives
+``undefined``), and a backreference to it sees that capture.
 
 Strings are Python strings: indices and lengths count code points where JavaScript counts UTF-16 code units, which
 only differs for characters outside the Basic Multilingual Plane. ``g`` and ``y`` keep ``lastIndex`` as JavaScript
@@ -46,6 +56,12 @@ _ESCAPES = {
 }
 
 
+def _isDigits(text: str) -> bool:
+    r"""ECMAScript's DecimalDigits: ASCII ``0``-``9`` only, as ``\d`` reads them. ``str.isdigit`` also takes ``²``,
+    ``٣`` and every other Unicode digit, which JavaScript reads as plain characters (identity escapes)."""
+    return bool(text) and all(char in "0123456789" for char in text)
+
+
 def _readQuantifier(source: str, index: int) -> int:
     """The end of a ``{n}``, ``{n,}`` or ``{n,m}`` quantifier starting at ``index``, or -1 when it is not one."""
     end = source.find("}", index)
@@ -53,7 +69,7 @@ def _readQuantifier(source: str, index: int) -> int:
         return -1
     body = source[index + 1 : end]
     low, comma, high = body.partition(",")
-    if not low.isdigit() or (comma and high and not high.isdigit()):
+    if not _isDigits(low) or (comma and high and not _isDigits(high)):
         return -1
     return end + 1
 
@@ -97,13 +113,13 @@ def _escape(source: str, index: int, inClass: bool, unicode: bool) -> tuple[int,
         return after, "x"
     if char == "c" and source[after : after + 1].isalpha():
         return after + 1, f"\\x{ord(source[after]) % 32:02x}"
-    if char == "0" and not source[after : after + 1].isdigit():
+    if char == "0" and not _isDigits(source[after : after + 1]):
         return after, "\\x00"
-    if char.isdigit():
+    if _isDigits(char):
         if inClass:
             raise ValueError(f"a backreference inside a character class is not supported: {source!r}")
         end = after
-        while end < len(source) and source[end].isdigit():
+        while end < len(source) and _isDigits(source[end]):
             end += 1
         return end, "\\" + source[index + 1 : end]
     if char in _SIMPLE_ESCAPES:
@@ -190,16 +206,109 @@ def _characterClassV(source: str, index: int) -> tuple[int, str]:
     return position + 1, "[" + ("^" if negated else "") + "".join(body) + "]"
 
 
+def _skipClass(source: str, index: int, vMode: bool) -> int:
+    """The index after the character class starting at ``index`` (the ``[``), for ``_captures``."""
+    position = index + 1
+    while position < len(source) and source[position] != "]":
+        if source[position] == "\\":
+            position += 2
+        elif source[position] == "[" and vMode:
+            position = _skipClass(source, position, vMode)
+        else:
+            position += 1
+    return position + 1
+
+
+def _captures(source: str, vMode: bool) -> list[str | None]:
+    """The capturing groups of a pattern, in number order: each one's name, or ``None`` (``CountLeftCapturingParens``
+    and the group names, which decide what ``\\N`` and ``\\k<name>`` mean)."""
+    groups: list[str | None] = []
+    index = 0
+    while index < len(source):
+        char = source[index]
+        if char == "\\":
+            index += 2
+        elif char == "[":
+            index = _skipClass(source, index, vMode)
+        elif char == "(":
+            if source.startswith("(?<", index) and source[index + 3 : index + 4] not in ("=", "!"):
+                end = source.find(">", index)
+                groups.append(source[index + 3 : end] if end > 0 else "")
+            elif not source.startswith("(?", index):
+                groups.append(None)
+            index += 1
+        else:
+            index += 1
+    return groups
+
+
+def _legacyOctal(source: str, index: int) -> tuple[int, str]:
+    """Annex B's ``LegacyOctalEscapeSequence`` or ``IdentityEscape`` for a ``\\`` and digits that name no group
+    (non-unicode mode): up to three octal digits (two after ``4``-``7``), or an ``8``/``9`` as itself."""
+    first = source[index + 1]
+    if first in "89":
+        return index + 2, first
+    limit = 3 if first in "0123" else 2
+    end = index + 1
+    while end < len(source) and end - index - 1 < limit and source[end] in "01234567":
+        end += 1
+    return end, f"\\x{int(source[index + 1 : end], 8):02x}"
+
+
+def _backreference(number: int, name: str | None, opened: list[int | None]) -> str:
+    """A backreference with JavaScript's meaning: to a group that has not taken part in the match (later in the
+    pattern, in another alternative, not matched) it matches the empty string, and inside its own group, whose capture
+    is set only when it closes, too."""
+    if number in opened:
+        return "(?:)"
+    reference = f"(?P={name})" if name else f"\\{number}"
+    return f"(?({number}){reference})"
+
+
 def _translate(source: str, flags: str) -> str:
     multiline = "m" in flags
     dotAll = "s" in flags
     unicode = "u" in flags or "v" in flags
     vMode = "v" in flags
+    groups = _captures(source, vMode)
+    names = {name: number for number, name in enumerate(groups, 1) if name}
+    # The groups open at this point of the source (their numbers; None for a group that does not capture).
+    opened: list[int | None] = []
+    seen = 0
     out: list[str] = []
     index = 0
     while index < len(source):
         char = source[index]
-        if char == "\\":
+        following = source[index + 1 : index + 2]
+        if char == "\\" and _isDigits(following) and following != "0":
+            end = index + 1
+            while end < len(source) and _isDigits(source[end]):
+                end += 1
+            number = int(source[index + 1 : end])
+            if number <= len(groups):
+                out.append(_backreference(number, None, opened))
+                index = end
+            elif unicode:
+                raise ValueError(f"invalid escape (no group {number}): {source!r}")
+            else:
+                index, piece = _legacyOctal(source, index)
+                out.append(piece)
+        elif char == "\\" and following == "0" and _isDigits(source[index + 2 : index + 3]) and not unicode:
+            index, piece = _legacyOctal(source, index)
+            out.append(piece)
+        elif char == "\\" and following == "k":
+            if not names and not unicode:
+                # Annex B: without named groups, `\k` is an identity escape.
+                out.append("k")
+                index += 2
+                continue
+            end = source.find(">", index)
+            name = source[index + 3 : end] if source[index + 2 : index + 3] == "<" and end > 0 else None
+            if name not in names:
+                raise ValueError(f"invalid named reference: {source!r}")
+            out.append(_backreference(names[name], name, opened))
+            index = end + 1
+        elif char == "\\":
             index, piece = _escape(source, index, False, unicode)
             out.append(piece)
         elif char == "[":
@@ -207,11 +316,23 @@ def _translate(source: str, flags: str) -> str:
             out.append(piece)
         elif char == "(":
             if source.startswith("(?<", index) and source[index + 3 : index + 4] not in ("=", "!"):
+                seen += 1
+                opened.append(seen)
                 out.append("(?P<")
                 index += 3
             else:
+                if not source.startswith("(?", index):
+                    seen += 1
+                    opened.append(seen)
+                else:
+                    opened.append(None)
                 out.append("(")
                 index += 1
+        elif char == ")":
+            if opened:
+                opened.pop()
+            out.append(")")
+            index += 1
         elif char == ".":
             out.append("(?s:.)" if dotAll else f"[^{_LINE_TERMINATORS}]")
             index += 1
@@ -359,9 +480,9 @@ def _expandReplacement(replacement: str, match: RegExpExecArray, string: str) ->
         elif following == "'":
             out.append(string[match.index + len(match[0]) :])
             index += 2
-        elif following.isdigit():
+        elif _isDigits(following):
             twoDigits = replacement[index + 1 : index + 3]
-            if len(twoDigits) == 2 and twoDigits.isdigit() and 1 <= int(twoDigits) <= groupCount:
+            if len(twoDigits) == 2 and _isDigits(twoDigits) and 1 <= int(twoDigits) <= groupCount:
                 out.append(match[int(twoDigits)] or "")
                 index += 3
             elif 1 <= int(following) <= groupCount:

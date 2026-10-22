@@ -114,6 +114,10 @@ def fakeApi(env: Any) -> SimpleNamespace:
     async def details(*_: Any) -> None:
         return None
 
+    # No model: `read` treats it as one that sees images.
+    async def agent(*_: Any) -> dict[str, Any]:
+        return {}
+
     # MISAKA fork: `outputWindow` is None here because an absent attribute does not read as `undefined` in Python.
     api = SimpleNamespace(
         taskId=1,
@@ -121,9 +125,11 @@ def fakeApi(env: Any) -> SimpleNamespace:
         callId="call",
         env=env,
         output=lambda chunk, skipped=None: output.append(chunk if isinstance(chunk, str) else chunk.decode()),
+        retainedOutput=lambda: {"text": "".join(output), "truncated": False},
         outputWindow=None,
         diagnostic=lambda diagnostic: diagnostics.append(diagnostic),
         details=details,
+        agent=agent,
     )
     return SimpleNamespace(api=api, output=output, diagnostics=diagnostics)
 
@@ -131,7 +137,7 @@ def fakeApi(env: Any) -> SimpleNamespace:
 async def run(tool: dict[str, Any], args: Any, env: Any, context: Any = BACKGROUND_CONTEXT) -> dict[str, Any]:
     fake = fakeApi(env)
     result = await tool["execute"](args, fake.api, context)
-    return {**result, "output": fake.output, "reported": fake.diagnostics}
+    return {**result, "streamed": fake.output, "reported": fake.diagnostics}
 
 
 async def runFailing(tool: dict[str, Any], args: Any, env: Any) -> SimpleNamespace:
@@ -140,12 +146,12 @@ async def runFailing(tool: dict[str, Any], args: Any, env: Any) -> SimpleNamespa
     try:
         await tool["execute"](args, fake.api, BACKGROUND_CONTEXT)
     except Exception as error:  # noqa: BLE001 - the error is the result
-        return SimpleNamespace(error=error, output=fake.output, reported=fake.diagnostics)
+        return SimpleNamespace(error=error, streamed=fake.output, reported=fake.diagnostics)
     raise AssertionError("Expected the tool to throw")
 
 
 def textOutput(result: dict[str, Any]) -> str:
-    return "\n".join(part["text"] for part in result.get("content") or [] if part["type"] == "text")
+    return "\n".join(part["text"] for part in result.get("output") or [] if part["type"] == "text")
 
 
 def diagnosticText(result: dict[str, Any]) -> str:
@@ -325,15 +331,14 @@ async def test_read_reads_a_log_that_grows_while_it_is_read():
     assert textOutput(result) == "one\ntwo"
 
 
-async def test_read_reports_images_by_content_as_unsupported():
+async def test_read_returns_images_by_content_as_one_image_block():
     env = createEnv()
-    png = base64.b64decode(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg=="
-    )
-    getOrThrow(await env.writeFile("image.txt", png, BACKGROUND_CONTEXT))
+    data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg=="
+    getOrThrow(await env.writeFile("image.txt", base64.b64decode(data), BACKGROUND_CONTEXT))
     result = await run(createReadTool(), {"path": "image.txt"}, env)
-    toMatchObject(result, {"content": [], "isError": True})
-    assert diagnosticText(result) == "image.txt is an image (image/png); reading images is not supported"
+    assert result["output"] == [{"type": "image", "data": data, "mimeType": "image/png"}]
+    assert "isError" not in result
+    assert diagnosticText(result) == "Read image file [image/png]."
 
 
 async def test_write_writes_files_and_creates_parent_directories():
@@ -576,7 +581,7 @@ def programsEnv(installed: list[str], output: str, exitCode: int = 0) -> SimpleN
 async def test_powershell_runs_the_command_with_pwsh_as_one_argument_forcing_utf_8_output():
     programs = programsEnv(["pwsh"], "héllo\n")
     result = await run(createPowerShellTool(), {"command": "Write-Output 'héllo'"}, programs.env)
-    assert "".join(result["output"]) == "héllo\n"
+    assert "".join(result["streamed"]) == "héllo\n"
     assert programs.commands == [
         [
             "pwsh",
@@ -593,7 +598,7 @@ async def test_powershell_runs_the_command_with_pwsh_as_one_argument_forcing_utf
 async def test_powershell_falls_back_to_windows_powershell_and_reports_the_last_start_failure():
     windowsOnly = programsEnv(["powershell"], "ok")
     result = await run(createPowerShellTool({"commandPrefix": "$x = 1"}), {"command": "$x"}, windowsOnly.env)
-    assert "".join(result["output"]) == "ok"
+    assert "".join(result["streamed"]) == "ok"
     assert [command[0] for command in windowsOnly.commands] == ["pwsh", "powershell"]
     assert re.search(r"\n\$x = 1\n\$x$", str(windowsOnly.commands[1][-1]))
 
@@ -602,11 +607,18 @@ async def test_powershell_falls_back_to_windows_powershell_and_reports_the_last_
     assert str(failed.error) == "spawn powershell ENOENT"
 
 
-async def test_powershell_throws_on_a_nonzero_exit_after_streaming_the_output():
+async def test_powershell_answers_a_nonzero_exit_with_an_error_result_carrying_the_exit_code():
     programs = programsEnv(["pwsh"], "partial", 3)
-    failed = await runFailing(createPowerShellTool(), {"command": "exit 3"}, programs.env)
-    assert str(failed.error) == "Command exited with code 3"
-    assert "".join(failed.output) == "partial"
+    result = await run(createPowerShellTool(), {"command": "exit 3"}, programs.env)
+    toMatchObject(
+        result,
+        {
+            "isError": True,
+            "structuredOutput": {"output": "partial", "truncated": False, "exitCode": 3},
+            "diagnostics": [{"severity": "error", "code": "exit_code", "message": "Command exited with code 3"}],
+        },
+    )
+    assert "".join(result["streamed"]) == "partial"
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="real PowerShell runs on Windows")
@@ -614,7 +626,7 @@ async def test_powershell_runs_real_powershell_with_utf_8_output():
     result = await run(
         createPowerShellTool(), {"command": "Write-Output ('h' + [char]0xe9 + 'llo'); exit 0"}, createEnv()
     )
-    assert "".join(result["output"]).strip() == "héllo"
+    assert "".join(result["streamed"]).strip() == "héllo"
 
 
 async def test_bash_passes_the_retained_window_to_the_environment_and_forwards_what_it_skipped():
@@ -641,19 +653,27 @@ async def test_bash_passes_the_retained_window_to_the_environment_and_forwards_w
     assert calls == [("tail\n", skipped)]
 
 
-async def test_bash_streams_combined_stdout_and_stderr_and_returns_no_content_of_its_own():
+async def test_bash_streams_combined_stdout_and_stderr_returns_no_output_of_its_own_and_repeats_it_with_the_exit_code():
     result = await run(createBashTool(), {"command": "printf out; printf err >&2"}, createEnv())
-    assert "out" in "".join(result["output"])
-    assert "err" in "".join(result["output"])
-    assert result.get("content") is None
+    assert "out" in "".join(result["streamed"])
+    assert "err" in "".join(result["streamed"])
+    assert "output" not in result
+    assert result["structuredOutput"] == {"output": "".join(result["streamed"]), "truncated": False, "exitCode": 0}
 
 
-async def test_bash_throws_on_nonzero_exits_and_timeouts_after_streaming_the_output():
+async def test_bash_answers_a_nonzero_exit_with_an_error_result_and_throws_on_a_timeout_after_streaming_the_output():
     env = createEnv()
     tool = createBashTool()
-    failed = await runFailing(tool, {"command": "printf failed; exit 7"}, env)
-    assert str(failed.error) == "Command exited with code 7"
-    assert "".join(failed.output) == "failed"
+    failed = await run(tool, {"command": "printf failed; exit 7"}, env)
+    toMatchObject(
+        failed,
+        {
+            "isError": True,
+            "structuredOutput": {"output": "failed", "truncated": False, "exitCode": 7},
+            "diagnostics": [{"code": "exit_code", "message": "Command exited with code 7"}],
+        },
+    )
+    assert "".join(failed["streamed"]) == "failed"
     slow = await runFailing(tool, {"command": "sleep 2", "timeout": 0.01}, env)
     assert str(slow.error) == "Command timed out after 0.01 seconds"
 
@@ -694,13 +714,13 @@ async def test_bash_prepares_command_cwd_and_an_explicit_environment_with_the_ca
     assert received["env"] is env
     assert received["signal"] is controller.signal
     pwd = "" if sys.platform == "win32" else f":{getOrThrow(await env.canonicalPath(workspace, BACKGROUND_CONTEXT))}"
-    assert "".join(result["output"]) == f"ready::explicit{pwd}"
+    assert "".join(result["streamed"]) == f"ready::explicit{pwd}"
     assert getOrThrow(await env.exists(f"{workspace}/prepared-cwd", BACKGROUND_CONTEXT)) is True
 
 
 async def test_bash_supports_command_prefixes():
     result = await run(createBashTool({"commandPrefix": "value=hello"}), {"command": "printf $value"}, createEnv())
-    assert "".join(result["output"]) == "hello"
+    assert "".join(result["streamed"]) == "hello"
 
 
 async def test_bash_streams_every_byte_and_spills_complete_output_beyond_the_default_limits():
@@ -709,7 +729,7 @@ async def test_bash_streams_every_byte_and_spills_complete_output_beyond_the_def
         createBashTool(), {"command": "i=1; while [ $i -le 3000 ]; do echo line-$i; i=$((i + 1)); done"}, env
     )
     expected = "".join(f"line-{index + 1}\n" for index in range(3000))
-    assert "".join(result["output"]) == expected
+    assert "".join(result["streamed"]) == expected
     found = re.match(r"^Full output: (.+)$", result["reported"][0]["message"])
     assert found is not None
     assert getOrThrow(await env.readTextFile(found.group(1), BACKGROUND_CONTEXT)) == expected

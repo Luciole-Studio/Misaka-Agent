@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/test/bedrock-convert-messages.test.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/test/bedrock-convert-messages.test.ts`` (v1.3.0).
 
 MISAKA fork: the three "unknown content block" cases are not ported -- the messages are pydantic models, and a
 block of an unknown type is rejected where the message is built, so it never reaches the converter.
@@ -13,6 +13,7 @@ from misaka.ai.api.bedrock_converse_stream import stream as streamBedrock
 from misaka.ai.types import (
     AssistantMessage,
     Context,
+    ImageContent,
     Model,
     ModelCost,
     TextContent,
@@ -210,6 +211,69 @@ async def test_replaces_blank_tool_result_content_with_a_placeholder():
     )
     assert len(payload["messages"]) == 1
     assert payload["messages"][0]["content"][0]["toolResult"]["content"] == [{"text": "<empty>"}]
+
+
+# Regression for #10794: Claude rejects error tool results that contain images.
+async def test_moves_images_of_error_tool_results_after_the_tool_results():
+    messages = [
+        _assistant(
+            [ToolCall(id="call-1", name="codemode", arguments={}), ToolCall(id="call-2", name="read", arguments={})],
+            "toolUse",
+        ),
+        ToolResultMessage(
+            toolCallId="call-1",
+            toolName="codemode",
+            content=[
+                TextContent(text="Script failed"),
+                ImageContent(data="AAAA", mimeType="image/png"),
+                TextContent(text="Script error"),
+            ],
+            isError=True,
+            timestamp=_now(),
+        ),
+        ToolResultMessage(
+            toolCallId="call-2",
+            toolName="read",
+            content=[ImageContent(data="BBBB", mimeType="image/png")],
+            isError=False,
+            timestamp=_now(),
+        ),
+    ]
+    payload = await capturePayload(Context(messages=messages))
+    content = payload["messages"][1]["content"]
+    assert len(content) == 4
+    assert content[0]["toolResult"] == {
+        "toolUseId": "call-1",
+        "content": [
+            {"text": "Script failed"},
+            {"text": "(image attached after the tool results)"},
+            {"text": "Script error"},
+        ],
+        "status": "error",
+    }
+    assert content[1]["toolResult"]["status"] == "success"
+    assert [block["image"]["format"] for block in content[1]["toolResult"]["content"]] == ["png"]
+    assert content[2] == {"text": "Images from the error result of tool call call-1 (codemode):"}
+    assert content[3]["image"]["format"] == "png"
+
+
+async def test_keeps_images_in_error_tool_results_for_non_claude_models():
+    messages = [
+        ToolResultMessage(
+            toolCallId="call-1",
+            toolName="codemode",
+            content=[TextContent(text="Script failed"), ImageContent(data="AAAA", mimeType="image/png")],
+            isError=True,
+            timestamp=_now(),
+        )
+    ]
+    payload = await capturePayload(Context(messages=messages), novaModel)
+    ((block,),) = [message["content"] for message in payload["messages"]]
+    assert block["toolResult"]["toolUseId"] == "call-1"
+    assert block["toolResult"]["status"] == "error"
+    assert block["toolResult"]["content"][0] == {"text": "Script failed"}
+    assert block["toolResult"]["content"][1]["image"]["format"] == "png"
+    assert len(block["toolResult"]["content"]) == 2
 
 
 async def test_removes_empty_property_names_only_from_replayed_bedrock_input():

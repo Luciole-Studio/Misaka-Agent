@@ -420,5 +420,4 @@ __all__ = [
     "CreateMcpResourceToolDefinitionsOptions",
     "McpResourceServer",
     "createMcpResourceToolDefinitions",
-    "isMcpAppResource",
 ]

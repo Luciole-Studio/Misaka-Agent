@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/env/src/watch.ts`` (v1.1.0)."""
+"""Translated from pi's ``packages/env/src/watch.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 

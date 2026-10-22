@@ -21,7 +21,7 @@ _hookExtensions = 0
 
 def tool(name: str, description: str | None = None) -> dict[str, Any]:
     async def execute(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": []}
+        return {"output": []}
 
     return defineTool(
         {

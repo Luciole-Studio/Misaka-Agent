@@ -65,7 +65,7 @@ async def test_stream_preserves_upstream_stop_reason(monkeypatch, reason, detail
 @pytest.mark.parametrize("off_map", [None, {}, {"off": None}, {"off": "none"}])
 def test_disabled_thinking_respects_model_map(off_map):
     model = getModel("anthropic", "claude-haiku-4-5").model_copy(update={"thinkingLevelMap": off_map})
-    payload = anthropic._buildParams(model, Context(messages=[]), False, {"thinkingEnabled": False})
+    payload = anthropic._buildParams(model, Context(messages=[]), False, {"thinkingEnabled": False}).params
     if off_map == {"off": None}:
         assert "thinking" not in payload
     else:
@@ -117,7 +117,7 @@ async def test_custom_models_load_pi_thinking_metadata(tmp_path, monkeypatch):
     }}}), encoding="utf-8")
     registry = ModelRegistry(await ModelRuntime.create({"authStorage": AuthStorage.inMemory(), "modelsPath": str(path), "modelsStore": InMemoryCodingAgentModelsStore()}))
     monkeypatch.setattr(
-        anthropic, "stream", lambda m, c, o: anthropic._buildParams(m, c, False, o)
+        anthropic, "stream", lambda m, c, o: anthropic._buildParams(m, c, False, o).params
     )
     for ident in ids:
         model = registry.find("fixture", ident)
@@ -160,7 +160,7 @@ def test_managed_and_proxy_effort_keep_requested_level(monkeypatch, managed, lev
         "compat": native.compat.model_copy(update={"supportsMidConvoEffort": managed}),
     })
     monkeypatch.setattr(
-        anthropic, "stream", lambda m, c, o: anthropic._buildParams(m, c, False, o)
+        anthropic, "stream", lambda m, c, o: anthropic._buildParams(m, c, False, o).params
     )
     payload = anthropic.streamSimple(
         model, Context(messages=[]), SimpleStreamOptions(apiKey="fixture", reasoning=level)

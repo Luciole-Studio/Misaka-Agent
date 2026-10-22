@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from misaka.durable import MemoryStorage, defineExtension, defineTask, hook
 from misaka.durable.ids import idFromNumber, seqFromNumber
 from tests.durable_support import context
@@ -28,6 +30,11 @@ def test_brands_numeric_ids_by_record_kind_and_carries_task_result_types():
     assert json.dumps(taskId) == "4"
     assert isinstance(entryId, int)
     assert isinstance(seq, int)
+
+
+@pytest.mark.skip(reason="compile-time only: `satisfies` and `expectTypeOf` checks of discriminated record unions")
+def test_encodes_discriminator_dependent_fields():
+    pass
 
 
 async def test_types_submissions_task_waits_compaction_and_tasks_erased_into_extensions():

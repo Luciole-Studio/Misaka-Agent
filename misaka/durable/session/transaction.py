@@ -1,6 +1,6 @@
 """The transaction of one Session commit callback.
 
-Translated from pi's ``packages/durable/src/session/transaction.ts``. A method that returns a ``Promise`` upstream
+Translated from pi's ``packages/durable/src/session/transaction.ts`` (v1.3.0). A method that returns a ``Promise`` upstream
 returns a future here and starts its work when it is called (``startTask``), as a JavaScript async function does;
 records are plain ``dict`` objects. ``Tx.entry(id)`` / ``Tx.entry(token, id)`` and ``Tx.appendEntry(...)`` take the
 same positional forms as upstream, with an ``Entry`` object as the token.
@@ -366,6 +366,7 @@ class Transaction:
                     **({} if owner is None else {"owner": owner["id"]}),
                     "background": options.get("background") if options.get("background") is not None else False,
                     "abortRequested": False,
+                    **({"abandonOnRestart": True} if options.get("abandonOnRestart") is True else {}),
                     "state": {"status": "pending", "checkpoint": checkpoint},
                 },
                 TABLE_JSON_COPY_OPTIONS,  # type: ignore[arg-type]

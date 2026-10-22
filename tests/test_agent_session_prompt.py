@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/coding-agent/test/suite/agent-session-prompt.test.ts`` (v1.1.0)."""
+"""Translated from pi's ``packages/coding-agent/test/suite/agent-session-prompt.test.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import pytest
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.providers.faux import fauxAssistantMessage, fauxToolCall
 from misaka.ai.types import TextContent
+from misaka.ai.utils.transcript import getCurrentSystemPrompt
 from misaka.core import agent_session
 from misaka.core.prompt_templates import PromptTemplate
 from misaka.core.source_info import createSyntheticSourceInfo
@@ -392,3 +393,142 @@ async def test_throws_when_prompting_without_configured_auth():
 # MISAKA fork: "expands skill commands before sending the prompt" is not ported -- skills are MISAKA's own layer
 # system (core/skills), which reads no `getSkills()` from the resource loader; tests/test_skill_command_delivery.py
 # covers `/skill:<name>` expansion.
+
+
+# Issue #10267, #5581: a run started by sendMessage(..., { triggerTurn: true }) skipped
+# before_agent_start, so its second request patched away the sections handlers had added.
+async def test_custom_message_run_keeps_the_same_system_prompt_for_every_request_of_the_run():
+    events: list[Any] = []
+
+    async def noop(*_args: Any, **_kwargs: Any) -> AgentToolResult:
+        return AgentToolResult(content=[TextContent(text="ok")], details={})
+
+    def extension(pi: Any) -> None:
+        def onBeforeAgentStart(event: Any, _ctx: Any) -> None:
+            events.append(event)
+            event["systemPromptOptions"]["sections"]["extension_rules"] = "Answer in one word."
+
+        pi.on("before_agent_start", onBeforeAgentStart)
+
+    async with createHarness(tools=[_tool("noop", noop)], extensionFactories=[extension]) as harness:
+        prompts: list[str] = []
+
+        def record(response: Any) -> Any:
+            def step(context: Any, *_: Any) -> Any:
+                prompts.append(getCurrentSystemPrompt(context.messages))
+                return response
+
+            return step
+
+        harness.setResponses([
+            record(fauxAssistantMessage("hi")),
+            record(fauxAssistantMessage([fauxToolCall("noop", {})], {"stopReason": "toolUse"})),
+            record(fauxAssistantMessage("done")),
+        ])
+
+        await harness.session.prompt("hello")
+        await harness.session.sendCustomMessage(
+            {"customType": "task-done", "content": "background task finished", "display": True},
+            {"triggerTurn": True},
+        )
+
+        assert len(prompts) == 3
+        assert "Answer in one word." in prompts[0]
+        assert len(set(prompts)) == 1
+        assert [event["messageType"] for event in events] == ["user", "custom"]
+        assert read_field(events[1]["message"], "customType") == "task-done"
+
+
+async def test_queues_a_custom_message_sent_while_before_agent_start_runs_into_the_starting_run():
+    handlerStarted = asyncio.Event()
+    releaseHandler = asyncio.Event()
+
+    def extension(pi: Any) -> None:
+        async def onBeforeAgentStart(event: Any, _ctx: Any) -> None:
+            if event["messageType"] != "custom" or read_field(event["message"], "customType") != "first":
+                return
+            handlerStarted.set()
+            await releaseHandler.wait()
+
+        pi.on("before_agent_start", onBeforeAgentStart)
+
+    async with createHarness(extensionFactories=[extension]) as harness:
+        requests: list[Any] = []
+
+        def respond(context: Any, *_: Any) -> Any:
+            requests.append(context)
+            return fauxAssistantMessage("handled both")
+
+        harness.setResponses([respond])
+
+        first = asyncio.ensure_future(harness.session.sendCustomMessage(
+            {"customType": "first", "content": "task one finished", "display": True},
+            {"triggerTurn": True},
+        ))
+        await handlerStarted.wait()
+        assert harness.session.isIdle is False
+        second = asyncio.ensure_future(harness.session.sendCustomMessage(
+            {"customType": "second", "content": "task two finished", "display": True},
+            {"triggerTurn": True},
+        ))
+        releaseHandler.set()
+        await asyncio.gather(first, second)
+
+        assert len(requests) == 1
+        texts = [getMessageText(message) for message in requests[0].messages if read_field(message, "role") == "user"]
+        assert texts == ["task one finished", "task two finished"]
+
+
+async def test_includes_a_custom_message_sent_without_trigger_turn_while_the_run_starts_in_its_first_request():
+    def extension(pi: Any) -> None:
+        def onBeforeAgentStart(_event: Any, _ctx: Any) -> None:
+            pi.sendMessage(
+                {"customType": "note", "content": "context from handler", "display": True},
+                {"triggerTurn": False},
+            )
+
+        pi.on("before_agent_start", onBeforeAgentStart)
+
+    async with createHarness(extensionFactories=[extension]) as harness:
+        requests: list[Any] = []
+
+        def respond(context: Any, *_: Any) -> Any:
+            requests.append(context)
+            return fauxAssistantMessage("done")
+
+        harness.setResponses([respond])
+
+        await harness.session.prompt("hello")
+
+        assert len(requests) == 1
+        assert "context from handler" in [getMessageText(message) for message in requests[0].messages]
+
+
+async def test_aborts_a_run_when_abort_is_requested_while_before_agent_start_runs():
+    handlerStarted = asyncio.Event()
+    releaseHandler = asyncio.Event()
+
+    def extension(pi: Any) -> None:
+        async def onBeforeAgentStart(_event: Any, _ctx: Any) -> None:
+            handlerStarted.set()
+            await releaseHandler.wait()
+
+        pi.on("before_agent_start", onBeforeAgentStart)
+
+    async with createHarness(extensionFactories=[extension]) as harness:
+        harness.setResponses([fauxAssistantMessage("should not complete")])
+
+        run = asyncio.ensure_future(harness.session.sendCustomMessage(
+            {"customType": "task-done", "content": "background task finished", "display": True},
+            {"triggerTurn": True},
+        ))
+        await handlerStarted.wait()
+        aborted = asyncio.ensure_future(harness.session.abort())
+        await asyncio.sleep(0)
+        releaseHandler.set()
+        await asyncio.gather(run, aborted)
+
+        last = harness.session.messages[-1]
+        assert read_field(last, "role") == "assistant"
+        assert read_field(last, "stopReason") == "aborted"
+        assert harness.session.isIdle is True

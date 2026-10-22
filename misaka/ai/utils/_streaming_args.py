@@ -2,14 +2,14 @@
 
 pi re-parses the whole accumulated buffer with ``parseStreamingJson`` on every fragment; in Python that cost 31 s of
 loop-thread CPU for one 38 KB argument, so adapters keep the raw text here and parse it on a schedule, and the final
-arguments are parsed strictly (``finish``).
+arguments go through upstream's ``parseToolCallArguments`` (``finish_into``).
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from misaka.ai.utils.json_parse import parseJsonWithRepair, parseStreamingJson
+from misaka.ai.utils.json_parse import parseStreamingJson, parseToolCallArguments
 
 STREAMING_PARSE_THRESHOLD_BYTES = 2048
 
@@ -54,26 +54,27 @@ class StreamingArgs:
         return self._value
 
     def finish(self) -> Any:
-        """MISAKA fork: final arguments require a complete object, never prefix recovery.
+        """The final arguments, parsed by ``parseToolCallArguments``: a complete object, never prefix recovery.
 
-        Keep the existing complete-string escape repair and empty/no-argument convention.
-        Incremental UI previews still use the permissive parser in arguments.
+        Raises ``ValueError`` carrying the ``argumentsError`` text when the buffer is not one. Incremental UI
+        previews still use the permissive parser in ``arguments``.
         """
-        value = parseJsonWithRepair(self._raw) if self._raw.strip() else {}
-        if not isinstance(value, dict):
-            raise ValueError("Final tool arguments must be a JSON object")  # noqa: TRY004 - malformed wire value, same contract as JSONDecodeError
-        self._value = value
+        parsed = parseToolCallArguments(self._raw)
+        if "argumentsError" in parsed:
+            raise ValueError(parsed["argumentsError"])
+        self._value = parsed["arguments"]
         self._parsed_length = len(self._raw)
         return self._value
 
     def finish_into(self, tool_call) -> None:
-        """Keep malformed calls in the batch, but return an error receipt instead of executing."""
-        try:
-            tool_call.arguments = self.finish()
-            tool_call.argumentsError = None
-        except (ValueError, RecursionError):
-            tool_call.arguments = {}
-            tool_call.argumentsError = "Invalid final tool arguments; resend a complete JSON object."
+        """``Object.assign(block, parseToolCallArguments(partialJson))``: a malformed call stays in the batch with
+        ``argumentsError`` set, and tool argument validation reports it back to the model instead of executing."""
+        parsed = parseToolCallArguments(self._raw)
+        tool_call.arguments = parsed["arguments"]
+        tool_call.argumentsError = parsed.get("argumentsError")
+        if "argumentsError" not in parsed:
+            self._value = parsed["arguments"]
+            self._parsed_length = len(self._raw)
 
     def _is_stale(self) -> bool:
         total = len(self._raw)

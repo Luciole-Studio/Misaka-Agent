@@ -1,6 +1,6 @@
 """Reaching a machine with the system ``ssh``: host keys, detection, deployment of the daemon, and the connection.
 
-Translated from pi's ``packages/env/src/ssh.ts`` (v1.1.0). MISAKA fork: the daemon is a Python zip application
+Translated from pi's ``packages/env/src/ssh.ts`` (v1.3.0). MISAKA fork: the daemon is a Python zip application
 (``misaka.env.bundle``), so the remote needs Python 3.9 or later. Detection also finds that interpreter
 (``RemotePlatform["python"]``), a Windows host keeps the daemon as ``pi-env-<hash>.pyz``, and the launch command runs the
 daemon with the interpreter.
@@ -16,6 +16,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Callable
 from typing import Any, Literal, NotRequired, TypedDict
@@ -503,6 +504,25 @@ def packagedDaemon(remote: RemotePlatform | dict[str, Any] | None = None) -> str
     return bundledDaemonPath()
 
 
+def localDaemon() -> str:
+    """The daemon this package ships for the machine it runs on, e.g. for terminals of local sessions. MISAKA fork: the
+    zip application, which runs under ``sys.executable`` (``[sys.executable, localDaemon()]``) rather than as a native
+    binary; the platform check stays upstream's."""
+    platform = "windows" if sys.platform == "win32" else "android" if hasattr(sys, "getandroidapilevel") else sys.platform
+    if platform.startswith("linux"):
+        platform = "linux"
+    if platform not in ("linux", "android", "darwin", "windows"):
+        raise RuntimeError(f"No pi-env daemon for {sys.platform}")
+    return packagedDaemon({"platform": platform, "arch": normalizeArch(_machine())})
+
+
+def _machine() -> str:
+    """``process.arch`` of this machine, in the spelling ``normalizeArch`` reads."""
+    import platform
+
+    return platform.machine()
+
+
 def quotePosix(text: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
@@ -720,6 +740,7 @@ __all__ = [
     "deployDaemon",
     "detectPlatform",
     "forgetHostKey",
+    "localDaemon",
     "packagedDaemon",
     "scanHostKey",
     "sshArguments",

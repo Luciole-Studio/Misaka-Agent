@@ -1601,7 +1601,41 @@ def buildArrayPlan(node: _OverlayNode) -> _ArrayPlan:
         return overlay.plan
     base = nodeBase(node)
     pieces = piecesOf(overlay)
-    retained = bytearray(len(base))
+    plan = orderedArrayPlan(len(base), pieces)
+    overlay.plan = plan if plan is not None else elementArrayPlan(len(base), pieces)
+    return overlay.plan
+
+
+def orderedArrayPlan(baseLength: int, pieces: Sequence[_Piece]) -> _ArrayPlan | None:
+    """The plan when the retained base elements keep their order, the common case of inserts and removals: computed
+    from the pieces alone, so appending to a long array costs no walk over its elements. ``None`` when base elements
+    moved."""
+    # Retained base ranges in piece order, `[first, last]` each; ordered means strictly ascending without overlap.
+    ranges: list[int] = []
+    for piece in pieces:
+        if piece.kind != "base" or piece.length == 0:
+            continue
+        if piece.step != 1 and piece.length > 1:
+            return None
+        if len(ranges) > 0 and piece.start <= ranges[-1]:
+            return None
+        ranges.extend((piece.start, piece.start + piece.length - 1))
+    # Unretained runs from the end backwards, as `start, length` pairs: after the last range, between ranges, before
+    # the first.
+    removeRuns: list[int] = []
+    end = baseLength
+    for index in range(len(ranges) - 2, -3, -2):
+        start = ranges[index + 1] + 1 if index >= 0 else 0
+        if end > start:
+            removeRuns.extend((start, end - start))
+        if index >= 0:
+            end = ranges[index]
+    return _ArrayPlan(removeRuns, None, insertRunsOf(pieces))
+
+
+def elementArrayPlan(baseLength: int, pieces: Sequence[_Piece]) -> _ArrayPlan:
+    """The plan from a walk over every base element, for pieces that moved base elements."""
+    retained = bytearray(baseLength)
     targetBase: list[int] = []
     for piece in pieces:
         if piece.kind != "base":
@@ -1611,7 +1645,7 @@ def buildArrayPlan(node: _OverlayNode) -> _ArrayPlan:
             retained[index] = 1
             targetBase.append(index)
     removeRuns: list[int] = []
-    end = len(base)
+    end = baseLength
     while end > 0:
         if retained[end - 1] != 0:
             end -= 1
@@ -1626,6 +1660,11 @@ def buildArrayPlan(node: _OverlayNode) -> _ArrayPlan:
     if any(index >= len(retainedBase) or value != retainedBase[index] for index, value in enumerate(targetBase)):
         positions = {value: index for index, value in enumerate(retainedBase)}
         permutation = [positions[value] for value in targetBase]
+    return _ArrayPlan(removeRuns, permutation, insertRunsOf(pieces))
+
+
+def insertRunsOf(pieces: Sequence[_Piece]) -> list[int]:
+    """Runs of consecutive insert pieces as ``logical index, first piece, end piece`` triples."""
     insertRuns: list[int] = []
     logicalIndex = 0
     pieceIndex = 0
@@ -1640,8 +1679,7 @@ def buildArrayPlan(node: _OverlayNode) -> _ArrayPlan:
             logicalIndex += pieces[pieceIndex].length
             pieceIndex += 1
         insertRuns.extend((logicalIndex - rangeLength(pieces, startPiece, pieceIndex), startPiece, pieceIndex))
-    overlay.plan = _ArrayPlan(removeRuns, permutation, insertRuns)
-    return overlay.plan
+    return insertRuns
 
 
 def rangeLength(pieces: Sequence[_Piece], start: int, end: int) -> int:

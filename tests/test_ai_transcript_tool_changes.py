@@ -1,10 +1,12 @@
-"""Translated from pi's ``packages/ai/test/transcript-tool-changes.test.ts`` (v1.1.0)."""
+"""Translated from pi's ``packages/ai/test/transcript-tool-changes.test.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from misaka.ai.compat import streamSimple
+import pytest
+
+from misaka.ai.compat import getModel, streamSimple
 from misaka.ai.types import (
     Context,
     Model,
@@ -299,6 +301,24 @@ async def test_anchors_kimi_additions_in_tool_bearing_system_messages():
         None,
         "updated guidance",
     ]
+
+
+# #10720: Kimi Coding uses Chat Completions so K3-style models keep added tools out of the top-level list.
+@pytest.mark.parametrize("modelId", ["k3", "k3-256k", "kimi-for-coding"])
+async def test_anchors_additions_for_kimi_coding(modelId):
+    payload = await capturePayload(getModel("kimi-coding", modelId), additionContext)
+
+    assert [value["function"]["name"] for value in payload["tools"]] == ["base_tool"]
+    toolMessage = next(message for message in payload["messages"] if message.get("tools"))
+    assert [value["function"]["name"] for value in toolMessage["tools"]] == ["late_tool"]
+
+
+# #10720: Kimi Code Highspeed rejects tool-bearing system messages.
+async def test_keeps_kimi_coding_highspeed_additions_in_top_level_tools():
+    payload = await capturePayload(getModel("kimi-coding", "kimi-for-coding-highspeed"), additionContext)
+
+    assert [value["function"]["name"] for value in payload["tools"]] == ["base_tool", "late_tool"]
+    assert not any("tools" in message for message in payload["messages"])
 
 
 async def test_keeps_kimi_k2_system_text_inline_without_dynamic_tool_messages():

@@ -1,6 +1,6 @@
 """Session-to-Chord bridges: a replicated-state source and a serialized watch.
 
-Translated from pi's ``packages/durable/src/session/observation.ts``. ``queueMicrotask`` is ``loop.call_soon`` and
+Translated from pi's ``packages/durable/src/session/observation.ts`` (v1.3.0). ``queueMicrotask`` is ``loop.call_soon`` and
 ``void asyncMethod()`` is a task the watch keeps alive until it finishes.
 """
 
@@ -59,7 +59,9 @@ class CommittedStateSource:
         for attachment in list(self._attachments):
             attachment.publish(frame)
 
-    def closeSession(self) -> None:
+    def closeSession(self, _failure: dict[str, Any] | None = None) -> None:
+        """Stop publishing; the attached states keep their last value. A failure ends them the same way. (The Session
+        passes its failure to every observer; JavaScript drops the argument this method does not declare.)"""
         if self._closed:
             return
         for attachment in list(self._attachments):
@@ -146,22 +148,29 @@ class SessionSourceAttachment:
 
 class CommittedWatch:
     """Serialized exact-frame watch bound to one document incarnation or conversation view. A ``None`` value retires
-    it. ``replace`` gives the value an overflow delivers; by default the newest value."""
+    it. ``report`` gets a listener's throw, which also ends the watch. ``replace`` gives the value an overflow delivers;
+    by default the newest value."""
 
-    def __init__(self, value: Any, detach: Callable[[], None], replace: Callable[[], Any] | None = None) -> None:
+    def __init__(
+        self,
+        value: Any,
+        detach: Callable[[], None],
+        report: Callable[[Any], None],
+        replace: Callable[[], Any] | None = None,
+    ) -> None:
         self._value = value
         self._detach = detach
+        self._report = report
         self._replace = replace
-        self._closedPromise: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._closed: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending: list[dict[str, Any]] = []
         self._listener: Callable[[Any, Sequence[Op], Context], Awaitable[None]] | None = None
         self._started = False
         self._scheduled = False
         self._running = False
-        self._detached = False
         self._retired = False
+        # Set once, by `_terminate()`.
         self._end: dict[str, Any] | None = None
-        self._resolved = False
         self._cancellationSignal: Any = None
         self._cancellationListener: Callable[[], None] | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -172,7 +181,7 @@ class CommittedWatch:
 
     @property
     def closed(self) -> asyncio.Future[dict[str, Any]]:
-        return self._closedPromise
+        return self._closed
 
     def start(self, listener: Callable[[Any, Sequence[Op], Context], Awaitable[None]]) -> None:
         if self._started:
@@ -186,7 +195,7 @@ class CommittedWatch:
 
     def stop(self) -> asyncio.Future[dict[str, Any]]:
         self._terminate({"reason": "stopped"})
-        return self._closedPromise
+        return self._closed
 
     def observeCancellation(self, signal: Any) -> None:
         if self._cancellationSignal is not None:
@@ -202,8 +211,9 @@ class CommittedWatch:
     def cancel(self) -> None:
         self._terminate({"reason": "cancelled"})
 
-    def closeSession(self) -> None:
-        self._terminate({"reason": "session_closed"})
+    def closeSession(self, failure: dict[str, Any] | None = None) -> None:
+        """End with ``session_closed``, or with ``session_failed`` and the error when the Session failed."""
+        self._terminate({"reason": "session_closed"} if failure is None else {"reason": "session_failed", "error": failure["error"]})
 
     def advance(self, value: Any, ops: Sequence[Op], context: Context) -> None:
         if self._end is not None or self._retired:
@@ -234,7 +244,6 @@ class CommittedWatch:
 
     async def _drain(self) -> None:
         if self._running or self._end is not None or not self._started:
-            self._finishIfReady()
             return
         self._running = True
         try:
@@ -249,6 +258,7 @@ class CommittedWatch:
                     await self._listener(frame["value"], frame["ops"], deliveryContext)
                 except Exception as error:  # noqa: BLE001
                     if self._end is None:
+                        self._report(error)
                         self._terminate({"reason": "listener_error", "error": error})
                     break
                 if frame["value"] is None:
@@ -258,31 +268,19 @@ class CommittedWatch:
             self._running = False
             if self._end is None and self._pending:
                 self._schedule()
-            self._finishIfReady()
 
     def _terminate(self, end: dict[str, Any]) -> None:
+        """End the watch, once: detach, drop pending frames, and settle ``closed``. A callback already running keeps
+        running."""
         if self._end is not None:
             return
         self._end = end
-        self._detachNow()
-        self._pending.clear()
-        self._finishIfReady()
-
-    def _detachNow(self) -> None:
-        if self._detached:
-            return
-        self._detached = True
         self._detach()
-
-    def _finishIfReady(self) -> None:
-        if self._resolved or self._end is None:
-            return
-        self._resolved = True
-        if self._cancellationSignal is not None and self._cancellationListener is not None:
+        self._pending.clear()
+        if self._cancellationListener is not None and self._cancellationSignal is not None:
             self._cancellationSignal.removeEventListener("abort", self._cancellationListener)
-        if not self._closedPromise.done():
-            self._closedPromise.set_result(self._end)
-
+        if not self._closed.done():
+            self._closed.set_result(end)
 
 __all__ = [
     "MAX_PENDING_WATCH_FRAMES",

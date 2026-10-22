@@ -15,7 +15,7 @@ from misaka.chord.context import Context
 from misaka.chord.delta import applyImmutableBatches
 from misaka.utils.js import UNDEFINED, eager, jsIsInteger, jsonStringify
 
-from ..errors import StorageRejected
+from ..errors import StorageRequestError
 from ..types import Cursor, DocumentPoint, Page, ScanOrder, Seq
 from .scan import ScanStart, nextCursor, scanStart
 
@@ -47,7 +47,7 @@ def cursorId(cursor: Cursor | None) -> int | None:
     if after is UNDEFINED:
         return None
     if not jsIsInteger(after) or abs(after) > _MAX_SAFE_INTEGER:
-        raise TypeError("Invalid storage cursor")
+        raise StorageRequestError("Invalid storage cursor")
     return after
 
 
@@ -230,10 +230,8 @@ class MemoryStorage:
                         "content": {"kind": "base", "version": stored["version"], "value": stored["value"]},
                     }
                 )
-            except StorageRejected:
-                raise
             except Exception as error:
-                raise StorageRejected(f"Document copy {write['record']['id']} was rejected", {"cause": error}) from error
+                raise RuntimeError(f"Document copy {write['record']['id']} was rejected") from error
         return resolved
 
     def _applyPreparedCommit(
@@ -365,7 +363,7 @@ class MemoryStorage:
             return {"entry": clone(found), "commitSeq": state.entryCommitSeqs[id]}
         conversationId, id = args[0], args[1]
         if not isinstance(id, int) or isinstance(id, bool):
-            raise TypeError("Storage.entry() requires an entry ID")
+            raise StorageRequestError("Storage.entry() requires an entry ID")
         entry = next(self._visibleEntries(conversationId, id, id), None)
         if entry is None:
             return None
@@ -378,7 +376,7 @@ class MemoryStorage:
         self._assertOpen()
         state = self._state
         if conversationId not in state.conversations:
-            raise RuntimeError(f"Unknown conversation: {conversationId}")
+            raise StorageRequestError(f"Unknown conversation: {conversationId}")
         currentId = conversationId
         upperEntryId: float = _INFINITY if atOrBeforeEntryId is None else atOrBeforeEntryId
         while True:
@@ -534,7 +532,7 @@ class MemoryStorage:
         if stored is None:
             return None
         if at != "current" and isCurrentOnly(stored["record"]):
-            raise RuntimeError(f"Document {id} does not retain historical content")
+            raise StorageRequestError(f"Document {id} does not retain historical content")
         if not isAliveAt(stored["record"], at):
             return None
         revisions = stored["revisions"] if at == "current" else [r for r in stored["revisions"] if r["seq"] <= at]
@@ -559,7 +557,7 @@ class MemoryStorage:
     ) -> Iterator[dict[str, Any]]:
         state = self._state
         if conversationId not in state.conversations:
-            raise RuntimeError(f"Unknown conversation: {conversationId}")
+            raise StorageRequestError(f"Unknown conversation: {conversationId}")
         minimum: float = -_INFINITY if minEntryId is None else minEntryId
         currentId = conversationId
         upperEntryId: float = _INFINITY if maxEntryId is None else maxEntryId
@@ -585,7 +583,7 @@ class MemoryStorage:
         state = self._state
         minimum: float = -_INFINITY if minEntryId is None else minEntryId
         if conversationId not in state.conversations:
-            raise RuntimeError(f"Unknown conversation: {conversationId}")
+            raise StorageRequestError(f"Unknown conversation: {conversationId}")
         segments: list[tuple[int, float]] = []
         currentId = conversationId
         upperEntryId: float = _INFINITY if maxEntryId is None else maxEntryId

@@ -1,4 +1,4 @@
-"""Ported from: pi packages/durable/src/storage/scan.ts @ v1.1.0"""
+"""Ported from: pi packages/durable/src/storage/scan.ts @ v1.3.0"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from typing import Any, TypedDict
 
 from misaka.utils.js import UNDEFINED, jsIsSafeInteger, jsString
 
+from ..errors import StorageRequestError
 from ..types import ScanOrder
 
 
@@ -21,18 +22,18 @@ def scanStart(requested: Any, cursor: dict[str, Any] | None, fallback: ScanOrder
     repeats that order or omits it; a different ``order`` throws. A cursor without an order, written before scans had
     one, continues in the scan's default order. ``requested`` is ``UNDEFINED`` when the query has no ``order``."""
     if requested is not UNDEFINED and requested != "ascending" and requested != "descending":
-        raise TypeError(f"Invalid scan order: {jsString(requested)}")
+        raise StorageRequestError(f"Invalid scan order: {jsString(requested)}")
     if cursor is None:
         return {"order": fallback if requested is UNDEFINED else requested, "after": None}
     after = cursor.get("after", UNDEFINED)
     stored = cursor.get("order", UNDEFINED)
     if isinstance(after, bool) or not jsIsSafeInteger(after):
-        raise TypeError("Invalid storage cursor")
+        raise StorageRequestError("Invalid storage cursor")
     if stored is not UNDEFINED and stored != "ascending" and stored != "descending":
-        raise TypeError("Invalid storage cursor")
+        raise StorageRequestError("Invalid storage cursor")
     order: ScanOrder = fallback if stored is UNDEFINED else stored
     if requested is not UNDEFINED and requested != order:
-        raise TypeError(f"The cursor continues a {order} scan; the query asks for {requested}")
+        raise StorageRequestError(f"The cursor continues a {order} scan; the query asks for {requested}")
     return {"order": order, "after": int(after)}
 
 

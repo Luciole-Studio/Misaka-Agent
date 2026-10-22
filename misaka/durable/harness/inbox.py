@@ -1,20 +1,22 @@
 """The built-in queue of one conversation's submissions waiting for a boundary.
 
-Translated from pi's ``packages/durable/src/harness/inbox.ts``. An item is ``{"id", "mode": "steer" | "followUp",
-"content"}`` (user input for a run) or ``{"id", "mode": "write", "entry"}`` (a passive entry write, an ``EntryDraft`` stored
-as plain JSON); a boundary is ``{"conversationId", "inbox", "steeringMode", "followUpMode", "head"}`` and a boundary result
+Translated from pi's ``packages/durable/src/harness/inbox.ts`` (v1.3.0). An item is ``{"id", "mode": "steer" |
+"followUp", "content", "entry"?}`` (user input for a run, with the ``InputEntry`` it is placed as when not ``pi.user``) or
+``{"id", "mode": "write", "entry"}`` (an entry write, an ``EntryDraft`` stored as plain JSON); a boundary is ``{"conversationId", "inbox", "steeringMode", "followUpMode", "head"}`` and a boundary result
 ``{"users", "reset"}``.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from typing import Any
 
 from misaka.chord.json import copyJson
+from misaka.utils.js import UNDEFINED
 
 from ..documents import defineDoc
 from ..entries import UserEntry
-from ..types import ConversationId, SubmissionId, Tx
+from ..types import ConversationId, EntryRecord, SubmissionId, Tx
 
 InboxDoc = defineDoc(
     {
@@ -54,7 +56,7 @@ async def applyBoundary(tx: Tx, boundary: dict[str, Any], at: str, now: int) -> 
     Selected and stale items are removed positionally."""
     conversationId = boundary["conversationId"]
     items = boundary["inbox"]["items"]
-    reset = any(item["mode"] == "write" and item["entry"].get("head") == "self" for item in items)
+    reset = hasQueuedReset(items)
     final = at == "final" or reset
 
     def pick(mode: str, queueMode: str) -> list[int]:
@@ -79,13 +81,47 @@ async def applyBoundary(tx: Tx, boundary: dict[str, Any], at: str, now: int) -> 
     placed: list[SubmissionId] = []
     for index in users:
         item = items[index]
-        message = {"role": "user", "content": copyJson(item["content"]), "timestamp": now}
-        entry = await tx.appendEntry(UserEntry, conversationId, {"model": [message]})
+        entry = await appendInput(tx, conversationId, copyJson(item["content"]), item.get("entry", None), now)
         tx.placeSubmission(item["id"], entry["id"])
         placed.append(item["id"])
     for index in sorted([*writes, *users], reverse=True):
         items.splice(index, 1)
     return {"users": placed, "reset": reset}
+
+
+def appendInput(
+    tx: Tx, conversationId: ConversationId, content: Any, entry: dict[str, Any] | None, now: int
+) -> Awaitable[EntryRecord]:
+    """Append the entry an input is placed as: ``entry``'s kind and data, or ``pi.user``, with the user message of
+    ``content``."""
+    message = {"role": "user", "content": content, "timestamp": now}
+    if entry is None:
+        return tx.appendEntry(UserEntry, conversationId, {"model": [message]})
+    return tx.appendEntry(conversationId, {**pickInputEntry(entry), "model": [message]})
+
+
+def pickInputEntry(entry: Any) -> dict[str, Any]:
+    """The kind and data of an input's entry as strict JSON, without other fields an untyped caller might pass."""
+    kind = entry["kind"]
+    data = entry.get("data", UNDEFINED)
+    picked = {"kind": kind} if data is UNDEFINED else {"kind": kind, "data": data}
+    return copyJson(picked, {"omitUndefinedProperties": True})  # type: ignore[return-value]
+
+
+def isDisplayOnly(entry: dict[str, Any]) -> bool:
+    """Whether a write is display-only: it has no ``model``, ``head``, or ``edits`` (present counts, even if empty), so
+    it changes nothing the model sees and needs no boundary."""
+    return (
+        entry.get("model", UNDEFINED) is UNDEFINED
+        and entry.get("head", UNDEFINED) is UNDEFINED
+        and entry.get("edits", UNDEFINED) is UNDEFINED
+    )
+
+
+def hasQueuedReset(items: Any) -> bool:
+    """Whether a reset (``head: "self"`` write) is queued; entries appended before it leave the active range when it
+    lands."""
+    return any(item["mode"] == "write" and item["entry"].get("head") == "self" for item in items)
 
 
 def isStale(boundary: dict[str, Any], entry: dict[str, Any]) -> bool:
@@ -121,8 +157,12 @@ async def withdrawQueuedInputs(tx: Tx, conversationId: ConversationId) -> None:
 
 __all__ = [
     "InboxDoc",
+    "appendInput",
     "applyBoundary",
+    "hasQueuedReset",
+    "isDisplayOnly",
     "isStale",
+    "pickInputEntry",
     "prepareBoundary",
     "removeInboxItem",
     "withdrawQueuedInputs",

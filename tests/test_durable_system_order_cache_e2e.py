@@ -50,7 +50,7 @@ Parameters = {"type": "object", "properties": {"text": {"type": "string"}}, "req
 
 
 async def _noContent(*_args: Any) -> dict[str, Any]:
-    return {"content": []}
+    return {"output": []}
 
 
 first = defineTool({"name": "probe_first", "description": "Unused probe tool.", "parameters": Parameters, "execute": _noContent})

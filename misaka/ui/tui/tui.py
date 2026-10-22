@@ -1,4 +1,4 @@
-"""Translated from pi-tui's ``packages/tui/src/tui.ts`` (v1.1.0).
+"""Translated from pi-tui's ``packages/tui/src/tui.ts`` (v1.3.0).
 
 MISAKA forks, each marked where it happens:
 
@@ -100,6 +100,19 @@ def isFocusable(component: Component | None) -> bool:
 # Components emit this at the cursor position when focused.
 # TUI finds and strips this marker, then positions the hardware cursor there.
 CURSOR_MARKER = "\x1b_pi:c\x07"
+
+# Fake cursor markers - zero-width APC sequences around the text drawn as the cursor. See resolveFakeCursors().
+FAKE_CURSOR_START = "\x1b_pi:fc\x07"
+FAKE_CURSOR_END = "\x1b_pi:/fc\x07"
+# CURSOR_MARKER + FAKE_CURSOR_START + text + FAKE_CURSOR_END. Truncating the line right after the cursor cell drops
+# the end.
+FOCUSED_FAKE_CURSOR = RegExp(r"(\x1b_pi:c\x07)\x1b_pi:fc\x07(.*?)(?:\x1b_pi:\/fc\x07|$)", "s")
+
+
+def renderFakeCursor(text: str) -> str:
+    """Wrap text in fake cursor markers."""
+    return f"{FAKE_CURSOR_START}{text}{FAKE_CURSOR_END}"
+
 
 # Anchor position for overlays
 type OverlayAnchor = Literal[
@@ -1181,7 +1194,7 @@ class TuiBase(Container):
             width, maxHeight = layout["width"], layout["maxHeight"]
 
             # Render component at calculated width
-            overlayLines = component.render(width)
+            overlayLines = self.resolveFakeCursors(component.render(width))
 
             # Apply maxHeight if specified
             if maxHeight is not None and len(overlayLines) > maxHeight:
@@ -1256,6 +1269,20 @@ class TuiBase(Container):
 
                 return {"row": row, "col": col}
         return None
+
+    def resolveFakeCursors(self, lines: list[str]) -> list[str]:
+        """Resolve fake cursor markers to reverse video. When the hardware cursor is shown, a fake cursor
+        directly after CURSOR_MARKER is dropped because the terminal cursor is drawn there. Fake cursors
+        of components without focus have no CURSOR_MARKER and stay visible.
+        """
+
+        def resolve(line: str) -> str:
+            if FAKE_CURSOR_START not in line:
+                return line
+            resolved = js_regexp.replace(line, FOCUSED_FAKE_CURSOR, "$1$2") if self.showHardwareCursor else line
+            return resolved.replace(FAKE_CURSOR_START, "\x1b[7m").replace(FAKE_CURSOR_END, "\x1b[27m")
+
+        return [resolve(line) for line in lines]
 
     # --- MISAKA fork (D11): the background probe in place of `queryTerminalColors` ----------------------------------
 
@@ -1347,6 +1374,8 @@ def _orZero(value: float | None) -> float:
 
 __all__ = [
     "CURSOR_MARKER",
+    "FAKE_CURSOR_END",
+    "FAKE_CURSOR_START",
     "SEGMENT_RESET",
     "TUI",
     "Component",
@@ -1365,5 +1394,6 @@ __all__ = [
     "TuiStopOptions",
     "compositeTuiLine",
     "isFocusable",
+    "renderFakeCursor",
     "visibleWidth",
 ]

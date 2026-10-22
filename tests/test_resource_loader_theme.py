@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/coding-agent/test/resource-loader-theme.test.ts`` (v1.1.0).
+"""Translated from pi's ``packages/coding-agent/test/resource-loader-theme.test.ts`` (v1.3.0).
 
 MISAKA forks: the environment override is ``MISAKA_TRUE_COLOR`` (pi: ``PI_TRUE_COLOR``), and the loader has no
 ``noSkills``/``noContextFiles`` options (skills and context files are not resource-loader resources here).
@@ -15,7 +15,16 @@ import pytest
 import misaka.modes.interactive.theme as theme_package
 from misaka.core.resource_loader import DefaultResourceLoader
 from misaka.core.settings_manager import SettingsManager
+from misaka.modes.interactive.theme import theme as theme_module
+from misaka.modes.interactive.theme.theme import setThemeJsonValidator
+from misaka.modes.interactive.theme.theme_schema import validateThemeJson
 from misaka.ui.tui.terminal_image import resetCapabilitiesCache, setCapabilityOverrides
+
+
+@pytest.fixture(autouse=True)
+def validated_themes(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(theme_module, "themeJsonValidator", None)
+    setThemeJsonValidator(validateThemeJson)
 
 
 @pytest.fixture
@@ -30,7 +39,7 @@ def dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     themeJson["colors"]["userMessageBg"] = "#3c3544"
     themePath = tmp_path / "capability-test.json"
     themePath.write_text(json.dumps(themeJson), encoding="utf-8")
-    yield SimpleNamespace(agentDir=str(agentDir), cwd=str(cwd), themePath=str(themePath))
+    yield SimpleNamespace(agentDir=str(agentDir), cwd=str(cwd), themePath=str(themePath), themeJson=themeJson)
     monkeypatch.undo()
     setCapabilityOverrides({})
     resetCapabilitiesCache()
@@ -101,3 +110,29 @@ async def test_returns_to_automatic_detection_after_an_explicit_setting_is_remov
     loadedTheme = capabilityTestTheme(loader)
     assert loadedTheme is not None
     assert loadedTheme.bg("userMessageBg", "x") == "\x1b[48;2;60;53;68mx\x1b[49m"
+
+
+async def test_applies_strict_validation_on_initial_load_and_reload(dirs: SimpleNamespace):
+    loader = DefaultResourceLoader(loaderOptions(dirs, SettingsManager.inMemory()))
+    themeJson = dirs.themeJson
+    themePath = Path(dirs.themePath)
+
+    themeJson["unsupported"] = True
+    themePath.write_text(json.dumps(themeJson), encoding="utf-8")
+    await loader.reload()
+    initialDiagnostics = loader.getThemes()["diagnostics"]
+    assert len(initialDiagnostics) == 1
+    assert initialDiagnostics[0].type == "warning"
+    assert initialDiagnostics[0].path == dirs.themePath
+    assert "/unsupported" in initialDiagnostics[0].message
+
+    del themeJson["unsupported"]
+    themePath.write_text(json.dumps(themeJson), encoding="utf-8")
+    await loader.reload()
+    assert loader.getThemes()["diagnostics"] == []
+    assert any(theme.name == themeJson["name"] for theme in loader.getThemes()["themes"])
+
+    themeJson["unsupported"] = True
+    themePath.write_text(json.dumps(themeJson), encoding="utf-8")
+    await loader.reload()
+    assert loader.getThemes()["diagnostics"] == initialDiagnostics

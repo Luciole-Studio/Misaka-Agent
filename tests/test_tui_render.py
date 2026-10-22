@@ -1,9 +1,11 @@
 """Translated from pi-tui's ``test/tui-render.test.ts``, ``test/tui-shrink.test.ts``, ``test/tui-cell-size-input.test.ts``,
 ``test/tui-overlay-style-leak.test.ts``, ``test/overlay-short-content.test.ts``, the ``compositeTuiLine`` cases of
-``test/regression-overlay-cjk-boundary.test.ts`` and the TUI case of ``test/tab-width.test.ts`` (v1.1.0).
+``test/regression-overlay-cjk-boundary.test.ts`` and the TUI case of ``test/tab-width.test.ts`` (v1.3.0).
 
 MISAKA forks: the redraw log is switched by ``MISAKA_TUI_DEBUG_REDRAW`` (pi: ``PI_TUI_DEBUG_REDRAW``), and the crash dump
-goes to the given log directory or else MISAKA's home (pi: the OS temp directory).
+goes to the given log directory or else MISAKA's home (pi: the OS temp directory). The test terminal shows and hides
+its cursor through ``write`` (pi's writes to the emulator directly), so the fake cursor cases read the writes without
+that trailing ``\x1b[?25h``/``\x1b[?25l``.
 """
 
 from __future__ import annotations
@@ -15,7 +17,9 @@ from pathlib import Path
 import pytest
 
 from misaka.config import home
+from misaka.ui.tui.components.editor import Editor
 from misaka.ui.tui.components.image import Image, ImageOptions, ImageTheme
+from misaka.ui.tui.components.input import Input
 from misaka.ui.tui.terminal_image import (
     CellDimensions,
     ImageDimensions,
@@ -27,9 +31,10 @@ from misaka.ui.tui.terminal_image import (
     setCapabilities,
     setCellDimensions,
 )
-from misaka.ui.tui.tui import compositeTuiLine
+from misaka.ui.tui.tui import CURSOR_MARKER, TUI, compositeTuiLine, renderFakeCursor
 from misaka.ui.tui.tui_main_screen import TuiMainScreen
-from misaka.ui.tui.utils import sliceByColumn, visibleWidth
+from misaka.ui.tui.utils import extractSegments, sliceByColumn, visibleWidth
+from tests.tui_test_themes import defaultEditorTheme
 from tests.tui_virtual_terminal import VirtualTerminal
 
 
@@ -933,6 +938,202 @@ async def test_clears_stale_content_when_maxlinesrendered_was_inflated_by_a_tran
     ]
 
     tui.stop()
+
+
+# --- TUI fake cursor ------------------------------------------------------------------------------
+
+
+def withoutCursorVisibility(writes: str) -> str:
+    """MISAKA fork: the writes without the trailing show/hide cursor (see the module docstring)."""
+    return writes.removesuffix("\x1b[?25h").removesuffix("\x1b[?25l")
+
+
+async def test_draws_the_focused_fake_cursor_in_reverse_video_and_omits_it_when_the_hardware_cursor_is_shown():
+    terminal = LoggingVirtualTerminal(20, 5)
+    tui: TUI = TuiMainScreen(terminal)
+    input = Input()
+    input.setValue("abc")
+    tui.addChild(input)
+    tui.setFocus(input)
+    tui.start()
+    await terminal.waitForRender()
+    assert "> \x1b[7ma\x1b[27mbc" in terminal.getWrites()
+
+    terminal.clearWrites()
+    tui.setShowHardwareCursor(True)
+    await terminal.waitForRender()
+    assert "\x1b[7m" not in terminal.getWrites()
+    assert "\x1b_pi:" not in terminal.getWrites()
+
+    tui.stop()
+
+
+async def test_keeps_the_fake_cursor_of_an_unfocused_input_when_the_hardware_cursor_is_shown():
+    terminal = LoggingVirtualTerminal(20, 5)
+    tui: TUI = TuiMainScreen(terminal, True)
+    input = Input()
+    input.setValue("abc")
+    tui.addChild(input)
+    tui.start()
+    await terminal.waitForRender()
+    assert "> \x1b[7ma\x1b[27mbc" in terminal.getWrites()
+    tui.stop()
+
+
+async def test_omits_the_focused_fake_cursor_when_truncation_dropped_its_end_marker():
+    terminal = LoggingVirtualTerminal(20, 5)
+    tui: TUI = TuiMainScreen(terminal, True)
+    base = TestComponent()
+    base.lines = [sliceByColumn(f"ab{CURSOR_MARKER}{renderFakeCursor('c')}def", 0, 3, True)]
+    tui.addChild(base)
+    tui.start()
+    await terminal.waitForRender()
+    assert "\x1b[7m" not in terminal.getWrites()
+    assert withoutCursorVisibility(terminal.getWrites()).endswith("\x1b[3G")
+    tui.stop()
+
+
+async def test_keeps_the_cursor_when_an_overlay_ends_directly_left_of_it():
+    for showHardwareCursor in [False, True]:
+        terminal = LoggingVirtualTerminal(20, 5)
+        tui: TUI = TuiMainScreen(terminal, showHardwareCursor)
+        base = TestComponent()
+        base.lines = [f"abc{CURSOR_MARKER}{renderFakeCursor('d')}ef"]
+        tui.addChild(base)
+        overlay = TestComponent()
+        overlay.lines = ["XXX"]
+        tui.showOverlay(overlay, {"row": 0, "col": 0, "width": 3})
+        tui.start()
+        await terminal.waitForRender()
+
+        writes = terminal.getWrites()
+        assert "XXX" in writes
+        assert ("\x1b[7md" in writes) == (not showHardwareCursor)
+        # The hardware cursor is positioned at column 4 in both modes
+        assert withoutCursorVisibility(writes).endswith("\x1b[4G")
+        tui.stop()
+
+
+# --- MISAKA: the fake cursor in the resize fast path, and with wide text and IME ------------------
+
+
+def isInverse(terminal: VirtualTerminal, row: int, col: int) -> bool:
+    """Whether the viewport cell is drawn in reverse video (libghostty-vt's style field 7)."""
+    return bool(terminal.viewportRows()[row][col][2][7])
+
+
+async def test_the_resize_fast_path_resolves_the_fake_cursor_before_writing():
+    for showHardwareCursor in [False, True]:
+        terminal = LoggingVirtualTerminal(20, 5)
+        tui: TUI = TuiMainScreen(terminal, showHardwareCursor)
+        input = Input()
+        input.setValue("abc")
+        tui.addChild(input)
+        tui.setFocus(input)
+        tui.start()
+        await terminal.waitForRender()
+
+        terminal.clearWrites()
+        terminal.resize(30, 5)
+        tui.renderNow()  # the first frame after the resize: the viewport repaint (`_try_viewport_render`)
+        fastFrame = terminal.getWrites()
+        assert "\x1b[2J\x1b[H" in fastFrame, "the resize frame should take the fast path"
+        assert "\x1b_pi:" not in fastFrame
+        assert ("> \x1b[7ma\x1b[27mbc" in fastFrame) == (not showHardwareCursor)
+        assert withoutCursorVisibility(fastFrame).endswith("\x1b[3G")
+        await terminal.waitForRender()
+        assert "\x1b_pi:" not in terminal.getWrites()
+        tui.stop()
+
+
+async def test_the_fake_cursor_covers_a_wide_cjk_character_and_the_ime_cursor_sits_on_it():
+    for showHardwareCursor in [False, True]:
+        terminal = LoggingVirtualTerminal(30, 6)
+        tui: TUI = TuiMainScreen(terminal, showHardwareCursor)
+        editor = Editor(tui, defaultEditorTheme)
+        tui.addChild(editor)
+        tui.setFocus(editor)
+        editor.setText("日本語テスト")
+        editor.handleInput("\x1b[D")
+        editor.handleInput("\x1b[D")  # the cursor on ス, after 4 wide characters
+        tui.start()
+        await terminal.waitForRender()
+
+        writes = terminal.getWrites()
+        assert "\x1b_pi:" not in writes
+        assert ("\x1b[7mス\x1b[27m" in writes) == (not showHardwareCursor)
+        assert "日本語テスト" in terminal.getViewport()[1]
+        # The IME candidate window follows the hardware cursor: row 1 (below the border), column 8.
+        assert terminal.getCursorPosition() == {"x": 8, "y": 1}
+        assert isInverse(terminal, 1, 8) == (not showHardwareCursor)
+        assert isInverse(terminal, 1, 6) is False and isInverse(terminal, 1, 10) is False
+        tui.stop()
+
+
+async def test_the_fake_cursor_keeps_a_zwj_cluster_whole():
+    terminal = LoggingVirtualTerminal(30, 6)
+    tui: TUI = TuiMainScreen(terminal)
+    editor = Editor(tui, defaultEditorTheme)
+    tui.addChild(editor)
+    tui.setFocus(editor)
+    editor.setText("a👨‍👩‍👧b")
+    editor.handleInput("\x1b[D")
+    editor.handleInput("\x1b[D")  # the cursor on the family emoji
+    tui.start()
+    await terminal.waitForRender()
+
+    assert "\x1b[7m👨‍👩‍👧\x1b[27mb" in terminal.getWrites()
+    assert terminal.getCursorPosition() == {"x": 1, "y": 1}
+    tui.stop()
+
+
+async def test_a_focused_input_with_cjk_text_places_the_ime_cursor_after_the_wide_characters():
+    for showHardwareCursor in [False, True]:
+        terminal = LoggingVirtualTerminal(30, 3)
+        tui: TUI = TuiMainScreen(terminal, showHardwareCursor)
+        input = Input()
+        tui.addChild(input)
+        tui.setFocus(input)
+        for ch in "中文输入":
+            input.handleInput(ch)
+        input.handleInput("\x1b[D")  # the cursor on 入
+        tui.start()
+        await terminal.waitForRender()
+
+        writes = terminal.getWrites()
+        assert "\x1b_pi:" not in writes
+        assert ("> 中文输\x1b[7m入\x1b[27m" in writes) == (not showHardwareCursor)
+        assert terminal.getCursorPosition() == {"x": 8, "y": 0}  # "> " + three wide characters
+        tui.stop()
+
+
+async def test_an_overlay_ending_left_of_a_cjk_cursor_keeps_the_ime_position():
+    for showHardwareCursor in [False, True]:
+        terminal = LoggingVirtualTerminal(20, 5)
+        tui: TUI = TuiMainScreen(terminal, showHardwareCursor)
+        base = TestComponent()
+        base.lines = [f"日本{CURSOR_MARKER}{renderFakeCursor('語')}です"]
+        tui.addChild(base)
+        overlay = TestComponent()
+        overlay.lines = ["XXXX"]
+        tui.showOverlay(overlay, {"row": 0, "col": 0, "width": 4})
+        tui.start()
+        await terminal.waitForRender()
+
+        writes = terminal.getWrites()
+        assert "XXXX" in writes
+        assert ("\x1b[7m語" in writes) == (not showHardwareCursor)
+        assert withoutCursorVisibility(writes).endswith("\x1b[5G")
+        assert terminal.getCursorPosition() == {"x": 4, "y": 0}
+        tui.stop()
+
+
+def test_extract_segments_keeps_an_apc_marker_at_the_after_boundary():
+    # The overlay covers columns 0-3; the cursor marker sits right where "after" starts, before a wide character.
+    segments = extractSegments(f"日本{CURSOR_MARKER}語です", 4, 4, 16)
+    assert segments.after.startswith(CURSOR_MARKER)
+    assert segments.after.endswith("語です")
+    assert segments.afterWidth == 6
 
 
 # --- TUI shrinking content (tui-shrink.test.ts) ---------------------------------------------------

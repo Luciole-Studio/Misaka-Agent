@@ -511,6 +511,11 @@ def applyImmutableBatches(target: Any, batches: Iterable[Sequence[Op]]) -> Any:
                 if op[0] == "r":
                     root = op[1]
                     continue
+                if op[0] == "p":
+                    appended = appendCopy(root, op, owned)
+                    if appended is not UNDEFINED:
+                        root = appended
+                        continue
                 root = copyContainers(root, op[1] if op[0] in ("p", "m") else op[1][:-1], owned)
                 root = applyOps(root, [op])
     finally:
@@ -518,6 +523,35 @@ def applyImmutableBatches(target: Any, batches: Iterable[Sequence[Op]]) -> Any:
         if close is not None:
             close()
     return root
+
+
+def appendCopy(root: Any, op: Op, owned: dict[int, Any]) -> Any:
+    """An append to an array not yet copied in this replay, built as one copy with the items (``concat``) instead of a
+    copy that the insert then grows, which copies it again. ``UNDEFINED`` for any other splice and for any path that is
+    not a plain walk over own properties, which takes the general path and so fails with its errors."""
+    _, path, index, deleteCount, items = op
+    if deleteCount != 0:
+        return UNDEFINED
+    target = root
+    for segment in path:
+        valid = (
+            segment not in RESERVED_SEGMENTS and isinstance(target, dict)
+            if isinstance(segment, str)
+            else jsIsInteger(segment) and segment >= 0 and isinstance(target, list)
+        )
+        if not valid or not _hasOwn(target, segment):
+            return UNDEFINED
+        target = _own(target, segment)
+    if not isinstance(target, list) or id(target) in owned or index != len(target):
+        return UNDEFINED
+    appended = [*target, *items]
+    owned[id(appended)] = appended
+    if len(path) == 0:
+        return appended
+    parentPath = path[:-1]
+    copiedRoot = copyContainers(root, parentPath, owned)
+    _defineProperty(resolve(copiedRoot, parentPath), path[-1], appended)
+    return copiedRoot
 
 
 def copyContainers(root: Any, path: Path, owned: dict[int, Any]) -> Any:
@@ -580,6 +614,9 @@ def resolve(root: Any, path: Path) -> Any:
 #
 # Path interning and arity omission live between the tracker and a boundary; `Op` and `apply` know nothing
 # about them.
+#
+# Consecutive batches of one encoder may be concatenated into one batch (links coalesce waiting state this way):
+# only path ids span batches, and every batch starts with an explicit path.
 #
 # ONE PAIR PER INDEPENDENT STATE STREAM. Every decoder must observe exactly the batches encoded by its
 # matching encoder, beginning with that state's base. Sharing a transport connection does not make
@@ -674,7 +711,8 @@ class Decoder:
     def __init__(self) -> None:
         self._paths: dict[int, Path] = {}
 
-    def decode(self, wire: Sequence[WireOp]) -> list[Op]:
+    def decode(self, wire: Sequence[Any]) -> list[Op]:
+        """Ops as received: each is validated (``assertValidWireOp``) before use."""
         previous: Path | None = None  # scoped to the batch, as in encode
         out: list[Op] = []
         for op in wire:

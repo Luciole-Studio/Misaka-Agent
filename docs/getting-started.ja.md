@@ -39,7 +39,7 @@ Homebrew と winget は [release/README.md](../release/README.md) を見てく�
 
 | 追加機能 | 加わるもの |
 |---|---|
-| `providers` | すべてのモデルプロバイダの SDK。一社だけなら `anthropic`、`openai`、`google`、`bedrock` のいずれかを指定します（OpenRouter や OpenAI 互換のサービスは `openai`。Mistral は SDK が要りません）。 |
+| `providers` | すべてのモデルプロバイダの SDK。一社だけなら `anthropic`、`openai`、`google`、`bedrock` のいずれかを指定します（OpenRouter、Kimi Code や OpenAI 互換のサービスは `openai`。Mistral は SDK が要りません）。 |
 | `browser` | ウェブブラウザを操作するツール |
 | `lcm-semantic` | 過去の会話を意味で検索する機能 |
 

@@ -1,11 +1,17 @@
-"""Translated from pi's ``core/tools/render-utils.ts`` (v1.1.0)."""
+"""Translated from pi's ``core/tools/render-utils.ts`` (v1.3.0).
+
+MISAKA fork: renderer state is the dict ``ToolExecutionComponent`` keeps (``state["startedAt"]`` for
+``state.startedAt``).
+"""
 
 from __future__ import annotations
 
 import builtins
+import math
 import os
+import time
 from collections.abc import Mapping
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from misaka.ui.tui.terminal_image import (
     getCapabilities,
@@ -15,10 +21,26 @@ from misaka.ui.tui.terminal_image import (
     pathToFileURL,
 )
 from misaka.utils.ansi import stripAnsi
-from misaka.utils.js import UNDEFINED, jsLength, jsonStringify, jsSlice, jsString
+from misaka.utils.js import (
+    UNDEFINED,
+    Interval,
+    clearInterval,
+    isNumber,
+    jsLength,
+    jsNumber,
+    jsonStringify,
+    jsSlice,
+    jsString,
+    jsTrim,
+    setInterval,
+    toFixed,
+)
 from misaka.utils.paths import resolvePath
 from misaka.utils.shell import sanitizeBinaryOutput
 from misaka.utils.values import read_field
+
+if TYPE_CHECKING:
+    from misaka.core.extensions.types import ToolRenderContext
 
 
 def shortenPath(path: object) -> builtins.str:
@@ -43,6 +65,31 @@ def str(value: object) -> builtins.str | None:
     if value is None or value is UNDEFINED:
         return ""
     return None
+
+
+def _parseLineNumber(value: object) -> int | float | None:
+    """pi's ``parseLineNumber``. A Python bool is not a number here, as a JavaScript boolean is not."""
+    if isinstance(value, builtins.str) and jsTrim(value) != "":
+        value = jsNumber(value)
+    # `jsNumber` also turns an integer beyond the double range into JavaScript's Infinity.
+    return value if isNumber(value) and math.isfinite(jsNumber(value)) else None
+
+
+def formatReadLineRange(offset: object, limit: object) -> builtins.str:
+    """Format finite numbers or numeric strings as a read line range, omitting malformed ranges."""
+    # Strict schemas represent omitted optional arguments as null.
+    if (offset is None or offset is UNDEFINED) and (limit is None or limit is UNDEFINED):
+        return ""
+    start = 1 if offset is None or offset is UNDEFINED else _parseLineNumber(offset)
+    if start is None:
+        return ""
+    if limit is None or limit is UNDEFINED:
+        return f":{jsString(start)}"
+    count = _parseLineNumber(limit)
+    if count is None:
+        return ""
+    end = start + count - 1
+    return f":{jsString(start)}{f'-{jsString(end)}' if end else ''}"
 
 
 def argOf(args: object, key: builtins.str) -> Any:
@@ -134,6 +181,67 @@ def formatToolCallWithArgs(title: builtins.str, args: object, theme: Any, expand
     pairs = " ".join(f"{key}={_stringifyOrString(value)}" for key, value in entries)
     preview = f"{jsSlice(pairs, 0, COLLAPSED_ARGS_CHARS - 3)}..." if jsLength(pairs) > COLLAPSED_ARGS_CHARS else pairs
     return f"{header} {theme.fg('muted', preview)}"
+
+
+def formatToolDuration(ms: float) -> builtins.str:
+    """Duration as `4.2s` below a minute, then `1m 30s` and `2h 3m 4s`."""
+    seconds = ms / 1000
+    if seconds < 60:
+        return f"{toFixed(seconds, 1)}s"
+
+    totalSeconds = math.floor(seconds)
+    minutes = math.floor(totalSeconds / 60)
+    remainder = totalSeconds % 60
+    if minutes < 60:
+        return f"{minutes}m {remainder}s"
+
+    return f"{math.floor(minutes / 60)}h {minutes % 60}m {remainder}s"
+
+
+class ToolTimerState(TypedDict, total=False):
+    """Renderer state of `startToolTimer` and `toolTimerText`, kept in `ToolRenderContext.state`."""
+
+    startedAt: int | None
+    endedAt: int | None
+    interval: Interval | None
+
+
+def _now() -> int:
+    """``Date.now()``"""
+    return int(time.time() * 1000)
+
+
+def startToolTimer(context: ToolRenderContext) -> None:
+    """Start the row's clock once execution starts. Call from `renderCall`."""
+    state: ToolTimerState = context.state
+    if context.executionStarted and state.get("startedAt") is None:
+        state["startedAt"] = _now()
+        state["endedAt"] = None
+
+
+def toolTimerText(context: ToolRenderContext, isPartial: bool) -> builtins.str | None:
+    """The row's timing line, from `renderResult`: `Elapsed 4.2s` while the result is partial, redrawn
+    every second, and `Took 4.2s` once it is final. None when the row has no start time and no
+    recorded duration."""
+    state: ToolTimerState = context.state
+    if state.get("startedAt") is not None and isPartial and not state.get("interval"):
+        state["interval"] = setInterval(lambda: context.invalidate(), 1000)
+    if not isPartial or context.isError:
+        if state.get("endedAt") is None:
+            state["endedAt"] = _now()
+        if state.get("interval"):
+            clearInterval(state["interval"])
+            state["interval"] = None
+    # A final result's recorded duration wins: it is monotonic and survives reloads. The renderer's own clock is the
+    # fallback for live progress and for results stored without one.
+    if not isPartial and context.durationMs is not None:
+        return f"Took {formatToolDuration(context.durationMs)}"
+    startedAt = state.get("startedAt")
+    if startedAt is None:
+        return None
+    endedAt = state.get("endedAt")
+    endTime = endedAt if endedAt is not None else _now()
+    return f"{'Elapsed' if isPartial else 'Took'} {formatToolDuration(endTime - startedAt)}"
 
 
 def invalidArgText(theme: Any) -> builtins.str:

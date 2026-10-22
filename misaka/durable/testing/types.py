@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/durable/src/testing/types.ts``."""
+"""Translated from pi's ``packages/durable/src/testing/types.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
@@ -35,9 +35,10 @@ type EnvConformanceProvider = Callable[[Callable[[Any], Awaitable[None]]], Await
 """``withEnv(use)``: calls ``use`` once with an environment whose ``cwd`` is a fresh, empty, writable directory, then
 cleans up."""
 type EnvConformanceOptions = dict[str, Any]
-"""``{"assertions": EnvConformanceAssertions, "withEnv": EnvConformanceProvider, "shell"?, "symlinks"?}``: ``shell``
-is the program and flag that run a POSIX shell script from the next argument (default ``["sh", "-c"]``); ``symlinks``
-is whether the shell's ``ln -s`` creates symbolic links (default true)."""
+"""``{"assertions": EnvConformanceAssertions, "withEnv": EnvConformanceProvider, "shell"?, "symlinks"?, "listFiles"?}``:
+``shell`` is the program and flag that run a POSIX shell script from the next argument (default ``["sh", "-c"]``);
+``symlinks`` is whether the shell's ``ln -s`` creates symbolic links (default true); ``listFiles`` is whether the
+environment implements the optional ``listFiles``, which the suite then checks (default false)."""
 type EnvConformanceCase = dict[str, Any]
 """``{"name": str, "timeoutMs"?: int, "run": () -> Awaitable[None]}``. Cases that wait for an environment's watch
 latency need longer than a test runner's default timeout."""

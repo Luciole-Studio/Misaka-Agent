@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/coding-agent/src/core/compaction/utils.ts`` (v1.1.0).
+"""Translated from pi's ``packages/coding-agent/src/core/compaction/utils.ts`` (v1.3.0).
 
 Shared utilities for compaction and branch summarization.
 """
@@ -113,6 +113,12 @@ def serializeConversation(messages: list[MessageValue]) -> str:
 
     Tool results are truncated to keep the summarization request within
     reasonable token budgets. Full content is not needed for summarization.
+
+    Thinking is omitted. Providers return summaries of the real reasoning, and
+    replayed thinking is often not part of the model's live context: for example,
+    a block that does not match its request is dropped. Including it can make the
+    summarization request larger than the context it summarizes. Visible text,
+    tool calls, and tool results record what happened.
     """
     parts: list[str] = []
 
@@ -123,23 +129,18 @@ def serializeConversation(messages: list[MessageValue]) -> str:
             if content:
                 parts.append(f"[User]: {content}")
         elif role == "assistant":
-            thinkingParts: list[str] = []
             toolCalls: list[str] = []
             blocks = read_field(msg, "content") or []
 
             for block in blocks:
                 blockType = read_field(block, "type")
-                if blockType == "thinking":
-                    thinkingParts.append(read_field(block, "thinking"))
-                elif blockType == "toolCall":
+                if blockType == "toolCall":
                     args = read_field(block, "arguments")
                     argsStr = ", ".join(
                         f"{k}={jsonStringify(v)}" for k, v in (args.items() if isinstance(args, dict) else [])
                     )
                     toolCalls.append(f"{read_field(block, 'name')}({argsStr})")
 
-            if len(thinkingParts) > 0:
-                parts.append(f"[Assistant thinking]: {chr(10).join(thinkingParts)}")
             if any(read_field(block, "type") == "text" for block in blocks):
                 parts.append(f"[Assistant]: {contentText(blocks)}")
             if len(toolCalls) > 0:

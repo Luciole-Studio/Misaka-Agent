@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/coding-agent/test/prompt-templates.test.ts`` (v1.1.0).
+"""Translated from pi's ``packages/coding-agent/test/prompt-templates.test.ts`` (v1.3.0).
 
 Tests for prompt template argument parsing and substitution.
 
@@ -388,8 +388,10 @@ def test_should_handle_tabs_as_separators():
 
 
 def test_should_handle_quoted_empty_string():
-    # Note: Empty quotes are skipped by current implementation
-    assert parseCommandArgs('"" " "') == [" "]
+    # Empty quotes keep their position as an empty argument (#10867)
+    assert parseCommandArgs('"" " "') == ["", " "]
+    assert parseCommandArgs("a '' c") == ["a", "", "c"]
+    assert parseCommandArgs('a ""') == ["a", ""]
 
 
 def test_should_handle_arguments_with_special_characters():
@@ -445,6 +447,20 @@ def argTestTemplate(content: str) -> PromptTemplate:
         sourceInfo=SourceInfo(path="/tmp/arg-test.md", source="local", scope="temporary", origin="top-level"),
         filePath="/tmp/arg-test.md",
     )
+
+
+# #10867
+def test_should_use_positional_default_for_empty_quoted_argument_without_shifting_later_args():
+    template = PromptTemplate(
+        name="review",
+        description="test",
+        content="Review $2. Focus: ${1:-correctness}.",
+        sourceInfo=SourceInfo(path="/tmp/review.md", source="local", scope="temporary", origin="top-level"),
+        filePath="/tmp/review.md",
+    )
+
+    assert expandPromptTemplate('/review "" src/index.ts', [template]) == "Review src/index.ts. Focus: correctness."
+    assert expandPromptTemplate("/review '' src/index.ts", [template]) == "Review src/index.ts. Focus: correctness."
 
 
 def test_should_split_template_arguments_on_unquoted_newlines():

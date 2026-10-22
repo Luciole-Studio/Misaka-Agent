@@ -487,12 +487,15 @@ async def runFlow(provider: OAuthClientProvider, options: OAuthFlowOptions) -> O
         "signal": options.get("signal"),
     })
     if options.get("authorizationCode"):
-        # RFC 9207: never send a code from another authorization server to this one.
+        # RFC 9207: never send a code from another authorization server to this one. Without metadata there
+        # is no issuer to compare with, so any `iss` is rejected.
         iss = options.get("iss", UNDEFINED)
-        if metadata is not None and (iss is not UNDEFINED or metadata.get("authorization_response_iss_parameter_supported")):
-            issuer = metadata.get("issuer", UNDEFINED)
+        if iss is not UNDEFINED or (metadata is not None and metadata.get("authorization_response_iss_parameter_supported")):
+            issuer = metadata.get("issuer", UNDEFINED) if metadata is not None else UNDEFINED
             if iss != issuer:
-                raise OAuthIssuerMismatchError(issuer, None if iss is UNDEFINED else iss)
+                raise OAuthIssuerMismatchError(
+                    None if issuer is UNDEFINED else issuer, None if iss is UNDEFINED else iss
+                )
         tokens = await exchangeAuthorizationCode(
             discovered["authorizationServerUrl"],
             {

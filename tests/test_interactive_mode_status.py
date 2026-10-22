@@ -1,8 +1,9 @@
-"""Translated from pi's ``coding-agent/test/interactive-mode-status.test.ts`` (v1.1.0).
+"""Translated from pi's ``coding-agent/test/interactive-mode-status.test.ts`` (v1.3.0).
 
 MISAKA forks in the expectations:
 - no ``showManagedToolStatus`` (fd and rg are never downloaded), so its case is not ported;
-- extension dialogs run one at a time, so the custom-UI case checks that the second component waits for the overlay;
+- extension dialogs run one at a time, so the custom-UI case checks that the second component waits for the overlay,
+  and in the #10648 case the overlay opened above the custom UI's is not another custom UI;
 - skills are listed by MISAKA's core parts through ``startup_sections`` (pi reads ``resourceLoader.getSkills()``), and
   there is no ``[Skill conflicts]`` section; prompt conflicts stand in for it;
 - git package sources are not parsed into ``owner/repo`` labels (MISAKA has no git package sources).
@@ -283,6 +284,111 @@ async def test_a_second_custom_ui_waits_for_the_open_overlay_and_input_follows_f
         assert editor.focused is True
     finally:
         ui.stop()
+
+
+# Regression test for #10648: closing a lower overlay removed the topmost overlay instead.
+@pytest.mark.parametrize("nonCapturing", [False, True], ids=["capturing", "non-capturing"])
+async def test_closing_a_lower_overlay_custom_ui_removes_its_own_overlay_not_the_topmost_one(nonCapturing):
+    # MISAKA fork: a second custom UI waits for the first, so the overlay above it is opened on the TUI directly
+    # (as a selector or another component of the window would).
+    terminal = VirtualTerminal(80, 24)
+    ui = TuiMainScreen(terminal)
+    editorContainer = Container()
+    editor = TestFocusableComponent("EDITOR")
+    lower = TestFocusableComponent("LOWER")
+    upper = TestFocusableComponent("UPPER")
+    closers: dict[str, object] = {}
+    fakeThis = _CustomHost(ui, editorContainer, editor)
+
+    def lowerFactory(_tui, _theme, _keybindings, done):
+        closers["lower"] = done
+        return lower
+
+    editorContainer.addChild(editor)
+    ui.addChild(editorContainer)
+    ui.setFocus(editor)
+    ui.start()
+    try:
+        lowerPromise = asyncio.ensure_future(
+            fakeThis.showExtensionCustom(lowerFactory, {"overlay": True, "overlayOptions": {"nonCapturing": nonCapturing}})
+        )
+        await flushTui(ui, terminal)
+        upperHandle = ui.showOverlay(upper)
+        await flushTui(ui, terminal)
+        assert upper.focused is True
+
+        closers["lower"]("lower closed")
+        assert await lowerPromise == "lower closed"
+        await flushTui(ui, terminal)
+
+        viewport = "\n".join(terminal.getViewport())
+        assert "UPPER" in viewport
+        assert "LOWER" not in viewport
+        terminal.sendInput("x")
+        await flushTui(ui, terminal)
+        assert upper.inputs == ["x"]
+        assert lower.inputs == []
+
+        upperHandle.hide()
+        await flushTui(ui, terminal)
+        assert ui.hasOverlay() is False
+        assert editor.focused is True
+    finally:
+        ui.stop()
+
+
+# --- InteractiveMode compaction status (#10809) --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"type": "compaction_start", "reason": "manual"},
+        {"type": "summarization_retry_attempt_start", "source": "compaction", "reason": "threshold"},
+    ],
+    ids=["compaction_start", "summarization_retry_attempt_start"],
+)
+@pytest.mark.parametrize("embedded", [True, False], ids=["embedded", "standalone"])
+async def test_colors_the_compaction_indicator_like_an_embedding_editors_border(event, embedded):
+    from misaka.modes.interactive.components.status_indicator import (
+        CompactionStatusIndicator,
+    )
+    from misaka.modes.interactive.theme.theme import theme
+
+    shown: list[object] = []
+    editor = SimpleNamespace(embedWorkingStatus=True, setWorkingStatusIndicator=lambda _indicator: None)
+    if embedded:
+        editor.borderColor = None  # falls back to the thinking level's border color
+    else:
+        del editor.embedWorkingStatus
+    fakeThis = SimpleNamespace(
+        isInitialized=True,
+        footer=SimpleNamespace(invalidate=lambda: None),
+        programStatus=SimpleNamespace(handleEvent=lambda _event: None),
+        settingsManager=SimpleNamespace(getShowTerminalProgress=lambda: False),
+        defaultEditor=SimpleNamespace(onEscape=None),
+        editor=editor,
+        session=SimpleNamespace(thinkingLevel="high", abortCompaction=lambda: None),
+        ui=SimpleNamespace(requestRender=lambda *_args: None),
+        showStatusIndicator=shown.append,
+        clearStatusIndicator=lambda _kind=None: None,
+        autoCompactionEscapeHandler=None,
+    )
+
+    await InteractiveMode.handleEvent(fakeThis, event)
+
+    [indicator] = shown
+    assert isinstance(indicator, CompactionStatusIndicator)
+    try:
+        line = indicator.render(80)[1]
+        if embedded:
+            assert theme.getFgAnsi("thinkingHigh") in line
+            assert theme.getFgAnsi("muted") not in line
+        else:
+            assert theme.getFgAnsi("accent") in line
+            assert theme.getFgAnsi("muted") in line
+    finally:
+        indicator.dispose()
 
 
 # --- InteractiveMode.createExtensionUIContext addAutocompleteProvider ----------------------------------------------
@@ -940,3 +1046,27 @@ def test_still_shows_diagnostics_on_quiet_startup_when_requested(skillSection):
     output = renderAll(fakeThis.loadedResourcesContainer)
     assert "[Prompt conflicts]" in output
     assert "[Skills]" not in output
+
+
+# --- InteractiveMode.handleDebugCommand ----------------------------------------------------------------------------
+
+
+def test_debug_dump_shows_rendered_lines_without_terminal_sequences(tmp_path, monkeypatch):
+    # MISAKA fork: since 1.2 a rendered line carries the fake cursor's APC markers; the dump lists the visible text.
+    from misaka.modes.interactive import interactive_mode
+    from misaka.ui.tui import renderFakeCursor
+
+    debugLogPath = tmp_path / "logs" / "debug.log"
+    monkeypatch.setattr(interactive_mode, "get_debug_log_path", lambda: str(debugLogPath))
+    line = f"\x1b[31mred\x1b[39m {renderFakeCursor('x')}"
+    fakeThis = SimpleNamespace(
+        ui=SimpleNamespace(terminal=SimpleNamespace(columns=40, rows=10), render=lambda _width: [line], requestRender=Mock()),
+        session=SimpleNamespace(messages=[]),
+        chatContainer=Container(),
+    )
+
+    InteractiveMode.handleDebugCommand(fakeThis)
+
+    dump = debugLogPath.read_text(encoding="utf-8")
+    assert '[0] (w=5) "red x"' in dump
+    assert "\\u001b" not in dump

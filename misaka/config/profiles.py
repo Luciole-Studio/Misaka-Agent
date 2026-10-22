@@ -95,7 +95,11 @@ def resolve_model_reference(reference, runtime, *, fallback_provider=None):
         matches = [f"{m.provider}/{m.id}" for m in models if m.id.casefold() == reference.casefold()]
         if matches:
             raise ValueError(f"Ambiguous model {reference!r}; choose provider/model: {', '.join(matches)}")
-        raise ValueError(f"Unknown model {reference!r}; choose a registered provider/model")
+        from misaka.core.model_runtime import personalizedCatalogHint
+
+        # A pinned OpenRouter model leaves the catalog when the user's key may not use it (pi 1.2 per-key lists).
+        hint = personalizedCatalogHint(reference.partition("/")[0] if "/" in reference else fallback_provider)
+        raise ValueError(f"Unknown model {reference!r}; choose a registered provider/model" + (f".{hint}" if hint else ""))
     return f"{model.provider}/{model.id}"
 
 

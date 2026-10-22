@@ -1,6 +1,6 @@
 # ruff: noqa: UP040 - TypeAlias spelling kept in step with misaka/ai/types.py.
 
-"""Translated from pi's ``packages/ai/src/api/google-shared.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/src/api/google-shared.ts`` (v1.3.0).
 
 Shared utilities for Google Generative AI and Google Vertex providers.
 
@@ -70,6 +70,8 @@ def usesGoogleThinkingLevel(model: Model) -> bool:
         # Match Gemini 3 Pro/Flash IDs with or without a minor version, such as
         # gemini-3-flash-preview, gemini-3.1-pro-preview, and gemini-3.8-flash.
         re.search(r"gemini-3(?:\.\d+)?-(?:pro|flash)", id) is not None
+        # Match Gemini 4 and later, such as gemini-4-argon (#10890).
+        or re.search(r"gemini-(?:[4-9]|[1-9][0-9])", id) is not None
         or id == "gemini-flash-latest"
         or id == "gemini-flash-lite-latest"
         # Match both hosted Gemma 4 naming forms: gemma-4-* and gemma4-*.

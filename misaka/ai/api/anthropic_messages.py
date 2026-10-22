@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/src/api/anthropic-messages.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/src/api/anthropic-messages.ts`` (v1.3.0).
 
 MISAKA fork, kept to what the Python SDK and platform force (each is marked where it happens):
 
@@ -6,8 +6,8 @@ MISAKA fork, kept to what the Python SDK and platform force (each is marked wher
   headers, ``extra_body`` for undeclared fields, a pool per request for a federation clone, the 401 token drop).
 - Stream events are the parsed JSON dicts; pi's per-block ``index`` and ``partialJson`` scratch fields live in side
   tables because the content blocks are strict models.
-- A tool call's streamed arguments are parsed sparingly (``StreamingArgs``) and finalized through ``finish_into``,
-  which records a malformed object as ``argumentsError``.
+- A tool call's streamed arguments are parsed sparingly (``StreamingArgs``) and finalized through ``finish_into``
+  (upstream's ``parseToolCallArguments``).
 - httpx has no ``AbortSignal``: a read races the signal (``_common._iterate_async_iterable``).
 """
 
@@ -40,7 +40,10 @@ from misaka.ai.api.simple_options import (
     buildBaseOptions,
     clampMaxTokensToContext,
 )
-from misaka.ai.api.transform_messages import transformMessages
+from misaka.ai.api.transform_messages import (
+    splitErrorToolResultImages,
+    transformMessages,
+)
 from misaka.ai.env_api_keys import (
     ANTHROPIC_FEDERATION_RULE_ID_ENV,
     ANTHROPIC_IDENTITY_TOKEN_FILE_ENV,
@@ -85,6 +88,7 @@ from misaka.ai.utils._sdk_error import provider_error_status
 from misaka.ai.utils._streaming_args import StreamingArgs
 from misaka.ai.utils.diagnostics import (
     AssistantMessageDiagnostic,
+    DiagnosticErrorInfo,
     appendAssistantMessageDiagnostic,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
@@ -107,6 +111,7 @@ from misaka.utils.js import (
     jsonStringify,
     jsTrim,
     nullishCoalesce,
+    throwIfAborted,
 )
 from misaka.utils.values import maybe_await, signal_aborted
 
@@ -179,6 +184,13 @@ def _fromClaudeCodeName(name: str, tools: Sequence[Tool] | None = None) -> str:
     return name
 
 
+def _convertImageBlock(image: ImageContent) -> dict[str, Any]:
+    return {
+        "type": "image",
+        "source": {"type": "base64", "media_type": image.mimeType, "data": image.data},
+    }
+
+
 def _convertContentBlocks(content: Sequence[TextContent | ImageContent]) -> str | list[dict[str, Any]]:
     """Convert content blocks to Anthropic API format"""
     # If only text blocks, return as concatenated string for simplicity
@@ -188,12 +200,7 @@ def _convertContentBlocks(content: Sequence[TextContent | ImageContent]) -> str 
 
     # If we have images, convert to content block array
     blocks: list[dict[str, Any]] = [
-        {"type": "text", "text": sanitizeSurrogates(block.text)}
-        if block.type == "text"
-        else {
-            "type": "image",
-            "source": {"type": "base64", "media_type": block.mimeType, "data": block.data},
-        }
+        {"type": "text", "text": sanitizeSurrogates(block.text)} if block.type == "text" else _convertImageBlock(block)
         for block in content
     ]
 
@@ -215,6 +222,13 @@ _SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 _MID_CONVERSATION_OUTPUT_CONFIG_BETA = "mid-conversation-output-config-2026-07-01"
 _THINKING_BINDING_CONTROLS_BETA = "thinking-binding-controls-2026-08-01"
 _INLINE_TOOLS_BETA = "inline-tools-2026-09-15"
+# MISAKA fork: the messages of a 400 `invalid_request_error` that `stream` retries with preferred strict tools
+# downgraded, named (upstream lists them inline).
+_STRICT_TOOL_LIMIT_ERRORS = (
+    "The compiled grammar is too large",
+    "Too many strict tools (",
+    "Schemas contains too many parameters with union types (",
+)
 
 # Stable deferred tool declared whenever native tool changes are in use. Anthropic adds
 # hidden prompt scaffolding for mid-conversation tool changes; declaring this placeholder
@@ -574,18 +588,12 @@ def stream(
     currentTools = getCurrentTools(normalizedContext.messages)
 
     async def run() -> None:
-        providerThinkingLevel = (
-            nullishCoalesce(_option(options, "effort"), "high")
-            if _compat_value(model, "supportsMidConvoEffort")
-            else None
-        )
         output = AssistantMessage(
             role="assistant",
             content=[],
             api=model.api,
             provider=model.provider,
             model=model.id,
-            **({} if providerThinkingLevel is None else {"providerThinkingLevel": providerThinkingLevel}),
             usage=Usage(
                 input=0,
                 output=0,
@@ -639,24 +647,56 @@ def stream(
                 client = created.client
                 isOAuth = created.isOAuthToken
                 requestHeaders = created.requestHeaders
-            params = _buildParams(model, normalizedContext, isOAuth, options)
-            onPayload = _option(options, "onPayload")
-            nextParams = await maybe_await(onPayload(params, model)) if onPayload else None
-            if nextParams is not None:
-                params = {**nextParams, "stream": True}
             requestOptions = {
                 **({"signal": _option(options, "signal")} if _option(options, "signal") else {}),
                 **({"timeout": _option(options, "timeoutMs")} if _option(options, "timeoutMs") is not None else {}),
                 "maxRetries": 0,
             }
-            response = await retryProviderRequest(
-                lambda: _anthropic_sdk._create_raw_response(client, params, requestOptions, requestHeaders),
-                {
-                    "maxRetries": _option(options, "maxRetries"),
-                    "maxRetryDelayMs": _option(options, "maxRetryDelayMs"),
-                    "signal": _option(options, "signal"),
-                },
-            )
+            disablePreferredStrictTools = False
+            onPayload = _option(options, "onPayload")
+            while True:
+                throwIfAborted(_option(options, "signal"))
+                built = _buildParams(model, normalizedContext, isOAuth, options, disablePreferredStrictTools)
+                if built.providerThinkingLevel:
+                    output.providerThinkingLevel = built.providerThinkingLevel
+                params = built.params
+                nextParams = await maybe_await(onPayload(params, model)) if onPayload else None
+                if nextParams is not None:
+                    params = {**nextParams, "stream": True}
+                try:
+                    response = await retryProviderRequest(
+                        lambda params=params: _anthropic_sdk._create_raw_response(
+                            client, params, requestOptions, requestHeaders
+                        ),
+                        {
+                            "maxRetries": _option(options, "maxRetries"),
+                            "maxRetryDelayMs": _option(options, "maxRetryDelayMs"),
+                            "signal": _option(options, "signal"),
+                        },
+                    )
+                    break
+                except Exception as error:
+                    # Only downgrade a rejected request, never an already-started stream.
+                    if (
+                        signal_aborted(_option(options, "signal"))
+                        or disablePreferredStrictTools
+                        or not built.hasPreferredStrictTools
+                        or not _anthropic_sdk._is_api_status_error(error)
+                        or error.status_code != 400  # type: ignore[attr-defined]
+                        or error.type != "invalid_request_error"  # type: ignore[attr-defined]
+                        or not any(message in str(error) for message in _STRICT_TOOL_LIMIT_ERRORS)
+                    ):
+                        raise
+                    disablePreferredStrictTools = True
+                    appendAssistantMessageDiagnostic(
+                        output,
+                        AssistantMessageDiagnostic(
+                            type="anthropic_strict_tools_fallback",
+                            timestamp=time.time_ns() // 1_000_000,
+                            error=DiagnosticErrorInfo(message=str(error)),
+                            details={"reason": "strict_tool_limits_exceeded"},
+                        ),
+                    )
             onResponse = _option(options, "onResponse")
             if onResponse:
                 await maybe_await(
@@ -1096,12 +1136,22 @@ def _getBetaFeatures(
     return list(dict.fromkeys(features))
 
 
+class _BuiltParams(NamedTuple):
+    """MISAKA fork: ``buildParams``'s result object, named."""
+
+    params: dict[str, Any]
+    hasPreferredStrictTools: bool
+    # Effort of the final effort marker, recorded on the reply so later requests can replay it.
+    providerThinkingLevel: AnthropicEffort | None
+
+
 def _buildParams(
     model: Model,
     context: TranscriptContext,
     isOAuthToken: bool,
     options: Any = None,
-) -> dict[str, Any]:
+    disablePreferredStrictTools: bool = False,
+) -> _BuiltParams:
     cacheControl = _getCacheControl(model, _option(options, "cacheRetention"), _option(options, "env")).get("cacheControl")
     compat = _getAnthropicCompat(model)
     initialSystemMessage = getInitialSystemMessage(context.messages)
@@ -1112,35 +1162,49 @@ def _buildParams(
     # by value in a `tool_addition` block, which also expresses same-name redefinitions.
     # Anthropic rejects a tool list where every tool is deferred, so there must be an initial
     # active tool to anchor the placeholder. Otherwise the current tool list is sent.
+    hasPreferredStrictTools = False
+
+    def convertToolDefinitions(tools: Sequence[Tool], toolCacheControl: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        nonlocal hasPreferredStrictTools
+        definitions = _convertTools(
+            tools,
+            isOAuthToken,
+            compat.supportsEagerToolInputStreaming,
+            compat.supportsStrictTools,
+            toolCacheControl,
+            disablePreferredStrictTools,
+        )
+        if any(
+            definition.get("strict") is True and _isPreferredStrictJsonSchema(tools[index])
+            for index, definition in enumerate(definitions)
+        ):
+            hasPreferredStrictTools = True
+        return definitions
+
     initialTools = nullishCoalesce(initialSystemMessage.toolsAdded if initialSystemMessage else None, [])
     nativeToolChanges = bool(
         compat.supportsMidConvoSystemMessages and compat.supportsMidConvoToolChanges and len(initialTools) > 0
     )
+    thinkingDisabled = bool(
+        model.reasoning
+        and _option(options, "thinkingEnabled") is False
+        and (model.thinkingLevelMap or {}).get("off", UNDEFINED) is not None
+    )
+    # Effort cannot change between messages while thinking is disabled, so "off" sends no effort markers.
+    effortMessages = _compat_value(model, "supportsMidConvoEffort") is True and not thinkingDisabled
     converted = _convertMessages(
         conversationMessages,
         isOAuthToken,
         cacheControl,
         compat.allowEmptySignature,
-        model.provider if _compat_value(model, "supportsMidConvoEffort") is True else None,
-        (
-            (
-                lambda tools: _convertTools(
-                    tools, isOAuthToken, compat.supportsEagerToolInputStreaming, compat.supportsStrictTools
-                )
-            )
-            if nativeToolChanges
-            else None
-        ),
+        model.provider if effortMessages else None,
+        convertToolDefinitions if nativeToolChanges else None,
     )
     activeEffort = nullishCoalesce(_option(options, "effort"), "high")
     betaFeatures = _getBetaFeatures(model, context, isOAuthToken, nativeToolChanges, options)
     params: dict[str, Any] = {
         "model": model.id,
-        "messages": (
-            _insertThinkingLevelMessages(converted, activeEffort)
-            if _compat_value(model, "supportsMidConvoEffort") is True
-            else converted["messages"]
-        ),
+        "messages": _insertThinkingLevelMessages(converted, activeEffort) if effortMessages else converted["messages"],
         "max_tokens": nullishCoalesce(_option(options, "maxTokens"), model.maxTokens),
         "stream": True,
         **({"betas": betaFeatures} if len(betaFeatures) > 0 else {}),
@@ -1188,55 +1252,41 @@ def _buildParams(
         # placeholder. The list never changes afterwards: later tools are defined by value in
         # `tool_addition` blocks and withdrawn by `tool_removal`, so the cached prefix survives
         # every tool change.
-        params["tools"] = [
-            *_convertTools(
-                initialTools,
-                isOAuthToken,
-                compat.supportsEagerToolInputStreaming,
-                compat.supportsStrictTools,
-                toolCacheControl,
-            ),
-            _DEFERRED_TOOL_PLACEHOLDER,
-        ]
+        params["tools"] = [*convertToolDefinitions(initialTools, toolCacheControl), _DEFERRED_TOOL_PLACEHOLDER]
     else:
         tools = getCurrentTools(context.messages)
         if len(tools) > 0:
-            params["tools"] = _convertTools(
-                tools,
-                isOAuthToken,
-                compat.supportsEagerToolInputStreaming,
-                compat.supportsStrictTools,
-                toolCacheControl,
-            )
+            params["tools"] = convertToolDefinitions(tools, toolCacheControl)
 
-    # Managed effort models always use adaptive thinking so prefix mismatches can
-    # be dropped instead of surfacing as persistent 400 responses.
-    if _compat_value(model, "supportsMidConvoEffort") is True:
+    if thinkingDisabled:
+        # No effort is sent, so the model default applies. Anthropic rejects `block_binding`
+        # with disabled thinking.
+        params["thinking"] = {"type": "disabled"}
+    elif effortMessages:
+        # Managed effort models use adaptive thinking so prefix mismatches can
+        # be dropped instead of surfacing as persistent 400 responses.
         params["thinking"] = {
             "type": "adaptive",
             "display": nullishCoalesce(_option(options, "thinkingDisplay"), "summarized"),
             "block_binding": {"prefix_mismatch_behavior": "drop_block"},
         }
         params["output_config"] = {"effort": "high"}
-    elif model.reasoning:
-        if _option(options, "thinkingEnabled"):
-            # Default to "summarized" so Opus 4.7 and Mythos Preview behave like
-            # older Claude 4 models (whose API default is also "summarized").
-            display: AnthropicThinkingDisplay = nullishCoalesce(_option(options, "thinkingDisplay"), "summarized")
-            if _compat_value(model, "forceAdaptiveThinking") is True:
-                # Adaptive thinking: Claude decides when and how much to think.
-                params["thinking"] = {"type": "adaptive", "display": display}
-                if _option(options, "effort"):
-                    params["output_config"] = {"effort": _option(options, "effort")}
-            else:
-                # Budget-based thinking for older models
-                params["thinking"] = {
-                    "type": "enabled",
-                    "budget_tokens": _option(options, "thinkingBudgetTokens") or 1024,
-                    "display": display,
-                }
-        elif _option(options, "thinkingEnabled") is False and (model.thinkingLevelMap or {}).get("off", UNDEFINED) is not None:
-            params["thinking"] = {"type": "disabled"}
+    elif model.reasoning and _option(options, "thinkingEnabled"):
+        # Default to "summarized" so Opus 4.7 and Mythos Preview behave like
+        # older Claude 4 models (whose API default is also "summarized").
+        display: AnthropicThinkingDisplay = nullishCoalesce(_option(options, "thinkingDisplay"), "summarized")
+        if _compat_value(model, "forceAdaptiveThinking") is True:
+            # Adaptive thinking: Claude decides when and how much to think.
+            params["thinking"] = {"type": "adaptive", "display": display}
+            if _option(options, "effort"):
+                params["output_config"] = {"effort": _option(options, "effort")}
+        else:
+            # Budget-based thinking for older models
+            params["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": _option(options, "thinkingBudgetTokens") or 1024,
+                "display": display,
+            }
 
     metadata = _option(options, "metadata")
     if metadata:
@@ -1255,7 +1305,7 @@ def _buildParams(
     if allowedFallbackModels and len(allowedFallbackModels) > 0:
         params["fallbacks"] = [{"model": fallback.model} for fallback in allowedFallbackModels]
 
-    return params
+    return _BuiltParams(params, hasPreferredStrictTools, activeEffort if effortMessages else None)
 
 
 _TOOL_CALL_ID_DISALLOWED = re.compile(r"[^a-zA-Z0-9_-]")
@@ -1268,11 +1318,11 @@ def _normalizeToolCallId(id: str, *_: Any) -> str:
     return _TOOL_CALL_ID_DISALLOWED.sub(lambda match: "_" * jsLength(match.group()), id)[:64]
 
 
-def _convertToolResult(msg: ToolResultMessage) -> dict[str, Any]:
+def _convertToolResult(msg: ToolResultMessage, content: Sequence[TextContent | ImageContent] | None = None) -> dict[str, Any]:
     return {
         "type": "tool_result",
         "tool_use_id": msg.toolCallId,
-        "content": _convertContentBlocks(msg.content),
+        "content": _convertContentBlocks(msg.content if content is None else content),
         "is_error": msg.isError,
     }
 
@@ -1341,12 +1391,7 @@ def _convertMessages(
                     params.append({"role": "user", "content": sanitizeSurrogates(msg.content)})
             else:
                 blocks = [
-                    {"type": "text", "text": sanitizeSurrogates(item.text)}
-                    if item.type == "text"
-                    else {
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": item.mimeType, "data": item.data},
-                    }
+                    {"type": "text", "text": sanitizeSurrogates(item.text)} if item.type == "text" else _convertImageBlock(item)
                     for item in msg.content
                 ]
                 filteredBlocks = [b for b in blocks if b["type"] != "text" or jsLength(jsTrim(b["text"])) > 0]
@@ -1413,15 +1458,22 @@ def _convertMessages(
         elif msg.role == "toolResult":
             # Collect all consecutive toolResult messages, needed for z.ai Anthropic endpoint.
             toolResults: list[dict[str, Any]] = []
+            # Anthropic rejects error tool results that contain anything but text, so their images follow
+            # all tool results of the turn, which must come first in the user message (#10794).
+            errorImages: list[dict[str, Any]] = []
             j = i
             while j < len(transformedMessages) and transformedMessages[j].role == "toolResult":
-                toolResults.append(_convertToolResult(transformedMessages[j]))  # type: ignore[arg-type]
+                toolMsg: Any = transformedMessages[j]
+                split = splitErrorToolResultImages(toolMsg)
+                toolResults.append(_convertToolResult(toolMsg, split.content if split else None))
+                if split:
+                    errorImages.extend([{"type": "text", "text": split.caption}, *map(_convertImageBlock, split.images)])
                 j += 1
 
             # Skip the messages we've already processed.
             i = j - 1
 
-            params.append({"role": "user", "content": toolResults})
+            params.append({"role": "user", "content": [*toolResults, *errorImages]})
         i += 1
 
     flushPendingSystemMessages()
@@ -1528,18 +1580,30 @@ def _isAnthropicStrictUnsupportedKeyword(key: str, value: Any) -> bool:
 _SCHEMA_DEFINITION_KEYS = ("$defs", "definitions")
 
 
+def _isPreferredStrictJsonSchema(tool: Tool) -> bool:
+    """MISAKA fork: ``config && config.type === "json_schema" && config.strict === "prefer"`` for
+    ``config = tool.constrainedSampling``, which ``buildParams`` and ``convertTools`` both test, named."""
+    config = tool.constrainedSampling
+    return bool(config) and config.type == "json_schema" and getattr(config, "strict", None) == "prefer"
+
+
 def _convertTools(
     tools: Sequence[Tool],
     isOAuthToken: bool,
     supportsEagerToolInputStreaming: bool,
     supportsStrictTools: bool,
     cacheControl: dict[str, Any] | None = None,
+    disablePreferredStrictTools: bool = False,
 ) -> list[dict[str, Any]]:
     if not tools:
         return []
 
     def convert(index: int, tool: Tool) -> dict[str, Any]:
-        strict = resolveJsonSchemaStrictSampling(tool, supportsStrictTools, _isAnthropicStrictUnsupportedKeyword)
+        strict = (
+            None
+            if disablePreferredStrictTools and _isPreferredStrictJsonSchema(tool)
+            else resolveJsonSchemaStrictSampling(tool, supportsStrictTools, _isAnthropicStrictUnsupportedKeyword)
+        )
         parameters = getJsonSchemaToolParameters(tool, strict)
         schema = parameters
         legacyInputSchema = {

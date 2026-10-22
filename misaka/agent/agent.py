@@ -176,6 +176,12 @@ class _PendingMessageQueue:
     def clear(self) -> None:
         self._messages = []
 
+    def take(self, predicate: Callable[[AgentMessage], bool]) -> list[AgentMessage]:
+        """MISAKA fork: remove and return the messages ``predicate`` selects, in queue order."""
+        taken = [message for message in self._messages if predicate(message)]
+        self._messages = [message for message in self._messages if not predicate(message)]
+        return taken
+
 
 @dataclass(slots=True)
 class _ActiveRun:
@@ -301,6 +307,11 @@ class Agent:
         """Preview the messages selected for the next turn without consuming them."""
         steering = self._steeringQueue.peek()
         return steering if len(steering) > 0 else self._followUpQueue.peek()
+
+    def takeQueuedMessages(self, predicate: Callable[[AgentMessage], bool]) -> list[AgentMessage]:
+        """MISAKA fork: remove the queued messages ``predicate`` selects and return them, steering first. The
+        session takes back what was queued into a run that then never started (``AgentSession._startRun``)."""
+        return [*self._steeringQueue.take(predicate), *self._followUpQueue.take(predicate)]
 
     @property
     def signal(self) -> AbortSignal | None:

@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/src/utils/retry.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/src/utils/retry.ts`` (v1.3.0).
 
 MISAKA fork: a few more patterns (marked where they stand), and callbacks are called the way JavaScript calls them:
 the optional trailing ``finalError`` only reaches a callback that accepts it.
@@ -65,13 +65,18 @@ _RETRYABLE_PROVIDER_ERROR_PATTERN = _buildProviderErrorPattern(
         "504",
         "520",
         "524",
-        "service.?unavailable",
+        # Also matches "The service is temporarily unavailable" (#10965).
+        "service.?(?:is.?)?(?:temporarily.?)?unavailable",
         "server.?error",
         "internal.?error",
         # Wrapper/provider text for transient upstream failures, including OpenRouter
-        # "Provider returned error" responses (#2264).
-        "provider.?returned.?error",
+        # "Provider returned error" responses (#2264) and gateway wording such as
+        # "The upstream provider returned an error" (#10842).
+        "provider.?returned.?(?:an.?)?error",
         "exceeded request buffer limit while retrying upstream",
+        # Gateway failure relaying the upstream response stream, sent as an OpenAI
+        # Responses `response.failed` event without an error code (#10920).
+        "unable to forward upstream",
         # Network, proxy, and fetch transport failures. This includes OpenAI Codex
         # raw-fetch failures such as "upstream connect", "connection refused", and
         # "reset before headers" (#733), plus OpenRouter connection drops (#3317).

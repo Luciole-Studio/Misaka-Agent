@@ -123,7 +123,7 @@ async def test_hands_a_generation_over_to_its_tool_round_and_starts_a_tool_with_
     setup = chatSetup()
 
     async def noop(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": []}
+        return {"output": []}
 
     addTool(
         setup.registry,
@@ -347,7 +347,7 @@ async def test_starts_calls_the_request_did_not_offer_as_done_and_marks_a_faulte
 
     # Not strict JSON: the result commit throws and the scheduler faults the task.
     async def bad(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": [], "details": {"fn": lambda: 1}}
+        return {"output": [], "details": {"fn": lambda: 1}}
 
     addTool(setup.registry, defineTool({"name": "bad", "description": "bad", "parameters": EMPTY_OBJECT, "execute": bad}))
     setup.faux.setResponses(
@@ -380,7 +380,7 @@ async def test_commits_the_tool_calling_answer_its_tool_tasks_the_generations_wa
     setup = chatSetup()
 
     async def noop(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": []}
+        return {"output": []}
 
     addTool(
         setup.registry,

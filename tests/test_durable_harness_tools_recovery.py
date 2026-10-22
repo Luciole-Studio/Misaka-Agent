@@ -209,7 +209,7 @@ async def test_reruns_before_tool_when_interrupted_before_intent_and_executes_on
     async def execute(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         nonlocal runs
         runs += 1
-        return {"content": []}
+        return {"output": []}
 
     addTool(setup.registry, tool("work", execute))
     reached = deferred()
@@ -243,7 +243,7 @@ async def test_reruns_the_generation_tools_phase_interrupted_before_its_commit(s
     setup = chatSetup()
 
     async def execute(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": []}
+        return {"output": []}
 
     addTool(setup.registry, tool("work", execute))
     reached = deferred()
@@ -299,7 +299,7 @@ async def test_lets_context_derivation_answer_a_faulted_tool_and_continues_the_r
 
     # A result that is not strict JSON makes the result commit throw, so the scheduler faults the task.
     async def bad(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": [], "details": {"fn": lambda: 1}}
+        return {"output": [], "details": {"fn": lambda: 1}}
 
     addTool(setup.registry, tool("bad", bad))
     requests: list[str] = []

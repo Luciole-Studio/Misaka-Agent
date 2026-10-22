@@ -1,5 +1,5 @@
 """Translated from pi's ``packages/ai/test/github-copilot-anthropic.test.ts`` and
-``anthropic-adaptive-thinking-models.test.ts`` (v1.1.0).
+``anthropic-adaptive-thinking-models.test.ts`` (v1.3.0).
 
 MISAKA fork: upstream mocks the SDK constructor to read the client options; here the request goes to a local HTTP
 server, and the headers it carries show the same choices (Bearer auth, no API key, the Copilot headers).
@@ -121,9 +121,6 @@ EXPECTED_CURRENT_ADAPTIVE_THINKING_MODELS = [
     "fireworks/accounts/fireworks/models/deepseek-v4p1-flash",
     "fireworks/accounts/fireworks/models/gpt-oss-120b",
     "fireworks/accounts/fireworks/models/qwen3p8-max",
-    "kimi-coding/kimi-for-coding",
-    "kimi-coding/k3",
-    "kimi-coding/kimi-for-coding-highspeed",
     "opencode/claude-opus-4-8",
     "opencode/claude-opus-5",
     "vercel-ai-gateway/anthropic/claude-opus-4.8",
@@ -148,7 +145,7 @@ def test_marks_built_in_anthropic_messages_models_that_use_adaptive_thinking():
     assert set(EXPECTED_CURRENT_ADAPTIVE_THINKING_MODELS) <= set(flaggedModels)
     # Regression for #9323: Fireworks uses catalog effort metadata and
     # verified fallbacks, not a fixed set of adaptive model names.
-    pattern = re.compile(r"(opus[-.](4[-.][678]|5)|sonnet[-.]4[-.]6|sonnet[-.]5|haiku[-.]5[-.]5|fable[-.]5|kimi-coding/)")
+    pattern = re.compile(r"(opus[-.](4[-.][678]|5)|sonnet[-.]4[-.]6|sonnet[-.]5|haiku[-.]5[-.]5|fable[-.]5)")
     assert flaggedModels == [
         modelId for modelId in flaggedModels if modelId.startswith("fireworks/") or pattern.search(modelId)
     ]

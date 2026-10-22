@@ -1,4 +1,4 @@
-"""Translated from the ``copyToClipboard`` cases of pi's ``coding-agent/test/clipboard.test.ts`` (v1.1.0)."""
+"""Translated from the ``copyToClipboard`` cases of pi's ``coding-agent/test/clipboard.test.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ class _Stdout:
 @pytest.fixture
 def mocks(monkeypatch):
     for name in ("SSH_CONNECTION", "SSH_CLIENT", "MOSH_CONNECTION", "WAYLAND_DISPLAY", "DISPLAY", "TERMUX_VERSION",
-                 "WT_SESSION", "WSL_DISTRO_NAME", "WSLENV"):
+                 "WT_SESSION", "WSL_DISTRO_NAME", "WSLENV", "MISAKA_CLIPBOARD_OSC52", "PI_CLIPBOARD_OSC52"):
         monkeypatch.delenv(name, raising=False)
     state = SimpleNamespace(
         platform="darwin",
@@ -80,6 +80,28 @@ async def test_waits_for_the_native_write_before_emitting_remote_osc52(mocks, mo
     await copy
     assert len(mocks.osc52Writes) == 1
     mocks.command.assert_not_called()
+
+
+@pytest.mark.parametrize(("platform", "display"), [("darwin", None), ("win32", None), ("linux", ":99")])
+async def test_misaka_clipboard_osc52_emits_osc52_after_a_successful_copy(mocks, monkeypatch, platform, display):
+    # Regression test for #10826, #10835, #10114: remote clients without SSH markers.
+    # MISAKA fork: the variable is `MISAKA_CLIPBOARD_OSC52` (pi: `PI_CLIPBOARD_OSC52`).
+    mocks.platform = platform
+    if display:
+        monkeypatch.setenv("DISPLAY", display)
+    monkeypatch.setenv("MISAKA_CLIPBOARD_OSC52", "1")
+    await clipboard.copyToClipboard("hello")
+    if platform == "linux":
+        mocks.command.assert_any_await("xclip", ["-selection", "clipboard"], {"input": "hello", "timeoutMs": 5000})
+    else:
+        mocks.clipboard.setText.assert_awaited_once_with("hello")
+    assert mocks.osc52Writes == ["\x1b]52;c;aGVsbG8=\x07"]
+
+
+async def test_pi_clipboard_osc52_is_not_read(mocks, monkeypatch):
+    monkeypatch.setenv("PI_CLIPBOARD_OSC52", "1")
+    await clipboard.copyToClipboard("hello")
+    assert mocks.osc52Writes == []
 
 
 async def test_a_rejected_native_write_falls_back_to_pbcopy(mocks):

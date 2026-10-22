@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/coding-agent/src/core/prompt-templates.ts`` (v1.1.0).
+"""Translated from pi's ``packages/coding-agent/src/core/prompt-templates.ts`` (v1.3.0).
 
 MISAKA forks:
 - The project prompts directory is the project's MISAKA home (``home.project_dir``), which a cwd at $HOME has none of.
@@ -51,6 +51,8 @@ def parseCommandArgs(argsString: str) -> list[str]:
     """
     args: list[str] = []
     current = ""
+    # Tracks whether a token has started, so quoted empty strings ("" or '') are kept as arguments
+    hasToken = False
     inQuote: str | None = None
 
     for char in argsString:
@@ -61,14 +63,17 @@ def parseCommandArgs(argsString: str) -> list[str]:
                 current += char
         elif char == '"' or char == "'":
             inQuote = char
+            hasToken = True
         elif char in ECMASCRIPT_WHITESPACE:
-            if current:
+            if hasToken:
                 args.append(current)
                 current = ""
+                hasToken = False
         else:
             current += char
+            hasToken = True
 
-    if current:
+    if hasToken:
         args.append(current)
 
     return args

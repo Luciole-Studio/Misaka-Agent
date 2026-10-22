@@ -1,4 +1,4 @@
-"""Translated from pi-tui's ``packages/tui/src/stdin-buffer.ts`` (v1.1.0).
+"""Translated from pi-tui's ``packages/tui/src/stdin-buffer.ts`` (v1.3.0).
 
 StdinBuffer buffers input and emits complete sequences.
 
@@ -40,6 +40,13 @@ DEFAULT_SEQUENCE_TIMEOUT_MS = 50
 DEFAULT_ESCAPE_TIMEOUT_MS = 10
 BRACKETED_PASTE_START = "\x1b[200~"
 BRACKETED_PASTE_END = "\x1b[201~"
+# Color and program-status OSC replies, XTVersion, and Kitty graphics replies.
+# Until their header is complete, the input may be batched legacy Alt keystrokes.
+TERMINAL_REPLY_HEADER_PATTERN = RegExp(r"^\x1b(?:\](?:1[01];|4;\d{1,3};|7501;\?)|P>\||_G(?:[a-z]=\d+,)*[a-z]=\d+;)")
+
+
+def isControlString(data: str) -> bool:
+    return data.startswith(f"{ESC}]") or data.startswith(f"{ESC}P") or data.startswith(f"{ESC}_")  # noqa: PIE810
 
 
 def isCompleteSequence(data: str) -> Literal["complete", "incomplete", "not-escape"]:
@@ -193,9 +200,21 @@ def extractCompleteSequences(buffer: str) -> ExtractedSequences:
 
         # Try to extract a sequence starting at this position
         if remaining.startswith(ESC):
+            terminalReply = isControlString(remaining) and TERMINAL_REPLY_HEADER_PATTERN.test(remaining)
             # Find the end of this escape sequence
             seqEnd = 1
             while seqEnd <= len(remaining):
+                if terminalReply and seqEnd > 2:
+                    char = remaining[seqEnd - 1]
+                    if char == "\x18" or char == "\x1a":
+                        # CAN and SUB cancel the string, not subsequent keyboard input.
+                        pos += seqEnd
+                        break
+                    if char == ESC and seqEnd < len(remaining) and remaining[seqEnd] != "\\":
+                        # A new escape sequence aborts an unterminated reply. Keep a
+                        # trailing ESC buffered until we can distinguish it from ST.
+                        pos += seqEnd - 1
+                        break
                 candidate = remaining[:seqEnd]
                 status = isCompleteSequence(candidate)
 
@@ -243,8 +262,10 @@ def extractCompleteSequences(buffer: str) -> ExtractedSequences:
 
 
 class StdinBufferOptions(TypedDict, total=False):
-    # Maximum time to wait for an incomplete sequence such as CSI or mouse
-    # (default: 50ms).
+    # Maximum time to wait for an incomplete keyboard or mouse sequence
+    # (default: 50ms). Strings with a recognized terminal reply header wait for
+    # their terminator instead, so delayed replies cannot become keypresses.
+    # Ambiguous legacy Alt-key input still uses this timeout.
     timeout: float
     # Maximum time to wait after a lone ESC before treating it as Escape
     # (default: 10ms). Increase for high-latency Alt+key input (SSH).
@@ -379,13 +400,25 @@ class StdinBuffer:
             self.emitDataSequence(sequence)
 
         if len(self.buffer) > 0:
+            # Only a recognizable reply header establishes a delimited string.
+            # Flushing it would turn a delayed tail into text and an OSC's BEL
+            # terminator into Ctrl+G (the external editor shortcut). Other input,
+            # including Alt+] followed by text, must retain bounded recovery.
+            if TERMINAL_REPLY_HEADER_PATTERN.test(self.buffer):
+                return
             timeoutMs = self.escapeTimeoutMs if self.buffer == ESC else self.timeoutMs
 
             def onTimeout() -> None:
                 flushed = self.flush()
 
                 for sequence in flushed:
-                    self.emitDataSequence(sequence)
+                    if len(sequence) > 2 and isControlString(sequence):
+                        # Recover the Alt key and reparse its tail so batched text,
+                        # Enter, and control keys are not swallowed as one event.
+                        self.emitDataSequence(sequence[:2])
+                        self.process(sequence[2:])
+                    else:
+                        self.emitDataSequence(sequence)
 
             # MISAKA fork: `setTimeout` on the event loop (see `loop`); input arrives on the loop's thread.
             loop = self.loop if self.loop is not None else asyncio.get_running_loop()

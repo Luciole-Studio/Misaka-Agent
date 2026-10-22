@@ -11,7 +11,7 @@ calls. Only the script's output reaches the model; nested results do not.
 
 Nested results are handed to the script as follows:
 - A tool that declares ``outputSchema`` resolves to its ``structuredContent``, also for error results
-  that carry one (MCP tools resolve to their ``CallToolResult``, including ``isError``).
+  that carry one.
 - Any other tool resolves to its text content as one string.
 - A failed, blocked, or invalid call rejects with an Error carrying the tool's error text.
 
@@ -26,6 +26,7 @@ Translated from pi's ``coding-agent/src/extensions/codemode/tool.ts``.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,8 +36,6 @@ from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import GrammarConstrainedSamplingConfig
 from misaka.ai.utils.typebox_helpers import typeboxSchema
 from misaka.codemode.declarations import (
-    MCP_TYPESCRIPT_PREAMBLE,
-    mcpStructuredContentSchema,
     renderToolOutputType,
     renderToolSample,
     toCodemodeIdentifier,
@@ -49,10 +48,17 @@ from misaka.core.extensions.types import (
     ToolLoadoutChanges,
     ToolNamespace,
 )
+from misaka.core.settings_defaults import SETTINGS_DEFAULTS
 from misaka.core.settings_manager import CodemodeMode
 from misaka.core.tools.tool_definition_wrapper import wrapToolDefinition
 from misaka.utils.collation import localeSortKey
-from misaka.utils.js import jsCollapseWhitespace, jsLength, jsTrim, nullishCoalesce
+from misaka.utils.js import (
+    jsCollapseWhitespace,
+    jsLength,
+    jsTrim,
+    nullishCoalesce,
+    objectEntries,
+)
 from misaka.utils.values import read_field
 
 from .execute_lazy import loadCodemodeExecutor
@@ -117,13 +123,6 @@ class CodemodeToolInput(TypedDict):
     code: str
 
 
-def isCodemodeTool(tool: Any) -> bool:
-    """Whether a registered tool is this package's ``codemode`` tool rather than another extension's
-    tool with the same name. Compares the parameter schema, which the definition passes through by
-    reference."""
-    return read_field(tool, "name") == CODEMODE_TOOL_NAME and read_field(tool, "parameters") is codemodeSchema
-
-
 type CodemodeNestedCallStatus = Literal["running", "ok", "error", "cancelled"]
 
 
@@ -167,7 +166,8 @@ DESCRIPTION_INTRO = (
     "Run JavaScript that calls other tools. The input is raw JavaScript (not JSON, no code fence), run as an async "
     "function body in a QuickJS sandbox: top-level `await` and `return` work. No Node, file system, network, or timers.\n"
     "- `await tools.<name>({ ...args })` resolves to a string, or an object if the tool's declaration says so, and "
-    "rejects with an Error on failure. Calls still running when the script ends are cancelled.\n"
+    "rejects with an Error on failure. A tool whose declaration returns an object resolves on failure too when it "
+    "returned that object; check its fields. Calls still running when the script ends are cancelled.\n"
     '- Optional first line: `// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}`'
 )
 
@@ -186,7 +186,7 @@ def describeGlobals(models: bool) -> str:
 
 
 # Default for `CodemodeDescriptionOptions.inlineBudget`, in estimated tokens.
-DEFAULT_CODEMODE_INLINE_BUDGET = 3000
+DEFAULT_CODEMODE_INLINE_BUDGET = SETTINGS_DEFAULTS["codemode"]["inlineBudget"]
 # Characters per token when estimating the cost of a tool section.
 CHARS_PER_TOKEN = 4
 
@@ -281,10 +281,9 @@ def selectCatalog(groups: Sequence[_CatalogGroup], budget: float | None) -> set[
 
 def createCodemodeDescription(tools: Sequence[Any], options: CodemodeDescriptionOptions | None = None) -> str:
     """Model-facing description: the helper list, guidance for finding tools that are not listed, the
-    shared MCP types when listed tools need them, the ``models`` API, and one section per listed tool,
-    grouped by namespace. Deferred tools are never listed and do not affect the description at all,
-    so it stays the same while MCP servers connect or change their tools. Tool sections are limited
-    to ``inlineBudget``."""
+    ``models`` API, and one section per listed tool, grouped by namespace. Deferred tools are never
+    listed and do not affect the description at all, so it stays the same while tools are registered
+    late (for example by MCP servers that connect). Tool sections are limited to ``inlineBudget``."""
     options = options or {}
     deferred = options.get("deferred") or set()
     namespaces = options.get("namespaces") or {}
@@ -308,11 +307,6 @@ def createCodemodeDescription(tools: Sequence[Any], options: CodemodeDescription
     shown = selectCatalog(ordered, options.get("inlineBudget"))
 
     sections = [DESCRIPTION_INTRO, describeGlobals(options.get("models") is True)]
-    if any(
-        declaration["name"] in shown and mcpStructuredContentSchema(declaration["outputSchema"]) is not None
-        for declaration in declarations
-    ):
-        sections.append(f"Shared MCP Types:\n```ts\n{MCP_TYPESCRIPT_PREAMBLE}\n```")
     if len(declarations) == 0:
         return "\n\n".join(sections)
 
@@ -334,21 +328,35 @@ def createCodemodeDescription(tools: Sequence[Any], options: CodemodeDescription
     return "\n\n".join(sections)
 
 
+def describeFields(schema: Any, depth: int) -> str | None:
+    """The field names of an object schema, ``{ output, exit_code, full_output_path? }``, with the fields of
+    object-typed fields ``depth`` levels deep: ``{ content, structuredContent?: { results } }``. ``None`` for
+    other schemas."""
+    # `typeof schema !== "object" || schema === null`: an array has no `type` and is left out below.
+    if not isinstance(schema, dict | list):
+        return None
+    fields_ = schema if isinstance(schema, dict) else {}
+    type, properties, required = fields_.get("type"), fields_.get("properties"), fields_.get("required")
+    if type != "object" or not isinstance(properties, dict | list):
+        return None
+    # Only strings can name a property; the set skips anything else (and anything unhashable).
+    requiredNames = {entry for entry in required if isinstance(entry, str)} if isinstance(required, list) else set()
+    fields: list[str] = []
+    # `Object.entries(properties)`: integer-like names first, ascending; an array's entries are its indexes.
+    for name, field_ in objectEntries(properties) if isinstance(properties, dict) else ((str(index), item) for index, item in enumerate(properties)):
+        nested = describeFields(field_, depth - 1) if depth > 0 else None
+        fields.append(f"{name}{'' if name in requiredNames else '?'}{f': {nested}' if nested else ''}")
+    return f"{{ {', '.join(fields)} }}"
+
+
 def describeOutput(schema: CodemodeJsonSchema | None) -> str:
-    """What a script call resolves to, in one line: ``a string``, the field names of an object
-    (``{ output, exit_code, full_output_path? }``), or the rendered type for anything else."""
+    """What a script call resolves to, in one line: ``a string``, the field names of an object (see
+    ``describeFields``), or the rendered type for anything else."""
     type = renderToolOutputType(schema)
     if type == "string":
         return "a string"
-    object_ = schema if isinstance(schema, dict) else None
-    properties = object_.get("properties") if object_ is not None else None
-    if object_ is not None and object_.get("type") == "object" and isinstance(properties, dict) and mcpStructuredContentSchema(schema) is None:
-        required_ = object_.get("required")
-        required = set(required_) if isinstance(required_, list) else set()
-        fields = [name if name in required else f"{name}?" for name in properties]
-        return f"`{{ {', '.join(fields)} }}`"
-    collapsed = jsCollapseWhitespace(type)
-    return f"`{collapsed}`"
+    fields = describeFields(schema, 1)
+    return f"`{fields if fields is not None else jsCollapseWhitespace(type)}`"
 
 
 def describeScriptCall(tool: Any) -> str:
@@ -371,7 +379,9 @@ def prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptions) -
 
     Listing by exposure, not by the active set, keeps the codemode description unchanged when
     ``tool_search`` loads a tool, so loads do not redeclare codemode."""
-    mode = nullishCoalesce(options.getMode() if options.getMode is not None else None, "on")
+    mode = nullishCoalesce(
+        options.getMode() if options.getMode is not None else None, SETTINGS_DEFAULTS["codemode"]["mode"]
+    )
 
     def isDirect(tool: Any) -> bool:
         return loadout.getExposure(tool.name) == "direct"
@@ -407,6 +417,20 @@ def prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptions) -
     }
 
 
+# Script globals that list or look up tools and namespaces, which the script may then call by any name.
+# `re.ASCII`: JavaScript's `\b` and `\w` are ASCII-only.
+DISCOVERY_GLOBALS = re.compile(r"\b(searchTools|describeNamespace|describeTool|ALL_TOOLS)\b", re.ASCII)
+
+
+def getScriptReach(code: Any) -> Literal["all"] | list[str]:
+    """The tools a script may call (``ToolDefinition.reachesTools``): every tool when it uses a discovery
+    global, else the words of its source, so ``tools.mcp__docs__search`` and
+    ``tools["mcp__docs__" + name]`` both name the ``mcp__docs`` namespace."""
+    if not isinstance(code, str):
+        return []
+    return "all" if DISCOVERY_GLOBALS.search(code) else re.findall(r"\w+", code, re.ASCII)
+
+
 def createCodemodeToolDefinition(options: CodemodeToolOptions | None = None) -> ToolDefinition[CodemodeToolInput, CodemodeToolDetails | None]:
     options = options or CodemodeToolOptions()
 
@@ -426,6 +450,7 @@ def createCodemodeToolDefinition(options: CodemodeToolOptions | None = None) -> 
         # Scripts must not start other scripts.
         exposure="model-only",
         prepareLoadout=lambda loadout: prepareCodemodeLoadout(loadout, options),
+        reachesTools=lambda input: getScriptReach(read_field(input, "code")),
         # Capable models write the script as raw text instead of a JSON-escaped string.
         constrainedSampling=GrammarConstrainedSamplingConfig(variants={"openai_lark": CODEMODE_SOURCE_GRAMMAR}),
         execute=execute,
@@ -464,6 +489,6 @@ __all__ = [
     "createCodemodeTool",
     "createCodemodeToolDefinition",
     "getCodemodeCallableTools",
-    "isCodemodeTool",
+    "getScriptReach",
     "toCodemodeDeclaration",
 ]

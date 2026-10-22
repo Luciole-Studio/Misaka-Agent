@@ -1,6 +1,6 @@
 """The built-in compaction task: summarize an old prefix of the model context and place the summary as an entry.
 
-Translated from pi's ``packages/durable/src/harness/compaction.ts`` (spec section 8.7). A compaction input is
+Translated from pi's ``packages/durable/src/harness/compaction.ts`` (v1.3.0, spec section 8.7). A compaction input is
 ``{"reason", "instructions"?}``; the pinned summarization request is ``{"attempt", "model", "thinkingLevel",
 "streamOptions", "maxTokens", "tail", "firstKept"}``; a checkpoint is ``{"phase": "select"}``, ``{"phase": "summarize",
 **request}`` or ``{"phase": "retry", "until", **request}``.
@@ -34,7 +34,13 @@ from .ai_bridge import (
     toMessageDict,
 )
 from .context import orderToolResults
-from .live import LiveDoc, addCompactionStatus, compactionStatus, removeCompactionStatus
+from .live import (
+    LiveDoc,
+    addCompactionStatus,
+    compactionStatus,
+    failCompactionStatus,
+    removeCompactionStatus,
+)
 from .provider import ensureProviderSessionId
 from .usage import recordUsage
 
@@ -191,8 +197,8 @@ async def summarizePhase(task: dict[str, Any], runtime: Any, context: Context) -
             if status is not None:
                 status["retry"] = {"at": until, "error": message.get("errorMessage") or ""}
             return {"status": "running", "checkpoint": {"phase": "retry", **request, "until": until}}
-        removeCompactionStatus(live, runtime.taskId)
         text = summaryFailure(message)
+        failCompactionStatus(live, runtime.taskId, text)
         return {
             "status": "terminal",
             "outcome": {"status": "failed", "error": {"message": text, "detail": {"reason": "model_error"}}},
@@ -368,7 +374,9 @@ def summaryPrompt(messages: list[dict[str, Any]], instructions: str | None) -> s
 
 def serializeConversation(messages: list[dict[str, Any]]) -> str:
     """Messages as plain text, so the summarizer reads a transcript instead of continuing it. System messages are
-    omitted."""
+    omitted. Thinking is omitted too: providers return summaries of the real reasoning, and replayed thinking is often
+    not part of the live context (a block that does not match its request is dropped), so including it can make the
+    request larger than the context it summarizes. Visible text, tool calls, and tool results record what happened."""
     parts: list[str] = []
     for message in messages:
         if message["role"] == "user":
@@ -376,15 +384,12 @@ def serializeConversation(messages: list[dict[str, Any]]) -> str:
             if len(text) > 0:
                 parts.append(f"[User]: {text}")
         elif message["role"] == "assistant":
-            thinking = [content["thinking"] for content in message["content"] if content["type"] == "thinking"]
             texts = [content["text"] for content in message["content"] if content["type"] == "text"]
             calls = [
                 f"{content['name']}({', '.join(f'{key}={jsonStringify(value)}' for key, value in content['arguments'].items())})"
                 for content in message["content"]
                 if content["type"] == "toolCall"
             ]
-            if len(thinking) > 0:
-                parts.append(f"[Assistant thinking]: {chr(10).join(thinking)}")
             if len(texts) > 0:
                 parts.append(f"[Assistant]: {chr(10).join(texts)}")
             if len(calls) > 0:
@@ -430,6 +435,8 @@ async def placeSummary(
     from .submissions import admitSubmission
 
     removeCompactionStatus(live, runtime.taskId)
+    if "compactionFailure" in live:
+        del live["compactionFailure"]
     text = f"{SUMMARY_PREFIX}{summary}{SUMMARY_SUFFIX}"
     entry = {
         "kind": CompactionEntry.kind,
@@ -466,7 +473,7 @@ async def failNoModel(runtime: Any, ref: dict[str, Any] | None, context: Context
     message = "No model is configured" if ref is None else f"Model {ref['provider']}/{ref['modelId']} is not available"
 
     async def fail(tx: Tx, current: dict[str, Any]) -> dict[str, Any]:
-        removeCompactionStatus(await tx.doc(LiveDoc, runtime.conversationId), runtime.taskId)
+        failCompactionStatus(await tx.doc(LiveDoc, runtime.conversationId), runtime.taskId, message)
         return {
             "status": "terminal",
             "outcome": {"status": "failed", "error": {"message": message, "detail": {"reason": "no_model"}}},

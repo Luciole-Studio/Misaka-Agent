@@ -2,7 +2,7 @@
 """Generate the built-in model catalog from the upstream catalogs (models.dev, OpenRouter, the Vercel AI Gateway,
 Radius, NVIDIA NIM) and pi's corrections.
 
-Translated from pi's ``packages/ai/scripts/generate-models.ts`` (v1.1.0), function by function::
+Translated from pi's ``packages/ai/scripts/generate-models.ts`` (v1.3.0), function by function::
 
     python scripts/generate_models.py --strict
     python scripts/generate_models.py --strict --data-only
@@ -298,13 +298,21 @@ KIMI_K3_COST = {
     "cacheRead": 0.3,
     "cacheWrite": 0,
 }
-# Kimi Coding is subscription-backed, so models.dev reports zero cost. Use the
-# equivalent Moonshot API rates to estimate the value of subscription usage.
-KIMI_CODING_IMPLIED_COSTS: dict[str, dict[str, Any]] = {
-    "k3": KIMI_K3_COST,
-    "kimi-for-coding": {"input": 0.95, "output": 4, "cacheRead": 0.19, "cacheWrite": 0},
-    "kimi-for-coding-highspeed": {"input": 1.9, "output": 8, "cacheRead": 0.38, "cacheWrite": 0},
-    "kimi-k2-thinking": {"input": 0.6, "output": 2.5, "cacheRead": 0.15, "cacheWrite": 0},
+# Kimi Chat Completions settings shared by Moonshot and Kimi Coding.
+KIMI_OPENAI_COMPAT: dict[str, Any] = {
+    "supportsStore": False,
+    "supportsDeveloperRole": False,
+    "supportsReasoningEffort": False,
+    "maxTokensField": "max_tokens",
+    "supportsStrictMode": False,
+    "thinkingFormat": "deepseek",
+}
+# Kimi K3-style models take reasoning_effort and need earlier reasoning sent back.
+KIMI_K3_OPENAI_COMPAT: dict[str, Any] = {
+    **KIMI_OPENAI_COMPAT,
+    "requiresReasoningContentOnAssistantMessages": True,
+    "thinkingFormat": "openai",
+    "supportsReasoningEffort": True,
 }
 OPENROUTER_KIMI_K3_MODEL_IDS = {"moonshotai/kimi-k3", "~moonshotai/kimi-latest"}
 
@@ -343,6 +351,9 @@ OPENAI_CODEX_ADDITIONAL_TOOLS_MODEL_IDS = {
     "gpt-6-luna",
     "gpt-6.1-sol",
 }
+# OpenAI documents configuration_update for the GPT-6 family.
+# https://developers.openai.com/api/docs/guides/reasoning
+OPENAI_MID_CONVO_EFFORT_MODEL_IDS = {"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"}
 OPENAI_LONG_CONTEXT_INPUT_THRESHOLD = 272000
 OPENAI_SHORT_CONTEXT_CAPPED_MODEL_IDS = {
     "gpt-5.4",
@@ -587,6 +598,18 @@ def supportsAnthropicMidConvoEffort(modelId: str) -> bool:
     )
 
 
+# Claude models that accept `thinking: {type: "disabled"}` alongside per-message effort.
+# Opus 5.5, Sonnet 5.5, Fable 5.1, and Mythos 5.1 reject it.
+# https://platform.claude.com/docs/en/build-with-claude/thinking#configuring-thinking
+ANTHROPIC_DISABLED_THINKING_MODELS = {"claude-opus-5", "claude-haiku-5-5", "claude-haiku-5.5"}
+
+
+def supportsAnthropicDisabledThinkingWithMidConvoEffort(modelId: str) -> bool:
+    # Strip OpenRouter's "anthropic/" or "~anthropic/" prefix and any dated snapshot suffix.
+    id = re.sub(r"-\d{8}\Z", "", re.sub(r"^~?anthropic/", "", modelId.lower(), count=1), count=1)
+    return id in ANTHROPIC_DISABLED_THINKING_MODELS
+
+
 def supportsAnthropicMidConvoSystemMessages(modelId: str) -> bool:
     return (
         _test(r"^claude-opus-(?:4[.-]8|5(?:[.-]5)?)(?:-\d{8})?$", modelId)
@@ -808,7 +831,7 @@ def applyAnthropicMessagesCompatMetadata(model: Model) -> None:
     compat = getAnthropicMessagesCompat(model["provider"], model["id"])
     if compat:
         mergeAnthropicMessagesCompat(model, compat)
-        if compat.get("supportsMidConvoEffort"):
+        if compat.get("supportsMidConvoEffort") and not supportsAnthropicDisabledThinkingWithMidConvoEffort(model["id"]):
             mergeThinkingLevelMap(model, {"off": None})
 
 
@@ -897,7 +920,7 @@ def applyOpenAIToolSearchMetadata(model: Model) -> None:
 # tool-bearing system messages. Kimi K3 accepts both forms; Fireworks and OpenCode pass
 # its tool-bearing form through. GitHub Copilot forwards K3 text but silently drops its
 # tool-bearing message. DeepSeek V4 Pro and OpenAI models behind OpenRouter also accept
-# plain system text in place.
+# plain system text in place. Kimi Coding sets these flags in createKimiCodingModels().
 def applyOpenAICompletionsTranscriptMetadata(model: Model) -> None:
     if model["api"] != "openai-completions":
         return
@@ -960,6 +983,20 @@ def applyOpenAIExplicitPromptCacheMetadata(model: Model) -> None:
     model["compat"] = {
         **(model.get("compat") or {}),
         "supportsExplicitPromptCacheMode": True,
+    }
+
+
+# GPT-6 models accept `configuration_update` input items that change the reasoning effort
+# without changing the cached prompt prefix. Not enabled for openai-codex (Codex CLI keeps it
+# behind a flag that is off by default) or proxies.
+def applyOpenAIMidConvoEffortMetadata(model: Model) -> None:
+    if model["provider"] != "openai" or model["api"] != "openai-responses":
+        return
+    if model["id"] not in OPENAI_MID_CONVO_EFFORT_MODEL_IDS:
+        return
+    model["compat"] = {
+        **(model.get("compat") or {}),
+        "supportsMidConvoEffort": True,
     }
 
 
@@ -1810,6 +1847,66 @@ def processFireworksModels(provider: dict[str, Any] | None) -> list[Model]:
     return models
 
 
+# Kimi Coding is subscription-backed, so models.dev reports zero cost. Use the
+# equivalent Moonshot API rates to estimate the value of subscription usage.
+KIMI_CODING_IMPLIED_COSTS: dict[str, dict[str, Any]] = {
+    "k3": KIMI_K3_COST,
+    "kimi-for-coding": {"input": 0.95, "output": 4, "cacheRead": 0.19, "cacheWrite": 0},
+    "kimi-for-coding-highspeed": {"input": 1.9, "output": 8, "cacheRead": 0.38, "cacheWrite": 0},
+}
+# Models whose https://api.kimi.com/coding/v1/models entry reports effort levels and
+# dynamic tool loading (tools declared in later system messages). Highspeed reports
+# neither and rejects tool-bearing system messages with a 400.
+KIMI_CODING_K3_STYLE_MODEL_IDS = {"k3", "k3-256k", "kimi-for-coding"}
+
+
+# Kimi Coding uses Chat Completions, the same protocol as the official Kimi Code client.
+def createKimiCodingModels(kimiModels: dict[str, Any]) -> list[Model]:
+    models: list[Model] = []
+    for modelId, m in kimiModels.items():
+        if m.get("tool_call") is not True:
+            continue
+
+        isK3Style = modelId in KIMI_CODING_K3_STYLE_MODEL_IDS
+        impliedCost = KIMI_CODING_IMPLIED_COSTS.get(modelId)
+        # K3-style models send reasoning_effort, so expose the effort values models.dev lists.
+        effortLevels = (
+            getEffortThinkingLevelMap(m["reasoning_options"])
+            if isK3Style and _truthy(m.get("reasoning_options"))
+            else None
+        )
+        cost = m.get("cost")
+
+        models.append(
+            {
+                "id": modelId,
+                "name": _or(m.get("name"), modelId),
+                "api": "openai-completions",
+                "provider": "kimi-coding",
+                "baseUrl": "https://api.kimi.com/coding/v1",
+                "compat": {
+                    **(KIMI_K3_OPENAI_COMPAT if isK3Style else KIMI_OPENAI_COMPAT),
+                    # All models accept system text after the conversation starts.
+                    "supportsMidConvoSystemMessages": True,
+                    **({"supportsMidConvoToolAdditions": True} if isK3Style else {}),
+                },
+                "reasoning": m.get("reasoning") is True,
+                "input": _inputModalities(m),
+                "cost": {
+                    "input": _or(_get(cost, "input"), _get(impliedCost, "input"), 0),
+                    "output": _or(_get(cost, "output"), _get(impliedCost, "output"), 0),
+                    "cacheRead": _or(_get(cost, "cache_read"), _get(impliedCost, "cacheRead"), 0),
+                    "cacheWrite": _or(_get(cost, "cache_write"), _get(impliedCost, "cacheWrite"), 0),
+                },
+                "contextWindow": _limit(m, "context", 4096),
+                "maxTokens": _limit(m, "output", 4096),
+                # Kimi Code reports every model as always-thinking.
+                "thinkingLevelMap": {**(effortLevels or {}), "off": None},
+            }
+        )
+    return models
+
+
 async def loadModelsDevData() -> list[Model]:
     try:
         _log("Fetching models from models.dev API...")
@@ -2242,8 +2339,8 @@ async def loadModelsDevData() -> list[Model]:
         # - @ai-sdk/google → google-generative-ai
         # - null/undefined/@ai-sdk/openai-compatible → openai-completions
         opencodeVariants = [
-            {"key": "opencode", "provider": "opencode", "basePath": "https://opencode.ai/zen"},
-            {"key": "opencode-go", "provider": "opencode-go", "basePath": "https://opencode.ai/zen/go"},
+            {"key": "opencode", "provider": "opencode", "basePath": "https://opencode.ai/inference"},
+            {"key": "opencode-go", "provider": "opencode-go", "basePath": "https://opencode.ai/inference/go"},
         ]
 
         for variant in opencodeVariants:
@@ -2289,20 +2386,13 @@ async def loadModelsDevData() -> list[Model]:
 
                 # Fix known mismatches between models.dev npm data and actual
                 # OpenCode Go endpoint behaviour. models.dev reports these models
-                # as @ai-sdk/anthropic, but the OpenCode Go endpoints either don't
-                # accept Anthropic SDK auth (MiniMax M2.7) or are served through
-                # the OpenAI-compatible /v1/chat/completions path (Qwen 3.5/3.6).
-                # Switch them to openai-completions so requests use Bearer auth
-                # and the standard /v1/chat/completions endpoint.
-                if variant["provider"] == "opencode-go":
-                    if modelId == "minimax-m2.7":
-                        api = "openai-completions"
-                        baseUrl = f"{variant['basePath']}/v1"
-                    if modelId in ("qwen3.5-plus", "qwen3.6-plus"):
-                        api = "openai-completions"
-                        baseUrl = f"{variant['basePath']}/v1"
-                        # Qwen/DashScope uses enable_thinking at the top level.
-                        compat = {**(compat or {}), "thinkingFormat": "qwen"}
+                # as @ai-sdk/anthropic, but OpenCode Go serves them through the
+                # OpenAI-compatible /v1/chat/completions path.
+                if variant["provider"] == "opencode-go" and modelId in ("qwen3.5-plus", "qwen3.6-plus"):
+                    api = "openai-completions"
+                    baseUrl = f"{variant['basePath']}/v1"
+                    # Qwen/DashScope uses enable_thinking at the top level.
+                    compat = {**(compat or {}), "thinkingFormat": "qwen"}
 
                 if api == "openai-completions":
                     compat = {**(compat or {}), "maxTokensField": "max_tokens"}
@@ -2423,66 +2513,13 @@ async def loadModelsDevData() -> list[Model]:
 
         # Process Kimi For Coding models
         if _truthy(_models(data, "kimi-code-plan-global")):
-            kimiModels = data["kimi-code-plan-global"]["models"]
-            hasCanonicalModel = "kimi-for-coding" in kimiModels
-
-            kimiAliases = {"k2p5", "k2p6", "k2p7"}
-
-            for modelId, m in kimiModels.items():
-                if m.get("tool_call") is not True:
-                    continue
-                # models.dev may expose versioned aliases (e.g. k2p5/k2p6/k2p7).
-                # Normalize aliases to the canonical model id and drop duplicates when canonical exists.
-                if modelId in kimiAliases and hasCanonicalModel:
-                    continue
-
-                normalizedId = "kimi-for-coding" if modelId in kimiAliases else modelId
-                normalizedName = "Kimi For Coding" if modelId in kimiAliases else _or(m.get("name"), normalizedId)
-                isKimiK3 = normalizedId == "k3"
-                allowEmptySignature = isKimiK3 or normalizedId == "kimi-for-coding"
-                impliedCost = KIMI_CODING_IMPLIED_COSTS.get(normalizedId)
-                cost = m.get("cost")
-
-                models.append(
-                    {
-                        "id": normalizedId,
-                        "name": normalizedName,
-                        "api": "anthropic-messages",
-                        "provider": "kimi-coding",
-                        # Kimi For Coding's Anthropic-compatible API - SDK appends /v1/messages
-                        "baseUrl": "https://api.kimi.com/coding",
-                        "compat": {
-                            **({"allowEmptySignature": True} if allowEmptySignature else {}),
-                            "forceAdaptiveThinking": True,
-                        },
-                        "reasoning": isKimiK3 or m.get("reasoning") is True,
-                        "input": _inputModalities(m),
-                        "cost": {
-                            "input": _or(_get(cost, "input"), _get(impliedCost, "input"), 0),
-                            "output": _or(_get(cost, "output"), _get(impliedCost, "output"), 0),
-                            "cacheRead": _or(_get(cost, "cache_read"), _get(impliedCost, "cacheRead"), 0),
-                            "cacheWrite": _or(_get(cost, "cache_write"), _get(impliedCost, "cacheWrite"), 0),
-                        },
-                        "contextWindow": _limit(m, "context", 4096),
-                        "maxTokens": _limit(m, "output", 4096),
-                    }
-                )
-                recordModelsDevReasoningOptions("kimi-coding", normalizedId, m)
+            models.extend(createKimiCodingModels(data["kimi-code-plan-global"]["models"]))
 
         # Process Moonshot AI models
         moonshotVariants = [
             {"key": "moonshotai", "provider": "moonshotai", "baseUrl": "https://api.moonshot.ai/v1"},
             {"key": "moonshotai-cn", "provider": "moonshotai-cn", "baseUrl": "https://api.moonshot.cn/v1"},
         ]
-        moonshotCompat = {
-            "supportsStore": False,
-            "supportsDeveloperRole": False,
-            "supportsReasoningEffort": False,
-            "maxTokensField": "max_tokens",
-            "supportsStrictMode": False,
-            "thinkingFormat": "deepseek",
-        }
-
         def getMoonshotProviderModels(key: str) -> dict[str, Any]:
             providerModels: Any = _models(data, key)
             return {**providerModels} if _truthy(providerModels) else {}
@@ -2498,11 +2535,7 @@ async def loadModelsDevData() -> list[Model]:
                 if m.get("tool_call") is not True:
                     continue
                 isKimiK3 = modelId == "kimi-k3"
-                moonshotModelCompat = {**moonshotCompat} if isKimiK3 else moonshotCompat
-                if isKimiK3:
-                    moonshotModelCompat["requiresReasoningContentOnAssistantMessages"] = True
-                    moonshotModelCompat["thinkingFormat"] = "openai"
-                    moonshotModelCompat["supportsReasoningEffort"] = True
+                compat = {**(KIMI_K3_OPENAI_COMPAT if isKimiK3 else KIMI_OPENAI_COMPAT)}
                 cost = m.get("cost")
                 models.append(
                     {
@@ -2526,7 +2559,7 @@ async def loadModelsDevData() -> list[Model]:
                         ),
                         "contextWindow": _limit(m, "context", 4096),
                         "maxTokens": _limit(m, "output", 4096),
-                        "compat": moonshotModelCompat,
+                        "compat": compat,
                     }
                 )
                 recordModelsDevReasoningOptions(provider, modelId, m)
@@ -2535,9 +2568,22 @@ async def loadModelsDevData() -> list[Model]:
         # Built-in `xiaomi` targets the API billing endpoint (single stable URL,
         # keys from platform.xiaomimimo.com). The three `xiaomi-token-plan-*`
         # providers cover prepaid Token Plan endpoints in cn / ams / sgp.
+        # MiMo Chat Completions only documents thinking.type enabled/disabled and
+        # rejects some reasoning_effort values (e.g. "minimal"). Xiaomi documents
+        # all effort levels as identical, so expose only off and high.
         xiaomiCompat = {
+            "supportsReasoningEffort": False,
             "requiresReasoningContentOnAssistantMessages": True,
             "thinkingFormat": "deepseek",
+        }
+        xiaomiThinkingLevelMap = {
+            "off": "off",
+            "minimal": None,
+            "low": None,
+            "medium": None,
+            "high": "high",
+            "xhigh": None,
+            "max": None,
         }
         xiaomiVariants = [
             {"source": "xiaomi", "provider": "xiaomi", "baseUrl": "https://api.xiaomimimo.com/v1"},
@@ -2579,13 +2625,13 @@ async def loadModelsDevData() -> list[Model]:
                         "baseUrl": baseUrl,
                         "compat": xiaomiCompat,
                         "reasoning": m.get("reasoning") is True,
+                        **({"thinkingLevelMap": xiaomiThinkingLevelMap} if m.get("reasoning") is True else {}),
                         "input": _inputModalities(m),
                         "cost": getModelsDevCost(m.get("cost")),
                         "contextWindow": _limit(m, "context", 4096),
                         "maxTokens": _limit(m, "output", 4096),
                     }
                 )
-                recordModelsDevReasoningOptions(provider, modelId, m)
 
         # Process Alibaba Cloud Model Studio Token Plan models. International and
         # China use separate endpoints and API keys (sk-sp- prefix). The Individual
@@ -2716,7 +2762,7 @@ async def loadModelsDevClassifierModels() -> list[Model]:
 # System One models yet. Cloudflare publishes pricing only in the dashboard.
 # https://developers.cloudflare.com/ai/models/typesafe/jev/
 # OpenCode Zen serves Jev through its TypeSafe-compatible System One endpoint.
-# Neither its /zen/v1/models listing nor models.dev carries metadata for it.
+# Neither its /inference/v1/models listing nor models.dev carries metadata for it.
 # https://opencode.ai/docs/zen
 OPENCODE_CLASSIFIER_MODELS: list[Model] = [
     {
@@ -2725,7 +2771,7 @@ OPENCODE_CLASSIFIER_MODELS: list[Model] = [
         "name": "Jev 1.13",
         "api": "typesafe-system-one",
         "provider": "opencode",
-        "baseUrl": "https://opencode.ai/zen/v1",
+        "baseUrl": "https://opencode.ai/inference/v1",
         "input": ["text"],
         "cost": {"input": 0.042, "output": 0, "cacheRead": 0, "cacheWrite": 0},
         "contextWindow": 32000,
@@ -2736,7 +2782,7 @@ OPENCODE_CLASSIFIER_MODELS: list[Model] = [
         "name": "Jev 1.13 Free",
         "api": "typesafe-system-one",
         "provider": "opencode",
-        "baseUrl": "https://opencode.ai/zen/v1",
+        "baseUrl": "https://opencode.ai/inference/v1",
         "input": ["text"],
         "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
         "contextWindow": 32000,
@@ -2933,96 +2979,6 @@ async def generateModels() -> None:
         and not (model["provider"] in ("opencode", "opencode-go") and model["id"] == "gpt-5.3-codex-spark")
     ]
 
-    # Add Claude Opus 5.5 until models.dev includes it.
-    # https://platform.claude.com/docs/en/models/opus-5-5/overview
-    if not any(model["provider"] == "anthropic" and model["id"] == "claude-opus-5-5" for model in allModels):
-        allModels.append(
-            {
-                "id": "claude-opus-5-5",
-                "name": "Claude Opus 5.5",
-                "api": "anthropic-messages",
-                "provider": "anthropic",
-                "baseUrl": "https://api.anthropic.com",
-                "reasoning": True,
-                "thinkingLevelMap": {
-                    "off": None,
-                    "minimal": None,
-                    "low": "low",
-                    "medium": "medium",
-                    "high": "high",
-                    "xhigh": "xhigh",
-                    "max": "max",
-                },
-                "input": ["text", "image"],
-                "cost": {"input": 4, "output": 20, "cacheRead": 0.2, "cacheWrite": 5},
-                "contextWindow": 1000000,
-                "maxTokens": 128000,
-            }
-        )
-
-    # Add Claude Sonnet 5.5 until models.dev includes it.
-    # https://platform.claude.com/docs/en/models/sonnet-5-5/overview
-    if not any(model["provider"] == "anthropic" and model["id"] == "claude-sonnet-5-5" for model in allModels):
-        allModels.append(
-            {
-                "id": "claude-sonnet-5-5",
-                "name": "Claude Sonnet 5.5",
-                "api": "anthropic-messages",
-                "provider": "anthropic",
-                "baseUrl": "https://api.anthropic.com",
-                "reasoning": True,
-                "thinkingLevelMap": {
-                    "off": None,
-                    "minimal": None,
-                    "low": "low",
-                    "medium": "medium",
-                    "high": "high",
-                    "xhigh": "xhigh",
-                    "max": "max",
-                },
-                "input": ["text", "image"],
-                "cost": {"input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5},
-                "contextWindow": 1000000,
-                "maxTokens": 128000,
-            }
-        )
-
-    # Add Claude Haiku 5.5 until models.dev includes it. Prompts over 100k input tokens
-    # are billed at 5x for the whole request.
-    # https://platform.claude.com/docs/en/models/haiku-5-5/overview
-    if not any(model["provider"] == "anthropic" and model["id"] == "claude-haiku-5-5" for model in allModels):
-        allModels.append(
-            {
-                "id": "claude-haiku-5-5",
-                "name": "Claude Haiku 5.5",
-                "api": "anthropic-messages",
-                "provider": "anthropic",
-                "baseUrl": "https://api.anthropic.com",
-                "reasoning": True,
-                "thinkingLevelMap": {
-                    "off": None,
-                    "minimal": None,
-                    "low": "low",
-                    "medium": "medium",
-                    "high": "high",
-                    "xhigh": "xhigh",
-                    "max": "max",
-                },
-                "input": ["text", "image"],
-                "cost": {
-                    "input": 0.1,
-                    "output": 0.5,
-                    "cacheRead": 0.01,
-                    "cacheWrite": 0.125,
-                    "tiers": [
-                        {"inputTokensAbove": 100000, "input": 0.5, "output": 2.5, "cacheRead": 0.05, "cacheWrite": 0.625}
-                    ],
-                },
-                "contextWindow": 1000000,
-                "maxTokens": 128000,
-            }
-        )
-
     # The authenticated Copilot catalog advertised these models on 2026-09-22,
     # but models.dev did not include them yet.
     missingCopilotModels: list[Model] = [
@@ -3084,7 +3040,8 @@ async def generateModels() -> None:
             mergeThinkingLevelMap(
                 candidate,
                 {
-                    "off": None,
+                    # Haiku 5.5 accepts disabled thinking; Opus 5.5 and Sonnet 5.5 reject it.
+                    **({} if candidate["id"] == "claude-haiku-5-5" else {"off": None}),
                     "minimal": None,
                     "low": "low",
                     "medium": "medium",
@@ -3385,8 +3342,10 @@ async def generateModels() -> None:
     # OpenAI Codex (ChatGPT OAuth) models
     # NOTE: These are not fetched from models.dev; we keep a small, explicit list to avoid aliases.
     # Older model limits are based on observed server behavior; GPT-5.6 and GPT-6 use Codex's 272k default catalog limit.
+    # GPT-6.1 Sol uses the 500k default returned by /backend-api/codex/models.
     CODEX_BASE_URL = "https://chatgpt.com/backend-api"
     CODEX_CONTEXT = 272000
+    CODEX_GPT_61_SOL_CONTEXT = 500000
     CODEX_GPT_56_CONTEXT = 272000
     CODEX_SPARK_CONTEXT = 128000
     CODEX_MAX_TOKENS = 128000
@@ -3400,7 +3359,7 @@ async def generateModels() -> None:
             "reasoning": True,
             "input": ["text", "image"],
             "cost": withOpenAiLongContextPricing(OPENAI_STANDARD_COSTS["gpt-6.1-sol"]),
-            "contextWindow": CODEX_CONTEXT,
+            "contextWindow": CODEX_GPT_61_SOL_CONTEXT,
             "maxTokens": CODEX_MAX_TOKENS,
         },
         {
@@ -3639,6 +3598,7 @@ async def generateModels() -> None:
         applyOpenAICompletionsTranscriptMetadata(model)
         applyOpenAIResponsesTranscriptMetadata(model)
         applyOpenAIExplicitPromptCacheMetadata(model)
+        applyOpenAIMidConvoEffortMetadata(model)
         applyPromptCacheMetadata(model)
         applyImageInputMetadata(model)
     applyAnthropicAllowedFallbackModelMetadata([model for model in allModels if isAnthropicFallbackMetadataModel(model)])

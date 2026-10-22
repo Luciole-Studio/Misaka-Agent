@@ -1,7 +1,8 @@
 """The built-in generation task: prepare, request or poll the model, retry, classify, and run the tool round.
 
-Translated from pi's ``packages/durable/src/harness/generation.ts``. A checkpoint is a ``dict`` with a ``phase``:
-``prepare`` (``attempt``, ``compacted``?, ``overflow``?), ``request`` (``attempt``, ``compacted``?, ``model``,
+Translated from pi's ``packages/durable/src/harness/generation.ts`` (v1.3.0). A checkpoint is a ``dict`` with a
+``phase``: ``prepare`` (``attempt``, ``compacted``?, ``overflow``?, ``threshold``?: true when the blocking threshold
+started ``compacted``, whose outcome is checked once when ``prepare`` resumes), ``request`` (``attempt``, ``compacted``?, ``model``,
 ``thinkingLevel``, ``streamOptions``, ``cutoff``), ``retry`` (``attempt``, ``compacted``?, ``until``), ``poll``
 (``attempt``, ``compacted``?, ``model``, ``cutoff``, ``handle``, ``pollAt``) or ``tools`` (``assistant``, ``tools``,
 ``pending``). Provider results cross the pi-ai boundary through ``misaka.durable.harness.ai_bridge``: messages are strict
@@ -50,8 +51,9 @@ DEFAULT_POLL_AFTER_MS = 5000
 
 async def preparePhase(task: dict[str, Any], runtime: Any, context: Context) -> None:
     """Render the system prompt and tool loadout and append the positional ``pi.system`` entries they need, then move
-    to ``request``. The agent and settings resolved here are fixed for this request. Only the Harness writes to a busy
-    conversation, so the transcript read here is still the tail at the commit."""
+    to ``request``. The agent and settings resolved here are fixed for this request. Only the Harness writes model
+    context to a busy conversation, so the context read here is still current at the commit; display-only entries may
+    land meanwhile."""
     conversationId = runtime.conversationId
     agent = await runtime.agent(context)
     settings = runtime.settings
@@ -65,10 +67,18 @@ async def preparePhase(task: dict[str, Any], runtime: Any, context: Context) -> 
     attempt = checkpoint["attempt"]
     compacted = checkpoint.get("compacted")
     overflow = checkpoint.get("overflow")
+    blocked = checkpoint.get("threshold")
     if compacted is not None and overflow is not None:
         outcome = (await runtime.outcomes([compacted], context))[0]
         if outcome["status"] != "completed" or outcome["result"].get("entryId") is None:
             await failModelError(runtime, overflow, context)
+            return
+    # A threshold compaction that found nothing to compact or was declined leaves a request that may still fit. One that
+    # failed left a context it judged too large: sending it would at best leave no room for the answer.
+    if compacted is not None and blocked is True:
+        outcome = (await runtime.outcomes([compacted], context))[0]
+        if outcome is not None and outcome["status"] != "completed":
+            await failModelError(runtime, compactionFailure(outcome), context)
             return
     view = await runtime.context(conversationId, context)
     shown = replaySections(view["messages"])
@@ -94,7 +104,7 @@ async def preparePhase(task: dict[str, Any], runtime: Any, context: Context) -> 
         # Compact first and prepare again; the transcript is unchanged until the compaction appends.
         async def compactFirst(tx: Tx, current: dict[str, Any]) -> dict[str, Any]:
             child = await createCompaction(tx, conversationId, {"reason": "threshold"}, runtime.taskId)
-            checkpoint = {"phase": "prepare", "attempt": attempt, "compacted": child}
+            checkpoint = {"phase": "prepare", "attempt": attempt, "compacted": child, "threshold": True}
             return {"status": "waiting", "checkpoint": checkpoint, "on": [child], "policy": "allSettled"}
 
         await runtime.commit(compactFirst, context)
@@ -259,7 +269,7 @@ async def abortPhase(task: dict[str, Any], runtime: Any, context: Context) -> No
         await convertPartial(tx, live, conversationId)
         for call in unstarted:
             result = harnessError("aborted", f"Tool {call['name']} was aborted")
-            await appendToolResult(tx, conversationId, call, result, runtime.now())
+            await appendToolResult(tx, conversationId, call, result, {"timestamp": runtime.now()})
         endRun(tx, live, runtime.taskId, {"status": "unanswered", "reason": "aborted"})
         return {"status": "terminal", "outcome": {"status": "aborted"}}
 
@@ -300,7 +310,11 @@ async def readCalls(runtime: Any, assistant: EntryId, callIds: list[str], contex
 
 def createToolTask(tx: Tx, runtime: Any, assistant: EntryId, callId: str) -> Any:
     """A tool task for call ``callId``, owned by the generation."""
-    return tx.createTask(ToolTask, {"assistant": assistant, "callId": callId}, {"ownership": {"kind": "task", "taskId": runtime.taskId}})
+    return tx.createTask(
+        ToolTask,
+        {"kind": "model", "assistant": assistant, "callId": callId},
+        {"ownership": {"kind": "task", "taskId": runtime.taskId}},
+    )
 
 
 def thresholdCompaction(
@@ -324,6 +338,16 @@ def thresholdCompaction(
     if over is None or selectCut(view, policy["keepRecentTokens"]) is None:
         return None
     return over
+
+
+def compactionFailure(outcome: dict[str, Any]) -> str:
+    """Error text for a generation whose blocking compaction ended without completing."""
+    status = outcome["status"]
+    if status in ("failed", "faulted"):
+        return f"Compaction failed: {outcome['error']['message']}"
+    if status == "orphaned":
+        return f"Compaction failed: {outcome['reason']}"
+    return "Compaction was aborted"
 
 
 async def failModelError(runtime: Any, text: str, context: Context) -> None:
@@ -595,7 +619,7 @@ async def startToolRound(
         for call in calls:
             if call["name"] not in offered:
                 unavailable = harnessError("tool_unavailable", f"Tool {call['name']} is not available")
-                result = await appendToolResult(tx, conversationId, call, unavailable, runtime.now())
+                result = await appendToolResult(tx, conversationId, call, unavailable, {"timestamp": runtime.now()})
                 slots.append({"callId": call["id"], "name": call["name"], "status": "done", "entry": result["id"]})
                 continue
             if sequential and len(started) > 0:
@@ -623,7 +647,12 @@ async def finishToolRound(runtime: Any, assistant: EntryId, tools: list[TaskId],
     outcomes = await runtime.outcomes(tools, context)
     for index, id in enumerate(tools):
         outcome = outcomes[index]
-        controls[id] = outcome["result"].get("control") if outcome["status"] == "completed" else None
+        # Version 1 results have no kind; every result a generation's round reads is a model-issued call's.
+        controls[id] = (
+            outcome["result"].get("control")
+            if outcome["status"] == "completed" and outcome["result"].get("kind") != "nested"
+            else None
+        )
     snapshot = await runtime.snapshot(LiveDoc, conversationId, context)
     slots = (snapshot or {}).get("tools") or []
     results = [slot["entry"] for slot in slots if slot.get("entry") is not None]
@@ -665,6 +694,8 @@ async def finishToolRound(runtime: Any, assistant: EntryId, tools: list[TaskId],
             else:
                 if "tools" in live:
                     del live["tools"]
+                if "nestedTools" in live:
+                    del live["nestedTools"]
                 run = live.get("run", UNDEFINED)
                 if run is not UNDEFINED and run["taskId"] == runtime.taskId:
                     run["inputs"].push(*users)

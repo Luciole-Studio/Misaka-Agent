@@ -20,9 +20,9 @@ from collections.abc import Mapping
 from typing import Any
 
 try:
-    from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient, omit
+    from anthropic import APIStatusError, AsyncAnthropic, DefaultAsyncHttpxClient, omit
 except ImportError:  # optional extra: misaka[anthropic]
-    AsyncAnthropic = DefaultAsyncHttpxClient = omit = None
+    APIStatusError = AsyncAnthropic = DefaultAsyncHttpxClient = omit = None
 
 from misaka.ai.api._common import _await_maybe_with_signal, split_sdk_params
 from misaka.ai.api._sdk import require
@@ -112,6 +112,13 @@ async def _create_raw_response(
     sdk_params = split_sdk_params(messages.create, params)
     raw = await _await_maybe_with_signal(messages.with_raw_response.create(**sdk_params, **call_options), signal)
     return raw.http_response
+
+
+def _is_api_status_error(error: BaseException) -> bool:
+    """``error instanceof Anthropic.APIError`` for an error that carries an HTTP status: the Python SDK raises its
+    ``APIStatusError`` subclass for those, with the status as ``status_code`` and the body's ``error.type`` as
+    ``type``."""
+    return APIStatusError is not None and isinstance(error, APIStatusError)
 
 
 async def _close_client(client: Any, *, federation: bool) -> None:

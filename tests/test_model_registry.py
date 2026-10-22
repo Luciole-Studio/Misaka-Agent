@@ -236,13 +236,13 @@ async def test_custom_provider_with_same_name_as_built_in_merges_with_built_in_m
 async def test_custom_model_with_same_id_replaces_built_in_model_by_id(authStorage, modelsJsonPath):
     writeModelsJson(modelsJsonPath, {
         "openrouter": providerConfig(
-            "https://my-proxy.example.com/v1", [{"id": "anthropic/claude-sonnet-4"}], "openai-completions"
+            "https://my-proxy.example.com/v1", [{"id": "anthropic/claude-sonnet-4.5"}], "openai-completions"
         ),
     })
 
     registry = await createModelRegistry(authStorage, modelsJsonPath)
     sonnetModels = [
-        model for model in getModelsForProvider(registry, "openrouter") if model.id == "anthropic/claude-sonnet-4"
+        model for model in getModelsForProvider(registry, "openrouter") if model.id == "anthropic/claude-sonnet-4.5"
     ]
 
     assert len(sonnetModels) == 1
@@ -429,7 +429,7 @@ async def test_model_overrides_still_apply_when_provider_also_defines_models(aut
             "input": ["text"], "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
             "contextWindow": 128000, "maxTokens": 16384,
         }],
-        "modelOverrides": {"anthropic/claude-sonnet-4": {"name": "Overridden Built-in Sonnet"}},
+        "modelOverrides": {"anthropic/claude-sonnet-4.5": {"name": "Overridden Built-in Sonnet"}},
     }})
 
     registry = await createModelRegistry(authStorage, modelsJsonPath)
@@ -437,7 +437,7 @@ async def test_model_overrides_still_apply_when_provider_also_defines_models(aut
 
     assert any(model.id == "custom/openrouter-model" for model in models)
     assert any(
-        model.id == "anthropic/claude-sonnet-4" and model.name == "Overridden Built-in Sonnet" for model in models
+        model.id == "anthropic/claude-sonnet-4.5" and model.name == "Overridden Built-in Sonnet" for model in models
     )
 
 
@@ -479,13 +479,13 @@ async def test_removing_custom_models_keeps_built_in_provider_models(authStorage
 
 async def test_model_override_applies_to_a_single_built_in_model(authStorage, modelsJsonPath):
     writeRawModelsJson(modelsJsonPath, {"openrouter": {"modelOverrides": {
-        "anthropic/claude-sonnet-4": {"name": "Custom Sonnet Name"},
+        "anthropic/claude-sonnet-4.5": {"name": "Custom Sonnet Name"},
     }}})
 
     registry = await createModelRegistry(authStorage, modelsJsonPath)
     models = getModelsForProvider(registry, "openrouter")
 
-    assert _find(models, "anthropic/claude-sonnet-4").name == "Custom Sonnet Name"
+    assert _find(models, "anthropic/claude-sonnet-4.5").name == "Custom Sonnet Name"
     assert _find(models, "anthropic/claude-opus-4.1").name != "Custom Sonnet Name"
 
 
@@ -531,7 +531,7 @@ async def test_custom_models_and_model_overrides_carry_sampling_params(authStora
             "custom/sampling-model": {
                 "samplingParamsByThinkingLevel": {"low": {"temperature": 0.5, "top_k": 20}, "max": {"temperature": 1}},
             },
-            "anthropic/claude-sonnet-4": {
+            "anthropic/claude-sonnet-4.5": {
                 "samplingParams": {"top_p": 0.9},
                 "samplingParamsByThinkingLevel": {"high": {"temperature": 0.8}},
             },
@@ -549,7 +549,7 @@ async def test_custom_models_and_model_overrides_carry_sampling_params(authStora
         "max": {"temperature": 1},
     }
 
-    sonnet = _find(models, "anthropic/claude-sonnet-4")
+    sonnet = _find(models, "anthropic/claude-sonnet-4.5")
     assert sonnet.samplingParams == {"top_p": 0.9}
     assert sonnet.samplingParamsByThinkingLevel == {"high": {"temperature": 0.8}}
 
@@ -565,7 +565,7 @@ async def test_custom_model_and_model_override_carry_prompt_cache_lifetimes(auth
             "baseUrl": "https://my-proxy.example.com/v1",
             "api": "openai-completions",
             "models": [{"id": "custom/cached-model", "promptCache": {"short": 120}}],
-            "modelOverrides": {"anthropic/claude-sonnet-4": {"promptCache": {"short": 300}}},
+            "modelOverrides": {"anthropic/claude-sonnet-4.5": {"promptCache": {"short": 300}}},
         },
         "anthropic": {"modelOverrides": {"claude-sonnet-4-6": {"promptCache": {"long": 1800}}}},
     })
@@ -575,7 +575,7 @@ async def test_custom_model_and_model_override_carry_prompt_cache_lifetimes(auth
 
     assert registry.getError() is None
     assert _plain(_find(openrouter, "custom/cached-model").promptCache) == {"short": 120}
-    assert _plain(_find(openrouter, "anthropic/claude-sonnet-4").promptCache) == {"short": 300}
+    assert _plain(_find(openrouter, "anthropic/claude-sonnet-4.5").promptCache) == {"short": 300}
     assert _find(openrouter, "anthropic/claude-opus-4.1").promptCache is None
     # Overrides merge per tier with the built-in catalog.
     assert _plain(registry.find("anthropic", "claude-sonnet-4-6").promptCache) == {"short": 300, "long": 1800}
@@ -613,11 +613,11 @@ async def test_model_override_deep_merges_image_resize_limits(authStorage, model
 
 async def test_model_override_with_compat_open_router_routing(authStorage, modelsJsonPath):
     writeRawModelsJson(modelsJsonPath, {"openrouter": {"modelOverrides": {
-        "anthropic/claude-sonnet-4": {"compat": {"openRouterRouting": {"only": ["amazon-bedrock"]}}},
+        "anthropic/claude-sonnet-4.5": {"compat": {"openRouterRouting": {"only": ["amazon-bedrock"]}}},
     }}})
 
     registry = await createModelRegistry(authStorage, modelsJsonPath)
-    sonnet = _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4")
+    sonnet = _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4.5")
 
     assert _plain(sonnet.compat.openRouterRouting) == {"only": ["amazon-bedrock"]}
 
@@ -625,49 +625,49 @@ async def test_model_override_with_compat_open_router_routing(authStorage, model
 async def test_supports_finish_reason_can_be_configured_at_provider_and_model_levels(authStorage, modelsJsonPath):
     writeRawModelsJson(modelsJsonPath, {"openrouter": {
         "compat": {"supportsFinishReason": True},
-        "modelOverrides": {"anthropic/claude-sonnet-4": {"compat": {"supportsFinishReason": False}}},
+        "modelOverrides": {"anthropic/claude-sonnet-4.5": {"compat": {"supportsFinishReason": False}}},
     }})
 
     registry = await createModelRegistry(authStorage, modelsJsonPath)
     models = getModelsForProvider(registry, "openrouter")
 
-    assert _find(models, "anthropic/claude-sonnet-4").compat.supportsFinishReason is False
+    assert _find(models, "anthropic/claude-sonnet-4.5").compat.supportsFinishReason is False
     assert _find(models, "anthropic/claude-opus-4.1").compat.supportsFinishReason is True
 
 
 async def test_model_override_deep_merges_compat_settings(authStorage, modelsJsonPath):
     writeRawModelsJson(modelsJsonPath, {"openrouter": {"modelOverrides": {
-        "anthropic/claude-sonnet-4": {"compat": {"openRouterRouting": {"order": ["anthropic", "together"]}}},
+        "anthropic/claude-sonnet-4.5": {"compat": {"openRouterRouting": {"order": ["anthropic", "together"]}}},
     }}})
 
     registry = await createModelRegistry(authStorage, modelsJsonPath)
-    sonnet = _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4")
+    sonnet = _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4.5")
 
     assert _plain(sonnet.compat.openRouterRouting) == {"order": ["anthropic", "together"]}
 
 
 async def test_multiple_model_overrides_on_same_provider(authStorage, modelsJsonPath):
     writeRawModelsJson(modelsJsonPath, {"openrouter": {"modelOverrides": {
-        "anthropic/claude-sonnet-4": {"compat": {"openRouterRouting": {"only": ["amazon-bedrock"]}}},
+        "anthropic/claude-sonnet-4.5": {"compat": {"openRouterRouting": {"only": ["amazon-bedrock"]}}},
         "anthropic/claude-opus-4.1": {"compat": {"openRouterRouting": {"only": ["anthropic"]}}},
     }}})
 
     registry = await createModelRegistry(authStorage, modelsJsonPath)
     models = getModelsForProvider(registry, "openrouter")
 
-    assert _plain(_find(models, "anthropic/claude-sonnet-4").compat.openRouterRouting) == {"only": ["amazon-bedrock"]}
+    assert _plain(_find(models, "anthropic/claude-sonnet-4.5").compat.openRouterRouting) == {"only": ["amazon-bedrock"]}
     assert _plain(_find(models, "anthropic/claude-opus-4.1").compat.openRouterRouting) == {"only": ["anthropic"]}
 
 
 async def test_model_override_combined_with_base_url_override(authStorage, modelsJsonPath):
     writeRawModelsJson(modelsJsonPath, {"openrouter": {
         "baseUrl": "https://my-proxy.example.com/v1",
-        "modelOverrides": {"anthropic/claude-sonnet-4": {"name": "Proxied Sonnet"}},
+        "modelOverrides": {"anthropic/claude-sonnet-4.5": {"name": "Proxied Sonnet"}},
     }})
 
     registry = await createModelRegistry(authStorage, modelsJsonPath)
     models = getModelsForProvider(registry, "openrouter")
-    sonnet = _find(models, "anthropic/claude-sonnet-4")
+    sonnet = _find(models, "anthropic/claude-sonnet-4.5")
     opus = _find(models, "anthropic/claude-opus-4.1")
 
     assert (sonnet.baseUrl, sonnet.name) == ("https://my-proxy.example.com/v1", "Proxied Sonnet")
@@ -687,11 +687,11 @@ async def test_model_override_for_non_existent_model_id_is_ignored(authStorage, 
 
 async def test_model_override_can_change_cost_fields_partially(authStorage, modelsJsonPath):
     writeRawModelsJson(modelsJsonPath, {"openrouter": {"modelOverrides": {
-        "anthropic/claude-sonnet-4": {"cost": {"input": 99}},
+        "anthropic/claude-sonnet-4.5": {"cost": {"input": 99}},
     }}})
 
     registry = await createModelRegistry(authStorage, modelsJsonPath)
-    sonnet = _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4")
+    sonnet = _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4.5")
 
     assert sonnet.cost.input == 99
     assert sonnet.cost.output > 0
@@ -699,11 +699,11 @@ async def test_model_override_can_change_cost_fields_partially(authStorage, mode
 
 async def test_model_override_can_add_headers_at_request_time(authStorage, modelsJsonPath):
     writeRawModelsJson(modelsJsonPath, {"openrouter": {"modelOverrides": {
-        "anthropic/claude-sonnet-4": {"headers": {"X-Custom-Model-Header": "value"}},
+        "anthropic/claude-sonnet-4.5": {"headers": {"X-Custom-Model-Header": "value"}},
     }}})
 
     registry = await createModelRegistry(authStorage, modelsJsonPath)
-    sonnet = _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4")
+    sonnet = _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4.5")
     assert sonnet is not None
 
     auth = await registry.getApiKeyAndHeaders(sonnet)
@@ -713,30 +713,30 @@ async def test_model_override_can_add_headers_at_request_time(authStorage, model
 
 async def test_refresh_picks_up_model_override_changes(authStorage, modelsJsonPath):
     writeRawModelsJson(modelsJsonPath, {"openrouter": {"modelOverrides": {
-        "anthropic/claude-sonnet-4": {"name": "First Name"},
+        "anthropic/claude-sonnet-4.5": {"name": "First Name"},
     }}})
     registry = await createModelRegistry(authStorage, modelsJsonPath)
-    assert _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4").name == "First Name"
+    assert _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4.5").name == "First Name"
 
     writeRawModelsJson(modelsJsonPath, {"openrouter": {"modelOverrides": {
-        "anthropic/claude-sonnet-4": {"name": "Second Name"},
+        "anthropic/claude-sonnet-4.5": {"name": "Second Name"},
     }}})
     await registry.refresh()
 
-    assert _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4").name == "Second Name"
+    assert _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4.5").name == "Second Name"
 
 
 async def test_removing_model_override_restores_built_in_values(authStorage, modelsJsonPath):
     writeRawModelsJson(modelsJsonPath, {"openrouter": {"modelOverrides": {
-        "anthropic/claude-sonnet-4": {"name": "Custom Name"},
+        "anthropic/claude-sonnet-4.5": {"name": "Custom Name"},
     }}})
     registry = await createModelRegistry(authStorage, modelsJsonPath)
-    assert _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4").name == "Custom Name"
+    assert _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4.5").name == "Custom Name"
 
     writeRawModelsJson(modelsJsonPath, {})
     await registry.refresh()
 
-    assert _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4").name != "Custom Name"
+    assert _find(getModelsForProvider(registry, "openrouter"), "anthropic/claude-sonnet-4.5").name != "Custom Name"
 
 
 

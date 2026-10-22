@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/coding-agent/src/cli/credential-print.ts`` (v1.1.0)."""
+"""Translated from pi's ``packages/coding-agent/src/cli/credential-print.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,11 @@ from misaka.cli.auth_command import (
     getAuthCredential,
     validateAuthCommandArgs,
 )
-from misaka.core.model_resolver import resolveCliModel
+from misaka.core.model_resolver import (
+    ModelReferenceRequest,
+    resolveCliModel,
+    resolveModelReference,
+)
 from misaka.core.model_runtime import ModelRuntime, ModelRuntimeAuthOverrides
 
 DEFAULT_BEARER_TOKEN_MIN_EXPIRY_MS = 30 * 60_000
@@ -52,12 +56,17 @@ async def resolveCredentialForPrint(
         else:
             providers.append({"id": provider.id})
     else:
+        models = modelRuntime.getModels()
         for provider in modelRuntime.getProviders():
             if provider.id not in credentialTypes:
                 continue
-            resolved = resolveCliModel({"cliProvider": provider.id, "cliModel": cliModel, "modelRuntime": modelRuntime})
-            if resolved.model and not resolved.error and "Using custom model id" not in (resolved.warning or ""):
-                providers.append({"id": provider.id, "model": resolved.model})
+            reference = resolveModelReference(
+                ModelReferenceRequest(text=cliModel, provider=provider.id, thinkingSuffix="strict", fuzzy=True),
+                models,
+                lambda _provider: True,
+            )
+            if reference.status == "resolved":
+                providers.append({"id": provider.id, "model": reference.model})
         if len(providers) == 0:
             raise AuthCommandError(f'Model "{cliModel}" not found. Use --list-models to see available models.')
 

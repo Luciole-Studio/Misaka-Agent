@@ -50,7 +50,7 @@ async def executeSubmitPlan(args: dict[str, Any], api: Any, callContext: Any) ->
         (await tx.doc(PlanDoc, api.conversationId))["steps"] = args["steps"]
 
     await api.commit(write, callContext)
-    return {"content": [{"type": "text", "text": "Plan submitted."}], "control": {"terminate": True}}
+    return {"output": [{"type": "text", "text": "Plan submitted."}], "control": {"terminate": True}}
 
 
 submitPlan = defineTool(

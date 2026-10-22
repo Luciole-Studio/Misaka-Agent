@@ -83,7 +83,7 @@ async def noSnapshot(*args: Any) -> None:
 
 promptInput = {
     "conversationId": 1,
-    "agent": {"thinkingLevel": "off", "extensions": [], "tools": [], "sections": []},
+    "agent": {"thinkingLevel": "off", "extensions": [], "tools": [], "callable": [], "deferred": [], "sections": []},
     "env": None,
     "shown": {},
     "read": SimpleNamespace(snapshot=noSnapshot, snapshotAsOf=noSnapshot),

@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/src/api/openai-completions.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/src/api/openai-completions.ts`` (v1.3.0).
 
 MISAKA fork, kept to what the Python SDK and platform force (each is marked where it happens):
 
@@ -6,8 +6,8 @@ MISAKA fork, kept to what the Python SDK and platform force (each is marked wher
   fields, the request and every stream read raced against the signal). There is no ``fetch`` option.
 - A streaming tool call's ``partialArgs`` / ``customInput`` / ``streamIndex`` scratch fields ride beside the block,
   because the content blocks are strict models.
-- A tool call's streamed arguments are parsed sparingly (``StreamingArgs``) and finalized through ``finish_into``,
-  which records a malformed object as ``argumentsError``.
+- A tool call's streamed arguments are parsed sparingly (``StreamingArgs``) and finalized through ``finish_into``
+  (upstream's ``parseToolCallArguments``).
 - A connection error names the transport failure behind it (``_openai_sdk._format_completion_error``), and the
   OpenRouter ``metadata.raw`` is read from ``error.body``, where openai-python keeps what openai-node calls
   ``error.error``.
@@ -470,8 +470,7 @@ def stream(
                                 )
                             )
                     else:
-                        # MISAKA fork: final arguments go through `finish_into`, which records a
-                        # malformed object as `argumentsError` instead of running a repaired prefix.
+                        # `Object.assign(block, parseToolCallArguments(block.partialArgs))`.
                         (scratch.partialArgs if scratch.partialArgs is not None else StreamingArgs()).finish_into(block)
                     # Finalize in-place and strip the scratch buffers so replay only
                     # carries parsed arguments.
@@ -602,17 +601,8 @@ def stream(
                         hasFinishReason = True
 
                     if isinstance(choice.get("delta"), Mapping):
-                        if choice["delta"].get("content") is not None and len(choice["delta"]["content"]) > 0:
-                            block = ensureTextBlock()
-                            block.text += choice["delta"]["content"]
-                            stream.push(
-                                TextDeltaEvent(
-                                    contentIndex=getContentIndex(block),
-                                    delta=choice["delta"]["content"],
-                                    partial=output,
-                                )
-                            )
-
+                        # Handle reasoning before content: some proxies (e.g. LiteLLM) aggregate reasoning and
+                        # answer into one delta, and the thinking block must precede the text block.
                         # Some endpoints return reasoning in reasoning_content (llama.cpp),
                         # or reasoning (other openai compatible endpoints)
                         # Use the first non-empty reasoning field to avoid duplication
@@ -644,6 +634,30 @@ def stream(
                                     )
                                 )
 
+                        reasoningDetails = choice["delta"].get("reasoning_details")
+                        if isinstance(reasoningDetails, list):
+                            for detail in reasoningDetails:
+                                if not _isOpenAIReasoningDetail(detail):
+                                    continue
+                                ensureThinkingBlock("")
+                                if streamedReasoningDetails is None:
+                                    streamedReasoningDetails = []
+                                # Keep provider replay data in the existing signature slot. OpenRouter streams
+                                # reasoning_details as deltas: consecutive text/summary deltas are merged into
+                                # logical entries, while encrypted entries remain opaque and discrete.
+                                _appendOpenAIReasoningDetail(streamedReasoningDetails, detail)
+
+                        if choice["delta"].get("content") is not None and len(choice["delta"]["content"]) > 0:
+                            block = ensureTextBlock()
+                            block.text += choice["delta"]["content"]
+                            stream.push(
+                                TextDeltaEvent(
+                                    contentIndex=getContentIndex(block),
+                                    delta=choice["delta"]["content"],
+                                    partial=output,
+                                )
+                            )
+
                         if choice["delta"].get("tool_calls"):
                             for toolCall in choice["delta"]["tool_calls"]:
                                 if not isinstance(toolCall, Mapping):
@@ -674,19 +688,6 @@ def stream(
                                         partial=output,
                                     )
                                 )
-
-                        reasoningDetails = choice["delta"].get("reasoning_details")
-                        if isinstance(reasoningDetails, list):
-                            for detail in reasoningDetails:
-                                if not _isOpenAIReasoningDetail(detail):
-                                    continue
-                                ensureThinkingBlock("")
-                                if streamedReasoningDetails is None:
-                                    streamedReasoningDetails = []
-                                # Keep provider replay data in the existing signature slot. OpenRouter streams
-                                # reasoning_details as deltas: consecutive text/summary deltas are merged into
-                                # logical entries, while encrypted entries remain opaque and discrete.
-                                _appendOpenAIReasoningDetail(streamedReasoningDetails, detail)
 
             for block in blocks:
                 finishBlock(block)

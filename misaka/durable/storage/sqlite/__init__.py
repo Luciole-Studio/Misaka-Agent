@@ -13,7 +13,7 @@ from .migrations import (
     SqliteMigration,
     applySqliteMigrations,
 )
-from .storage import SqliteStorage
+from .storage import SqliteStorage, SqliteStorageOptions
 
 __all__ = [
     "CURRENT_SQLITE_SCHEMA_VERSION",
@@ -22,6 +22,7 @@ __all__ = [
     "SqliteExecutor",
     "SqliteMigration",
     "SqliteStorage",
+    "SqliteStorageOptions",
     "SqliteValue",
     "applySqliteMigrations",
 ]

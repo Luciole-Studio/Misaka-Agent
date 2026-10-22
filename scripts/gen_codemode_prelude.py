@@ -75,7 +75,8 @@ def _parse(source: str) -> tuple[str, list[tuple[str, str, str, bool, bool]], st
 def _pythonValue(value: str) -> str:
     if re.fullmatch(r"[\d_ *+]+", value):
         return value
-    if re.fullmatch(r'"(?:[^"\\]|\\.)*"', value):
+    # A JavaScript string literal in either quote is a Python one: neither form uses escapes the other lacks.
+    if re.fullmatch(r'"(?:[^"\\]|\\.)*"', value) or re.fullmatch(r"'(?:[^'\\]|\\.)*'", value):
         return f"(\n    {value}\n)"
     raise SystemExit(f"unexpected constant value: {value}")
 

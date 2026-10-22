@@ -1,29 +1,20 @@
-"""Translated from pi-tui's ``test/input.test.ts`` (v1.1.0).
+"""Translated from pi-tui's ``test/input.test.ts`` (v1.3.0).
 
-MISAKA forks: ``stripTerminalSequences`` (an alt-screen helper, D1) is a local regex that removes CSI, OSC and APC
-sequences; word navigation has no ICU dictionary, so the two Han word-boundary cases are strict xfails.
+MISAKA fork: word navigation has no ICU dictionary, so the two Han word-boundary cases are strict xfails.
 """
 
 from __future__ import annotations
 
-import re
-
 import pytest
 
 from misaka.ui.tui.components.input import Input, InputOptions
-from misaka.ui.tui.utils import visibleWidth
-
-_SEQUENCES = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b_[^\x07\x1b]*(?:\x07|\x1b\\)")
+from misaka.ui.tui.utils import stripTerminalSequences, visibleWidth
 
 NO_ICU_DICTIONARY = pytest.mark.xfail(
     strict=True, reason="MISAKA fork: no ICU word dictionary, so a Han run segments per character"
 )
 
 UNDO = "\x1b[45;5u"  # Ctrl+- (undo)
-
-
-def stripTerminalSequences(text: str) -> str:
-    return _SEQUENCES.sub("", text)
 
 
 def _type(input: Input, text: str) -> None:

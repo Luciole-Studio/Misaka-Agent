@@ -58,6 +58,21 @@ your shell wins over both files.
 A value of the wrong type (text where a number belongs) stops MISAKA at start and names the
 setting; `misaka setup`, `update` and `uninstall` still run so you can fix it.
 
+### Schemas for your editor
+
+MISAKA ships JSON schemas for `settings.json`, `models.json`, `keybindings.json` and themes, so an
+editor can complete keys and flag mistakes as you type. Name one in the file's `$schema` key (MISAKA
+ignores the key itself):
+
+```json
+{ "$schema": "https://raw.githubusercontent.com/Luciole-Studio/Misaka-Agent/vX.Y.Z/misaka/schemas/settings.schema.json" }
+```
+
+Put your version (`misaka --version`) in place of `X.Y.Z`; the other files are
+`models.schema.json`, `keybindings.schema.json` and `theme.schema.json`. The same files are in the
+installed package, under `misaka/schemas/`, and the built-in themes name theirs. In `models.json`
+the key must be text: any other value makes the file invalid.
+
 ## Models and thinking
 
 | Setting | Default | Meaning |
@@ -76,6 +91,25 @@ A session's thinking level comes from the first of: a `--thinking` flag (or a `:
 `--model`); for a conversation you resume, the level it last had; the role's own default;
 `modelThinkingLevels`; the home's `defaultThinkingLevel`; `medium`. It is then limited to what
 the model supports.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `enabledModels` | none | the models Ctrl+P cycles through, in the same form as `--models` |
+
+When several providers offer a model of the same name, `--model NAME` takes the one of them you
+have a key or a sign-in for; when that is more than one, or none, or with `--api-key`, it stops and
+lists them, and you write `provider/model` (or add `--provider`) instead. A name in
+`enabledModels` or `--models` that several providers offer adds each of them, with a warning.
+
+With an OpenRouter key, MISAKA lists only the OpenRouter models, limits and prices that key allows:
+it asks OpenRouter when it refreshes the model list (at the `/model` list, for example) and keeps the
+answer in `state/models-store.json`, which Sisters' cards read. A pinned OpenRouter model that the key
+may not use is then unknown, and the error says so. MISAKA sends nothing to any other catalog service.
+
+`models.json` is checked as a whole: one wrong value, a `contextWindow` or `maxTokens` of `0`, or a
+known `compat` setting of the wrong type, such as `"supportsMidConvoSystemMessages": "yes"`, makes
+MISAKA ignore the file and show the error. Unknown `compat` keys are kept. A `kimi-coding` base URL
+in `models.json` must end in `/v1`.
 
 ## Research, budget and concurrency
 
@@ -225,8 +259,9 @@ deferred tools; a tool it loads is then called like any other.
 |---|---|---|
 | `panel.prefix` | `ctrl+b` | the panel's prefix key, `ctrl+` and a letter (use `ctrl+g` inside tmux, which takes `ctrl+b`); read when the panel starts |
 | `tui.esc_timeout_ms` | `10`; `100` over ssh or inside a pane | how long Esc waits to see whether it starts an Alt+key |
-| `showHardwareCursor` | `false` | show the terminal's own cursor |
+| `showHardwareCursor` | `false` | use the terminal's own cursor instead of the one MISAKA draws; MISAKA still places it where input methods need it |
 | `terminal.clearOnShrink` | `false` | clear the screen when the window shrinks |
+| `sessionShareDestination` | `auto` | where `/share` uploads: `radius`, `gist` (a private GitHub gist), or `auto`, which uses Radius when you are signed in to it and a gist otherwise. `radius` never falls back to a gist: without a Radius sign-in, `/share` says so and stops |
 
 Chat also tells a terminal that supports the
 [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status) (OSC 7501)
@@ -235,6 +270,23 @@ waits for you, `done`, `error` (with the error's first line) and `idle`. A repor
 the conversation's name or the dialog's title, never your prompts or the model's output. It is sent
 only after the terminal answers the protocol's query; tmux and screen do not pass it on.
 `MISAKA_PROGRAM_STATUS` changes that.
+
+### Themes
+
+`theme` names the color theme: `dark`, `light`, a theme of your own, or `LIGHT/DARK` (two names) to
+follow the terminal's background. A theme of your own is a file `~/.misaka/themes/NAME.json` whose
+`name` is `NAME`; copy the built-in `dark.json` or `light.json` (in the installed package, under
+`misaka/modes/interactive/theme/`) to start from. A color is `#RRGGBB` or `#RGB`, a palette index
+from 0 to 255, `""` for the terminal's own color, or the name of a color under `vars`.
+
+Theme files are strict: only `$schema`, `name`, `appearance`, `vars`, `colors` and `export` are
+allowed at the top, and only the known color names under `colors` and `export`. Define colors of
+your own under `vars` and use them by name; any other key makes the theme invalid. MISAKA's own
+`sectionTitle`, `appTitle` and `appTitleOnLight` (the startup screen's section titles, and the agent's
+name in a "MISAKA · NAME" startup title, on dark and on light backgrounds) may be left out; they then
+take `accent`, `text` and `text`.
+An invalid theme is reported when MISAKA starts and at `/reload`, and is not used. `theme.schema.json`
+(see [Schemas for your editor](#schemas-for-your-editor)) lists every color.
 
 ## Long conversations (LCM)
 
@@ -288,6 +340,7 @@ Variables for MISAKA itself:
 | `MISAKA_GHOSTTY_VT` | the bundled library | a terminal library you built yourself, for platforms without a bundled one |
 | `MISAKA_ALLOW_NESTED` | off | `1` lets the panel open inside one of its own panes |
 | `MISAKA_PROGRAM_STATUS` | ask the terminal | `1` always sends program status reports (OSC 7501), `0` never does |
+| `MISAKA_CLIPBOARD_OSC52` | off | `1` also sends copied text to the terminal with OSC 52 after the local clipboard write, as MISAKA does over SSH: for a remote client that reaches MISAKA without SSH variables, such as a multiplexer attached from another machine or a remote IDE |
 | `MISAKA_TUI_WRITE_LOG` | off | a file, or a folder, that gets a copy of everything written to the terminal; for tracking down display problems |
 | `MISAKA_TUI_DEBUG_REDRAW` | off | `1` records why each full redraw happened, in `pi-tui-debug.log` in the home |
 | `MISAKA_TUI_DEBUG` | off | `1` writes the state of every screen update to `/tmp/tui` |

@@ -147,7 +147,7 @@ def createEditTool() -> dict[str, Any]:
                 **({} if diffResult["firstChangedLine"] is None else {"firstChangedLine": diffResult["firstChangedLine"]}),
             }
             return {
-                "content": [{"type": "text", "text": f"Successfully replaced {len(edits)} block(s) in {path}."}],
+                "output": [{"type": "text", "text": f"Successfully replaced {len(edits)} block(s) in {path}."}],
                 "details": details,
             }
 

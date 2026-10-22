@@ -63,8 +63,9 @@ EXAMPLES: dict[str, list[str]] = {
     "example_09_context": [
         ("raw active entries: ['message', 'message', 'message', 'message', 'pi.system', 'message', 'message', 'edit', "
         "'note']"),
-        ("request messages: ['user: read files a and b', 'assistant: reading call(a) call(b)', 'result(a)', "
-        "'result(b)', 'system: {\"cwd\":\"<cwd>/repo</cwd>\"}', 'assistant: a and b look fine']"),
+        # pi 1.3.0 (#10904): the first `pi.system` entry is the baseline, which leads the request even after answers.
+        ("request messages: ['system: {\"cwd\":\"<cwd>/repo</cwd>\"}', 'user: read files a and b', "
+        "'assistant: reading call(a) call(b)', 'result(a)', 'result(b)', 'assistant: a and b look fine']"),
         ("fork messages: ['user: read a and b', 'assistant: reading call(a) call(b)', 'result(a) error', "
         "'result(b) error']"),
         "after summary: summary ['user: Summary: a and b are fine.']",
@@ -118,13 +119,15 @@ EXAMPLES: dict[str, list[str]] = {
     "example_20_inbox": [
         "rejected: Conversation 1 is busy",
         "withdraw: aborted",
-        "inbox: ['10 followUp', '11 steer', '12 write']",
+        # pi 1.3.0 (#10407): a data-only write is appended at once, even while busy, so the note never queues and lands
+        # in time order, before the first answer.
+        "inbox: ['10 followUp', '11 steer']",
         "first: done",
         "follow-up: done",
         "steer: done",
         "note: done",
         "withdrawn: unanswered aborted",
-        "transcript: ['pi.user', 'pi.assistant', 'app.note', 'pi.user', 'pi.user', 'pi.assistant']",
+        "transcript: ['pi.user', 'app.note', 'pi.assistant', 'pi.user', 'pi.user', 'pi.assistant']",
     ],
     "example_21_late_join": [
         "view entries: ['pi.user', 'pi.system', 'pi.assistant']",
@@ -144,14 +147,19 @@ EXAMPLES: dict[str, list[str]] = {
     "example_23_subagent_background": [
         "> Start a subagent named reader that summarizes Moby Dick.",
         'subagent spawn reader "Summarize the plot of Moby Dick."',
-        "Started reader.",
+        # pi 1.3.0 renamed a tool result's `content` to `output`. Upstream's example 23 still returns `content`, which
+        # results no longer read, so each subagent call answers with its (empty) retained output and the scripted
+        # model only says "OK.". The calls themselves still spawn, message, stop, and list the subagent.
+        "  → \nOK. \n",
         "> reader: A whale, a captain, an obsession.",
         "> Ask reader to summarize every chapter.",
+        'subagent send reader "Now go through all chapters in detail."',
         "> Stop reader.",
-        "Stopped reader.",
+        "subagent stop reader",
         "> What are my subagents doing?",
-        "reader: idle",
+        "subagent status",
         "> Ask reader for the whale's name.",
+        'subagent send reader "What is the whale called?"',
         "(process restarts)",
         "> reader: Moby Dick.",
     ],

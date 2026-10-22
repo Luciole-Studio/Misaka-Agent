@@ -23,7 +23,7 @@ from misaka.core.extensions.types import LoadExtensionsResult
 from misaka.modes.json_event import toJsonEvent
 from misaka.utils.js import jsonStringify
 from misaka.utils.values import read_field
-from tests.experimental_support import flush
+from tests.fake_timers import flush
 from tests.suite_harness import createHarness, createTestResourceLoader, getUserTexts
 
 # --- issue #7193 extension event-bus lifecycle --------------------------------------------------

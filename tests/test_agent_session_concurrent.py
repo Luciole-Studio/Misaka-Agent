@@ -351,7 +351,7 @@ class RunnerStub:
         return getattr(self._real, name)
 
 
-async def _beforeAgentStart(_prompt: Any, _images: Any, systemPromptOptions: Any, *_: Any) -> Any:
+async def _beforeAgentStart(_trigger: Any, systemPromptOptions: Any, *_: Any) -> Any:
     return {"messages": [], "systemPromptOptions": normalizeBuildSystemPromptOptions(systemPromptOptions)}
 
 

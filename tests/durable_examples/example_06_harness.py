@@ -29,7 +29,7 @@ context = BACKGROUND_CONTEXT
 # installed in a registry the application owns. Nothing in the registry is
 # saved; it is this process's code.
 async def readFile(args: dict[str, Any], api: Any, callContext: Any) -> dict[str, Any]:
-    return {"content": [{"type": "text", "text": f"contents of {args['path']}"}]}
+    return {"output": [{"type": "text", "text": f"contents of {args['path']}"}]}
 
 
 read = defineTool(

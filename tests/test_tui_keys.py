@@ -1,4 +1,4 @@
-"""Translated from pi-tui's ``test/keys.test.ts`` (v1.1.0).
+"""Translated from pi-tui's ``test/keys.test.ts`` (v1.3.0).
 
 Tests for keyboard input handling
 """
@@ -134,6 +134,16 @@ def test_should_normalize_kitty_keypad_functional_keys_to_logical_digits_symbols
     setKittyProtocolActive(False)
 
 
+def test_should_match_shifted_symbols_by_their_produced_character():
+    setKittyProtocolActive(True)
+    assert matchesKey("\x1b[61:43;2u", "+") is True
+    assert matchesKey("\x1b[61:43;2u", "shift+=") is True
+    assert parseKey("\x1b[61:43;2u") == "+"
+    assert matchesKey("\x1b[61:43;6u", "ctrl++") is True
+    assert parseKey("\x1b[61:43;6u") == "ctrl++"
+    setKittyProtocolActive(False)
+
+
 def test_should_handle_shifted_key_in_format():
     setKittyProtocolActive(True)
     # Format with shifted key: CSI codepoint:shifted:base;modifier u
@@ -266,6 +276,8 @@ def test_should_match_xterm_modifyotherkeys_symbol_combos():
     setKittyProtocolActive(False)
     assert matchesKey("\x1b[27;5;47~", "ctrl+/") is True
     assert parseKey("\x1b[27;5;47~") == "ctrl+/"
+    assert matchesKey("\x1b[27;6;43~", "ctrl++") is True
+    assert parseKey("\x1b[27;6;43~") == "ctrl++"
 
 
 def test_should_match_xterm_modifyotherkeys_digit_combos():
@@ -610,6 +622,8 @@ def test_should_parse_special_keys():
     assert parseKey(" ") == "space"
     assert parseKey("1") == "1"
     assert matchesKey("1", "1") is True
+    assert parseKey("+") == "+"
+    assert matchesKey("+", "+") is True
 
 
 def test_should_parse_arrow_keys():
@@ -663,3 +677,46 @@ def test_out_of_range_codepoints_do_not_raise():
     assert parseKey("\x1b[1114112u") is None
     assert decodeKittyPrintable("\x1b[1114112u") is None
     assert decodeKittyPrintable(f"\x1b[{'9' * 400}u") is None
+
+
+def test_the_logical_shifted_symbol_match_leaves_cjk_and_fullwidth_input_alone():
+    # An IME commit (日) is no key, and a fullwidth ＋ is not the ASCII symbol `+`: neither is consumed as Shift.
+    setKittyProtocolActive(True)
+    assert matchesKey("\x1b[26085u", "+") is False
+    assert parseKey("\x1b[26085u") is None
+    assert decodeKittyPrintable("\x1b[26085u") == "日"
+    assert matchesKey("\x1b[61:65291;2u", "+") is False
+    assert matchesKey("\x1b[61:65291;2u", "shift+=") is True
+    assert parseKey("\x1b[61:65291;2u") == "shift+="
+    setKittyProtocolActive(False)
+    assert decodePrintableKey("\x1b[27;2;26085~") == "日"
+    assert matchesKey("\x1b[27;2;26085~", "+") is False
+    assert matchesKey("\x1b[27;2;65291~", "+") is False
+
+
+def test_a_jis_layout_shifted_symbol_matches_the_symbol_it_produces():
+    # On a JIS keyboard Shift+- types `=`: Kitty reports `-` with the shifted key `=`.
+    setKittyProtocolActive(True)
+    assert parseKey("\x1b[45:61;2u") == "="
+    assert matchesKey("\x1b[45:61;2u", "=") is True
+    assert matchesKey("\x1b[45:61;2u", "shift+-") is True
+    # `"` (Shift+2) is not a bindable symbol, so it stays the physical key.
+    assert parseKey("\x1b[50:34;2u") == "shift+2"
+    setKittyProtocolActive(False)
+
+
+def test_editing_keys_still_match_with_the_new_modifier_order():
+    # The keys the editor's CJK backspace and IME paths rely on: the physical match comes first, unchanged.
+    setKittyProtocolActive(True)
+    assert matchesKey("\x1b[127u", "backspace") is True
+    assert matchesKey("\x1b[127;2u", "shift+backspace") is True
+    assert matchesKey("\x1b[127;2u", "backspace") is False
+    assert matchesKey("\x1b[13u", "enter") is True
+    setKittyProtocolActive(False)
+
+
+def test_key_ids_parse_modifier_prefixes_only():
+    # Unknown or repeated modifiers name no key (they used to fall back to the last `+` part); ids lowercase as before.
+    assert matchesKey("x", "meta+x") is False
+    assert matchesKey("\x03", "ctrl+ctrl+c") is False
+    assert matchesKey("\x03", "Ctrl+C") is True

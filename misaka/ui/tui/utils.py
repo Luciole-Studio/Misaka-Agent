@@ -1,4 +1,4 @@
-"""Translated from pi-tui's ``packages/tui/src/utils.ts`` (v1.1.0).
+"""Translated from pi-tui's ``packages/tui/src/utils.ts`` (v1.3.0).
 
 MISAKA forks, each marked where it happens:
 
@@ -1451,8 +1451,13 @@ def extractSegments(
             # Include ANSI codes in their respective segments
             if currentCol < beforeEnd:
                 pendingAnsiBefore += ansi.code
-            elif currentCol >= afterStart and currentCol < afterEnd and afterStarted:
-                # Only include after we've started "after" (styling already prepended)
+            elif (
+                currentCol >= afterStart
+                and currentCol < afterEnd
+                and (afterStarted or ansi.code.startswith("\x1b_"))
+            ):
+                # SGR codes are only included after "after" started (styling already prepended). Zero-width APC
+                # markers like CURSOR_MARKER are not tracked styling, so keep them at the boundary too.
                 after += ansi.code
             i += ansi.length
             continue

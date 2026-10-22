@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/test/openai-completions-tool-choice.test.ts`` (v1.1.0)."""
+"""Translated from pi's ``packages/ai/test/openai-completions-tool-choice.test.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
@@ -600,12 +600,12 @@ async def test_accumulates_mixed_content_reasoning_and_parallel_tool_call_deltas
     assert toolEventsByContentIndex[5] == ["toolcall_start", "toolcall_delta", "toolcall_delta", "toolcall_end"]
 
     assert len(response.content) == 6
-    assert response.content[0].model_dump(exclude_none=True) == {"type": "text", "text": "answer 1 answer 2\n"}
-    assert response.content[1].model_dump(exclude_none=True) == {
+    assert response.content[0].model_dump(exclude_none=True) == {
         "type": "thinking",
         "thinking": "think 1 think 2",
         "thinkingSignature": "reasoning_content",
     }
+    assert response.content[1].model_dump(exclude_none=True) == {"type": "text", "text": "answer 1 answer 2\n"}
     readCall, grepCall, listCall, writeCall = response.content[2:]
     assert [call.type for call in (readCall, grepCall, listCall, writeCall)] == ["toolCall"] * 4
     assert (readCall.id, readCall.name, readCall.arguments) == ("tc_read_initial", "read", {"path": "README.md"})
@@ -705,7 +705,7 @@ async def test_replays_xiaomi_mimo_assistant_tool_calls_with_empty_reasoning_con
     assert replayedAssistant["role"] == "assistant"
     assert replayedAssistant["reasoning_content"] == ""
     assert params["thinking"] == {"type": "enabled"}
-    assert params["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in params
 
 
 async def test_normalizes_opencode_go_reasoning_deltas_to_reasoning_content_for_replay(mockState):

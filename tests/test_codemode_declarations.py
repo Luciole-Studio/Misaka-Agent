@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from misaka.codemode import (
-    mcpStructuredContentSchema,
     renderDeclarations,
     renderToolSample,
     renderToolSignature,
@@ -15,17 +14,8 @@ def execute(_args, _context):
     return None
 
 
-def mcpResultSchema(structuredContent=None):
-    return {
-        "type": "object",
-        "properties": {
-            "content": {"type": "array", "items": {"type": "object"}},
-            **({} if structuredContent is None else {"structuredContent": structuredContent}),
-            "isError": {"type": "boolean"},
-            "_meta": {"type": "object"},
-        },
-        "required": ["content"],
-    }
+def joinLines(*lines: str) -> str:
+    return "\n".join(lines)
 
 
 # -- schemaToType ------------------------------------------------------------------------------
@@ -81,6 +71,131 @@ def test_puts_property_descriptions_on_comment_lines():
     }) == "{\n  // Outer\n  outer?: {\n    // Inner\n    inner?: string;\n  };\n}"
 
 
+# https://github.com/earendil-works/pi/issues/10707
+def test_puts_constraints_the_type_cannot_express_on_property_comment_lines():
+    assert schemaToType({
+        "type": "object",
+        "properties": {
+            "timeoutMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 30000,
+                "default": 0,
+                "description": "Wait in milliseconds.",
+            },
+            "id": {"type": "string", "pattern": "^[a-z]+$", "maxLength": 8},
+            "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 5, "uniqueItems": True, "deprecated": True},
+            "name": {"type": "string"},
+        },
+        "required": ["id"],
+    }) == joinLines(
+        "{",
+        "  // @maxLength 8 @pattern ^[a-z]+$",
+        "  id: string;",
+        "  name?: string;",
+        "  // @maxItems 5 @uniqueItems @deprecated",
+        "  tags?: Array<string>;",
+        "  // Wait in milliseconds.",
+        "  // @integer @minimum 0 @maximum 30000 @default 0",
+        "  timeoutMs?: number;",
+        "}",
+    )
+
+
+def test_reads_constraints_of_optional_fields_from_the_non_null_branch():
+    # Pydantic's `limit: int | None = Field(None, ge=1, le=100)`.
+    assert schemaToType({
+        "type": "object",
+        "properties": {
+            "limit": {
+                "anyOf": [{"type": "integer", "minimum": 1, "maximum": 100}, {"type": "null"}],
+                "default": None,
+                "title": "Limit",
+            },
+        },
+    }) == "{\n  // @integer @minimum 1 @maximum 100\n  limit?: number | null;\n}"
+    # Constraints of the property and the branch both apply.
+    assert schemaToType({
+        "type": "object",
+        "properties": {
+            "n": {
+                "anyOf": [{"type": "integer", "minimum": 10, "maximum": 50, "format": "int32"}, {"type": "null"}],
+                "minimum": 0,
+                "maximum": 20,
+                "format": "port",
+            },
+        },
+    }) == "{\n  // @integer @minimum 10 @maximum 20 @format port @format int32\n  n?: number | null;\n}"
+
+
+def test_reads_draft_04_boolean_exclusive_bounds():
+    assert schemaToType({
+        "type": "object",
+        "properties": {
+            "n": {"type": "integer", "minimum": 0, "exclusiveMinimum": True, "maximum": 10, "exclusiveMaximum": False},
+            "m": {"anyOf": [{"type": "number", "maximum": 5, "exclusiveMaximum": True}, {"type": "null"}], "maximum": 8},
+        },
+    }) == joinLines(
+        "{",
+        "  // @maximum 8 @exclusiveMaximum 5",
+        "  m?: number | null;",
+        "  // @integer @exclusiveMinimum 0 @maximum 10",
+        "  n?: number;",
+        "}",
+    )
+
+
+def test_leaves_out_long_tags_and_escapes_line_terminators():
+    assert schemaToType({
+        "type": "object",
+        "properties": {"config": {"type": "object", "default": {"text": "x" * 100}}},
+    }) == "{ config?: { [key: string]: unknown; }; }"
+    assert schemaToType({
+        "type": "object",
+        "properties": {
+            "sep": {"type": "string", "pattern": "^[\r\n\u2028\u2029]$", "default": "\u2028", "description": "a\u2028b"},
+        },
+    }) == joinLines(
+        "{",
+        "  // a",
+        "  // b",
+        '  // @pattern ^[\\u000d\\u000a\\u2028\\u2029]$ @default "\\u2028"',
+        "  sep?: string;",
+        "}",
+    )
+
+
+def test_drops_constraint_tags_before_rendering_a_type_over_the_budget_as_unknown():
+    schema = {"type": "object", "properties": {"n": {"type": "integer", "minimum": 1}}}
+    assert schemaToType(schema) == "{\n  // @integer @minimum 1\n  n?: number;\n}"
+    assert schemaToType(schema, {"maxChars": 20}) == "{ n?: number; }"
+    assert schemaToType(schema, {"maxChars": 10}) == "unknown"
+
+
+# -- misaka adaptations: JavaScript number formatting and equality in tags ---------------------
+
+
+def test_formats_tag_numbers_as_javascript_prints_them():
+    # `${n}`: a whole float prints without a fraction, and 1 and 1.0 are one value for `new Set`.
+    assert schemaToType({
+        "type": "object",
+        "properties": {
+            "n": {"anyOf": [{"type": "number", "multipleOf": 1.0}, {"type": "null"}], "multipleOf": 1, "maximum": 1e21},
+            "s": {"type": "string", "format": "1", "anyOf": [{"type": "string", "format": 1}, {"type": "null"}]},
+            "b": {"type": "boolean", "default": False},
+        },
+    }) == joinLines(
+        "{",
+        "  // @default false",
+        "  b?: boolean;",
+        "  // @maximum 1e+21 @multipleOf 1",
+        "  n?: number | null;",
+        "  // @format 1 @format 1",
+        "  s?: string | null;",
+        "}",
+    )
+
+
 def test_resolves_local_references_and_stops_at_recursive_ones():
     schema = {
         "type": "object",
@@ -132,30 +247,19 @@ def test_renders_signatures_with_normalized_identifiers():
     assert renderToolSignature({"name": "free"}) == "free(args: unknown): Promise<unknown>;"
 
 
-def test_renders_mcp_call_tool_result_output_schemas_as_call_tool_result_t():
-    inputSchema = {"type": "object", "properties": {}, "additionalProperties": False}
-    assert renderToolSignature({
-        "name": "mcp__sample__search",
-        "inputSchema": inputSchema,
-        "outputSchema": mcpResultSchema({
-            "type": "object",
-            "properties": {"results": {"type": "array", "items": {"$ref": "#/definitions/Result~1item~0v1"}}},
-            "required": ["results"],
-            "additionalProperties": False,
-            "definitions": {
-                "Result/item~v1": {
-                    "type": "object",
-                    "properties": {"id": {"type": "string"}, "score": {"type": "number"}},
-                    "required": ["id", "score"],
-                    "additionalProperties": False,
-                },
-            },
-        }),
-    }) == "mcp__sample__search(args: {}): Promise<CallToolResult<{ results: Array<{ id: string; score: number; }>; }>>;"
-    assert renderToolSignature({"name": "plain", "inputSchema": inputSchema, "outputSchema": mcpResultSchema()}) == (
-        "plain(args: {}): Promise<CallToolResult>;"
+def test_renders_output_schemas_shaped_like_an_mcp_call_tool_result_as_plain_types():
+    outputSchema = {
+        "type": "object",
+        "properties": {
+            "content": {"type": "array", "items": {"type": "object"}},
+            "isError": {"type": "boolean"},
+            "_meta": {"type": "object"},
+        },
+        "required": ["content"],
+    }
+    assert renderToolSignature({"name": "plain", "inputSchema": {"type": "object", "properties": {}}, "outputSchema": outputSchema}) == (
+        "plain(args: { [key: string]: unknown; }): Promise<{ _meta?: { [key: string]: unknown; }; content: Array<{ [key: string]: unknown; }>; isError?: boolean; }>;"
     )
-    assert mcpStructuredContentSchema({"type": "object", "properties": {"content": {"type": "array"}}}) is None
 
 
 def test_renders_the_per_tool_sample():

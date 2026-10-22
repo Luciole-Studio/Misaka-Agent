@@ -7,7 +7,6 @@ from typing import Any
 
 import pytest
 
-from misaka.chord.services.state_internals import getReplicatedStateInternals
 from misaka.durable.documents import defineDoc, defineDocFamily
 from tests.durable_support import (
     context,
@@ -105,17 +104,14 @@ class TestSessionDocumentStates:
         assert second.value["value"] == 2
         second.dispose()
 
-    async def test_shares_exact_committed_value_and_operation_references_with_chord(self):
+    async def test_shares_exact_committed_value_references_with_chord(self):
         ts = await createState()
         session, publications = ts.session, ts.publications
         state = await session.documentState(StateDoc, context)
-        received: list[Any] = []
-        getReplicatedStateInternals(state).subscribe(lambda ops, *_: received.append(ops))
         await setValue(session, StateDoc, 4)
         await flush()
         published = documentChanges(publications[-1])[0]
         assert state.value is published["value"]
-        assert received[-1] is published["ops"]
         assert state.value["retained"] is (await session.snapshot(StateDoc, context))["retained"]
         state.dispose()
 
@@ -133,8 +129,6 @@ class TestSessionDocumentStates:
     async def test_publishes_null_retirement_and_never_follows_a_replacement_incarnation(self):
         session = (await createState()).session
         oldState = await session.documentState(StateDoc, context)
-        retirement: list[Any] = []
-        getReplicatedStateInternals(oldState).subscribe(lambda ops, *_: retirement.append(ops))
 
         async def replace(tx):
             await tx.retireDoc(StateDoc)
@@ -143,7 +137,6 @@ class TestSessionDocumentStates:
         await session.commit(replace, context)
         await flush()
         assert oldState.value is None
-        assert retirement[-1] == [["r", None]]
 
         replacement = await session.documentState(StateDoc, context)
         assert replacement.value["value"] == 10

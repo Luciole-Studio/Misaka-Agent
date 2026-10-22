@@ -1,7 +1,7 @@
 """Translated from pi's ``packages/ai/test/provider-retry.test.ts`` (v1.1.0).
 
 MISAKA fork: vitest's fake timers are stood in for by replacing the running loop's ``call_later`` with
-``tests.experimental_support.FakeTimers``; ``httpx.Headers`` is the ``Headers`` object.
+``tests.fake_timers.FakeTimers``; ``httpx.Headers`` is the ``Headers`` object.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import pytest
 
 from misaka.ai.utils.provider_retry import retryProviderRequest
 from misaka.utils.js import AbortController
-from tests.experimental_support import FakeTimers
+from tests.fake_timers import FakeTimers
 
 
 def providerError(status: int | None, headers: dict[str, str] | None = None) -> Exception:

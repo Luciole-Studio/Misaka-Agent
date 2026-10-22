@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/test/openai-completions-reasoning-details.test.ts`` (v1.1.0)."""
+"""Translated from pi's ``packages/ai/test/openai-completions-reasoning-details.test.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
@@ -218,3 +218,24 @@ async def test_merges_consecutive_text_and_summary_reasoning_details_deltas_befo
     await runOpenAICompletionsStream([assistantMessage])
 
     assert getAssistantPayload(mockState.requests[1])["reasoning_details"] == expectedReasoningDetails
+
+
+# --- openai-completions reasoning and content in one delta ---------------------------------------
+
+
+# https://github.com/earendil-works/pi/issues/10926
+async def test_places_thinking_before_text_when_one_delta_carries_reasoning_content_and_content(mockState):
+    mockState.chunkSets = [[chunk({"role": "assistant", "reasoning_content": "thinking", "content": "answer"}, "stop")]]
+
+    assistantMessage = await runOpenAICompletionsStream()
+    assert [block.model_dump(exclude_none=True) for block in assistantMessage.content] == [
+        {"type": "thinking", "thinking": "thinking", "thinkingSignature": "reasoning_content"},
+        {"type": "text", "text": "answer"},
+    ]
+
+
+async def test_places_thinking_before_text_when_one_delta_carries_reasoning_details_and_content(mockState):
+    mockState.chunkSets = [[chunk({"reasoning_details": [reasoningDetail], "content": "answer"}, "stop")]]
+
+    assistantMessage = await runOpenAICompletionsStream()
+    assert [block.type for block in assistantMessage.content] == ["thinking", "text"]

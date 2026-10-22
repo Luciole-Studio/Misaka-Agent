@@ -2,7 +2,8 @@
 
 MISAKA forks: "expands a collapsed tool result when clicked" is not ported (D1); the two "Pi documentation" read
 scenarios are not ported (MISAKA ships no pi documentation, see ``core/tools/renderers/read.py``); ``vi.useFakeTimers``
-is a patched clock in ``core/tools/renderers/bash.py``; ``{ ...definition }`` is ``dataclasses.replace``.
+is a patched clock in ``core/tools/render_utils.py`` (the tool timer the bash renderer uses since pi 1.2);
+``{ ...definition }`` is ``dataclasses.replace``.
 """
 
 from __future__ import annotations
@@ -19,9 +20,9 @@ import pytest
 from misaka.agent.types import AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.tools import render_utils
 from misaka.core.tools.bash import createBashToolDefinition
 from misaka.core.tools.read import createReadTool, createReadToolDefinition
-from misaka.core.tools.renderers import bash as bash_renderers
 from misaka.core.tools.renderers import withBuiltInRenderers
 from misaka.core.tools.write import createWriteToolDefinition
 from misaka.modes.interactive.components.tool_execution import ToolExecutionComponent
@@ -75,7 +76,7 @@ class FakeClock:
 
     def __init__(self, monkeypatch: Any) -> None:
         self.now = 0
-        monkeypatch.setattr(bash_renderers, "_now", lambda: self.now)
+        monkeypatch.setattr(render_utils, "_now", lambda: self.now)
 
     def advanceTimersByTime(self, ms: int) -> None:
         self.now += ms

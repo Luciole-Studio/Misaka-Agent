@@ -240,7 +240,7 @@ def examples() -> dict[str, Any]:
         settled = await (await handle.submit(request, context)).wait(context)
         if settled["status"] != "done" or settled["type"] != "input":
             raise RuntimeError(f"Subagent failed: {settled['status']}")
-        return {"content": [{"type": "text", "text": await answerText(api, settled["answer"], context)}]}
+        return {"output": [{"type": "text", "text": await answerText(api, settled["answer"], context)}]}
 
     Subagent = defineExtension(
         {

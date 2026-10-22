@@ -1,5 +1,5 @@
 """Translated from pi's ``packages/coding-agent/test/compaction-serialization.test.ts`` and
-``compaction-summary-reasoning.test.ts`` (v1.1.0)."""
+``compaction-summary-reasoning.test.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
@@ -90,6 +90,36 @@ def test_should_not_truncate_assistant_or_user_messages():
 
     assert "truncated" not in result
     assert longText in result
+
+
+def test_should_omit_thinking():
+    messages = [
+        AssistantMessage.model_validate({
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "private reasoning", "thinkingSignature": "sig"},
+                {"type": "text", "text": "visible reply"},
+                {"type": "toolCall", "id": "tc1", "name": "read", "arguments": {"path": "a.ts"}},
+            ],
+            "api": "anthropic",
+            "provider": "anthropic",
+            "model": "test",
+            "usage": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 0,
+                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
+            },
+            "stopReason": "toolUse",
+            "timestamp": nowMs(),
+        }),
+    ]
+
+    result = serializeConversation(messages)
+
+    assert result == '[Assistant]: visible reply\n\n[Assistant tool calls]: read(path="a.ts")'
 
 
 # --- generateSummary reasoning options ----------------------------------------------------------

@@ -214,7 +214,7 @@ class WindowLO:
                         {"customType": "research-phase", "display": True, "content": prompt,
                          "details": {"run_id": options.get("usage_task_id"), TURN: True,
                                      "stage": "adjudication_draft" if prompt.startswith((DRAFT_CONTRACT, FINAL_CONTRACT)) else None}},
-                        {"triggerTurn": True, "prepareTurn": True})
+                        {"triggerTurn": True})
             self.check_active()
             return None, answer or "", error or (None if answer is not None else "no completed research response")
         finally:

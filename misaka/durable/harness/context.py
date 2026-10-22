@@ -1,6 +1,6 @@
 """The active transcript and the model context derived from it.
 
-Translated from pi's ``packages/durable/src/harness/context.ts`` (v1.1.0). Records, messages and views are plain
+Translated from pi's ``packages/durable/src/harness/context.ts`` (v1.3.0). Records, messages and views are plain
 ``dict`` objects with the upstream keys; a view's ``head`` is ``None`` (upstream ``undefined``) when there is no head
 marker. Python has no frozen objects: upstream freezes a kept range's entries so no reader can change them, while here
 the range keeps them private and ``readContextFrom()`` returns a detached copy of its view.
@@ -11,7 +11,9 @@ from __future__ import annotations
 from typing import Any
 
 from misaka.chord.context import Context
+from misaka.utils.js import UNDEFINED
 
+from ..entries import SystemEntry
 from ..ids import idFromNumber
 from ..types import ConversationId, Cursor, EntryId, EntryRecord, Storage
 
@@ -48,8 +50,13 @@ ContextRange = dict[str, Any]
 ``bounds["tail"]``, oldest first, and the view derived from them. Entries at or below the tail never change, so a later
 read with the same head marker extends both. Keys: ``bounds``, ``entries``, ``view``, ``edited`` (targets of the edits
 in ``entries``), ``settled`` (``view["messages"]`` from the contributed messages before the last assistant message; tool
-results are ordered within the messages up to the next assistant message, so later entries cannot change these) and
-``open`` (contributed messages from the last assistant message on, before tool result ordering)."""
+results are ordered within the messages up to the next assistant message, so later entries cannot change these),
+``open`` (contributed messages from the last assistant message on, before tool result ordering) and ``baseline`` (the
+baseline's system message; see ``findBaseline()``)."""
+
+type Baseline = dict[str, Any] | None | Any
+"""A baseline's system message, ``None`` when the range cannot have one, or ``UNDEFINED`` while a later entry may be
+one."""
 
 
 async def readContextFrom(
@@ -130,9 +137,18 @@ def deriveRange(bounds: ContextBounds, entries: list[EntryRecord]) -> ContextRan
     active = selectActive(bounds["head"], entries)
     contributions = [contribute(entry, edits.get(entry["id"])) for entry in active]
     settled, open_ = settle([], [message for contributed in contributions for message in contributed])
-    messages = leadWithSystem([*settled, *orderToolResults(open_)])
+    baseline = findBaseline(bounds["head"], active)
+    messages = leadWithSystem([*settled, *orderToolResults(open_)], baseline)
     view = {"head": bounds["head"], "entries": active, "contributions": contributions, "messages": messages}
-    return {"bounds": bounds, "entries": entries, "view": view, "edited": set(edits), "settled": settled, "open": open_}
+    return {
+        "bounds": bounds,
+        "entries": entries,
+        "view": view,
+        "edited": set(edits),
+        "settled": settled,
+        "open": open_,
+        "baseline": baseline,
+    }
 
 
 def extendRange(previous: ContextRange, bounds: ContextBounds, added: list[EntryRecord]) -> ContextRange:
@@ -149,11 +165,12 @@ def extendRange(previous: ContextRange, bounds: ContextBounds, added: list[Entry
     settled, open_ = settle(
         previous["settled"], [*previous["open"], *[message for contributed in contributions for message in contributed]]
     )
+    baseline = previous["baseline"] if previous["baseline"] is not UNDEFINED else findBaseline(bounds["head"], added)
     view = {
         "head": bounds["head"],
         "entries": [*previous["view"]["entries"], *added],
         "contributions": [*previous["view"]["contributions"], *contributions],
-        "messages": leadWithSystem([*settled, *orderToolResults(open_)]),
+        "messages": leadWithSystem([*settled, *orderToolResults(open_)], baseline),
     }
     return {
         "bounds": bounds,
@@ -162,18 +179,49 @@ def extendRange(previous: ContextRange, bounds: ContextBounds, added: list[Entry
         "edited": previous["edited"],
         "settled": settled,
         "open": open_,
+        "baseline": baseline,
     }
 
 
-def leadWithSystem(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Move a system message that only user messages precede to the front. A run's input is committed before generation
-    renders the system prompt, so a transcript, or the range after a compaction or reset, starts with user messages
-    followed by the baseline system message. Providers treat only a leading system message as the initial prompt and
-    tool set; without it, a later tool change rewrites the request's tool list and invalidates the whole prompt cache."""
-    index = next((index for index, message in enumerate(messages) if message["role"] != "user"), -1)
-    if index <= 0 or messages[index]["role"] != "system":
+def findBaseline(head: dict[str, Any] | None, entries: list[EntryRecord]) -> Baseline:
+    """The baseline among ``entries``, oldest first: the system message of the first ``pi.system`` entry after the head
+    marker, or of the transcript without one, when generation wrote it with every section and tool in effect. After a
+    head marker it always does, and omits the retained ``pi.system`` entries. Without one it does when it saw no system
+    message before, which holds unless an earlier entry carries one, even if an edit omits it later. An edit that
+    targets the baseline contributes other messages, or none, so none leads; a later entry does not take its place."""
+    for entry in entries:
+        if head is not None and entry["id"] <= head["id"]:
+            continue
+        if SystemEntry.is_(entry):
+            return next((message for message in entry.get("model") or [] if message["role"] == "system"), None)
+        if head is None and carriesSystemMessage(entry):
+            return None
+    return UNDEFINED
+
+
+def carriesSystemMessage(entry: EntryRecord) -> bool:
+    """Whether an entry's own messages, or the replacement messages of its edits, include a system message."""
+    return any(message["role"] == "system" for message in entry.get("model") or []) or any(
+        edit["action"] == "replace" and any(message["role"] == "system" for message in edit["messages"])
+        for edit in entry.get("edits") or []
+    )
+
+
+def leadWithSystem(messages: list[dict[str, Any]], baseline: Baseline) -> list[dict[str, Any]]:
+    """Move the first system message to the front when only user messages precede it, or when it is the baseline's. A
+    run's input is committed before generation renders the system prompt, so a transcript starts with the input followed
+    by the baseline, and the range after a compaction with the kept history, assistant messages included. Providers
+    treat only a leading system message as the initial prompt and tool set; without it, a later tool change rewrites the
+    request's tool list and invalidates the whole prompt cache. Only the first system message moves, so replaying system
+    messages in order gives the same sections and tools. Any other system message, before an assistant message, stays
+    where it was committed: moving it would change what it means to the model."""
+    index = next((index for index, message in enumerate(messages) if message["role"] == "system"), -1)
+    if index <= 0:
         return messages
-    return [messages[index], *messages[:index], *messages[index + 1 :]]
+    system = messages[index]
+    if system is not baseline and any(message["role"] != "user" for message in messages[:index]):
+        return messages
+    return [system, *messages[:index], *messages[index + 1 :]]
 
 
 def contribute(entry: EntryRecord, edit: dict[str, Any] | None) -> list[dict[str, Any]]:

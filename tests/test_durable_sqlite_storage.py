@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 
 from misaka.chord.context import BACKGROUND_CONTEXT
-from misaka.durable.errors import StorageRejected
 from misaka.durable.storage.sqlite import SqliteStorage
 from misaka.durable.storage.sqlite.node import (
     NodeSqliteStorageOptions,
@@ -179,6 +178,39 @@ async def test_persists_records_sequence_allocation_and_global_id_allocation_acr
     assert await reopened.entry(entryId, context) == {"entry": entry(entryId, ROOT_CONVERSATION_ID), "commitSeq": 2}
     assert await reopened.mintId() == entryId + 1
     assert await reopened.commit([{"type": "task", "value": pendingTask(await reopened.mintId())}], context) == 3
+
+
+async def test_namespaces_tables_and_indexes_with_a_prefix_across_reopen(workspace):
+    directory = tempfile.mkdtemp(prefix="pi-durable-sqlite-")
+    workspace.directories.add(directory)
+    path = os.path.join(directory, "storage.sqlite")
+    with rawDatabase(path) as host:
+        host.execute("CREATE TABLE tasks (text TEXT)")
+    storage = await openNodeSqliteStorage(path, {"prefix": "pi_"})
+    assert await createRoot(storage) == 1
+    await storage.close(context)
+
+    reopened = await openNodeSqliteStorage(path, {"prefix": "pi_"})
+    workspace.storages.add(reopened)
+    assert await reopened.conversation(ROOT_CONVERSATION_ID, context) == {"id": ROOT_CONVERSATION_ID}
+    with rawDatabase(path) as database:
+        names = [
+            str(row[0])
+            for row in database.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        ]
+    assert [name for name in names if not name.startswith("pi_")] == ["tasks"]
+    assert "pi_tasks" in names
+
+
+async def test_rejects_an_invalid_prefix_before_creating_the_database(workspace):
+    directory = tempfile.mkdtemp(prefix="pi-durable-sqlite-")
+    workspace.directories.add(directory)
+    databaseDirectory = os.path.join(directory, "nested")
+    with pytest.raises(Exception, match="Invalid SQLite schema prefix"):
+        await openNodeSqliteStorage(os.path.join(databaseDirectory, "storage.sqlite"), {"prefix": "bad-prefix"})
+    assert not os.path.exists(databaseDirectory)
 
 
 async def test_rejects_persisted_metadata_corruption_on_reopen(workspace):
@@ -587,7 +619,7 @@ async def test_rejects_a_copy_whose_source_changes_in_the_same_batch(workspace):
         [{"type": "document.create", "record": record, "content": {"kind": "base", "version": 1, "value": {"count": 0}}}],
         context,
     )
-    with pytest.raises(StorageRejected, match="source is changed in the copy batch"):
+    with pytest.raises(RuntimeError, match="source is changed in the copy batch"):
         await storage.commit(
             [
                 {"type": "document.copy", "record": {**record, "id": copied}, "source": {"id": source, "at": createdAt}},

@@ -139,11 +139,15 @@ async def test_invalid_call_gets_receipt_without_blocking_valid_sibling(executio
         lambda e: None,
     )
     assert called == [("good", {})]
-    assert prepared == [{}]
+    # pi 1.3.0 order: the tool lookup and `prepareArguments` run for the malformed call too, and argument validation
+    # then fails with its `argumentsError`.
+    assert prepared == [{}, {}]
     assert [(r.toolCallId, r.isError) for r in result.messages] == [
         ("bad", True),
         ("good", False),
     ]
+    assert result.messages[0].content[0].text.startswith('Invalid arguments for tool "probe": ')
+    assert "Received arguments:\nnot-json" in result.messages[0].content[0].text
 
 
 @pytest.mark.parametrize(
@@ -720,7 +724,8 @@ def test_the_refusal_names_the_bare_variable_it_refuses(tmp_path):
 
 
 @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
-def test_native_argument_error_is_persisted_but_not_sent_on_wire(bridge):
+def test_native_argument_error_is_persisted_and_sent_on_wire_as_upstream(bridge):
+    # pi 1.3.0 made `argumentsError` a ToolCall field and its proxy and pi-messages bridges send `context` whole.
     from misaka.agent import proxy
     from misaka.ai.api import pi_messages
     from misaka.ai.types import UserMessage
@@ -732,7 +737,7 @@ def test_native_argument_error_is_persisted_but_not_sent_on_wire(bridge):
     serialize = proxy._serializeContext if bridge == "proxy" else pi_messages._serializeContext
     wire = serialize(context)
     assert wire["messages"][0]["content"] == "hello"
-    assert "argumentsError" not in wire["messages"][1]["content"][0]
+    assert wire["messages"][1]["content"][0]["argumentsError"] == "fixture"
     assert (
         context.model_dump()["messages"][1]["content"][0]["argumentsError"] == "fixture"
     )

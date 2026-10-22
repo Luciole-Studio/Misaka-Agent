@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/test/anthropic-mid-conversation-effort.test.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/test/anthropic-mid-conversation-effort.test.ts`` (v1.3.0).
 
 MISAKA fork: Python has no ``fetch`` override; the beta-header case answers from a local HTTP server instead.
 """
@@ -65,7 +65,8 @@ def assistant(model: Model, level: str | None = None) -> AssistantMessage:
     )
 
 
-async def capture(model: Model, context: Context, effort: str | None = None) -> tuple[Any, AssistantMessage]:
+async def capture(model: Model, context: Context, options: dict[str, Any] | None = None) -> tuple[Any, AssistantMessage]:
+    """``options`` is ``Pick<AnthropicOptions, "effort" | "thinkingEnabled">``."""
     captured: list[Any] = []
 
     def onPayload(value: Any, _model: Any) -> Any:
@@ -75,7 +76,7 @@ async def capture(model: Model, context: Context, effort: str | None = None) -> 
     result = stream(
         model,
         normalizeContext(context),
-        {"apiKey": "test-key", "cacheRetention": "none", "thinkingEnabled": True, "effort": effort, "onPayload": onPayload},
+        {"apiKey": "test-key", "cacheRetention": "none", "thinkingEnabled": True, **(options or {}), "onPayload": onPayload},
     )
     message = await result.result()
     if not captured:
@@ -93,9 +94,9 @@ def effortMessages(payload: Any) -> list[Any]:
 
 async def test_reconstructs_an_exact_historical_marker_prefix_and_appends_the_current_marker():
     model = managedModel()
-    firstPayload, firstMessage = await capture(model, Context(messages=[user("one", 1)]), "low")
+    firstPayload, firstMessage = await capture(model, Context(messages=[user("one", 1)]), {"effort": "low"})
     secondPayload, _ = await capture(
-        model, Context(messages=[user("one", 1), assistant(model, "low"), user("two", 2)]), "high"
+        model, Context(messages=[user("one", 1), assistant(model, "low"), user("two", 2)]), {"effort": "high"}
     )
 
     assert firstPayload["messages"] == [
@@ -117,7 +118,7 @@ async def test_reconstructs_an_exact_historical_marker_prefix_and_appends_the_cu
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
 async def test_preserves_native_effort(effort):
     model = managedModel()
-    payload, message = await capture(model, Context(messages=[user("one", 1)]), effort)
+    payload, message = await capture(model, Context(messages=[user("one", 1)]), {"effort": effort})
     assert effortMessages(payload) == [{"role": "system", "content": [], "output_config": {"effort": effort}}]
     assert message.providerThinkingLevel == effort
 
@@ -136,14 +137,46 @@ async def test_does_not_invent_markers_for_legacy_or_other_provider_assistants()
     payload, _ = await capture(
         model,
         Context(messages=[user("one", 1), legacy, user("two", 2), otherProvider, user("three", 3)]),
-        "medium",
+        {"effort": "medium"},
     )
     assert effortMessages(payload) == [{"role": "system", "content": [], "output_config": {"effort": "medium"}}]
 
 
+async def test_sends_plain_disabled_thinking_without_effort_when_off_is_supported():
+    model = managedModel().model_copy(
+        update={"thinkingLevelMap": {"minimal": None, "low": "low", "medium": "medium", "high": "high", "max": "max"}}
+    )
+    # Anthropic rejects block_binding with disabled thinking, and rejects effort markers
+    # that change level (here low, then medium) while thinking is disabled.
+    payload, message = await capture(
+        model,
+        Context(
+            messages=[
+                user("one", 1),
+                assistant(model, "low"),
+                user("two", 2),
+                assistant(model, "medium"),
+                user("three", 3),
+            ]
+        ),
+        {"thinkingEnabled": False},
+    )
+    assert payload["thinking"] == {"type": "disabled"}
+    assert "output_config" not in payload
+    assert effortMessages(payload) == []
+    assert message.providerThinkingLevel is None
+
+
+async def test_keeps_adaptive_thinking_when_off_is_unsupported():
+    payload, message = await capture(managedModel(), Context(messages=[user("one", 1)]), {"thinkingEnabled": False})
+    assert payload["thinking"]["type"] == "adaptive"
+    assert effortMessages(payload) == [{"role": "system", "content": [], "output_config": {"effort": "high"}}]
+    assert message.providerThinkingLevel == "high"
+
+
 async def test_leaves_unsupported_models_on_top_level_effort():
     model = managedModel(compat={"forceAdaptiveThinking": True})
-    payload, message = await capture(model, Context(messages=[user("one", 1)]), "low")
+    payload, message = await capture(model, Context(messages=[user("one", 1)]), {"effort": "low"})
     assert payload["messages"] == [{"role": "user", "content": "one"}]
     assert payload["output_config"] == {"effort": "low"}
     assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
@@ -187,3 +220,14 @@ def test_generates_exact_model_and_transport_gates():
     assert (opus5.compat.supportsMidConvoEffort if opus5.compat else None) is None
     anthropicOpus5 = getModel("anthropic", "claude-opus-5")
     assert (anthropicOpus5.compat.allowedFallbackModels if anthropicOpus5.compat else None) is None
+
+
+def test_supports_off_only_on_managed_models_that_accept_disabled_thinking():
+    for id in ["claude-opus-5", "claude-haiku-5-5"]:
+        model = getModel("anthropic", id)
+        assert model.compat.supportsMidConvoEffort is True
+        # `thinkingLevelMap?.off` not null: absent or a value.
+        assert (model.thinkingLevelMap or {}).get("off", "absent") is not None
+    for id in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"]:
+        model = getModel("anthropic", id)
+        assert "off" in model.thinkingLevelMap and model.thinkingLevelMap["off"] is None

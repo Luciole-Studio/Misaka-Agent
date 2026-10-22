@@ -1,6 +1,6 @@
 """Runner-independent conformance cases for an ``ExecutionEnv``.
 
-Translated from pi's ``packages/durable/src/testing/env-conformance.ts`` (v1.1.0). Records are plain ``dict`` objects
+Translated from pi's ``packages/durable/src/testing/env-conformance.ts`` (v1.3.0). Records are plain ``dict`` objects
 with the upstream keys; a case is ``{"name", "timeoutMs"?, "run"}``.
 """
 
@@ -56,6 +56,18 @@ async def readAll(env: Any, path: str, maxEntries: int) -> dict[str, Any]:
         return {"pages": pages, "done": False}
     finally:
         await reader.close(context)
+
+
+async def listed(env: Any, path: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A listing as ``<kind letter> <path>`` lines (``f``, ``d``, ``l``), with its truncation."""
+    if getattr(env, "listFiles", None) is None:
+        raise RuntimeError("The environment does not implement listFiles")
+    listing = getOrThrow(await env.listFiles(path, options, context))
+    letter = {"file": "f", "directory": "d", "symlink": "l"}
+    return {
+        "entries": [f"{letter[entry['kind']]} {entry['path']}" for entry in listing["entries"]],
+        "truncated": listing["truncated"],
+    }
 
 
 def covers(change: dict[str, Any], path: str) -> bool:
@@ -451,6 +463,102 @@ def createEnvConformance(options: EnvConformanceOptions) -> list[EnvConformanceC
         createCase("windowed exec keeps the exact tail and counts what it skips", windowed),
         createCase("argv exec distinguishes timeout from abort", timeoutVersusAbort),
     ]
+
+    if options.get("listFiles"):
+
+        async def writeAll(env: Any, files: list[str]) -> None:
+            for file in files:
+                getOrThrow(await env.writeFile(file, "", context))
+
+        async def listOrder(env: Any) -> None:
+            await writeAll(env, ["b.txt", "a/z.txt", "a/b/c.txt", ".hidden/x", "A.txt"])
+            getOrThrow(await env.createDir("empty", None, context))
+            check.deepEqual(
+                await listed(env, "."),
+                {
+                    "entries": [
+                        "d .hidden",
+                        "f .hidden/x",
+                        "f A.txt",
+                        "d a",
+                        "d a/b",
+                        "f a/b/c.txt",
+                        "f a/z.txt",
+                        "f b.txt",
+                        "d empty",
+                    ],
+                    "truncated": False,
+                },
+            )
+            check.deepEqual(
+                (await listed(env, ".", {"hidden": False}))["entries"],
+                ["f A.txt", "d a", "d a/b", "f a/b/c.txt", "f a/z.txt", "f b.txt", "d empty"],
+            )
+            expected = {"entries": ["d b", "f b/c.txt", "f z.txt"], "truncated": False}
+            check.deepEqual(await listed(env, "a"), expected)
+            check.deepEqual(await listed(env, getOrThrow(await env.absolutePath("a", context))), expected)
+            check.deepEqual(await listed(env, "empty"), {"entries": [], "truncated": False})
+
+        async def listIgnored(env: Any) -> None:
+            await writeAll(env, ["keep.txt", "out/x.js", "sub/keep.txt", "sub/drop.log", "node_modules/m/i.js"])
+            getOrThrow(await env.writeFile(".gitignore", "out/\n*.log\n", context))
+            getOrThrow(await env.writeFile("sub/.gitignore", "!keep.txt\n", context))
+            # Not a work tree yet: `.gitignore` files have no effect.
+            check.ok("f out/x.js" in (await listed(env, "."))["entries"])
+            getOrThrow(await env.writeFile(".git/HEAD", "ref: refs/heads/main\n", context))
+            getOrThrow(await env.writeFile(".git/info/exclude", "keep.txt\n", context))
+            check.deepEqual(
+                (await listed(env, ".", {"exclude": ["node_modules"]}))["entries"],
+                ["f .gitignore", "d sub", "f sub/.gitignore", "f sub/keep.txt"],
+            )
+            # A directory inside the work tree applies its parents' rules.
+            check.deepEqual((await listed(env, "sub"))["entries"], ["f .gitignore", "f keep.txt"])
+            every = (await listed(env, ".", {"gitignore": False}))["entries"]
+            check.ok("f out/x.js" in every and "f node_modules/m/i.js" in every and "f keep.txt" in every)
+            check.ok(not any(".git/" in entry or entry == "d .git" for entry in every))
+
+        async def listBounds(env: Any) -> None:
+            await writeAll(env, ["a", "b", "c"])
+            check.deepEqual(await listed(env, ".", {"maxEntries": 2}), {"entries": ["f a", "f b"], "truncated": True})
+            check.deepEqual(
+                await listed(env, ".", {"maxEntries": 3}), {"entries": ["f a", "f b", "f c"], "truncated": False}
+            )
+            # Each entry counts its path plus two bytes.
+            check.deepEqual(await listed(env, ".", {"maxBytes": 6}), {"entries": ["f a", "f b"], "truncated": True})
+            check.deepEqual(await listed(env, ".", {"maxEntries": 0}), {"entries": [], "truncated": True})
+            check.strictEqual(errorCode(await env.listFiles(".", {"maxEntries": -1}, context)), "invalid")
+            check.strictEqual(errorCode(await env.listFiles(".", {"timeoutMs": 1.5}, context)), "invalid")
+
+        async def listFailures(env: Any) -> None:
+            getOrThrow(await env.writeFile("file.txt", "", context))
+            check.strictEqual(errorCode(await env.listFiles("missing", None, context)), "not_found")
+            check.strictEqual(errorCode(await env.listFiles("file.txt", None, context)), "not_directory")
+            check.strictEqual(errorCode(await env.listFiles(".", None, abortedContext())), "aborted")
+
+        cases.extend(
+            [
+                createCase("listFiles lists files and directories depth first in name order", listOrder),
+                createCase("listFiles skips what git ignores in work trees, .git, and excluded names", listIgnored),
+                createCase("listFiles stops at its bounds and reports truncated", listBounds),
+                createCase("listFiles fails on missing directories, files, and aborts", listFailures),
+            ]
+        )
+
+    if symlinks and options.get("listFiles"):
+
+        async def listSymlinks(env: Any) -> None:
+            getOrThrow(await env.writeFile("dir/inner.txt", "", context))
+            linked = await env.exec(
+                [*shell, "ln -s dir link && ln -s missing dangling && ln -s .. dir/loop"], None, context
+            )
+            check.strictEqual(getOrThrow(linked)["exitCode"], 0)
+            check.deepEqual(
+                (await listed(env, "."))["entries"], ["l dangling", "d dir", "f dir/inner.txt", "l dir/loop", "l link"]
+            )
+            # The listed directory itself may be a link.
+            check.deepEqual((await listed(env, "link"))["entries"], ["f inner.txt", "l loop"])
+
+        cases.append(createCase("listFiles lists symbolic links without following them", listSymlinks))
 
     if symlinks:
 

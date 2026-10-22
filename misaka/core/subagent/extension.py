@@ -159,8 +159,7 @@ def _render_result(result: Any, context: Any = None, *_args: Any) -> Any:
         # Source AgentTool/UI.tsx branch structure; native Text/expanded mode
         # replaces Ink/transcript widgets. Reuse native number/time formatting
         # instead of recreating Intl or another UI framework.
-        from misaka.core.tools.bash import _format_duration
-        from misaka.core.tools.render_utils import get_text_output
+        from misaka.core.tools.render_utils import formatToolDuration, get_text_output
         from misaka.modes.interactive.components.footer import format_tokens
 
         expanded = bool(read_field(context, "expanded", False))
@@ -171,7 +170,7 @@ def _render_result(result: Any, context: Any = None, *_args: Any) -> Any:
             count = details.get("totalToolUseCount", 0)
             uses = "1 tool use" if count == 1 else f"{count} tool uses"
             lines.append(f"Done ({uses} · {format_tokens(details.get('totalTokens', 0))} tokens · "
-                         f"{_format_duration(details.get('totalDurationMs', 0))})")
+                         f"{formatToolDuration(details.get('totalDurationMs', 0))})")
         elif status in {"running", "pending"} and "agentId" in details:
             progress = details.get("progress") or {}
             count, tokens = progress.get("toolUseCount", 0), progress.get("tokenCount", 0)
@@ -478,8 +477,12 @@ class SubagentPart:
             self.manager.flag_agents = definitions
 
     async def before_agent_start(self, event: Any, _ctx: Any) -> Any:
+        from misaka.core.moments import opens_turn
+
         eligible = await self._refresh_roster(_ctx) if self.manager is not None else {}
-        result = await self.policy.before_agent(event) if self.policy is not None else None
+        # SubagentStart hooks answer a prompt. A run a notification wakes (a task or shell result) has
+        # none; running them there would repeat their context on every wake.
+        result = await self.policy.before_agent(event) if self.policy is not None and opens_turn(event) else None
         from misaka.core.subagent.catalog import list_in_messages, listing_delta
 
         # A hidden Agent tool must not leak an unactionable catalog into the prompt.

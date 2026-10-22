@@ -1,4 +1,0 @@
-[project]
-name = "pi-example-plugin"
-version = "1.0.0"
-description = "Conventional session and tui Chord facets for the experimental server and client"

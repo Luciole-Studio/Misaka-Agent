@@ -1,4 +1,4 @@
-"""Translated from pi-tui's ``packages/tui/src/keys.ts`` (v1.1.0).
+"""Translated from pi-tui's ``packages/tui/src/keys.ts`` (v1.3.0).
 
 Keyboard input handling for terminal applications.
 
@@ -275,6 +275,10 @@ SYMBOL_KEYS = {
     "?",
 }
 
+SHIFTED_SYMBOL_KEYS = frozenset("~!@#$%^&*()_+|{}:<>?")
+
+MODIFIER_NAMES = ("shift", "alt", "ctrl", "super")
+
 
 class MODIFIERS:
     shift = 1
@@ -356,6 +360,27 @@ def normalizeShiftedLetterIdentityCodepoint(codepoint: int, modifier: int) -> in
 def fromCharCode(code: int) -> str:
     """MISAKA fork: ``String.fromCharCode``: the UTF-16 code unit ``code`` names (ToUint16), so it never raises."""
     return chr(code & 0xFFFF)
+
+
+@dataclass(slots=True, kw_only=True)
+class LogicalShiftedSymbolCandidate:
+    """MISAKA fork: upstream's ``{ codepoint, modifier }`` object."""
+
+    codepoint: int
+    modifier: int
+
+
+def getLogicalShiftedSymbolCandidate(
+    codepoint: int | None,
+    modifier: int,
+    allowedSymbols: set[str] | frozenset[str],
+) -> LogicalShiftedSymbolCandidate | None:
+    if codepoint is None or (modifier & MODIFIERS.shift) == 0:
+        return None
+    normalizedCodepoint = normalizeKittyFunctionalCodepoint(codepoint)
+    if fromCharCode(normalizedCodepoint) not in allowedSymbols:
+        return None
+    return LogicalShiftedSymbolCandidate(codepoint=normalizedCodepoint, modifier=modifier & ~MODIFIERS.shift)
 
 
 LEGACY_KEY_SEQUENCES: dict[str, tuple[str, ...]] = {
@@ -655,10 +680,6 @@ def matchesKittySequence(data: str, expectedCodepoint: int, expectedModifier: in
     actualMod = parsed.modifier & ~LOCK_MASK
     expectedMod = expectedModifier & ~LOCK_MASK
 
-    # Check if modifiers match
-    if actualMod != expectedMod:
-        return False
-
     normalizedCodepoint = normalizeShiftedLetterIdentityCodepoint(
         normalizeKittyFunctionalCodepoint(parsed.codepoint),
         parsed.modifier,
@@ -668,9 +689,23 @@ def matchesKittySequence(data: str, expectedCodepoint: int, expectedModifier: in
         expectedModifier,
     )
 
-    # Primary match: codepoint matches directly after normalizing functional keys
-    if normalizedCodepoint == normalizedExpectedCodepoint:
+    # Physical match: primary codepoint and every reported modifier match.
+    if actualMod == expectedMod and normalizedCodepoint == normalizedExpectedCodepoint:
         return True
+
+    # Logical match: Kitty reports symbols such as "+" as Shift plus the physical "=" key.
+    # Bindings name the produced symbol, so consume that implicit Shift while preserving
+    # Ctrl, Alt, and Super. The physical "shift+=" spelling remains valid through the match above.
+    logicalShiftedSymbol = getLogicalShiftedSymbolCandidate(parsed.shiftedKey, actualMod, SYMBOL_KEYS)
+    if (
+        logicalShiftedSymbol
+        and (logicalShiftedSymbol.modifier & ~LOCK_MASK) == expectedMod
+        and logicalShiftedSymbol.codepoint == normalizeKittyFunctionalCodepoint(expectedCodepoint)
+    ):
+        return True
+
+    if actualMod != expectedMod:
+        return False
 
     # Alternate match: use base layout key for non-Latin keyboard layouts.
     # This allows Ctrl+С (Cyrillic) to match Ctrl+c (Latin) when terminal reports
@@ -768,14 +803,24 @@ def isDigitKey(key: str) -> bool:
 
 
 def matchesPrintableModifyOtherKeys(data: str, expectedKeycode: int, expectedModifier: int) -> bool:
-    if expectedModifier == 0:
-        return False
     parsed = parseModifyOtherKeysSequence(data)
-    if not parsed or parsed.modifier != expectedModifier:
+    if not parsed:
         return False
-    return normalizeShiftedLetterIdentityCodepoint(
+    physicalMatch = parsed.modifier == expectedModifier and normalizeShiftedLetterIdentityCodepoint(
         parsed.codepoint, parsed.modifier
     ) == normalizeShiftedLetterIdentityCodepoint(expectedKeycode, expectedModifier)
+    if physicalMatch:
+        return True
+    logicalShiftedSymbol = getLogicalShiftedSymbolCandidate(
+        parsed.codepoint,
+        parsed.modifier,
+        SHIFTED_SYMBOL_KEYS,
+    )
+    return (
+        logicalShiftedSymbol is not None
+        and logicalShiftedSymbol.modifier == expectedModifier
+        and logicalShiftedSymbol.codepoint == expectedKeycode
+    )
 
 
 def formatKeyNameWithModifiers(keyName: str, modifier: int) -> str | None:
@@ -797,16 +842,24 @@ def formatKeyNameWithModifiers(keyName: str, modifier: int) -> str | None:
 
 def parseKeyId(keyId: str) -> dict[str, Any] | None:
     """The key and its modifier flags: ``{key, ctrl, shift, alt, super}``."""
-    parts = keyId.lower().split("+")
-    key = parts[len(parts) - 1]
-    if not key:
+    key = keyId.lower()
+    modifiers: set[str] = set()
+    while True:
+        modifier = next((name for name in MODIFIER_NAMES if key.startswith(f"{name}+")), None)
+        if not modifier:
+            break
+        if modifier in modifiers:
+            return None
+        modifiers.add(modifier)
+        key = key[len(modifier) + 1 :]
+    if not key or ("+" in key and key != "+"):
         return None
     return {
         "key": key,
-        "ctrl": "ctrl" in parts,
-        "shift": "shift" in parts,
-        "alt": "alt" in parts,
-        "super": "super" in parts,
+        "ctrl": "ctrl" in modifiers,
+        "shift": "shift" in modifiers,
+        "alt": "alt" in modifiers,
+        "super": "super" in modifiers,
     }
 
 
@@ -1134,7 +1187,11 @@ def matchesKey(data: str, keyId: KeyId) -> bool:
             )
 
         # Check both raw char and Kitty sequence (needed for release events)
-        return data == key or matchesKittySequence(data, codepoint, 0)
+        return (
+            data == key
+            or matchesKittySequence(data, codepoint, 0)
+            or matchesPrintableModifyOtherKeys(data, codepoint, 0)
+        )
 
     return False
 
@@ -1207,11 +1264,24 @@ def formatParsedKey(codepoint: int, modifier: int, baseLayoutKey: int | None = N
 def parseKey(data: str) -> str | None:
     kitty = parseKittySequence(data)
     if kitty:
-        return formatParsedKey(kitty.codepoint, kitty.modifier, kitty.baseLayoutKey)
+        logicalShiftedSymbol = getLogicalShiftedSymbolCandidate(kitty.shiftedKey, kitty.modifier, SYMBOL_KEYS)
+        return formatParsedKey(
+            logicalShiftedSymbol.codepoint if logicalShiftedSymbol is not None else kitty.codepoint,
+            logicalShiftedSymbol.modifier if logicalShiftedSymbol is not None else kitty.modifier,
+            kitty.baseLayoutKey,
+        )
 
     modifyOtherKeys = parseModifyOtherKeysSequence(data)
     if modifyOtherKeys:
-        return formatParsedKey(modifyOtherKeys.codepoint, modifyOtherKeys.modifier)
+        logicalShiftedSymbol = getLogicalShiftedSymbolCandidate(
+            modifyOtherKeys.codepoint,
+            modifyOtherKeys.modifier,
+            SHIFTED_SYMBOL_KEYS,
+        )
+        return formatParsedKey(
+            logicalShiftedSymbol.codepoint if logicalShiftedSymbol is not None else modifyOtherKeys.codepoint,
+            logicalShiftedSymbol.modifier if logicalShiftedSymbol is not None else modifyOtherKeys.modifier,
+        )
 
     # Mode-aware legacy sequences
     # When Kitty protocol is active, ambiguous sequences are interpreted as custom terminal mappings:

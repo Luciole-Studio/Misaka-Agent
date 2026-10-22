@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/test/validation.test.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/test/validation.test.ts`` (v1.3.0).
 
 MISAKA fork: TypeBox schemas are written as the JSON schemas they compile to. Two upstream checks are about TypeBox's
 JavaScript code generation and have no counterpart here: validation without the ``Function`` constructor (CSP), and
@@ -136,4 +136,17 @@ def test_accepts_null_for_nullable_array_schemas_with_items():
 def test_rejects_invalid_coercions_for_serialized_plain_json_schemas(schema, input):
     tool, toolCall = createToolCallWithPlainSchema(schema, input)
     with pytest.raises(Exception, match="Validation failed"):
+        validateToolArguments(tool, toolCall)
+
+
+# #10897
+def test_reports_malformed_arguments_json_instead_of_validating_empty_arguments():
+    tool = Tool(
+        name="echo",
+        description="Echo tool",
+        parameters={"type": "object", "properties": {"value": {"type": "string"}}},
+    )
+    toolCall = ToolCall(id="tool-1", name="echo", arguments={}, argumentsError="Unexpected token")
+
+    with pytest.raises(Exception, match='Invalid arguments for tool "echo": Unexpected token'):
         validateToolArguments(tool, toolCall)

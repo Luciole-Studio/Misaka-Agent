@@ -73,7 +73,7 @@ async def delegate(args: dict[str, Any], api: Any, callContext: Any) -> dict[str
     if settled["status"] != "done" or settled["type"] != "input":
         raise RuntimeError(f"Subagent failed: {settled['status']}")
     text = await answerText(api, settled["answer"], callContext)
-    return {"content": [{"type": "text", "text": text}], "details": {"conversationId": child}}
+    return {"output": [{"type": "text", "text": text}], "details": {"conversationId": child}}
 
 
 Subagent = defineExtension(

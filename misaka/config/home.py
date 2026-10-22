@@ -119,12 +119,6 @@ LAYOUT: dict[str, Entry] = {
     "web_logs": Entry("logs/web", "logs"),
     "moa_traces": Entry("logs/moa-traces", "logs"),
     "net_sock": Entry("run/net.sock", "run"),
-    # The experimental server (``misaka.experimental``): its sockets, launcher locks, default server ID and plugin builds
-    # share one directory, kept short so a socket path in it fits where the kernel limits one; its Sessions are state, and
-    # so are those of the single-process durable demo beside it.
-    "experimental_server": Entry("run/server", "run"),
-    "experimental_sessions": Entry("state/experimental/sessions", "state"),
-    "experimental_durable_sessions": Entry("state/experimental/durable-sessions", "state"),
     "net_snapshot": Entry("run/net.json", "run"),
     "locks": Entry("run/locks", "run"),
     "skills_lock": Entry("run/skills-write.lock", "run"),

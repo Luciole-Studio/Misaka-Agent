@@ -48,6 +48,22 @@ async def test_connects_to_a_newline_delimited_mcp_server_and_captures_stderr():
     assert client.connectionState == "closed"
 
 
+async def test_takes_the_send_options_the_client_passes_and_ignores_them():
+    """MISAKA adaptation: the client passes ``send(message, {"signal": ...})`` to every transport (#10598); a
+    TypeScript transport may leave the parameter out, a Python one must take it. stdio dispatches at once, so
+    there is nothing for the signal to stop, also when it already aborted."""
+    from misaka.utils.js import AbortController
+
+    transport = StdioTransport({"command": sys.executable, "args": [fixture]})
+    client = McpClient({"name": "stdio-test", "version": "1.0.0"})
+    await client.connect(transport)
+    aborted = AbortController()
+    aborted.abort()
+    await transport.send({"jsonrpc": "2.0", "method": "notifications/initialized"}, {"signal": aborted.signal})
+    assert await client.callTool("echo", {"text": "hi"}) == {"content": [{"type": "text", "text": "hi"}]}
+    await client.close()
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups and signals")
 async def test_kills_a_server_that_ignores_shutdown_including_its_children():
     import psutil

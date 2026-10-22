@@ -1,5 +1,5 @@
 """Translated from pi's ``packages/ai/test/openai-responses-{namespace,partial-json-cleanup,foreign-toolcall-id,
-message-id,empty-tool-result}.test.ts`` (v1.1.0)."""
+message-id,empty-tool-result}.test.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ from misaka.ai.types import (
     Model,
     ModelCost,
     TextContent,
-    ThinkingContent,
     ToolCall,
     ToolResultMessage,
     Usage,
@@ -289,6 +288,21 @@ async def test_removes_partial_json_from_persisted_tool_call_blocks_at_output_it
     assert "partialJson" not in toolCallEnd.toolCall.model_dump()
 
 
+# #10897
+async def test_marks_malformed_final_arguments_instead_of_keeping_the_parsed_prefix():
+    model = _responsesModel(id="gpt-5-mini", name="GPT-5 Mini")
+    output = createOutput(model)
+    stream = AssistantMessageEventStream()
+    argumentsJson = '{"path":"README.md","content":"updated","mode":.5}'
+
+    await processResponsesStream(_partialJsonEvents(argumentsJson), output, stream, model)
+
+    toolCall = output.content[0]
+    assert toolCall.type == "toolCall"
+    assert toolCall.arguments == {}
+    assert toolCall.argumentsError.endswith(f"Received arguments:\n{argumentsJson}")
+
+
 # --- openai-responses-foreign-toolcall-id.test.ts -----------------------------------------------
 
 COPILOT_RAW_TOOL_CALL_ID = (
@@ -337,7 +351,7 @@ def test_hashes_foreign_copilot_tool_item_ids_into_a_bounded_codex_safe_shape():
 def test_generates_unique_fallback_message_ids_for_multiple_text_blocks_in_one_assistant_turn():
     model = getModel("openai-codex", "gpt-5.5")
     assistant = AssistantMessage(
-        content=[ThinkingContent(thinking="private reasoning"), TextContent(text="visible answer")],
+        content=[TextContent(text="first answer"), TextContent(text="visible answer")],
         api="anthropic-messages",
         provider="anthropic",
         model="claude-opus-4-8",

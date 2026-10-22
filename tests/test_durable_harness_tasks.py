@@ -15,13 +15,13 @@ from misaka.chord.context import withAbortSignal, withCancel
 from misaka.durable import (
     Harness,
     MemoryStorage,
-    StorageRejected,
     createRegistry,
     defineDoc,
     defineEntry,
     defineTask,
     defineTool,
 )
+from misaka.durable.errors import SessionFailed
 from misaka.utils.js import UNDEFINED, AbortController
 from tests.durable_support import ControlledStorage, context, flush, toMatchObject
 from tests.harness_support import addHooks, addTask, addTool, user
@@ -847,7 +847,7 @@ async def test_runtime_rejects_a_sleep_when_the_invocation_is_signalled_or_the_s
     await harness.close(context)
 
 
-async def test_scheduling_retries_reservation_on_the_next_wakeup_after_a_rejected_reservation_commit():
+async def test_scheduling_fails_the_harness_on_a_failed_reservation_commit_reopening_runs_the_task():
     runs = 0
 
     async def once(_task: Any, runtime: Any, ctx: Any) -> None:
@@ -858,70 +858,66 @@ async def test_scheduling_retries_reservation_on_the_next_wakeup_after_a_rejecte
     Once = oneStep("test.once", once)
     storage = ControlledStorage()
     opened = await openRoot([Once], {"storage": storage})
-    harness, root, registry, reports = opened.harness, opened.root, opened.registry, opened.reports
+    harness, root, reports = opened.harness, opened.root, opened.reports
     id = await start(root, Once)
-    storage.failNextCommit(StorageRejected("busy"))
+    waiting = harness.waitForTask(id, context)
+    failure = RuntimeError("disk gone")
+    storage.failNextCommit(failure)
     harness.resume()
-    await eventually(lambda: len(reports) == 1)
-    assert (await harness.getTask(id, context))["state"]["status"] == "pending"
+    end = await harness.closed
+    assert end == {"reason": "failed", "error": failure}
+    assert reports == [failure]
+    # The pending wait and every later call get SessionFailed with the storage error.
+    with pytest.raises(SessionFailed) as waitFailed:
+        await waiting
+    assert waitFailed.value.cause is failure
+    with pytest.raises(SessionFailed) as getFailed:
+        await harness.getTask(id, context)
+    assert getFailed.value.cause is failure
+    with pytest.raises(SessionFailed):
+        await root.submit({"type": "input", "content": "x"}, context)
+    assert runs == 0
+    await harness.close(context)
 
-    # Any wakeup, here a registry change, reserves again.
-    async def wake(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {}
-
-    addTool(registry, defineTool({"name": "wake", "description": "wake", "parameters": EMPTY_OBJECT, "execute": wake}))
-    await harness.waitForTask(id, context)
+    reopened = await openRoot([Once], {"storage": storage.reopen()})
+    reopened.harness.resume()
+    assert (await reopened.harness.waitForTask(id, context))["state"]["outcome"]["status"] == "completed"
     assert runs == 1
-    await harness.close(context)
+    await reopened.harness.close(context)
 
 
-async def test_scheduling_keeps_a_wakeup_that_arrives_while_a_rejected_reservation_commit_is_in_storage():
-    async def quick(_task: Any, runtime: Any, ctx: Any) -> None:
-        await runtime.commit(lambda tx, current: completed(None), ctx)
-
-    First = oneStep("test.wake-first", quick)
-    Late = oneStep("test.wake-late", quick)
-    storage = ControlledStorage()
-    opened = await openRoot([First], {"storage": storage})
-    harness, root, registry = opened.harness, opened.root, opened.registry
-    first = await start(root, First)
-    late = await start(root, Late)
-    held = storage.holdCommits()
-    storage.failNextCommit(StorageRejected("busy"))
-    harness.resume()
-    await held.entered
-    # Registering the missing definition wakes the scheduler while the doomed reservation is in storage.
-    addTask(registry, Late)
-    held.release()
-    await harness.waitForTask(first, context)
-    await harness.waitForTask(late, context)
-    await harness.close(context)
-
-
-async def test_scheduling_reruns_a_task_whose_fault_write_was_rejected():
+async def test_scheduling_fails_the_harness_instead_of_running_a_task_again_when_its_fault_write_fails():
     runs = 0
     storage = ControlledStorage()
+    failure = RuntimeError("disk gone")
 
     async def throws(*_: Any) -> None:
         nonlocal runs
         runs += 1
         # The next commit is the step's fault write.
         if runs == 1:
-            storage.failNextCommit(StorageRejected("busy"))
+            storage.failNextCommit(failure)
         raise RuntimeError("boom")
 
-    Throws = oneStep("test.rejected-fault", throws)
+    Throws = oneStep("test.failed-fault", throws)
     opened = await openRoot([Throws], {"storage": storage})
     harness, root, reports = opened.harness, opened.root, opened.reports
     id = await start(root, Throws)
     harness.resume()
-    assert (await harness.waitForTask(id, context))["state"]["outcome"] == {
+    assert await harness.closed == {"reason": "failed", "error": failure}
+    assert runs == 1
+    assert reports == [failure]
+    await harness.close(context)
+
+    # Reopening recovers the task as after a crash: still running, so its phase runs again.
+    reopened = await openRoot([Throws], {"storage": storage.reopen()})
+    reopened.harness.resume()
+    assert (await reopened.harness.waitForTask(id, context))["state"]["outcome"] == {
         "status": "faulted",
         "error": {"message": "boom"},
     }
     assert runs == 2
-    assert [f"{type(error).__name__}: {error}" for error in reports] == ["StorageRejected: busy"]
-    await harness.close(context)
+    await reopened.harness.close(context)
 
 
 async def test_scheduling_waits_for_harness_and_conversation_idleness_counting_blocked_work_and_ignoring_background_tasks():

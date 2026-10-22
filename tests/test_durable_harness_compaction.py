@@ -26,7 +26,6 @@ from misaka.durable import (
     LiveDoc,
     MemoryStorage,
     ProviderDoc,
-    StorageRejected,
     UsageDoc,
     defineTask,
     defineTool,
@@ -278,6 +277,18 @@ def test_range_selection_cuts_at_an_assistant_in_the_middle_of_one_long_run_and_
     assert cut == 9
 
 
+def test_range_selection_never_cuts_at_a_display_only_entry_where_the_budget_is_reached_10407():
+    entries = [
+        entry("pi.user", [user(text("u1", 100))]),
+        entry("pi.assistant", [assistant(text("a1", 100))]),
+        entry("chat.message", []),
+        entry("pi.assistant", [assistant(text("a2", 100))]),
+    ]
+    # The budget is reached at a1; the display-only entry after it is skipped for the assistant a2.
+    assert selectCut(view(entries), 150) == 1
+    assert selectCut(view(entries), 50) == 3
+
+
 def test_range_selection_keeps_a_huge_last_tool_result_together_with_its_assistant():
     entries = [
         entry("pi.user", [user("u")]),
@@ -352,7 +363,7 @@ def test_range_selection_summarizes_an_earlier_summary_marker_first():
     assert re.match(r"^\[User\]: EARLIER", serializeConversation(prefix))
 
 
-def test_serialization_writes_a_transcript_truncates_tool_results_and_omits_system_messages():
+def test_serialization_writes_a_transcript_truncates_tool_results_and_omits_system_messages_and_thinking():
     call = fauxToolCall("read", {"path": "a.ts"}, {"id": "c"})
     messages = [
         {"role": "system", "content": "", "sections": {"s": "hidden"}, "timestamp": 0},
@@ -363,7 +374,8 @@ def test_serialization_writes_a_transcript_truncates_tool_results_and_omits_syst
     serialized = serializeConversation(messages)
     assert "hidden" not in serialized
     assert "[User]: hello" in serialized
-    assert "[Assistant thinking]: hmm" in serialized
+    assert "hmm" not in serialized
+    assert "[Assistant thinking]" not in serialized
     assert "[Assistant]: sure" in serialized
     assert '[Assistant tool calls]: read(path="a.ts")' in serialized
     assert f"[Tool result]: {'y' * 2000}\n\n[... 500 more characters truncated]" in serialized
@@ -425,9 +437,9 @@ async def test_manual_places_the_summary_at_once_when_idle_and_keeps_raw_history
     assert usage["input"] > usageBefore["input"]
     await turn(chat, "next", "done")
     agent = chat.faux.agentRequests[-1].messages
-    # The next request: the summary, the kept turn, the new input, then one complete system baseline.
-    assert [message.role for message in agent] == ["user", "user", "assistant", "user", "system"]
-    assert agent[4].sections == {"preamble": "You are helpful."}
+    # The next request: one complete system baseline leading the summary, the kept turn, and the new input (#10904).
+    assert [message.role for message in agent] == ["system", "user", "user", "assistant", "user"]
+    assert agent[0].sections == {"preamble": "You are helpful."}
     await chat.harness.close(context)
 
 
@@ -470,7 +482,7 @@ async def test_manual_places_a_queued_summary_at_post_tools_and_the_run_continue
     chat = await openCompaction()
 
     async def wait(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": [{"type": "text", "text": "waited"}]}
+        return {"output": [{"type": "text", "text": "waited"}]}
 
     addTool(
         chat.setup.registry,
@@ -490,9 +502,10 @@ async def test_manual_places_a_queued_summary_at_post_tools_and_the_run_continue
     await result(chat, await chat.root.compact(None, context))
     gate.resolve()
     assert (await input.wait(context))["status"] == "done"
-    # The continuation request starts with the summary.
+    # The continuation request starts with the new baseline, then the summary, ahead of the kept tool call (#10904).
     continuation = chat.faux.agentRequests[-1].messages
-    assert "<summary>\nSUMMARY\n</summary>" in userText(continuation[0])
+    assert continuation[0].role == "system"
+    assert "<summary>\nSUMMARY\n</summary>" in userText(continuation[1])
     assert (await kinds(chat.root))[-4:] == ["pi.tool-result", "pi.compaction", "pi.system", "pi.assistant"]
     await chat.harness.close(context)
 
@@ -880,7 +893,7 @@ async def test_outcomes_caps_max_tokens_at_the_models_output_limit_and_sends_no_
     chat = await openCompaction()
 
     async def read(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": []}
+        return {"output": []}
 
     addTool(
         chat.setup.registry,
@@ -1005,6 +1018,49 @@ async def test_background_does_not_start_while_another_compaction_is_listed():
     await chat.harness.close(context)
 
 
+async def test_background_records_a_failure_in_pi_live_the_snapshot_and_compaction_end_until_a_summary_is_produced():
+    chat = await openCompaction({"contextWindow": 2000})
+    await history(chat)
+    chat.setup.settings["compaction"] = BACKGROUND
+    events: list[dict[str, Any]] = []
+    stream = await watchEvents(chat.harness, chat.root.id, context)
+
+    async def onBatch(batch: Any, *_: Any) -> None:
+        events.extend(batch)
+
+    stream.start(onBatch)
+    chat.faux.summaries.append(failure("bad request"))
+    await turn(chat, text("u4", 100), text("a4", 100))
+    await waitFor(lambda: any(event["type"] == "compaction_end" for event in events))
+    recorded = (await live(chat)).get("compactionFailure")
+    toMatchObject(recorded, {"reason": "threshold", "error": "Summarization failed: bad request"})
+    assert next(event for event in events if event["type"] == "compaction_end") == {
+        "type": "compaction_end",
+        "taskId": recorded["taskId"],
+        "reason": "threshold",
+        "error": "Summarization failed: bad request",
+    }
+    reopened = await watchEvents(chat.harness, chat.root.id, context)
+    assert reopened.snapshot.get("compactionFailure") == recorded
+    await reopened.stop()
+    # A compaction that produces a summary removes the failure, and ends without an error.
+    chat.setup.settings["compaction"] = MANUAL
+    chat.faux.summaries.append(summary())
+    manual = await chat.root.compact(None, context)
+    assert (await result(chat, manual))["status"] == "completed"
+    assert (await live(chat)).get("compactionFailure") is None
+
+    def manualEnd() -> Any:
+        return next(
+            (event for event in events if event["type"] == "compaction_end" and event["taskId"] == manual), None
+        )
+
+    await waitFor(lambda: manualEnd() is not None)
+    assert "error" not in manualEnd()
+    await stream.stop()
+    await chat.harness.close(context)
+
+
 @pytest.mark.parametrize("stop", ["task", "conversation"])
 async def test_background_stops_through_abort_task_and_conversation_abort_with_background(stop):
     chat = await openCompaction({"contextWindow": 2000})
@@ -1075,34 +1131,62 @@ async def test_blocking_sends_the_request_once_without_a_second_compaction_when_
     await chat.harness.close(context)
 
 
-@pytest.mark.parametrize("name", ["declines", "fails"])
-async def test_blocking_sends_the_request_anyway_when_its_compaction(name):
+async def test_blocking_sends_the_request_anyway_when_its_compaction_declines():
     chat = await openCompaction({"contextWindow": 1000})
     await history(chat)
     chat.setup.settings["compaction"] = BLOCKING
-    if name == "declines":
-        addHooks(chat.setup.registry, CompactionTask, {"beforeCompact": lambda *_: {"decline": True}})
-    else:
-        chat.faux.summaries.append(failure("bad request"))
+    addHooks(chat.setup.registry, CompactionTask, {"beforeCompact": lambda *_: {"decline": True}})
     await turn(chat, text("u4", 200), "a4")
     assert "pi.compaction" not in await kinds(chat.root)
     assert firstUserText(chat.faux.agentRequests[-1].messages) == text("u1", 100)
+    assert (await live(chat)).get("compactionFailure") is None
     await chat.harness.close(context)
 
 
-async def test_blocking_sends_the_request_anyway_when_its_compaction_is_aborted_directly():
+# A failed compaction leaves a context it judged too large; sending it once filled a 1M window and got an empty
+# `length` answer on every turn while the failure stayed invisible.
+async def test_blocking_fails_the_run_with_the_compactions_error_without_a_request_when_its_compaction_fails():
+    chat = await openCompaction({"contextWindow": 1000})
+    await history(chat)
+    chat.setup.settings["compaction"] = BLOCKING
+    chat.faux.summaries.append(failure("bad request"))
+    requests = len(chat.faux.agentRequests)
+    input = await chat.root.submit({"type": "input", "content": text("u4", 200)}, context)
+    toMatchObject(
+        await input.wait(context),
+        {
+            "status": "unanswered",
+            "reason": "model_error",
+            "detail": "Compaction failed: Summarization failed: bad request",
+        },
+    )
+    assert len(chat.faux.agentRequests) == requests
+    assert (await kinds(chat.root))[-1] == "pi.user"
+    state = await live(chat)
+    assert state.get("compactions") is None
+    toMatchObject(state.get("compactionFailure"), {"reason": "threshold", "error": "Summarization failed: bad request"})
+    await chat.harness.close(context)
+
+
+async def test_blocking_fails_the_run_when_its_compaction_is_aborted_directly():
     chat = await openCompaction({"contextWindow": 1000})
     await history(chat)
     chat.setup.settings["compaction"] = BLOCKING
     reached = deferred()
     chat.faux.summaries.append(gated(deferred(), summary(), reached))
-    chat.faux.agent.append(answer("a4"))
+    requests = len(chat.faux.agentRequests)
     input = await chat.root.submit({"type": "input", "content": text("u4", 200)}, context)
     await reached.promise
     [child] = await compactionTasks(chat)
     await chat.harness.abortTask(child["id"], context)
-    assert (await input.wait(context))["status"] == "done"
+    toMatchObject(
+        await input.wait(context),
+        {"status": "unanswered", "reason": "model_error", "detail": "Compaction was aborted"},
+    )
+    assert len(chat.faux.agentRequests) == requests
     assert "pi.compaction" not in await kinds(chat.root)
+    # Aborting is not a failure.
+    assert (await live(chat)).get("compactionFailure") is None
     await chat.harness.close(context)
 
 
@@ -1179,7 +1263,8 @@ async def test_overflow_compacts_and_retries_with_the_same_attempt_leaving_the_e
     [compaction] = [record for record in await allEntries(chat.root) if record["kind"] == "pi.compaction"]
     toMatchObject(compaction, {"data": {"reason": "overflow"}})
     retry = chat.faux.agentRequests[-1].messages
-    assert "SUMMARY" in userText(retry[0])
+    assert retry[0].role == "system"
+    assert "SUMMARY" in userText(retry[1])
     assert not any(message.role == "assistant" and message.stopReason == "error" for message in retry)
     await chat.harness.close(context)
 
@@ -1254,7 +1339,7 @@ async def test_estimates_ignore_usage_measured_before_a_summary_placed_mid_run(c
     async def slow(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         toolReached.resolve()
         await toolGate.promise
-        return {"content": [{"type": "text", "text": text("result", 200)}]}
+        return {"output": [{"type": "text", "text": text("result", 200)}]}
 
     addTool(
         chat.setup.registry,
@@ -1856,7 +1941,7 @@ async def test_edge_starts_no_background_compaction_after_a_blocking_one_in_the_
     await chat.harness.close(context)
 
 
-async def test_edge_sends_the_request_anyway_when_its_blocking_compaction_faults():
+async def test_edge_fails_the_run_when_its_blocking_compaction_faults_and_records_the_fault():
     chat = await openCompaction({"contextWindow": 1000})
     await history(chat)
     chat.setup.settings["compaction"] = BLOCKING
@@ -1866,10 +1951,16 @@ async def test_edge_sends_the_request_anyway_when_its_blocking_compaction_faults
         raise RuntimeError("no credentials")
 
     chat.setup.models.completeSimple = broken
-    await turn(chat, text("u4", 200), "a4")
+    input = await chat.root.submit({"type": "input", "content": text("u4", 200)}, context)
+    toMatchObject(
+        await input.wait(context),
+        {"status": "unanswered", "reason": "model_error", "detail": "Compaction failed: no credentials"},
+    )
     chat.setup.models.completeSimple = original
     assert "pi.compaction" not in await kinds(chat.root)
-    assert (await live(chat)).get("compactions") is None
+    state = await live(chat)
+    assert state.get("compactions") is None
+    toMatchObject(state.get("compactionFailure"), {"reason": "threshold", "error": "no credentials"})
     await chat.harness.close(context)
 
 
@@ -2001,7 +2092,7 @@ async def test_edge_summarizes_the_previous_summary_in_a_second_compaction():
     await chat.harness.close(context)
 
 
-async def test_edge_leaves_no_usage_submission_summary_or_outcome_when_the_classifying_commit_is_rejected():
+async def test_edge_leaves_no_usage_submission_or_summary_when_the_classifying_commit_fails_which_fails_the_harness():
     storage = ControlledStorage()
     chat = await openCompaction({"storage": storage})
     await history(chat)
@@ -2010,21 +2101,25 @@ async def test_edge_leaves_no_usage_submission_summary_or_outcome_when_the_class
         return (await chat.harness.snapshot(UsageDoc, chat.root.id, context))["models"]["faux/faux-1"]
 
     before = await usage()
+    failure = RuntimeError("disk gone")
 
-    async def rejecting(request: Any) -> Any:
-        storage.failNextCommit(StorageRejected("rejected"))
+    async def failing(request: Any) -> Any:
+        storage.failNextCommit(failure)
         return summary()
 
-    chat.faux.summaries.append(rejecting)
+    chat.faux.summaries.append(failing)
     id = await chat.root.compact(None, context)
-    outcome = await result(chat, id)
-    assert outcome["status"] == "faulted"
-    assert await usage() == before
-    assert "pi.compaction" not in await kinds(chat.root)
-    assert (await chat.harness.inspect(context))["submissions"] == []
-    assert await storage.submissionByRequest(chat.root.id, f"compaction:{id}", context) is None
-    assert (await live(chat)).get("compactions") is None
+    assert await chat.harness.closed == {"reason": "failed", "error": failure}
     await chat.harness.close(context)
+    # Nothing of the failed commit landed: the task is still live, without usage, entry, or submission.
+    storage.reopen()
+    assert await storage.submissionByRequest(chat.root.id, f"compaction:{id}", context) is None
+    assert ((await storage.task(id, context)) or {}).get("state", {}).get("status") != "terminal"
+    reopened = await openChat(storage, chat.setup)
+    usageAfter = await reopened.harness.snapshot(UsageDoc, reopened.root.id, context)
+    assert usageAfter["models"]["faux/faux-1"] == before
+    assert "pi.compaction" not in await kinds(reopened.root)
+    await reopened.harness.close(context)
 
 
 # ─── Blocking and manual compaction together ──────────────────────────────

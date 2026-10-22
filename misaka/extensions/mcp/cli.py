@@ -105,7 +105,7 @@ Options for add:
 Other options:
   --as <Sister>           Use the Sister's mcp.json and sign-ins instead of Last Order's
   --json                  Print the list as JSON
-  --timeout <seconds>     How long login waits for the browser (default: 300)"""
+  --timeout <seconds>     Time limit for the whole sign-in (default: 300)"""
 
 HELP_HINT = chalk.dim(f'Use "{APP_NAME} mcp --help" for usage.')
 
@@ -141,8 +141,8 @@ class ServerReport(TypedDict):
     tools: list[str]
     # Tools whose exposure differs from the server's, from `toolExposure`.
     toolExposure: NotRequired[dict[str, str]]
-    resources: NotRequired[int]
-    resourceTemplates: NotRequired[int]
+    # Whether the server offers resources. They are not listed: listing every one can take long.
+    resources: NotRequired[Literal[True]]
     error: NotRequired[str]
 
 
@@ -549,8 +549,7 @@ async def _list(
         if len(overrides) > 0:
             report["toolExposure"] = jsObjectOrder(dict(overrides))
         if connection.hasResources:
-            report["resources"] = len(connection.resources)
-            report["resourceTemplates"] = len(connection.resourceTemplates)
+            report["resources"] = True
         if connection.state != "connected" and connection.error:
             report["error"] = connection.error
         await connection.close()
@@ -593,8 +592,8 @@ async def _list(
             overridden = entry.get("toolExposure") or {}
             tools = [f"{tool} [{overridden[tool]}]" if overridden.get(tool) else tool for tool in entry["tools"]]
             log(f"  tools: {', '.join(tools)}")
-        if "resources" in entry:
-            log(f"  resources: {entry['resources']}, URI templates: {entry.get('resourceTemplates') or 0}")
+        if entry.get("resources"):
+            log("  offers resources")
         if entry.get("error"):
             log(f"  {entry['error'].replace(chr(10), chr(10) + '  ')}")
     for configError in loaded["errors"]:

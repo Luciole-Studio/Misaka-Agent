@@ -112,7 +112,7 @@ async def assembled(home, role, kind, *, research=False, custom=False, prompt_fl
 
 
 async def final_prompt(session):
-    await session._prepareAgentStart([], "Offline prompt assembly check", None)
+    await session._prepareRun({"messageType": "user", "prompt": "Offline prompt assembly check", "images": None})
     return session.systemPrompt
 
 

@@ -15,7 +15,7 @@ from misaka.modes.interactive.components.session_selector import (
 )
 from misaka.modes.interactive.theme.theme import initTheme
 from misaka.ui.tui import setKeybindings
-from tests.experimental_support import flush
+from tests.fake_timers import flush
 
 
 async def flushPromises() -> None:

@@ -39,7 +39,7 @@ import re
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
 
 from misaka.ai.types import TextContent
 from misaka.config import home, profiles
@@ -70,8 +70,8 @@ from misaka.utils.js import (
 from misaka.utils.open_browser import openBrowser
 from misaka.utils.values import read_field, signal_aborted
 
-from ..codemode.tool import CODEMODE_TOOL_NAME, isCodemodeTool
-from ..tool_search.tool import TOOL_SEARCH_TOOL_NAME, isToolSearchTool
+from ..codemode.tool import CODEMODE_TOOL_NAME
+from ..tool_search.tool import TOOL_SEARCH_TOOL_NAME
 from .config import (
     LoadedMcpConfig,
     McpExposure,
@@ -283,13 +283,13 @@ def renderServersSection(servers: Sequence[Any]) -> str | None:
     return "\n".join([intro, *lines, *omitted(len(listed) - kept)])
 
 
-def scriptNeedsServer(code: str, server: str) -> bool:
-    """Whether a codemode script needs the server: it names the server's namespace, or searches,
-    enumerates, or describes tools or namespaces, which may name the server in other forms."""
-    # `re.ASCII`: a JavaScript `\b` without the `u` flag knows only ASCII word characters.
-    if re.search(r"\b(searchTools|describeNamespace|describeTool|ALL_TOOLS)\b", code, re.ASCII):
+def reachesServer(reach: Literal["all"] | Sequence[str], server: str) -> bool:
+    """Whether a call that reaches ``reach`` (see ``ToolDefinition.reachesTools``) needs the server: it
+    reaches every tool, or one of its words contains the server's namespace."""
+    if reach == "all":
         return True
-    return mcpNamespace(server) in code
+    namespace = mcpNamespace(server)
+    return any(namespace in word for word in reach)
 
 
 def describeState(server: McpServer, withError: bool = True) -> str:
@@ -306,10 +306,8 @@ def describeState(server: McpServer, withError: bool = True) -> str:
             error = connection.error if connection.error is not None else "unknown error"
             return f"failed: {firstLine(error)}" if withError else "failed"
         case "connected":
-            tools, resources = connection.tools, connection.resources
-            count = len(resources)
-            resourceCount = f" · {count} resource{'' if count == 1 else 's'}" if count > 0 else ""
-            return f"connected · {len(tools)} tool{'' if len(tools) == 1 else 's'}{resourceCount}"
+            tools, hasResources = connection.tools, connection.hasResources
+            return f"connected · {len(tools)} tool{'' if len(tools) == 1 else 's'}{' · resources' if hasResources else ''}"
         case "connecting":
             return "connecting…"
         case _:
@@ -489,8 +487,10 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
             found = findServer(server)
             entry = found.entry if found is not None else connection.entry
             description = jsTrim(entry["config"].get("description") or "")
-            namespace: dict[str, str] = {
+            namespace: dict[str, Any] = {
                 "name": mcpNamespace(server),
+                # `describeNamespace("docs")` finds `mcp__docs`.
+                "aliases": [server],
                 **({"description": description} if description else {}),
                 **({"instructions": connection.instructions} if connection.instructions else {}),
             }
@@ -608,10 +608,15 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
             needsToolSearch = "deferred" in exposures
             if not needsCodemode and not needsToolSearch:
                 return
-            # Other extensions' tools of the same names cannot reach MCP tools, so never activate them.
+            # Only a tool of these names that declares `reachesTools` can reach MCP tools; another
+            # extension's tool of the same name without it is never activated.
             tools = pi.getAllTools()
-            hasCodemode = any(isCodemodeTool(tool) for tool in tools)
-            hasToolSearch = any(isToolSearchTool(tool) for tool in tools)
+
+            def hasReachingTool(name: str) -> bool:
+                return any(tool.name == name and getattr(tool, "reachesTools", None) for tool in tools)
+
+            hasCodemode = hasReachingTool(CODEMODE_TOOL_NAME)
+            hasToolSearch = hasReachingTool(TOOL_SEARCH_TOOL_NAME)
             active = pi.getActiveTools()
             activate: list[str] = []
             if needsCodemode and hasCodemode and autoEnableCodemode and CODEMODE_TOOL_NAME not in active:
@@ -1322,10 +1327,11 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
 
         pi.on("before_agent_start", onBeforeAgentStart)
 
-        # A codemode script waits for the servers it names, or for every server when it searches or
-        # enumerates tools, so their tools are registered before the script runs. tool_search and the
-        # resource tools reach every server, so they wait for all of them. Direct MCP calls wait only
-        # for their own server, including a reconnect still closing its old transport.
+        # A tool that reaches other tools (`reachesTools`) waits for the servers it may reach, so their
+        # tools are registered before it runs: a codemode script for the servers it names, or for every
+        # server when it searches or enumerates tools, and tool_search for every server. The resource
+        # tools reach every server, so they wait for all of them. Direct MCP calls wait only for their
+        # own server, including a reconnect still closing its old transport.
         async def onToolCall(event: Any, ctx: Any) -> None:
             tool = next((candidate for candidate in pi.getAllTools() if candidate.name == event["toolName"]), None)
             if tool is None:
@@ -1336,14 +1342,11 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
             if len(readyServers) == 0:
                 return
             waiting: list[McpServer] = []
-            if isCodemodeTool(tool):
-                eventInput = event.get("input")
-                if eventInput is None:
-                    raise TypeError("Cannot destructure property 'code' of 'event.input' as it is undefined.")
-                code = eventInput.get("code")
-                source = code if isinstance(code, str) else ""
-                waiting = [server for server in readyServers if scriptNeedsServer(source, server.entry["name"])]
-            elif isToolSearchTool(tool) or tool.name in RESOURCE_TOOL_NAMES:
+            reachesTools = getattr(tool, "reachesTools", None)
+            reach = reachesTools(event.get("input")) if reachesTools is not None else None
+            if reach is not None:
+                waiting = [server for server in readyServers if reachesServer(reach, server.entry["name"])]
+            elif tool.name in RESOURCE_TOOL_NAMES:
                 waiting = readyServers
             else:
                 assigned = toolOwners.get(event["toolName"])

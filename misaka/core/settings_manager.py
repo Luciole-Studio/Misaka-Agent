@@ -1,4 +1,8 @@
-"""Hierarchical settings management for coding-agent runtime behavior."""
+"""Hierarchical settings management for coding-agent runtime behavior.
+
+Translated from pi's ``coding-agent/src/core/settings-manager.ts`` (v1.3.0); defaults are ``settings_defaults``, the
+settings types ``settings_schema`` (re-exported here).
+"""
 
 from __future__ import annotations
 
@@ -17,26 +21,45 @@ from typing import Any, Literal, TypedDict
 
 from filelock import FileLock, Timeout
 
-from misaka.ai.types import Model, ModelThinkingLevel, Transport
-from misaka.ai.utils.retry import DEFAULT_MAX_AGENT_RETRY_DELAY_MS
+from misaka.ai.types import Model, ModelThinkingLevel
 from misaka.config import get_agent_dir, home
 from misaka.core.http_dispatcher import (
     DEFAULT_HTTP_IDLE_TIMEOUT_MS,
     parseHttpIdleTimeoutMs,
 )
+from misaka.core.settings_defaults import SETTINGS_DEFAULTS
+from misaka.core.settings_schema import (
+    BranchSummarySettings,
+    CacheWarmingMode,
+    CodemodeMode,
+    CodemodeSettings,
+    CompactionModelOverride,
+    CompactionSettings,
+    DefaultProjectTrust,
+    ImageSettings,
+    MarkdownSettings,
+    MermaidRenderingMode,
+    ProviderRetrySettings,
+    QuietStartup,
+    RetrySettings,
+    SessionShareDestination,
+    Settings,
+    TerminalSettings,
+    ThinkingBudgetsSettings,
+    TransportSetting,
+    WarningSettings,
+)
 from misaka.utils import atomic
 from misaka.utils.js import UNDEFINED, jsString, jsTrim
 from misaka.utils.paths import normalizePath, resolvePath
 
-DEFAULT_COMPACTION_TOKEN_SETTINGS = {
-    "reserveTokens": 16384,
-    "keepRecentTokens": 20000,
-}
-type MermaidRenderingMode = Literal["off", "final", "streaming"]
-
 # Cache-warming profile. "idle" also warms between agent runs.
-CACHE_WARMING_MODES = ("off", "streaming", "idle")
-type CacheWarmingMode = Literal["off", "streaming", "idle"]
+CACHE_WARMING_MODES: tuple[CacheWarmingMode, ...] = ("off", "streaming", "idle")
+
+DEFAULT_COMPACTION_TOKEN_SETTINGS = {
+    "reserveTokens": SETTINGS_DEFAULTS["compaction"]["reserveTokens"],
+    "keepRecentTokens": SETTINGS_DEFAULTS["compaction"]["keepRecentTokens"],
+}
 _MAX_SAFE_INTEGER = 2**53 - 1
 
 
@@ -49,40 +72,11 @@ def _is_non_negative_safe_integer(value: Any) -> bool:
         return False
     return 0 <= value <= _MAX_SAFE_INTEGER
 
-type CompactionSettings = dict[str, Any]
-type BranchSummarySettings = dict[str, Any]
-type ProviderRetrySettings = dict[str, Any]
-type RetrySettings = dict[str, Any]
-type TerminalSettings = dict[str, Any]
-type ImageSettings = dict[str, Any]
-type ThinkingBudgetsSettings = dict[str, Any]
-type MarkdownSettings = dict[str, Any]
-type WarningSettings = dict[str, Any]
-type Settings = dict[str, Any]
 type SettingsScope = Literal["global", "role", "project"]
 # The keys a role may hold a value of its own for. A role session that sets one of these writes
 # its own scope; every other key is the user's, shared by every role, and stays global. This
 # table is what keeps Last Order's and a Sister's configuration apart -- not per-key special cases.
 ROLE_KEYS = frozenset({"defaultProvider", "defaultModel", "defaultThinkingLevel", "web"})
-type TransportSetting = Transport
-# How the codemode tool presents tools while it is active.
-# - `on`: declared tools that scripts can call get a note on calling them from scripts appended to
-#   their description; the codemode description lists only the tools without `direct` exposure.
-# - `only`: the codemode description lists every tool scripts can call, and active `direct` tools are
-#   not declared to the model.
-type CodemodeMode = Literal["on", "only"]
-
-
-class CodemodeSettings(TypedDict, total=False):
-    # Default: `on`.
-    mode: CodemodeMode
-    # Estimated tokens (characters / 4) the codemode description may spend on tool declarations. Default: 3000.
-    inlineBudget: float
-
-
-type DefaultProjectTrust = Literal["ask", "always", "never"]
-# true hides all startup output, "header" keeps only the startup header.
-type QuietStartup = bool | Literal["header"]
 
 
 class SettingsManagerOptions(TypedDict, total=False):
@@ -905,13 +899,13 @@ class SettingsManager:
         self.save()
 
     def getSteeringMode(self) -> str:
-        return self.settings.get("steeringMode") or "one-at-a-time"
+        return self.settings.get("steeringMode") or SETTINGS_DEFAULTS["steeringMode"]
 
     def setSteeringMode(self, mode: str) -> None:
         self._set_global_value("steeringMode", mode)
 
     def getFollowUpMode(self) -> str:
-        return self.settings.get("followUpMode") or "one-at-a-time"
+        return self.settings.get("followUpMode") or SETTINGS_DEFAULTS["followUpMode"]
 
     def setFollowUpMode(self, mode: str) -> None:
         self._set_global_value("followUpMode", mode)
@@ -958,7 +952,7 @@ class SettingsManager:
 
     def getDefaultProjectTrust(self) -> DefaultProjectTrust:
         value = self.globalSettings.get("defaultProjectTrust")
-        return value if value in {"ask", "always", "never"} else "ask"
+        return value if value == "always" or value == "never" else SETTINGS_DEFAULTS["defaultProjectTrust"]
 
     def setDefaultProjectTrust(self, defaultProjectTrust: DefaultProjectTrust) -> None:
         self._set_global_value("defaultProjectTrust", defaultProjectTrust)
@@ -1003,13 +997,24 @@ class SettingsManager:
         self.save()
 
     def getTransport(self) -> TransportSetting:
-        return self._nullish(self.settings.get("transport"), "auto")
+        return self._nullish(self.settings.get("transport"), SETTINGS_DEFAULTS["transport"])
 
     def setTransport(self, transport: TransportSetting) -> None:
         self._set_global_value("transport", transport)
 
+    def getSessionShareDestination(self) -> SessionShareDestination:
+        destination = self.settings.get("sessionShareDestination")
+        return (
+            destination
+            if destination == "gist" or destination == "radius"
+            else SETTINGS_DEFAULTS["sessionShareDestination"]
+        )
+
+    def setSessionShareDestination(self, destination: SessionShareDestination) -> None:
+        self._set_global_value("sessionShareDestination", destination)
+
     def getCompactionEnabled(self) -> bool:
-        return self._nullish(self._settings_object("compaction").get("enabled"), True)
+        return self._nullish(self._settings_object("compaction").get("enabled"), SETTINGS_DEFAULTS["compaction"]["enabled"])
 
     def setCompactionEnabled(self, enabled: bool) -> None:
         compaction = self._ensure_global_nested("compaction")
@@ -1065,15 +1070,19 @@ class SettingsManager:
     def getBranchSummarySettings(self) -> dict[str, Any]:
         branch_summary = self._settings_object("branchSummary")
         return {
-            "reserveTokens": self._nullish(branch_summary.get("reserveTokens"), 16384),
-            "skipPrompt": self._nullish(branch_summary.get("skipPrompt"), False),
+            "reserveTokens": self._nullish(
+                branch_summary.get("reserveTokens"), SETTINGS_DEFAULTS["branchSummary"]["reserveTokens"]
+            ),
+            "skipPrompt": self._nullish(branch_summary.get("skipPrompt"), SETTINGS_DEFAULTS["branchSummary"]["skipPrompt"]),
         }
 
     def getBranchSummarySkipPrompt(self) -> bool:
-        return self._nullish(self._settings_object("branchSummary").get("skipPrompt"), False)
+        return self._nullish(
+            self._settings_object("branchSummary").get("skipPrompt"), SETTINGS_DEFAULTS["branchSummary"]["skipPrompt"]
+        )
 
     def getRetryEnabled(self) -> bool:
-        return self._nullish(self._settings_object("retry").get("enabled"), True)
+        return self._nullish(self._settings_object("retry").get("enabled"), SETTINGS_DEFAULTS["retry"]["enabled"])
 
     def setRetryEnabled(self, enabled: bool) -> None:
         retry_settings = self._ensure_global_nested("retry")
@@ -1085,9 +1094,11 @@ class SettingsManager:
         retry_settings = self._settings_object("retry")
         return {
             "enabled": self.getRetryEnabled(),
-            "maxRetries": self._nullish(retry_settings.get("maxRetries"), 3),
-            "baseDelayMs": self._nullish(retry_settings.get("baseDelayMs"), 2000),
-            "maxAgentDelayMs": self._nullish(retry_settings.get("maxAgentDelayMs"), DEFAULT_MAX_AGENT_RETRY_DELAY_MS),
+            "maxRetries": self._nullish(retry_settings.get("maxRetries"), SETTINGS_DEFAULTS["retry"]["maxRetries"]),
+            "baseDelayMs": self._nullish(retry_settings.get("baseDelayMs"), SETTINGS_DEFAULTS["retry"]["baseDelayMs"]),
+            "maxAgentDelayMs": self._nullish(
+                retry_settings.get("maxAgentDelayMs"), SETTINGS_DEFAULTS["retry"]["maxAgentDelayMs"]
+            ),
         }
 
     def getHttpIdleTimeoutMs(self) -> int:
@@ -1105,7 +1116,7 @@ class SettingsManager:
     def getCacheWarmingMode(self) -> CacheWarmingMode:
         """Read from global settings only because warming costs money."""
         mode = self.globalSettings.get("cacheWarming")
-        return mode if mode is not None and mode in CACHE_WARMING_MODES else "streaming"
+        return mode if mode is not None and mode in CACHE_WARMING_MODES else SETTINGS_DEFAULTS["cacheWarming"]
 
     def setCacheWarmingMode(self, mode: CacheWarmingMode) -> None:
         self._set_global_value("cacheWarming", mode)
@@ -1116,17 +1127,19 @@ class SettingsManager:
         return {
             "timeoutMs": provider_settings.get("timeoutMs"),
             "maxRetries": provider_settings.get("maxRetries"),
-            "maxRetryDelayMs": self._nullish(provider_settings.get("maxRetryDelayMs"), 60000),
+            "maxRetryDelayMs": self._nullish(
+                provider_settings.get("maxRetryDelayMs"), SETTINGS_DEFAULTS["retry"]["provider"]["maxRetryDelayMs"]
+            ),
         }
 
     def getWebSocketConnectTimeoutMs(self) -> int | None:
         return parseTimeoutSetting(self.settings.get("websocketConnectTimeoutMs", _UNDEFINED), "websocketConnectTimeoutMs")
 
     def getHideThinkingBlock(self) -> bool:
-        return self._nullish(self.settings.get("hideThinkingBlock"), False)
+        return self._nullish(self.settings.get("hideThinkingBlock"), SETTINGS_DEFAULTS["hideThinkingBlock"])
 
     def getShowCacheMissNotices(self) -> bool:
-        return self._nullish(self.settings.get("showCacheMissNotices"), False)
+        return self._nullish(self.settings.get("showCacheMissNotices"), SETTINGS_DEFAULTS["showCacheMissNotices"])
 
     def getExternalEditorCommand(self) -> str:
         configuredEditor = self.settings.get("externalEditor")
@@ -1151,7 +1164,7 @@ class SettingsManager:
 
     def getQuietStartup(self) -> QuietStartup:
         value = self.settings.get("quietStartup")
-        return value if value is True or value == "header" else False
+        return value if value is True or value == "header" else SETTINGS_DEFAULTS["quietStartup"]
 
     def setQuietStartup(self, quiet: QuietStartup) -> None:
         self._set_global_value("quietStartup", quiet)
@@ -1159,9 +1172,10 @@ class SettingsManager:
     def getEnableInstallTelemetry(self) -> bool:
         # The setting answers "may this install be identified to a service". All that rides
         # on it is `core/provider_attribution.py` naming the client "misaka" to aggregator
-        # gateways; nothing else is sent. Upstream defaults it on; MISAKA defaults it off,
-        # so being named is something the user turns on rather than something they find.
-        return self._nullish(self.settings.get("enableInstallTelemetry"), False)
+        # gateways; nothing else is sent. Upstream defaults it on; MISAKA defaults it off
+        # (`# MISAKA fork:` in settings_defaults.py), so being named is something the user
+        # turns on rather than something they find.
+        return self._nullish(self.settings.get("enableInstallTelemetry"), SETTINGS_DEFAULTS["enableInstallTelemetry"])
 
     def setEnableInstallTelemetry(self, enabled: bool) -> None:
         self._set_global_value("enableInstallTelemetry", enabled)
@@ -1174,7 +1188,7 @@ class SettingsManager:
 
 
     def getCollapseChangelog(self) -> bool:
-        return self._nullish(self.settings.get("collapseChangelog"), False)
+        return self._nullish(self.settings.get("collapseChangelog"), SETTINGS_DEFAULTS["collapseChangelog"])
 
     def setCollapseChangelog(self, collapse: bool) -> None:
         self._set_global_value("collapseChangelog", collapse)
@@ -1213,7 +1227,7 @@ class SettingsManager:
         self.saveProjectSettings(project_settings)
 
     def getEnableSkillCommands(self) -> bool:
-        return self._nullish(self.settings.get("enableSkillCommands"), True)
+        return self._nullish(self.settings.get("enableSkillCommands"), SETTINGS_DEFAULTS["enableSkillCommands"])
 
     def setEnableSkillCommands(self, enabled: bool) -> None:
         self._set_global_value("enableSkillCommands", enabled)
@@ -1237,7 +1251,7 @@ class SettingsManager:
         return overrides
 
     def getShowImages(self) -> bool:
-        return self._nullish(self._settings_object("terminal").get("showImages"), True)
+        return self._nullish(self._settings_object("terminal").get("showImages"), SETTINGS_DEFAULTS["terminal"]["showImages"])
 
     def setShowImages(self, show: bool) -> None:
         terminal = self._ensure_global_nested("terminal")
@@ -1248,7 +1262,7 @@ class SettingsManager:
     def getImageWidthCells(self) -> int:
         width = self._settings_object("terminal").get("imageWidthCells")
         if not isinstance(width, (int, float)) or isinstance(width, bool) or not float("-inf") < float(width) < float("inf"):
-            return 60
+            return SETTINGS_DEFAULTS["terminal"]["imageWidthCells"]
         return max(1, int(width // 1))
 
     def setImageWidthCells(self, width: int) -> None:
@@ -1261,7 +1275,10 @@ class SettingsManager:
         terminal = self._settings_object("terminal")
         if terminal.get("clearOnShrink") is not None:
             return terminal["clearOnShrink"]
-        return os.environ.get("MISAKA_CLEAR_ON_SHRINK") == "1"
+        # MISAKA fork: `MISAKA_CLEAR_ON_SHRINK`, where upstream reads `PI_CLEAR_ON_SHRINK`.
+        if os.environ.get("MISAKA_CLEAR_ON_SHRINK") == "1":
+            return True
+        return SETTINGS_DEFAULTS["terminal"]["clearOnShrink"]
 
     def setClearOnShrink(self, enabled: bool) -> None:
         terminal = self._ensure_global_nested("terminal")
@@ -1270,7 +1287,9 @@ class SettingsManager:
         self.save()
 
     def getShowTerminalProgress(self) -> bool:
-        return self._nullish(self._settings_object("terminal").get("showTerminalProgress"), False)
+        return self._nullish(
+            self._settings_object("terminal").get("showTerminalProgress"), SETTINGS_DEFAULTS["terminal"]["showTerminalProgress"]
+        )
 
     def setShowTerminalProgress(self, enabled: bool) -> None:
         terminal = self._ensure_global_nested("terminal")
@@ -1279,7 +1298,7 @@ class SettingsManager:
         self.save()
 
     def getImageAutoResize(self) -> bool:
-        return self._nullish(self._settings_object("images").get("autoResize"), True)
+        return self._nullish(self._settings_object("images").get("autoResize"), SETTINGS_DEFAULTS["images"]["autoResize"])
 
     def setImageAutoResize(self, enabled: bool) -> None:
         images = self._ensure_global_nested("images")
@@ -1288,7 +1307,7 @@ class SettingsManager:
         self.save()
 
     def getBlockImages(self) -> bool:
-        return self._nullish(self._settings_object("images").get("blockImages"), False)
+        return self._nullish(self._settings_object("images").get("blockImages"), SETTINGS_DEFAULTS["images"]["blockImages"])
 
     def setBlockImages(self, blocked: bool) -> None:
         images = self._ensure_global_nested("images")
@@ -1303,15 +1322,16 @@ class SettingsManager:
         self._set_global_value("enabledModels", patterns)
 
     def getDoubleEscapeAction(self) -> str:
-        return self._nullish(self.settings.get("doubleEscapeAction"), "tree")
+        return self._nullish(self.settings.get("doubleEscapeAction"), SETTINGS_DEFAULTS["doubleEscapeAction"])
 
     def setDoubleEscapeAction(self, action: str) -> None:
         self._set_global_value("doubleEscapeAction", action)
 
     def getTreeFilterMode(self) -> str:
         mode = self.settings.get("treeFilterMode")
-        valid = {"default", "no-tools", "user-only", "labeled-only", "all"}
-        return mode if mode in valid else "default"
+        valid = ("default", "no-tools", "user-only", "labeled-only", "all")
+        # `valid.includes(mode)`: a list or an object in settings.json is not a mode, nor an error.
+        return mode if isinstance(mode, str) and mode in valid else SETTINGS_DEFAULTS["treeFilterMode"]
 
     def setTreeFilterMode(self, mode: str) -> None:
         self._set_global_value("treeFilterMode", mode)
@@ -1325,30 +1345,32 @@ class SettingsManager:
         self._set_global_value("showHardwareCursor", enabled)
 
     def getEditorPaddingX(self) -> int:
-        return self._nullish(self.settings.get("editorPaddingX"), 0)
+        return self._nullish(self.settings.get("editorPaddingX"), SETTINGS_DEFAULTS["editorPaddingX"])
 
     def setEditorPaddingX(self, padding: int) -> None:
         self._set_global_value("editorPaddingX", max(0, min(3, int(padding))))
 
     def getOutputPad(self) -> Literal[0, 1]:
         value = self.settings.get("outputPad")
-        return 0 if type(value) in (int, float) and value == 0 else 1
+        return 0 if type(value) in (int, float) and value == 0 else SETTINGS_DEFAULTS["outputPad"]
 
     def setOutputPad(self, padding: Literal[0, 1]) -> None:
         self._set_global_value("outputPad", padding)
 
     def getAutocompleteMaxVisible(self) -> int:
-        return self._nullish(self.settings.get("autocompleteMaxVisible"), 5)
+        return self._nullish(self.settings.get("autocompleteMaxVisible"), SETTINGS_DEFAULTS["autocompleteMaxVisible"])
 
     def setAutocompleteMaxVisible(self, maxVisible: int) -> None:
         self._set_global_value("autocompleteMaxVisible", max(3, min(20, int(maxVisible))))
 
     def getCodeBlockIndent(self) -> str:
-        return self._nullish(self._settings_object("markdown").get("codeBlockIndent"), "  ")
+        return self._nullish(
+            self._settings_object("markdown").get("codeBlockIndent"), SETTINGS_DEFAULTS["markdown"]["codeBlockIndent"]
+        )
 
     def getMermaidRenderingMode(self) -> MermaidRenderingMode:
         mode = self._settings_object("markdown").get("mermaid")
-        return mode if mode == "off" or mode == "final" else "streaming"
+        return mode if mode == "off" or mode == "final" else SETTINGS_DEFAULTS["markdown"]["mermaid"]
 
     def setMermaidRenderingMode(self, mode: MermaidRenderingMode) -> None:
         markdown = self._ensure_global_nested("markdown")
@@ -1363,19 +1385,25 @@ class SettingsManager:
         self._set_global_value("warnings", {**warnings})
 
 __all__ = [
+    "CACHE_WARMING_MODES",
     "DEFAULT_TOOL_NAMES",
+    "ROLE_KEYS",
     "BranchSummarySettings",
+    "CacheWarmingMode",
     "CodemodeMode",
     "CodemodeSettings",
+    "CompactionModelOverride",
     "CompactionSettings",
     "DefaultProjectTrust",
     "FileSettingsStorage",
     "ImageSettings",
     "InMemorySettingsStorage",
     "MarkdownSettings",
+    "MermaidRenderingMode",
     "ProviderRetrySettings",
     "QuietStartup",
     "RetrySettings",
+    "SessionShareDestination",
     "Settings",
     "SettingsError",
     "SettingsManager",

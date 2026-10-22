@@ -2,7 +2,7 @@
 
 MISAKA fork: ``vi.stubGlobal("fetch", ...)`` becomes a ``FetchMock`` patched over a flow module's ``fetch``, ``new
 Response(...)`` is ``misaka.utils.whatwg_fetch.Response``, and vitest's fake timers replace the running loop's
-``call_later`` and the wall clock (``time.time``) with ``tests.experimental_support.FakeTimers``.
+``call_later`` and the wall clock (``time.time``) with ``tests.fake_timers.FakeTimers``.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import pytest
 from misaka.utils.js import UNDEFINED, jsonStringify
 from misaka.utils.whatwg_fetch import Response
 from misaka.utils.whatwg_url import URL, URLSearchParams
-from tests.experimental_support import FakeTimers
+from tests.fake_timers import FakeTimers
 
 
 def jsonResponse(body: Any, status: int = 200, headers: dict[str, str] | None = None) -> Response:

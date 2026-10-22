@@ -89,7 +89,7 @@ async def test_tool_round_runs_input_tool_call_tool_result_and_answer_and_settle
     setup = chatSetup()
 
     async def echo(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": [{"type": "text", "text": f"echo {args.get('text')}"}]}
+        return {"output": [{"type": "text", "text": f"echo {args.get('text')}"}]}
 
     addTool(setup.registry, tool("echo", echo))
     result = await run(setup, [calls(("echo", {"text": "hi"}, "c1")), DONE])
@@ -123,7 +123,7 @@ async def test_tool_round_gives_tools_and_hooks_the_harnesss_models():
 
     async def echo(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         seen.append(api.models)
-        return {"content": []}
+        return {"output": []}
 
     def beforeTool(_call: Any, api: Any, *_: Any) -> None:
         seen.append(api.models)
@@ -141,7 +141,7 @@ async def test_tool_round_answers_calls_to_tools_the_request_did_not_offer_witho
     setup = chatSetup()
 
     async def echo(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": []}
+        return {"output": []}
 
     addTool(setup.registry, tool("echo", echo))
     result = await run(setup, [calls(("ghost", {}, "c1"), ("echo", {}, "c2")), DONE])
@@ -168,7 +168,7 @@ async def test_tool_round_answers_a_call_to_a_tool_deactivated_after_preparation
 
     async def echo(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         seen.append("ran")
-        return {"content": []}
+        return {"output": []}
 
     addTool(setup.registry, tool("echo", echo))
     holder: dict[str, Any] = {}
@@ -193,7 +193,7 @@ async def test_tool_round_removes_unregistered_active_tools_from_the_offer_and_a
     setup = chatSetup()
 
     async def echoRun(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": []}
+        return {"output": []}
 
     echo = tool("echo", echoRun)
     registration = addTool(setup.registry, echo)
@@ -224,12 +224,12 @@ async def test_tool_round_produces_tool_unavailable_when_the_implementation_is_u
 
     async def firstRun(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         installed["second"].dispose()
-        return {"content": []}
+        return {"output": []}
 
     addTool(setup.registry, tool("first", firstRun, {"executionMode": "sequential"}))
 
     async def secondRun(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": [{"type": "text", "text": "ran"}]}
+        return {"output": [{"type": "text", "text": "ran"}]}
 
     installed["second"] = addTool(setup.registry, tool("second", secondRun))
     result = await run(setup, [calls(("first", {}, "c1"), ("second", {}, "c2")), DONE])
@@ -250,7 +250,7 @@ async def test_tool_round_reads_the_execution_mode_when_a_round_starts_and_keeps
             setup.settings["toolExecution"] = "parallel"
             await asyncio.sleep(0.02)
             events.append(f"end {name}")
-            return {"content": []}
+            return {"output": []}
 
         return execute
 
@@ -276,7 +276,7 @@ async def test_tool_round_runs_a_round_in_parallel_by_default_and_sequentially_w
                 events.append(f"start {name}")
                 await asyncio.sleep(0.02)
                 events.append(f"end {name}")
-                return {"content": []}
+                return {"output": []}
 
             return execute
 
@@ -299,11 +299,11 @@ async def test_tool_round_runs_a_round_in_parallel_by_default_and_sequentially_w
     async def aRun(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         await asyncio.sleep(0.02)
         events.append("a")
-        return {"content": []}
+        return {"output": []}
 
     async def bRun(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         events.append("b")
-        return {"content": []}
+        return {"output": []}
 
     addTool(perTool.registry, tool("a", aRun, {"executionMode": "sequential"}))
     addTool(perTool.registry, tool("b", bRun))
@@ -374,7 +374,7 @@ async def test_tool_results_bound_explicit_text_content_and_keep_other_content()
     image = {"type": "image", "data": "AAAA", "mimeType": "image/png"}
 
     async def big(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": [{"type": "text", "text": "a\nb\n"}, image, {"type": "text", "text": "c\nd\n"}]}
+        return {"output": [{"type": "text", "text": "a\nb\n"}, image, {"type": "text", "text": "c\nd\n"}]}
 
     addTool(setup.registry, tool("big", big, {"outputLimits": {"maxLines": 2, "retain": "tail"}}))
     result = await run(setup, [calls(("big", {}, "c1")), DONE])
@@ -406,7 +406,7 @@ async def test_tool_results_record_how_long_execute_took_excluding_hooks_and_not
 
     async def slow(*_: Any) -> dict[str, Any]:
         await asyncio.sleep(0.03)
-        return {"content": []}
+        return {"output": []}
 
     async def thrower(*_: Any) -> dict[str, Any]:
         await asyncio.sleep(0.03)
@@ -437,7 +437,7 @@ async def test_tool_results_validate_arguments_before_and_after_before_tool_and_
 
     async def echo(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         seen.append(args)
-        return {"content": []}
+        return {"output": []}
 
     addTool(setup.registry, tool("echo", echo))
 
@@ -487,7 +487,7 @@ async def test_tool_results_repair_arguments_with_prepare_arguments_before_valid
 
     async def echo(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         seen.append(args)
-        return {"content": []}
+        return {"output": []}
 
     def prepareArguments(args: dict[str, Any]) -> dict[str, Any]:
         text = args.get("text")
@@ -511,7 +511,7 @@ async def test_tool_results_let_the_first_before_tool_block_win_and_skip_later_h
     setup = chatSetup()
 
     async def echo(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": []}
+        return {"output": []}
 
     addTool(setup.registry, tool("echo", echo))
     asked: list[str] = []
@@ -536,19 +536,20 @@ async def test_tool_results_chain_after_tool_replacements_and_observe_the_round_
     setup = chatSetup()
 
     async def echo(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": [{"type": "text", "text": "raw"}]}
+        return {"output": [{"type": "text", "text": "raw"}]}
 
     addTool(setup.registry, tool("echo", echo))
     addHooks(
         setup.registry,
         ToolTask,
-        {"afterTool": lambda _call, result, *_: {**result, "content": [{"type": "text", "text": "first"}]}},
+        {"afterTool": lambda _call, result, *_: {**result, "output": [{"type": "text", "text": "first"}]}},
     )
-    addHooks(
-        setup.registry,
-        ToolTask,
-        {"afterTool": lambda _call, result, *_: {**result, "details": {"replaced": resultText(result)}}},
-    )
+
+    def replaced(_call: Any, result: Any, *_: Any) -> dict[str, Any]:
+        texts = [item["text"] if item["type"] == "text" else "" for item in result.get("output") or []]
+        return {**result, "details": {"replaced": "|".join(texts)}}
+
+    addHooks(setup.registry, ToolTask, {"afterTool": replaced})
     observed: list[Any] = []
 
     def afterTools(assistant: Any, entries: Any, *_: Any) -> None:
@@ -569,7 +570,7 @@ async def test_tool_results_run_the_hooks_of_the_selected_extensions_a_task_owne
     calledIn: list[int] = []
 
     async def echoRun(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": []}
+        return {"output": []}
 
     Echo = defineExtension({"name": "echo", "tools": [tool("echo", echoRun)]})
 
@@ -620,13 +621,13 @@ async def test_tool_results_apply_add_tools_and_terminate_only_when_every_result
     setup = chatSetup()
 
     async def stopRun(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": [], "control": {"terminate": True}}
+        return {"output": [], "control": {"terminate": True}}
 
     async def growRun(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": [], "control": {"addTools": ["extra", "stop"]}}
+        return {"output": [], "control": {"addTools": ["extra", "stop"]}}
 
     async def extraRun(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": []}
+        return {"output": []}
 
     stop = tool("stop", stopRun)
     grow = tool("grow", growRun)
@@ -783,7 +784,7 @@ async def test_generation_hooks_keep_durable_hook_decisions_in_task_memos():
     asked = 0
 
     async def echo(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": []}
+        return {"output": []}
 
     addTool(setup.registry, tool("echo", echo))
 
@@ -840,7 +841,7 @@ async def test_tool_execution_api_builds_the_environment_per_call_from_the_conve
         id = await api.createTask(child, {"n": 21}, {"ownership": {"kind": "conversation"}}, context)
         done = await api.waitForTask(id, context)
         seen.append(done["state"]["outcome"])
-        return {"content": []}
+        return {"output": []}
 
     addTool(setup.registry, tool("probe", probeRun))
     setup.faux.setResponses([calls(("probe", {}, "c1"), ("probe", {}, "c2")), DONE])
@@ -870,7 +871,7 @@ async def test_tool_execution_api_answers_a_throwing_environment_with_a_tool_err
     setup = chatSetup()
 
     async def probeRun(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": [{"type": "text", "text": "ran"}]}
+        return {"output": [{"type": "text", "text": "ran"}]}
 
     addTool(setup.registry, tool("probe", probeRun))
 
@@ -904,7 +905,7 @@ async def test_coding_tools_answer_a_failing_command_with_its_retained_tail_and_
         assert text.startswith("line-1001\n")
         assert [diagnostic.get("code") for diagnostic in entry["data"]["diagnostics"]] == [
             "full_output",
-            "tool_error",
+            "exit_code",
             "truncated",
         ]
         assert "line-3000\n|<harness>\n[info] Full output: " in text
@@ -978,7 +979,7 @@ async def test_tool_progress_sanitizes_running_output_but_keeps_explicit_result_
         return {}
 
     async def explicit(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": [{"type": "text", "text": "c\x1bd"}]}
+        return {"output": [{"type": "text", "text": "c\x1bd"}]}
 
     addTool(setup.registry, tool("noisy", noisy))
     addTool(setup.registry, tool("explicit", explicit))
@@ -994,10 +995,10 @@ async def test_tool_progress_drops_control_keys_set_to_undefined_instead_of_faul
     setup = chatSetup()
 
     async def grow(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": [], "control": {"addTools": ["extra"], "terminate": UNDEFINED}}
+        return {"output": [], "control": {"addTools": ["extra"], "terminate": UNDEFINED}}
 
     async def extraRun(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": []}
+        return {"output": []}
 
     addTool(setup.registry, tool("grow", grow))
     extra = tool("extra", extraRun)
@@ -1018,7 +1019,7 @@ async def test_tool_progress_uses_explicit_null_details_instead_of_the_last_repo
 
     async def nullDetails(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         await api.details({"old": 1}, context)
-        return {"content": [], "details": None}
+        return {"output": [], "details": None}
 
     addTool(setup.registry, tool("null", nullDetails))
     result = await run(setup, [calls(("null", {}, "c1")), DONE])
@@ -1041,7 +1042,7 @@ async def test_tool_progress_settles_details_promises_with_coalesced_progress_co
         await first
         consume(second)
         consume(asyncio.ensure_future(mark("third", api.details({"n": 3}, context))))
-        return {"content": []}
+        return {"output": []}
 
     addTool(setup.registry, tool("details", detailsRun))
     result = await run(setup, [calls(("details", {}, "c1")), DONE])
@@ -1058,7 +1059,7 @@ async def test_tool_progress_finishes_a_call_under_the_implementation_it_resolve
     async def v1Run(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         started.resolve()
         await finished.promise
-        return {"content": [{"type": "text", "text": "v1"}]}
+        return {"output": [{"type": "text", "text": "v1"}]}
 
     addTool(setup.registry, tool("work", v1Run))
     setup.faux.setResponses([calls(("work", {}, "c1")), DONE])
@@ -1068,7 +1069,7 @@ async def test_tool_progress_finishes_a_call_under_the_implementation_it_resolve
     await started.promise
 
     async def v2Run(args: Any, api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": [{"type": "text", "text": "v2"}]}
+        return {"output": [{"type": "text", "text": "v2"}]}
 
     # The same extension name replaces the old one in place.
     addTool(setup.registry, tool("work", v2Run))
@@ -1098,7 +1099,7 @@ async def test_tool_progress_uses_a_section_and_hook_extension_reloaded_mid_run_
     async def work(_args: Any, api: Any, callContext: Any) -> dict[str, Any]:
         running.resolve()
         await reloaded.promise
-        return {"content": []}
+        return {"output": []}
 
     addTool(setup.registry, tool("work", work))
     setup.faux.setResponses([calls(("work", {}, "c1")), DONE])
@@ -1144,7 +1145,7 @@ async def test_tool_progress_rejects_invocation_bound_waits_and_stops_watches_wh
         consume(holder["wait"])
         watch = await api.watchDoc(LiveDoc, api.conversationId, context)
         holder["watchClosed"] = watch.closed
-        return {"content": []}
+        return {"output": []}
 
     addTool(setup.registry, tool("detach", detach))
     result = await run(setup, [calls(("detach", {}, "c1")), DONE])

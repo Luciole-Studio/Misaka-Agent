@@ -1,4 +1,4 @@
-"""Translated from pi's ``modes/interactive/components/status-indicator.ts`` (v1.1.0)."""
+"""Translated from pi's ``modes/interactive/components/status-indicator.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ type CompactionStatusReason = Literal["manual", "threshold", "overflow"]
 
 
 class CompactionStatusIndicator(StatusIndicator):
-    def __init__(self, ui: Any, reason: CompactionStatusReason) -> None:
+    def __init__(self, ui: Any, reason: CompactionStatusReason, colorFn: Callable[[str], str] | None = None) -> None:
         cancelHint = f"({keyText('app.interrupt')} to cancel)"
         label = (
             f"Compacting context... {cancelHint}"
@@ -105,8 +105,8 @@ class CompactionStatusIndicator(StatusIndicator):
         super().__init__(
             "compaction",
             ui,
-            lambda spinner: theme.fg("accent", spinner),
-            lambda text: theme.fg("muted", text),
+            colorFn if colorFn is not None else (lambda spinner: theme.fg("accent", spinner)),
+            colorFn if colorFn is not None else (lambda text: theme.fg("muted", text)),
             label,
         )
 

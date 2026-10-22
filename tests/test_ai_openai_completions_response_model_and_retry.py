@@ -1,7 +1,7 @@
 """Translated from pi's ``packages/ai/test/openai-completions-{response-model,retry}.test.ts`` (v1.1.0).
 
 MISAKA fork: vitest's fake timers are stood in for by replacing the running loop's ``call_later`` with
-``tests.experimental_support.FakeTimers`` (as ``tests/test_ai_provider_retry.py`` does).
+``tests.fake_timers.FakeTimers`` (as ``tests/test_ai_provider_retry.py`` does).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from misaka.ai.api.openai_completions import stream as streamOpenAICompletions
 from misaka.ai.compat import complete
 from misaka.ai.types import Context, Model, TextContent, UserMessage
 from misaka.ai.utils.transcript import normalizeContext
-from tests.experimental_support import FakeTimers
+from tests.fake_timers import FakeTimers
 from tests.openai_fake import installFakeOpenAI
 
 # --- openai-completions-response-model.test.ts --------------------------------------------------

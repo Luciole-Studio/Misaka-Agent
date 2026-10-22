@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/coding-agent/test/print-mode.test.ts`` (v1.1.0)."""
+"""Translated from pi's ``packages/coding-agent/test/print-mode.test.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
@@ -122,3 +122,16 @@ async def test_emits_session_shutdown_and_returns_non_zero_on_assistant_error(ca
     assert exitCode == 1
     assert "provider failure\n" in capsys.readouterr().err
     assert session.extensionRunner.emit.calls == [({"type": "session_shutdown", "reason": "quit"},)]
+
+
+# #10799
+async def test_warns_on_stderr_and_returns_non_zero_when_the_response_was_truncated(
+    capsys: pytest.CaptureFixture[str],
+):
+    runtimeHost = createRuntimeHost(createAssistantMessage(text="partial", stopReason="length"))
+
+    exitCode = await runPrintMode(runtimeHost, {"mode": "text"})
+
+    assert exitCode == 1
+    captured = capsys.readouterr()
+    assert "Response was truncated: the model reached its output token limit." in captured.err

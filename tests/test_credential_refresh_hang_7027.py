@@ -23,7 +23,7 @@ from misaka.core.model_resolver import defaultModelPerProvider
 from misaka.modes.interactive import interactive_mode
 from misaka.modes.interactive.interactive_mode import InteractiveMode
 from misaka.utils.js import startTask
-from tests.experimental_support import FakeTimers
+from tests.fake_timers import FakeTimers
 from tests.suite_harness import createHarness
 from tests.test_model_runtime import _interaction, _model, _unused, runtimeWithProvider
 

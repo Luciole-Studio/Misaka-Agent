@@ -1,7 +1,8 @@
 """pi env's ``test/daemon.ts``: the daemon the tests run, plus helpers the Python tests need.
 
 ``PI_ENV_DAEMON`` names another daemon to test (pi's CI points it at release builds); otherwise the zip application
-``misaka.env.bundle`` builds from ``misaka/env/daemon``.
+``misaka.env.bundle`` builds from ``misaka/env/daemon``. ``oldDaemonCommand()`` starts pi env's ``test/old-daemon.ts``
+(``tests/fixtures/old_env_daemon.py``), a daemon released before ``hello.features``.
 """
 
 from __future__ import annotations
@@ -25,6 +26,12 @@ def daemonCommand() -> list[str]:
     """The command that starts the daemon. MISAKA fork: a zip application runs under this interpreter; ``PI_ENV_DAEMON``
     may also name a native daemon, which runs as it is."""
     return [sys.executable, daemon] if zipfile.is_zipfile(daemon) else [daemon]
+
+
+def oldDaemonCommand() -> list[str]:
+    """``[process.execPath, join(import.meta.dirname, "old-daemon.ts")]``: a stand-in for a daemon released before
+    ``hello.features``, which refuses ``listFiles`` as an unknown operation."""
+    return [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "old_env_daemon.py")]
 
 
 async def closeConnection(connection: Connection) -> None:

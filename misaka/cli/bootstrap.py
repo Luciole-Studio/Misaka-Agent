@@ -17,6 +17,10 @@ board treats a research card as research's in every process without importing re
 ``install`` is also where a process refuses to start on a settings.json knob it cannot
 use, listing every one at once, so a bad value is found before any work begins rather
 than by whichever long-running process reads it first.
+
+``install`` also turns on theme validation (pi's ``main.ts`` does it first thing): the sessions
+these processes build load the home's ``themes/``, and an invalid theme is then reported, not
+half-loaded.
 """
 
 from __future__ import annotations
@@ -27,6 +31,10 @@ from misaka.core import wiring
 
 
 def install(*, check_settings: bool = True) -> None:
+    # MISAKA fork: pi's only entry is `main()`; MISAKA's other entries build sessions without it.
+    from misaka.modes.interactive.theme.theme import setThemeJsonValidator
+    from misaka.modes.interactive.theme.theme_schema import validateThemeJson
+    setThemeJsonValidator(validateThemeJson)
     if check_settings and (errors := product.validate_settings()):
         raise SystemExit("settings.json has values MISAKA cannot use; fix or remove them:\n  "
                          + "\n  ".join(errors))

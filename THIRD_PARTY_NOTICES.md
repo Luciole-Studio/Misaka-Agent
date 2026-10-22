@@ -13,18 +13,16 @@ MISAKA 的部分文件移植自其它项目。移植代码所附带的许可证�
 - 上游：https://github.com/earendil-works/pi ，npm 包 `@earendil-works/pi-coding-agent`
 - 许可证：MIT
 - 版权：Copyright (c) 2025 Mario Zechner
-- 许可证全文：`misaka/LICENSE.pi`，取自上游仓库 `v1.1.0` 的 `LICENSE`（与 `v0.87.1` 一字不差；npm 包本身不带 LICENSE 文件）
-- 对照件：上游仓库 `v1.1.0` 标签的源码（`packages/*/src`）与 `@earendil-works/pi-ai` 1.1.0 发布包
-- 模型目录数据：`misaka/ai/providers/data/` 是 `@earendil-works/pi-ai` 1.1.0 发布包中 `dist/providers/data` 的原样拷贝，
+- 许可证全文：`misaka/LICENSE.pi`，取自上游仓库 `v1.1.0` 的 `LICENSE`（与 `v0.87.1`、`v1.3.0` 一字不差；npm 包本身不带 LICENSE 文件）
+- 对照件：上游仓库 `v1.3.0` 标签的源码（`packages/*/src`）与 `@earendil-works/pi-ai` 1.3.0 发布包
+- 模型目录数据：`misaka/ai/providers/data/` 是 `@earendil-works/pi-ai` 1.3.0 发布包中 `dist/providers/data` 的原样拷贝，
   用 `scripts/refresh_model_catalog.py` 按清单校验后更新
 - 本仓库位置：`misaka/ai/**`、`misaka/agent/**`、`misaka/ui/tui/**`、`misaka/mcp/**`（Pi 的
   `packages/mcp`）、`misaka/codemode/**`（Pi 的 `packages/codemode`；其中 `quickjs_wasi/` 见下面的 quickjs-wasi 条）、
-  `misaka/extensions/{mcp,codemode,tool_search}/**`，`misaka/{chord,protocol,client,server,durable}/**`
-  （Pi 的同名 packages；`chord/node` 是 Python 分叉）、`misaka/experimental/**` 与 `misaka/cli/experimental/**`
-  （Pi 的 `coding-agent/src/experimental` 与 `src/cli/experimental`，开发专用），以及 `misaka/core/` 的内核
-  部分；这些目录自 2026-10 起对照 Pi 1.1.0。`misaka/core/` 逐目录、逐文件的归属清单是 `misaka/core/PI_ORIGIN.md`。
-  仓库里另有两处 Pi 来源：`tests/` 中移植的上游测试（含 faux provider 与 suite 测试夹具），以及
-  `examples/plugins/pi-example-plugin/`（Pi 的示例插件）。
+  `misaka/extensions/{mcp,codemode,tool_search}/**`，`misaka/{chord,durable,env}/**`
+  （Pi 的同名 packages；`chord/loader.py` 与 `chord/manager.py` 是 Python 分叉），以及 `misaka/core/` 的内核
+  部分；这些目录自 2026-10-21 起对照 Pi 1.3.0。`misaka/core/` 逐目录、逐文件的归属清单是 `misaka/core/PI_ORIGIN.md`。
+  仓库里另有一处 Pi 来源：`tests/` 中移植的上游测试（含 faux provider 与 suite 测试夹具）。
 - 说明：MISAKA 的内核是 Pi 的 Python 移植，是本仓库最大的单一上游来源。分叉处在代码里
   以 `# MISAKA fork:` 注释标出并说明理由。Pi 树内自带第三方许可证头的文件另见下面各条：
   `utils/ansi.ts`（ansi-regex）、`tui/src/stdin-buffer.ts`（OpenTUI）、`mcp/src/oauth/{types,discovery,flow}.ts`
@@ -32,7 +30,7 @@ MISAKA 的部分文件移植自其它项目。移植代码所附带的许可证�
 
 ## quickjs-wasi 与其中的 QuickJS-NG、wasi-libc（经 Pi 的 packages/codemode）
 
-- 上游：https://github.com/vercel-labs/quickjs-wasi ，npm 包 `quickjs-wasi` 3.6.2（Pi 1.1.0 的 codemode 依赖它）
+- 上游：https://github.com/vercel-labs/quickjs-wasi ，npm 包 `quickjs-wasi` 3.6.2（Pi 1.3.0 的 codemode 依赖它，版本未变）
 - 许可证：quickjs-wasi 为 MIT（Copyright (c) 2026 Vercel, Inc.）；其中的 QuickJS-NG 0.17.0 为 MIT
   （Copyright (c) 2017-2026 Fabrice Bellard 等）；wasi-libc 按其多许可证中的 MIT 使用，所含 musl 为 MIT、
   cloudlibc 为 BSD-2-Clause、dlmalloc 为 CC0
@@ -42,6 +40,15 @@ MISAKA 的部分文件移植自其它项目。移植代码所附带的许可证�
   `misaka/codemode/quickjs_wasi/__init__.py`（完整 MIT 文本在该文件头部）
 - 说明：`__init__.py` 把 quickjs-wasi 的 `src/index.ts` 与 `src/wasi-shim.ts` 中 Pi 的 codemode worker
   用到的部分移植成 Python，宿主的 WebAssembly 换成 wasmtime；分叉处在文件头部列出。
+
+## TypeBox（经 Pi 的 packages/chord）
+
+- 上游：https://github.com/sinclairzx81/typebox ，npm 包 `typebox` 1.3.27（Pi 1.3.0 的 chord 依赖它）
+- 许可证：MIT
+- 版权：Copyright (c) 2017-2026 Haydn Paterson
+- 本仓库位置：`misaka/chord/_typebox.py`（完整 MIT 文本在该文件头部）
+- 说明：chord 用到的 `Type` 构造器与 `Value.Check/Errors/Clean/Default/Clone` 的 Python 移植（联合分支的优先级排序、
+  字素计数、交叉类型求值、错误文案与路径同上游）；分叉处在文件头部列出。
 
 ## ansi-regex / strip-ansi
 
@@ -83,13 +90,13 @@ MISAKA 的部分文件移植自其它项目。移植代码所附带的许可证�
   处理 shebang 与 cmd.exe 转义的那部分移植为 Python，转义规则以 node 跑 cross-spawn 7.0.6
   产出的向量校验（`tests/fixtures/mcp/cross_spawn_vectors.json`）。
 
-## proper-lockfile 与 retry（经 Pi 的 coding-agent 实验服务器）
+## proper-lockfile 与 retry（经 Pi 的 coding-agent）
 
 - 上游与许可证：proper-lockfile 4.1.2（MIT，Copyright (c) 2018 Made With MOXY Lda）、
   retry 0.12.0（MIT，Copyright (c) 2011 Tim Koschützki、Felix Geisendörfer）
 - 许可证全文：`LICENSES/proper-lockfile-and-retry.txt`
-- 本仓库位置：`misaka/experimental/lockfile.py`
-- 说明：Pi 的实验服务器与 Session worker 用 proper-lockfile 锁目录；MISAKA 把它的
+- 本仓库位置：`misaka/utils/lockfile.py`
+- 说明：Pi 的 coding-agent 用 proper-lockfile 锁文件（MISAKA 里是 MCP 的 OAuth 扩展）；MISAKA 把它的
   `lib/lockfile.js`、`lib/adapter.js`、`lib/mtime-precision.js` 与 retry 的退避参数那一部分
   逐行改写为 Python（以 `mkdir` 为原子加锁、陈旧锁接管、定时刷新、ELOCKED/ECOMPROMISED/ENOTACQUIRED）。
 
@@ -126,7 +133,7 @@ MISAKA 的部分文件移植自其它项目。移植代码所附带的许可证�
   （`rules`、`helpers`、`Tokenizer`、`Lexer`、`Hooks` 与 `Marked` 的词法接口），不含 HTML 的
   `Parser`/`Renderer`。正则保留 JavaScript 源码，经 `misaka/utils/js_regexp.py` 按 JavaScript 语义编译；
   输出以 node 跑真实的 marked 18.0.11 录下的词元校验（`tests/fixtures/marked_18_0_11_tokens.json.gz`）。
-- 另一处：`misaka/core/export_html/vendor/marked.min.js` 是 marked v18.0.5 的压缩构建，取自 Pi 1.1.0 的
+- 另一处：`misaka/core/export_html/vendor/marked.min.js` 是 marked v18.0.5 的压缩构建，取自 Pi 1.1.0（1.3.0 未改）的
   `core/export-html/vendor/` 原样拷贝，文件头保留上游版权行；HTML 导出页在浏览器里用它渲染 Markdown。
 
 ## highlight.js（经 Pi 的 export-html）
@@ -136,7 +143,7 @@ MISAKA 的部分文件移植自其它项目。移植代码所附带的许可证�
 - 版权：Copyright (c) 2006, Ivan Sagalaev 及其他贡献者
 - 许可证全文：`LICENSES/highlight.js.txt`
 - 本仓库位置：`misaka/core/export_html/vendor/highlight.min.js`
-- 说明：Pi 1.1.0 `core/export-html/vendor/` 中压缩构建的原样拷贝，HTML 导出页用它给代码块着色；文件头保留
+- 说明：Pi 1.1.0（1.3.0 未改）`core/export-html/vendor/` 中压缩构建的原样拷贝，HTML 导出页用它给代码块着色；文件头保留
   上游的版本与许可证行。
 
 ## Oklab（经 Pi 的 packages/tui）

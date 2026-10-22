@@ -138,6 +138,18 @@ class WorkerModelTests(unittest.TestCase):
             self.manager()
         self.assertEqual(self.manager("other-provider/other-model").model, "other-provider/other-model")
 
+    def test_a_card_model_missing_from_the_openrouter_keys_list_names_the_keys_restrictions(self):
+        # pi 1.2 narrows OpenRouter's catalog to what the user's key may use (model_runtime.withPersonalizedCatalog).
+        self.runtime.models.append(SimpleNamespace(provider="openrouter", id="allowed/model"))
+        with self.assertRaisesRegex(ValueError, r"Unknown Sister model: openrouter/vanished/model\. MISAKA lists only "
+                                                r"the OpenRouter models your OpenRouter API key may use"):
+            self.manager("openrouter/vanished/model")
+        with self.assertRaisesRegex(ValueError, r"^Unknown Sister model: other-provider/vanished$"):
+            self.manager("other-provider/vanished")
+        self.pin("openrouter/vanished/model")
+        with self.assertRaisesRegex(ValueError, "Unknown model 'openrouter/vanished/model'.*OpenRouter API key"):
+            self.manager()
+
     def test_malformed_profile_fails_instead_of_using_global_default(self):
         (self.profile / "settings.json").write_text("not json", encoding="utf-8")
         with self.assertRaises(ValueError):

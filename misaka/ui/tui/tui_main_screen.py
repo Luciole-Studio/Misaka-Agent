@@ -1,4 +1,4 @@
-"""Translated from pi-tui's ``packages/tui/src/tui-main-screen.ts`` (v1.1.0).
+"""Translated from pi-tui's ``packages/tui/src/tui-main-screen.ts`` (v1.3.0).
 
 MISAKA forks, each marked where it happens:
 
@@ -299,7 +299,8 @@ class TuiMainScreen(TuiBase):
             return targetScreenRow - currentScreenRow
 
         # Render all components to get new lines
-        newLines = self.render(width)
+        # Resolve fake cursors before compositing so overlays and line slicing see plain SGR codes
+        newLines = self.resolveFakeCursors(self.render(width))
 
         # Composite overlays into the rendered lines (before differential compare)
         if self.hasOverlayEntries:
@@ -731,6 +732,9 @@ class TuiMainScreen(TuiBase):
             return True
         if any(isImageLine(line) for line in tail):
             return False
+        # MISAKA fork: this frame bypasses `doRender`'s body, so it resolves the fake cursors itself, as that does
+        # before it looks for the cursor; otherwise the raw APC markers reach the terminal.
+        tail = self.resolveFakeCursors(tail)
         cursorPos = self.extractCursorPosition(tail, height)
         tail = self.applyLineResets(tail)
         buffer = "\x1b[?2026h\x1b[2J\x1b[H"  # clear the visible screen only (2J, not 3J): keep scrollback

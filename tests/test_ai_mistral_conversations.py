@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/test/mistral-{http-transport,raw-stop-reason,tool-schema}.test.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/test/mistral-{http-transport,raw-stop-reason,tool-schema}.test.ts`` (v1.3.0).
 
 MISAKA fork: there is no ``fetch`` option; requests go to an ``httpx.MockTransport`` (``fetchMock``) and a body is a
 ``ChunkedBody`` stream (byte-wise, or one that never sends). The tool-schema case answers with an error instead of
@@ -453,13 +453,42 @@ async def test_aborts_while_waiting_for_an_sse_chunk(fetchMock):
     assert message.stopReason == "aborted"
 
 
-async def test_applies_the_request_timeout_while_waiting_for_an_sse_chunk(fetchMock):
-    fetchMock.impl = _endlessBody
+async def test_applies_the_request_timeout_while_waiting_for_response_headers(fetchMock):
+    async def neverAnswers(_request: httpx.Request) -> httpx.Response:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    fetchMock.impl = neverAnswers
 
     message = await streamMistral(getModel("mistral", "mistral-large-latest"), _hello(), {"apiKey": "test", "timeoutMs": 5}).result()
 
     assert message.stopReason == "error"
-    assert "timeout" in message.errorMessage.lower()
+    assert message.errorMessage == "Mistral response headers timed out after 5ms"
+
+
+class _PacedThinkingBody(httpx.AsyncByteStream):
+    """Five thinking deltas 10 ms apart, then the terminal event."""
+
+    async def __aiter__(self):
+        thinkingEvent = {
+            "choices": [{"index": 0, "delta": {"content": [{"type": "thinking", "thinking": [{"type": "text", "text": "x"}]}]}}],
+        }
+        for _ in range(5):
+            yield f"data: {json.dumps(thinkingEvent)}\n\n".encode()
+            await asyncio.sleep(0.01)
+        yield f"data: {json.dumps(createTerminalEvent())}\n\ndata: [DONE]\n\n".encode()
+
+
+# Regression test for #10609: an active stream must not be cut off after timeoutMs.
+async def test_does_not_abort_an_active_stream_that_lasts_longer_than_the_request_timeout(fetchMock):
+    fetchMock.impl = lambda _request: httpx.Response(
+        200, headers={"content-type": "text/event-stream"}, stream=_PacedThinkingBody()
+    )
+
+    message = await streamMistral(getModel("mistral", "mistral-large-latest"), _hello(), {"apiKey": "test", "timeoutMs": 20}).result()
+
+    assert message.stopReason == "stop"
+    assert _blocks(message) == [{"type": "thinking", "thinking": "xxxxx"}]
 
 
 async def test_preserves_http_status_and_response_bodies_in_errors(fetchMock):

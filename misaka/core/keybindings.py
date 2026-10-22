@@ -1,10 +1,12 @@
-"""Translated from pi coding-agent's ``src/core/keybindings.ts`` (v1.1.0).
+"""Translated from pi coding-agent's ``src/core/keybindings.ts`` (v1.3.0).
 
 MISAKA forks:
 
 - D1: the ``tui.altScreen.*`` overrides serve the fullscreen renderer, which is not ported.
 - No legacy keybinding-name migration (``KEYBINDING_NAME_MIGRATIONS``, ``migrateKeybindingsConfig``,
   ``orderKeybindingsConfig``): MISAKA keeps no backward-compatibility layer for old configuration names.
+- TypeBox's ``Compile`` is a jsonschema Draft 2020-12 validator (as in ``misaka/ai/utils/validation.py``) whose
+  ``pattern`` is read as an ECMAScript regular expression, as TypeBox reads it (``validateKeybindingValue``).
 """
 
 from __future__ import annotations
@@ -12,8 +14,10 @@ from __future__ import annotations
 import dataclasses
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any, Literal
+
+from jsonschema import Draft202012Validator, ValidationError, validators
 
 from misaka.config import get_agent_dir
 from misaka.ui.tui import (
@@ -28,54 +32,9 @@ from misaka.ui.tui import (
     KeybindingsManager as TuiKeybindingsManager,
 )
 from misaka.utils.js import jsonParse
+from misaka.utils.js_regexp import RegExp
 
-# MISAKA fork: `keyof AppKeybindings` spelled out as the literal union of the registry's names.
-type AppKeybinding = Literal[
-    "app.interrupt",
-    "app.clear",
-    "app.exit",
-    "app.suspend",
-    "app.thinking.cycle",
-    "app.thinking.save",
-    "app.model.cycleForward",
-    "app.model.cycleBackward",
-    "app.model.select",
-    "app.tools.expand",
-    "app.thinking.toggle",
-    "app.session.toggleNamedFilter",
-    "app.editor.external",
-    "app.message.copy",
-    "app.message.followUp",
-    "app.message.dequeue",
-    "app.clipboard.pasteImage",
-    "app.session.new",
-    "app.session.tree",
-    "app.session.fork",
-    "app.session.resume",
-    "app.tree.foldOrUp",
-    "app.tree.unfoldOrDown",
-    "app.tree.editLabel",
-    "app.tree.toggleLabelTimestamp",
-    "app.session.togglePath",
-    "app.session.toggleSort",
-    "app.session.rename",
-    "app.session.delete",
-    "app.session.deleteNoninvasive",
-    "app.models.save",
-    "app.models.enableAll",
-    "app.models.clearAll",
-    "app.models.toggleProvider",
-    "app.models.reorderUp",
-    "app.models.reorderDown",
-    "app.tree.filter.default",
-    "app.tree.filter.noTools",
-    "app.tree.filter.userOnly",
-    "app.tree.filter.labeledOnly",
-    "app.tree.filter.all",
-    "app.tree.filter.cycleForward",
-    "app.tree.filter.cycleBackward",
-]
-type AppKeybindings = dict[AppKeybinding, Literal[True]]
+from .key_id_schema import KeybindingValueSchema
 
 
 def useWindowsKeybindings(platform: str = sys.platform, env: Mapping[str, str] = os.environ) -> bool:
@@ -84,13 +43,7 @@ def useWindowsKeybindings(platform: str = sys.platform, env: Mapping[str, str] =
 
 windowsKeybindings = useWindowsKeybindings()
 
-KEYBINDINGS: KeybindingDefinitions = {
-    **TUI_KEYBINDINGS,
-    "tui.editor.undo": dataclasses.replace(
-        TUI_KEYBINDINGS["tui.editor.undo"],
-        defaultKeys="ctrl+z" if sys.platform == "win32" else "alt+z" if windowsKeybindings else "ctrl+-",
-    ),
-    # MISAKA fork (D1): upstream overrides `tui.altScreen.previousPrompt`, `nextPrompt` and `search` here.
+APP_KEYBINDINGS: KeybindingDefinitions = {
     "app.interrupt": KeybindingDefinition(defaultKeys="escape", description="Cancel or abort"),
     "app.clear": KeybindingDefinition(defaultKeys="ctrl+c", description="Clear editor"),
     "app.exit": KeybindingDefinition(defaultKeys="ctrl+d", description="Exit when editor is empty"),
@@ -239,14 +192,82 @@ KEYBINDINGS: KeybindingDefinitions = {
     ),
 }
 
+# MISAKA fork: `keyof typeof APP_KEYBINDINGS` spelled out as the literal union of the table's names
+# (tests/test_core_keybindings.py keeps the two equal).
+type AppKeybinding = Literal[
+    "app.interrupt",
+    "app.clear",
+    "app.exit",
+    "app.suspend",
+    "app.thinking.cycle",
+    "app.thinking.save",
+    "app.model.cycleForward",
+    "app.model.cycleBackward",
+    "app.model.select",
+    "app.tools.expand",
+    "app.thinking.toggle",
+    "app.session.toggleNamedFilter",
+    "app.editor.external",
+    "app.message.copy",
+    "app.message.followUp",
+    "app.message.dequeue",
+    "app.clipboard.pasteImage",
+    "app.session.new",
+    "app.session.tree",
+    "app.session.fork",
+    "app.session.resume",
+    "app.tree.foldOrUp",
+    "app.tree.unfoldOrDown",
+    "app.tree.editLabel",
+    "app.tree.toggleLabelTimestamp",
+    "app.session.togglePath",
+    "app.session.toggleSort",
+    "app.session.rename",
+    "app.session.delete",
+    "app.session.deleteNoninvasive",
+    "app.models.save",
+    "app.models.enableAll",
+    "app.models.clearAll",
+    "app.models.toggleProvider",
+    "app.models.reorderUp",
+    "app.models.reorderDown",
+    "app.tree.filter.default",
+    "app.tree.filter.noTools",
+    "app.tree.filter.userOnly",
+    "app.tree.filter.labeledOnly",
+    "app.tree.filter.all",
+    "app.tree.filter.cycleForward",
+    "app.tree.filter.cycleBackward",
+]
+type AppKeybindings = dict[AppKeybinding, Literal[True]]
+
+KEYBINDINGS: KeybindingDefinitions = {
+    **TUI_KEYBINDINGS,
+    "tui.editor.undo": dataclasses.replace(
+        TUI_KEYBINDINGS["tui.editor.undo"],
+        defaultKeys="ctrl+z" if sys.platform == "win32" else "alt+z" if windowsKeybindings else "ctrl+-",
+    ),
+    # MISAKA fork (D1): upstream overrides `tui.altScreen.previousPrompt`, `nextPrompt` and `search` here.
+    **APP_KEYBINDINGS,
+}
+
+
+def _ecmaPattern(validator: Any, pattern: str, instance: Any, _schema: Any) -> Iterator[ValidationError]:
+    """MISAKA fork: ``pattern`` as TypeBox checks it, an ECMAScript regular expression (Python's ``$`` would also
+    accept a trailing newline)."""
+    if validator.is_type(instance, "string") and not RegExp(pattern, "u").test(instance):
+        yield ValidationError(f"{instance!r} does not match {pattern!r}")
+
+
+validateKeybindingValue = validators.extend(Draft202012Validator, {"pattern": _ecmaPattern})(KeybindingValueSchema)
+
 
 def toKeybindingsConfig(value: dict[str, Any]) -> KeybindingsConfig:
     config: KeybindingsConfig = {}
     for key, binding in value.items():
-        if isinstance(binding, str):
-            config[key] = binding
+        if key == "$schema":
             continue
-        if isinstance(binding, list) and all(isinstance(entry, str) for entry in binding):
+        if validateKeybindingValue.is_valid(binding):
             config[key] = binding
     return config
 

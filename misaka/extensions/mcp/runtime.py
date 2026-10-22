@@ -67,7 +67,6 @@ from .oauth import (
     createMcpAuthProvider,
     signInMcpServer,
 )
-from .resources import isMcpAppResource
 
 DEFAULT_TIMEOUT_SECONDS = 60
 STDERR_TAIL_CHARS = 2_000
@@ -149,29 +148,6 @@ def listTemplates(client: McpClient, options: McpRequestOptions | None = None) -
     return withoutTemplates(lambda: client.listResourceTemplates(options if options is not None else {}), [])
 
 
-class _Resources(TypedDict):
-    resources: list[Resource]
-    resourceTemplates: list[ResourceTemplate]
-
-
-async def fetchResources(client: McpClient) -> _Resources:
-    """Resources and templates at connect time, for the counts in ``/mcp`` and ``misaka mcp list``. A
-    server whose lists fail still connects: the resource tools list and read its resources on demand."""
-
-    async def caught[T](listed: Awaitable[list[T]]) -> list[T]:
-        # `.catch(() => [])`
-        try:
-            return await listed
-        except Exception:  # noqa: BLE001 - upstream `.catch(() => [])`
-            return []
-
-    resources, resourceTemplates = await asyncio.gather(caught(client.listResources()), caught(listTemplates(client)))
-    return {
-        "resources": [resource for resource in resources if not isMcpAppResource(resource)],
-        "resourceTemplates": [template for template in resourceTemplates if not isMcpAppResource(template)],
-    }
-
-
 class McpServerConnectionOptions(TypedDict):
     entry: McpServerEntry
     cwd: str
@@ -212,11 +188,9 @@ class McpServerConnection:
         self.state: ServerState = "connecting"
         self.error: str | None = None
         self.tools: list[McpTool] = []
-        # Whether the server offers resources. The lists below are what it listed at the last connect or
-        # change, without MCP App resources.
+        # Whether the server offers resources, which the resource tools list and read on demand. They are
+        # not listed at connect: listing every resource can take long (a large drive, say).
         self.hasResources = False
-        self.resources: list[Resource] = []
-        self.resourceTemplates: list[ResourceTemplate] = []
         # Server instructions from `initialize`, describing its tools as a group.
         self.instructions: str | None = None
         # Last OAuth challenge from the server; sign-in uses its resource metadata URL and scope.
@@ -455,19 +429,13 @@ class McpServerConnection:
             client.onNotification(
                 "notifications/tools/list_changed", lambda _params: spawn(self._refreshTools(client), self._tasks)
             )
-            client.onNotification(
-                "notifications/resources/list_changed",
-                lambda _params: spawn(self._refreshResources(client), self._tasks),
-            )
             stdio = transport if isinstance(transport, StdioTransport) else None
             client.onClose(lambda: self._handleClientClose(client, stdio))
             # Servers without the tools capability (prompts or resources only) do not answer tools/list.
-            hasResources = client.serverCapabilities is not None and "resources" in client.serverCapabilities
-            tools, resources = await asyncio.gather(
-                client.listTools()
+            tools = (
+                await client.listTools()
                 if client.serverCapabilities is not None and jsTruthy(client.serverCapabilities.get("tools"))
-                else _resolved([]),
-                fetchResources(client) if hasResources else _resolved({"resources": [], "resourceTemplates": []}),
+                else []
             )
             if self._closed:
                 raise RuntimeError("shut down while connecting")
@@ -475,9 +443,7 @@ class McpServerConnection:
                 raise RuntimeError("connection closed during setup")
             self._client = client
             self.tools = tools
-            self.hasResources = hasResources
-            self.resources = resources["resources"]
-            self.resourceTemplates = resources["resourceTemplates"]
+            self.hasResources = client.serverCapabilities is not None and "resources" in client.serverCapabilities
             self.instructions = jsTrim(client.instructions or "") or None
             self.state = "connected"
             self.error = None
@@ -520,15 +486,6 @@ class McpServerConnection:
             self._onTools(self)
         except Exception as error:  # noqa: BLE001 - upstream `catch (error)`: recorded as the connection's error
             self.error = f"Failed to refresh tools: {errorMessage(error)}"
-        self._changed()
-
-    async def _refreshResources(self, client: McpClient) -> None:
-        resources = await fetchResources(client)
-        if self._client is not client or self._closed:
-            return
-        self.resources = resources["resources"]
-        self.resourceTemplates = resources["resourceTemplates"]
-        self._onTools(self)
         self._changed()
 
     async def close(self) -> None:

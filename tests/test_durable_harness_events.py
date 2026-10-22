@@ -28,7 +28,7 @@ from misaka.durable import (
 from misaka.durable.harness.ai_bridge import toMessageDict
 from misaka.utils.js import AbortController
 from tests.chat_support import chatSetup, openChat, textOf, waitFor
-from tests.durable_support import context, documentChanges, flush, toMatchObject
+from tests.durable_support import AnyOf, context, documentChanges, flush, toMatchObject
 from tests.harness_support import addTool
 from tests.task_support import aborted, deferred, race
 
@@ -226,7 +226,13 @@ async def test_reports_tool_start_output_appends_and_the_result_entry():
     await submission.wait(context)
     await drained()
     tool = [event for event in events() if event["type"].startswith("tool_execution")]
-    assert tool[0] == {"type": "tool_execution_start", "toolCallId": "c1", "toolName": "print", "args": {"n": 1}}
+    assert tool[0] == {
+        "type": "tool_execution_start",
+        "toolCallId": "c1",
+        "toolName": "print",
+        "taskId": AnyOf(int),
+        "args": {"n": 1},
+    }
     end = tool[-1]
     toMatchObject(end, {"type": "tool_execution_end", "toolCallId": "c1", "entry": {"kind": "pi.tool-result"}})
     # As in the coding agent, the tool ends directly before its result message.

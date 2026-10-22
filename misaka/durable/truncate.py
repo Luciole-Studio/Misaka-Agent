@@ -2,14 +2,16 @@
 
 Translated from pi's ``packages/durable/src/truncate.ts``. Truncation is based on two independent limits, and whichever
 is hit first wins: a line limit (default 2000 lines) and a byte limit (default 50KB). It never returns partial lines.
-Tool output streams are bounded by ``misaka.durable.harness.output`` instead. A result is a ``dict`` with the upstream
-keys.
+Tool output streams are bounded by ``OutputBuffer`` from ``misaka.chord.output`` instead. A result is a ``dict`` with the
+upstream keys.
 """
 
 from __future__ import annotations
 
 from typing import Literal, TypedDict
 
+# One implementation, shared with the output buffer.
+from misaka.chord.output import utf8ByteLength
 from misaka.utils.js import toFixed
 
 DEFAULT_MAX_LINES = 2000
@@ -33,11 +35,6 @@ class TruncationResult(TypedDict):
 class TruncationOptions(TypedDict, total=False):
     maxLines: int  # Maximum number of lines (default: 2000).
     maxBytes: int  # Maximum number of bytes (default: 50KB).
-
-
-def utf8ByteLength(content: str) -> int:
-    # A lone surrogate counts as the three bytes of U+FFFD, as it does for ``Buffer.byteLength``.
-    return len(content.encode("utf-8", "surrogatepass"))
 
 
 def splitLinesForCounting(content: str) -> list[str]:

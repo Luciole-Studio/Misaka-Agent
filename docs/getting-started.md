@@ -45,7 +45,7 @@ optional pieces:
 
 | Extra | Adds |
 |---|---|
-| `providers` | every model provider's SDK. To install one only, use `anthropic`, `openai`, `google` or `bedrock` (OpenRouter and other OpenAI-compatible services use `openai`; Mistral needs no SDK). |
+| `providers` | every model provider's SDK. To install one only, use `anthropic`, `openai`, `google` or `bedrock` (OpenRouter, Kimi Code and other OpenAI-compatible services use `openai`; Mistral needs no SDK). |
 | `browser` | tools that drive a web browser |
 | `lcm-semantic` | searching past conversations by meaning |
 

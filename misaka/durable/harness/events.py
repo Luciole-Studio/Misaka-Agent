@@ -1,13 +1,20 @@
 """Agent events: the coding agent's session events, derived from the commits of one conversation.
 
-Translated from pi's ``packages/durable/src/harness/events.ts`` (experimental, spec section 9.4). An event is a ``dict``
-with a ``type`` and the upstream keys; the event types are ``snapshot``, ``run_start``, ``run_end``, ``turn_start``,
+Translated from pi's ``packages/durable/src/harness/events.ts`` (v1.3.0, experimental, spec section 9.4). An event is a
+``dict`` with a ``type`` and the upstream keys; the event types are ``snapshot``, ``run_start``, ``run_end``, ``turn_start``,
 ``turn_end``, ``message_start``, ``message_update`` (``usage`` and ``changes``), ``message_end``,
 ``tool_execution_start``, ``tool_execution_update``, ``tool_execution_end``, ``inbox_update``, ``submission``,
 ``auto_retry_start``, ``auto_retry_end``, ``deferred_poll``, ``entry_appended``, ``agent_changed``, ``usage_changed``,
 ``task_failed``, ``compaction_start`` and ``compaction_end``. A message change is ``text_start``, ``thinking_start`` or
 ``toolcall_start`` (``contentIndex``, ``block``), ``text_delta`` or ``thinking_delta`` (``contentIndex``, ``delta``),
-``toolcall_delta`` (``contentIndex``, ``path``, ``delta``), ``block`` (``contentIndex``, ``block``) or ``message``.
+``toolcall_delta`` (``contentIndex``, ``path``, ``delta``), ``block`` (``contentIndex``, ``block``) or ``message``. The
+tool events carry the call's ``ToolEventCall`` fields: ``toolCallId`` (the provider's ID for a model-issued call,
+``<parent call ID>/<key>`` for a nested one; match events by it, do not parse it), ``toolName``, ``taskId`` (the call's
+tool task, absent for a call that never got one: not offered, or not started in a sequential round), and for a nested
+call ``parentToolCallId`` and ``parentTaskId``. ``tool_execution_end`` carries a model-issued call's result ``entry`` or
+a nested call's ``result``; both are absent when the tool task faulted or was orphaned, or when the call's slot left
+``pi.live`` unfinished (its run ended, or its parent settled first). ``compaction_end`` carries ``error`` when the
+compaction failed, faulted, or was orphaned, as in ``pi.live.compactionFailure``.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ from misaka.utils.js import UNDEFINED, eager
 from ..session.observation import CommittedWatch
 from ..types import CommitPublication, ConversationId
 from .agent import AgentDoc
+from .tool import NestedCallDoc
 from .usage import UsageDoc
 from .util import scanAll
 from .view import conversationViews
@@ -65,7 +73,9 @@ def snapshotOf(view: dict[str, Any]) -> dict[str, Any]:
         **({} if live.get("run") is None else {"run": {"inputs": live["run"]["inputs"]}}),
         **({} if live.get("generation") is None else {"generation": live["generation"]}),
         "tools": live.get("tools") or [],
+        "nestedTools": live.get("nestedTools") or [],
         "compactions": live.get("compactions") or [],
+        **({} if live.get("compactionFailure") is None else {"compactionFailure": live["compactionFailure"]}),
         "inbox": queued(inbox),
         "agent": agent if agent is not None else AgentDoc["definition"]["initial"](),
         "usage": usage if usage is not None else UsageDoc["definition"]["initial"](),
@@ -81,6 +91,7 @@ async def watchEvents(harness: Any, conversationId: ConversationId, context: Con
     """Experimental: attach to one conversation's agent events (spec section 9.4). The snapshot and the registration for
     later commits are captured atomically on the Session line; overflow replaces undelivered batches with one
     snapshot."""
+    views = conversationViews(harness)
     holder: dict[str, Any] = {}
 
     async def create(initial: dict[str, Any], release: Any, storage: Any) -> Any:
@@ -91,7 +102,7 @@ async def watchEvents(harness: Any, conversationId: ConversationId, context: Con
         current = initial
         holder["snapshot"] = snapshotOf(initial)
         # Batches are the watch's values; an overflow delivers a snapshot of the newest view instead.
-        watch = CommittedWatch([], release, lambda: [snapshotOf(current)])
+        watch = CommittedWatch([], release, lambda error: views.report(error), lambda: [snapshotOf(current)])
         holder["watch"] = watch
 
         def publication(
@@ -103,9 +114,9 @@ async def watchEvents(harness: Any, conversationId: ConversationId, context: Con
             if len(events) > 0:
                 watch.advance(events, [], commitContext)
 
-        return _Observer(publication, lambda: watch.closeSession())
+        return _Observer(publication, lambda failure: watch.closeSession(failure))
 
-    await conversationViews(harness).attach(conversationId, create, context)
+    await views.attach(conversationId, create, context)
     watch = holder["watch"]
     # Like a watch, the acquisition context governs the stream's lifetime.
     signal = context.abortSignal
@@ -139,7 +150,18 @@ def translate(
     entries: list[dict[str, Any]] = []
     tasks: dict[int, dict[str, Any]] = {}
     submissions: list[dict[str, Any]] = []
+    # Nested results this commit stored, by nested task ID; read now, since the caller's documents may retire next.
+    nestedResults: dict[int, Any] = {}
     for change in publication["changes"]:
+        if (
+            change["type"] == "document"
+            and change["record"]["kind"] == NestedCallDoc["definition"]["kind"]
+            and change["value"] is not None
+            and change.get("conversationId") == conversationId
+        ):
+            state = change["value"]
+            if state.get("taskId") is not None and state.get("result") is not None:
+                nestedResults[state["taskId"]] = state["result"]
         if change["type"] == "entry" and change["value"]["conversationId"] == conversationId:
             entries.append(change["value"])
         if change["type"] == "task" and change["value"]["conversationId"] == conversationId:
@@ -157,19 +179,19 @@ def translate(
     # Progress: tool starts, the in-flight message, tool updates, retry and deferred state.
     slotsBefore = {slot["callId"]: slot for slot in was["live"].get("tools") or []}
     slots = now["live"].get("tools") or []
-    for slot in slots:
-        if slot["status"] != "running" or (slotsBefore.get(slot["callId"]) or {}).get("status") == "running":
+    nestedBefore = {slot["taskId"]: slot for slot in was["live"].get("nestedTools") or []}
+    nested = now["live"].get("nestedTools") or []
+    for slot in [*slots, *nested]:
+        previous = nestedBefore.get(slot["taskId"]) if "parentCallId" in slot else slotsBefore.get(slot["callId"])
+        if slot["status"] != "running" or (previous or {}).get("status") == "running":
             continue
+        # A nested slot carries the arguments the call runs with; a model-issued call's are in its intent checkpoint.
         checkpoint = None if slot.get("taskId") is None else ((tasks.get(slot["taskId"]) or {}).get("state") or {}).get("checkpoint")
-        args = checkpoint.get("arguments") if isinstance(checkpoint, dict) else None
-        events.append(
-            {
-                "type": "tool_execution_start",
-                "toolCallId": slot["callId"],
-                "toolName": slot["name"],
-                "args": args if args is not None else {},
-            }
-        )
+        if "parentCallId" in slot:
+            args = slot["arguments"]
+        else:
+            args = checkpoint.get("arguments") if isinstance(checkpoint, dict) else None
+        events.append({"type": "tool_execution_start", **callOf(slot), "args": args if args is not None else {}})
     partialBefore = (was["live"].get("generation") or {}).get("message")
     partial = (now["live"].get("generation") or {}).get("message")
     if partial is not None and partialBefore is None:
@@ -182,12 +204,18 @@ def translate(
         previous = slotsBefore.get(slot["callId"])
         if slot["status"] != "running" or previous is None or previous["status"] != "running":
             continue
-        update = toolUpdate(viewOps, index, slot, previous)
+        update = toolUpdate(viewOps, ["tools", index], slot, previous)
         if update is None:
             continue
-        events.append(
-            {"type": "tool_execution_update", "toolCallId": slot["callId"], "toolName": slot["name"], **update}
-        )
+        events.append({"type": "tool_execution_update", **callOf(slot), **update})
+    for index, slot in enumerate(nested):
+        previous = nestedBefore.get(slot["taskId"])
+        if slot["status"] != "running" or previous is None or previous["status"] != "running":
+            continue
+        update = toolUpdate(viewOps, ["nestedTools", index], slot, previous)
+        if update is None:
+            continue
+        events.append({"type": "tool_execution_update", **callOf(slot), **update})
     generation = now["live"].get("generation")
     generationBefore = was["live"].get("generation")
     if generation is not None and generation.get("retry") is not None and (
@@ -214,30 +242,40 @@ def translate(
     # one that vanishes because its run ended. A done slot that vanishes ended earlier.
     toolEnds: list[dict[str, Any]] = []
 
-    def endTool(callId: str, name: str, entryId: int | None) -> None:
+    def endTool(slot: dict[str, Any], entryId: int | None) -> None:
         entry = next((candidate for candidate in entries if candidate["id"] == entryId), None)
-        toolEnds.append(
-            {
-                "type": "tool_execution_end",
-                "toolCallId": callId,
-                "toolName": name,
-                **({} if entry is None else {"entry": entry}),
-            }
-        )
+        toolEnds.append({"type": "tool_execution_end", **callOf(slot), **({} if entry is None else {"entry": entry})})
 
     for previous in slotsBefore.values():
         if previous["status"] == "done":
             continue
         slot = next((candidate for candidate in slots if candidate["callId"] == previous["callId"]), None)
         if slot is not None and slot["status"] == "done":
-            endTool(previous["callId"], previous["name"], slot.get("entry"))
+            endTool(slot, slot.get("entry"))
         # A slot whose run ended in this commit may have had its result appended with it, as for unstarted calls.
         elif slot is None:
             result = resultOf(entries, previous["callId"])
-            endTool(previous["callId"], previous["name"], None if result is None else result["id"])
+            endTool(previous, None if result is None else result["id"])
     for slot in slots:
         if slot["status"] == "done" and slot["callId"] not in slotsBefore:
-            endTool(slot["callId"], slot["name"], slot.get("entry"))
+            endTool(slot, slot.get("entry"))
+    # Nested calls that end in this commit, the same way, children before the calls that made them: the lists hold
+    # parents first, so walk them backwards.
+
+    def endNested(slot: dict[str, Any]) -> None:
+        result = nestedResults.get(slot["taskId"])
+        events.append({"type": "tool_execution_end", **callOf(slot), **({} if result is None else {"result": result})})
+
+    nestedNow = {slot["taskId"]: slot for slot in nested}
+    for previous in reversed(list(nestedBefore.values())):
+        if previous["status"] == "done":
+            continue
+        current = nestedNow.get(previous["taskId"])
+        if current is None or current["status"] == "done":
+            endNested(current if current is not None else previous)
+    for slot in reversed(nested):
+        if slot["status"] == "done" and slot["taskId"] not in nestedBefore:
+            endNested(slot)
 
     # Entries in append order; a tool's end directly precedes its result's message, as in the coding agent.
     assistantAppended = False
@@ -261,9 +299,18 @@ def translate(
     # Compaction ends, task failures, then turn and run ends.
     compactionsBefore = was["live"].get("compactions") or []
     compactions = now["live"].get("compactions") or []
+    failure = now["live"].get("compactionFailure")
     for status in compactionsBefore:
         if not any(candidate["taskId"] == status["taskId"] for candidate in compactions):
-            events.append({"type": "compaction_end", "taskId": status["taskId"], "reason": status["reason"]})
+            error = failure["error"] if failure is not None and failure["taskId"] == status["taskId"] else None
+            events.append(
+                {
+                    "type": "compaction_end",
+                    "taskId": status["taskId"],
+                    "reason": status["reason"],
+                    **({} if error is None else {"error": error}),
+                }
+            )
     # A generation's turn ends when its outcome is committed: at a ``completing`` hold or at terminal, whichever comes
     # first, so a successor created at the hold starts after it.
     turnEnded = False
@@ -336,7 +383,7 @@ class _Observer:
     """The view observer of one event stream. A mount holds its observers in an identity set, so it is a plain class
     rather than a namespace, which compares by value."""
 
-    def __init__(self, publication: Callable[..., None], closeSession: Callable[[], None]) -> None:
+    def __init__(self, publication: Callable[..., None], closeSession: Callable[[Any], None]) -> None:
         self.publication = publication
         self.closeSession = closeSession
 
@@ -394,9 +441,24 @@ def messageChanges(viewOps: list[Any], message: dict[str, Any]) -> list[dict[str
     return changes
 
 
-def toolUpdate(viewOps: list[Any], index: int, slot: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any] | None:
-    """Output, details, and diagnostics changes of a running slot, from the view operations on it."""
-    outputPath = ["docs", "pi.live", "tools", index, "output"]
+def callOf(slot: dict[str, Any]) -> dict[str, Any]:
+    """The identifying fields of a slot's tool events (``ToolEventCall``)."""
+    return {
+        "toolCallId": slot["callId"],
+        "toolName": slot["name"],
+        **({} if slot.get("taskId") is None else {"taskId": slot["taskId"]}),
+        **(
+            {"parentToolCallId": slot["parentCallId"], "parentTaskId": slot["parentTaskId"]}
+            if "parentCallId" in slot
+            else {}
+        ),
+    }
+
+
+def toolUpdate(viewOps: list[Any], at: list[Any], slot: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any] | None:
+    """Output, details, and diagnostics changes of a running slot at ``at`` in ``pi.live``, from the view operations on
+    it."""
+    outputPath = ["docs", "pi.live", *at, "output"]
     trimStart = 0
     append = ""
     isSet = False

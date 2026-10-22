@@ -98,6 +98,8 @@ class PendingRequest:
     timer: Timeout | None
     signal: Any
     onAbort: Callable[[], None]
+    # Aborted when the request settles, so the transport does not dispatch (or retry) it afterwards.
+    sendController: AbortController
     cancellable: bool
     onProgress: Callable[[ProgressNotification], None] | None
     progressToken: JsonRpcId | None
@@ -196,11 +198,9 @@ def validateReadResourceResult(value: Any) -> ReadResourceResult:
 
 def validateCallToolResult(value: Any) -> CallToolResult:
     """``content`` is required by the spec, but servers that only return ``structuredContent`` omit it
-    (the SDK defaults it too)."""
+    (the SDK defaults it too). ``structuredContent`` may be any JSON value, as MCP 2026-07-28 allows."""
     if not isObject(value) or ("content" in value and not isinstance(value["content"], list)):
         raise McpError(JSON_RPC_ERROR_CODES.invalidRequest, "Invalid MCP tools/call result")
-    if "structuredContent" in value and not isObject(value["structuredContent"]):
-        raise McpError(JSON_RPC_ERROR_CODES.invalidRequest, "Invalid MCP tools/call structured content")
     return ({**value, "content": []} if "content" not in value else value)  # type: ignore[return-value]
 
 
@@ -515,6 +515,7 @@ class McpClient:
             signal=signal,
             # The spec forbids cancelling `initialize`.
             onAbort=abortRequest,
+            sendController=AbortController(),
             cancellable=method != "initialize",
             onProgress=onProgress,
             progressToken=progressToken,
@@ -524,7 +525,7 @@ class McpClient:
             self._progressRequests[progressToken] = id
         entry.removeAbortListener = addAbortListener(signal, entry.onAbort) if signal is not None else (lambda: None)
         self._armTimeout(id, entry)
-        sending = spawn(transport.send(message), self._tasks)
+        sending = spawn(transport.send(message, {"signal": entry.sendController.signal}), self._tasks)
         sending.add_done_callback(
             lambda task: self._cancelPending(id, task.exception(), False)  # type: ignore[arg-type]
             if not task.cancelled() and task.exception() is not None
@@ -685,6 +686,7 @@ class McpClient:
         if entry.progressToken is not None:
             self._progressRequests.pop(entry.progressToken, None)
         entry.removeAbortListener()
+        entry.sendController.abort()
 
     def _rejectPending(self, error: BaseException) -> None:
         for id, entry in list(self._pending.items()):

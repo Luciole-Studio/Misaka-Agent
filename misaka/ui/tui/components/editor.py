@@ -1,4 +1,4 @@
-"""Translated from pi-tui's ``components/editor.ts`` (v1.1.0).
+"""Translated from pi-tui's ``components/editor.ts`` (v1.3.0).
 
 MISAKA forks, each marked where it happens:
 
@@ -28,7 +28,7 @@ from misaka.ui.tui.autocomplete import (
 from misaka.ui.tui.keybindings import KeybindingsManager, getKeybindings
 from misaka.ui.tui.keys import decodePrintableKey, matchesKey
 from misaka.ui.tui.kill_ring import KillRing
-from misaka.ui.tui.tui import CURSOR_MARKER, TUI, Component
+from misaka.ui.tui.tui import CURSOR_MARKER, TUI, Component, renderFakeCursor
 from misaka.ui.tui.undo_stack import UndoStack
 from misaka.ui.tui.utils import (
     SegmentData,
@@ -651,12 +651,12 @@ class Editor(Component):
                     afterGraphemes = [*self.segment(after, "grapheme")]
                     firstGrapheme = afterGraphemes[0].segment if afterGraphemes else ""
                     restAfter = after[len(firstGrapheme) :]
-                    cursor = f"\x1b[7m{firstGrapheme}\x1b[0m"
+                    cursor = renderFakeCursor(firstGrapheme)
                     displayText = before + marker + cursor + restAfter
                     # lineVisibleWidth stays the same - we're replacing, not adding
                 else:
                     # Cursor is at the end - add highlighted space
-                    cursor = "\x1b[7m \x1b[0m"
+                    cursor = renderFakeCursor(" ")
                     displayText = before + marker + cursor
                     lineVisibleWidth = lineVisibleWidth + 1
                     # If cursor overflows content width into the padding, flag it

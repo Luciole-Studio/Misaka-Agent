@@ -45,7 +45,7 @@ async def main() -> None:
         async def execute(*_: Any) -> dict[str, Any]:
             started()
             await gate
-            return {"content": [{"type": "text", "text": version}]}
+            return {"output": [{"type": "text", "text": version}]}
 
         return defineExtension(
             {

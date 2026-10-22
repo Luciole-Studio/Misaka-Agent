@@ -1,8 +1,9 @@
 """Presentation for the codemode tool.
 
 The call shows the script; the result lists the nested tool calls with their status as they run and
-the cost of its model calls, followed by the script output without the "Script completed" header.
-Nested calls are not separate tool rows because they never reach the model as tool calls.
+the cost of its model calls, followed by the script output without the "Script completed" header,
+and the time the script has been running (``Elapsed``) or took (``Took``), like bash rows. Nested
+calls are not separate tool rows because they never reach the model as tool calls.
 
 Translated from pi's ``coding-agent/src/extensions/codemode/renderer.ts``.
 """
@@ -14,7 +15,12 @@ from collections.abc import Sequence
 from typing import Any
 
 from misaka.core.tools import render_utils
-from misaka.core.tools.render_utils import getTextOutput, replaceTabs
+from misaka.core.tools.render_utils import (
+    getTextOutput,
+    replaceTabs,
+    startToolTimer,
+    toolTimerText,
+)
 from misaka.ui.tui import Container, Spacer, Text
 from misaka.utils.js import (
     UNDEFINED,
@@ -95,6 +101,7 @@ def renderCall(args: Any, theme: Any, context: Any) -> Any:
     )
     from misaka.modes.interactive.theme.theme import highlightCode
 
+    startToolTimer(context)
     # The code includes the `// @options:` line, so options show as part of the script.
     code = render_utils.str(read_field(args, "code")) if args is not None else render_utils.str(None)
     title = theme.fg("toolTitle", theme.bold("codemode"))
@@ -130,6 +137,7 @@ def renderResult(result: Any, options: Any, theme: Any, context: Any) -> Any:
     )
 
     expanded = bool(read_field(options, "expanded"))
+    timerText = toolTimerText(context, bool(read_field(options, "isPartial")))
     component = context.lastComponent if context.lastComponent is not None else Container()
     component.clear()
     details = read_field(result, "details")
@@ -186,6 +194,9 @@ def renderResult(result: Any, options: Any, theme: Any, context: Any) -> Any:
             fullOutputPath = read_field(details, "fullOutputPath") if details is not None else None
             if fullOutputPath:
                 component.addChild(Text(theme.fg("muted", f"Full output: {fullOutputPath}"), 0, 0))  # type: ignore[abstract]
+    if timerText:
+        component.addChild(Spacer(1))  # type: ignore[abstract]
+        component.addChild(Text(theme.fg("muted", timerText), 0, 0))  # type: ignore[abstract]
     return component
 
 

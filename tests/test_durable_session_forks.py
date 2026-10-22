@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from misaka.durable.documents import defineDoc, defineDocFamily
-from misaka.durable.errors import StorageRejected
+from misaka.durable.errors import SessionFailed
 from misaka.durable.tasks import defineTask
 from tests.chord_helpers import matches
 from tests.durable_support import (
@@ -470,7 +470,7 @@ class TestSessionConversationDocumentForks:
         assert await session.snapshot(Failure, context) == {"count": 2}
         assert await session.snapshot(Copied, parentId, context) == {"value": "copied"}
 
-    async def test_rolls_back_a_guaranteed_storage_rejection_without_poisoning_the_session(self):
+    async def test_fails_the_session_on_a_rejected_fork_commit_which_leaves_no_effect(self):
         Doc = conversationDoc("fork.storage-rejected", "rewindable", "asOf", lambda: {"value": "source"})
         ts = openTestSession()
         session, storage = ts.session, ts.storage
@@ -482,16 +482,21 @@ class TestSessionConversationDocumentForks:
             await tx.doc(Doc, parentId)
 
         await session.commit(work, context)
-        storage.failNextCommit(StorageRejected("copy rejected"))
+        rejection = RuntimeError("copy rejected")
+        storage.failNextCommit(rejection)
 
         async def rejected(tx):
             state["rejectedChildId"] = (await tx.forkConversation(parentId, state["forkAt"], OWNERLESS))["id"]
 
-        with throws("copy rejected"):
+        with pytest.raises(RuntimeError) as raised:
             await session.commit(rejected, context)
-        assert await storage.conversation(state["rejectedChildId"], context) is None
-        nextConversation = await session.commit(lambda tx: tx.createConversation(OWNERLESS), context)
-        assert await storage.conversation(nextConversation["id"], context) == nextConversation
+        assert raised.value is rejection
+        with pytest.raises(SessionFailed) as failed:
+            await session.commit(lambda tx: tx.createConversation(OWNERLESS), context)
+        assert failed.value.cause is rejection
+        # The failed Session closed its Storage; reopened, it holds nothing of the batch.
+        assert await session.closed == {"reason": "failed", "error": rejection}
+        assert await storage.reopen().conversation(state["rejectedChildId"], context) is None
 
     async def test_retires_a_copied_document_and_can_recreate_the_address_in_the_fork_transaction(self):
         Doc = conversationDoc("fork.retire-recreate", "rewindable", "asOf", lambda: {"value": "fresh"})

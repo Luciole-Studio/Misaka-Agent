@@ -1,6 +1,6 @@
 """The task graph: every live task of the Session as a Chord state.
 
-Translated from pi's ``packages/durable/src/harness/task-graph.ts``. A graph is ``{"tasks": {decimal id: node}}``; a node
+Translated from pi's ``packages/durable/src/harness/task-graph.ts`` (v1.3.0). A graph is ``{"tasks": {decimal id: node}}``; a node
 is ``{"id", "kind", "conversationId", "owner"?, "background", "abortRequested", "state", "conversations"}`` and a node
 state is ``{"status": "pending" | "running", "phase"}``, ``{"status": "waiting", "phase", "on", "policy"}`` or
 ``{"status": "completing", "outcome"}`` (spec section 9.5).
@@ -17,6 +17,7 @@ from misaka.chord.delta import applyImmutable
 from misaka.utils.js import eager, jsonStringify
 
 from ..session.observation import CommittedStateSource, CommittedWatch
+from ..session.session import contained
 from ..types import CommitPublication, ConversationId, Storage
 from .util import closedError, scanAll
 
@@ -42,15 +43,18 @@ class TaskGraphView:
 
         def onCommit(publication: CommitPublication, context: Context) -> None:
             if self._mount is not None:
-                advance(self._mount, publication, context)
+                advance(self._mount, publication, context, lambda error: session.report(error))
 
         def onClose() -> None:
             self._closed = True
             for observer in list(self._mount.observers if self._mount is not None else ()):
-                observer.closeSession()
+                contained(
+                    lambda observer=observer: observer.closeSession(self._session.failure),
+                    lambda error: session.report(error),
+                )
             self._mount = None
 
-        session.subscribeCommits(onCommit)
+        session.observeCommits(onCommit)
         session.subscribeClose(onClose)
 
     @eager
@@ -58,7 +62,7 @@ class TaskGraphView:
         """A disposable read-only Chord state of the graph."""
         attached = await self._attach(lambda value, release: CommittedStateSource(value, release), context)
         try:
-            return replicatedState(attached["observer"])
+            return replicatedState(attached["observer"], {"onError": lambda error: self._session.report(error)})
         except BaseException:
             attached["detach"]()
             raise
@@ -66,7 +70,9 @@ class TaskGraphView:
     @eager
     async def watch(self, context: Context) -> Any:
         """A serialized exact-frame watch of the graph; cancelling ``context`` stops it."""
-        attached = await self._attach(lambda value, release: CommittedWatch(value, release), context)
+        attached = await self._attach(
+            lambda value, release: CommittedWatch(value, release, lambda error: self._session.report(error)), context
+        )
         observer = attached["observer"]
         signal = context.abortSignal
         if signal is not None and signal.aborted:
@@ -90,7 +96,7 @@ class TaskGraphView:
             observer = create(mount.value, detach)
             # Close or cancellation may begin while the mount builds; register nothing then.
             if self._closed:
-                raise closedError()
+                raise closedError(self._session)
             signal = context.abortSignal
             if signal is not None:
                 signal.throwIfAborted()
@@ -121,8 +127,9 @@ class TaskGraphView:
         return {"tasks": tasks}
 
 
-def advance(mount: _Mount, publication: CommitPublication, context: Context) -> None:
-    """Derive the mount's operations from one publication, apply them, and hand the revision to every observer."""
+def advance(mount: _Mount, publication: CommitPublication, context: Context, report: Callable[[Any], None]) -> None:
+    """Derive the mount's operations from one publication, apply them, and hand the revision to every observer; one that
+    throws is reported through ``report``, and the others still get it."""
     ops: list[Any] = []
     # Nodes this publication set or deleted, over the mount's value.
     changed: dict[str, Any] = {}
@@ -164,7 +171,7 @@ def advance(mount: _Mount, publication: CommitPublication, context: Context) -> 
     mount.value = applyImmutable(mount.value, ops)
     frameContext = withoutAbortSignal(context)
     for observer in list(mount.observers):
-        observer.advance(mount.value, ops, frameContext)
+        contained(lambda observer=observer: observer.advance(mount.value, ops, frameContext), report)
 
 
 def nodeOf(record: dict[str, Any], conversations: list[ConversationId]) -> dict[str, Any]:

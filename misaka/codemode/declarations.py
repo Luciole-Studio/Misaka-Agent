@@ -8,7 +8,14 @@ from dataclasses import dataclass, field
 from typing import Any, TypedDict, TypeGuard
 from urllib.parse import unquote
 
-from misaka.utils.js import UNDEFINED, jsLength, jsonStringify, jsTrim, nullishCoalesce
+from misaka.utils.js import (
+    UNDEFINED,
+    jsLength,
+    jsonStringify,
+    jsString,
+    jsTrim,
+    nullishCoalesce,
+)
 from misaka.utils.values import read_field
 
 from .identifier import toCodemodeIdentifier
@@ -22,84 +29,27 @@ DEFAULT_INPUT_SCHEMA_MAX_CHARS = 16_000
 # Local `$ref` expansions per rendered schema, so shared definitions cannot blow up the output.
 MAX_REF_EXPANSIONS = 32
 
-# TypeScript types for MCP results, from the MCP `CallToolResult` schema, so `CallToolResult<T>`
-# declarations can refer to them.
-MCP_TYPESCRIPT_PREAMBLE = """type Role = "user" | "assistant";
-type MetaObject = Record<string, unknown>;
-type Annotations = {
-  audience?: Role[];
-  priority?: number;
-  lastModified?: string;
-};
-type Icon = {
-  src: string;
-  mimeType?: string;
-  sizes?: string[];
-  theme?: "light" | "dark";
-};
-type TextResourceContents = {
-  uri: string;
-  mimeType?: string;
-  _meta?: MetaObject;
-  text: string;
-};
-type BlobResourceContents = {
-  uri: string;
-  mimeType?: string;
-  _meta?: MetaObject;
-  blob: string;
-};
-type TextContent = {
-  type: "text";
-  text: string;
-  annotations?: Annotations;
-  _meta?: MetaObject;
-};
-type ImageContent = {
-  type: "image";
-  data: string;
-  mimeType: string;
-  annotations?: Annotations;
-  _meta?: MetaObject;
-};
-type AudioContent = {
-  type: "audio";
-  data: string;
-  mimeType: string;
-  annotations?: Annotations;
-  _meta?: MetaObject;
-};
-type ResourceLink = {
-  icons?: Icon[];
-  name: string;
-  title?: string;
-  uri: string;
-  description?: string;
-  mimeType?: string;
-  annotations?: Annotations;
-  size?: number;
-  _meta?: MetaObject;
-  type: "resource_link";
-};
-type EmbeddedResource = {
-  type: "resource";
-  resource: TextResourceContents | BlobResourceContents;
-  annotations?: Annotations;
-  _meta?: MetaObject;
-};
-type ContentBlock =
-  | TextContent
-  | ImageContent
-  | AudioContent
-  | ResourceLink
-  | EmbeddedResource;
-type CallToolResult<TStructured = { [key: string]: unknown }> = {
-  _meta?: MetaObject;
-  content: ContentBlock[];
-  isError?: boolean;
-  structuredContent?: TStructured;
-  [key: string]: unknown;
-};"""
+# JSON Schema keywords with a number or string value shown as `@keyword value` property tags.
+TAG_KEYWORDS = (
+    "minimum",
+    "exclusiveMinimum",
+    "maximum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "format",
+    "minItems",
+    "maxItems",
+)
+# Tag keywords whose values all hold at once, so only the largest (lower) or smallest (upper) matters.
+LOWER_BOUNDS: frozenset[str] = frozenset({"minimum", "exclusiveMinimum", "minLength", "minItems"})
+UPPER_BOUNDS: frozenset[str] = frozenset({"maximum", "exclusiveMaximum", "maxLength", "maxItems"})
+# Longest property tag; longer ones (large defaults, long patterns) are left out.
+MAX_TAG_CHARS = 80
+# Characters that end a `//` comment.
+LINE_TERMINATORS = re.compile("[\r\n\u2028\u2029]")
 
 
 class RenderDeclarationsOptions(TypedDict, total=False):
@@ -136,9 +86,7 @@ def renderDeclarations(options: RenderDeclarationsOptions) -> str:
 
 def renderToolSignature(tool: Any, options: Mapping[str, int] | None = None) -> str:
     """One tool as a member of the ``tools`` object: ``name(args: T): Promise<R>;`` with the name as
-    the identifier scripts use. Input types longer than ``inputMaxChars`` render as ``unknown``. Tools
-    whose output schema is an MCP ``CallToolResult`` render as ``Promise<CallToolResult<T>>``, which
-    needs :data:`MCP_TYPESCRIPT_PREAMBLE`."""
+    the identifier scripts use. Input types longer than ``inputMaxChars`` render as ``unknown``."""
     inputSchema = read_field(tool, "inputSchema")
     input = (
         "unknown"
@@ -160,34 +108,8 @@ def renderToolSample(tool: Any, options: Mapping[str, int] | None = None) -> str
     return f"{jsTrim(description) if description is not None else ''}\n\ncodemode tool declaration:\n```ts\n{declaration}\n```"
 
 
-def mcpStructuredContentSchema(schema: CodemodeJsonSchema | None) -> CodemodeJsonSchema | None:
-    """The ``structuredContent`` schema of an MCP ``CallToolResult`` output schema (detected by a
-    ``content`` array of objects, boolean ``isError``, and object ``_meta``), ``True`` when it declares
-    none, or ``None`` when the schema is not a ``CallToolResult``."""
-    if not isObject(schema) or not isObject(schema.get("properties")):
-        return None
-    properties = schema["properties"]
-    content, isError, _meta = properties.get("content"), properties.get("isError"), properties.get("_meta")
-    structuredContent = properties.get("structuredContent", UNDEFINED)
-    if (
-        not isObject(content)
-        or content.get("type") != "array"
-        or not isObject(content.get("items"))
-        or content["items"].get("type") != "object"
-    ):
-        return None
-    if not isObject(isError) or isError.get("type") != "boolean" or not isObject(_meta) or _meta.get("type") != "object":
-        return None
-    return structuredContent if isObject(structuredContent) or isinstance(structuredContent, bool) else True
-
-
 def renderToolOutputType(schema: CodemodeJsonSchema | None) -> str:
-    """The type a tool call resolves to: ``CallToolResult<T>`` for MCP output schemas (needs
-    :data:`MCP_TYPESCRIPT_PREAMBLE`), the schema's type otherwise, and ``unknown`` without a schema."""
-    structured = mcpStructuredContentSchema(schema)
-    if structured is not None:
-        type = schemaToType(structured)
-        return "CallToolResult" if type == "unknown" else f"CallToolResult<{type}>"
+    """The type a tool call resolves to: the output schema's type, and ``unknown`` without a schema."""
     return "unknown" if schema is None else schemaToType(schema)
 
 
@@ -231,20 +153,31 @@ def union(types: Sequence[str]) -> str:
 def schemaToType(schema: CodemodeJsonSchema, options: Mapping[str, int] | None = None) -> str:
     """Convert a JSON Schema to a TypeScript type expression: objects on one line
     (``{ a: string; b?: number; }``) with properties sorted by name, or one property per line with
-    ``//`` comments when a property has a description; ``Array<T>`` for arrays. Local references
+    ``//`` comments when a property has a description or constraints the type cannot express
+    (``// @integer @minimum 1 @default 20``); ``Array<T>`` for arrays. Local references
     (``#/$defs/...``, ``#/definitions/...``) resolve against ``schema``; recursive and remote
-    references render as ``unknown``. A result longer than ``maxChars`` renders as ``unknown``."""
-    type = toType(schema, SchemaContext(root=schema))
+    references render as ``unknown``. A result longer than ``maxChars`` is rendered again without the
+    constraint tags, and renders as ``unknown`` if it is still too long."""
+
+    def render(tags: bool) -> str:
+        return toType(schema, SchemaContext(root=schema, tags=tags))
+
+    type = render(True)
     maxChars = (options or {}).get("maxChars")
-    return "unknown" if maxChars is not None and jsLength(type) > maxChars else type
+    if maxChars is None or jsLength(type) <= maxChars:
+        return type
+    untagged = render(False)
+    return untagged if jsLength(untagged) <= maxChars else "unknown"
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class SchemaContext:
     root: CodemodeJsonSchema
     # References being expanded on the current path, to stop at recursive types.
     resolving: set[str] = field(default_factory=set)
     expansions: int = 0
+    # Whether property comments include constraint tags.
+    tags: bool
 
 
 _MALFORMED_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
@@ -361,6 +294,81 @@ def _utf16Order(name: str) -> bytes:
     return name.encode("utf-16-be", "surrogatepass")
 
 
+def _isNumber(value: Any) -> bool:
+    """``typeof value === "number"``."""
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _escapeLineTerminator(match: re.Match[str]) -> str:
+    return f"\\u{ord(match.group(0)):04x}"
+
+
+def constraintTags(schema: Any) -> str:
+    """Constraints of a property that its TypeScript type cannot express, as JSDoc-style tags:
+    ``@integer @minimum 1 @maximum 100 @default 20``. Empty when there are none."""
+    if not isObject(schema):
+        return ""
+    property = schema
+    # Optional fields such as Pydantic's `int | None` keep their constraints in the non-null branch.
+    # The branch's constraints apply together with the property's, so both are read.
+    variants = property.get("anyOf") if isinstance(property.get("anyOf"), list) else property.get("oneOf")
+    nonNull = (
+        [variant for variant in variants if not (isObject(variant) and variant.get("type", UNDEFINED) == "null")]
+        if isinstance(variants, list)
+        else []
+    )
+    branch = nonNull[0] if len(nonNull) == 1 else UNDEFINED
+    branches = [property, branch] if isObject(branch) else [property]
+    # Draft-04 and OpenAPI 3.0 make `minimum`/`maximum` exclusive with a boolean `exclusiveMinimum`/`exclusiveMaximum`.
+    schemas: list[dict[str, Any]] = []
+    for entry in branches:
+        adjusted = dict(entry)
+        if entry.get("exclusiveMinimum") is True:
+            adjusted["minimum"] = UNDEFINED
+            adjusted["exclusiveMinimum"] = entry.get("minimum", UNDEFINED)
+        if entry.get("exclusiveMaximum") is True:
+            adjusted["maximum"] = UNDEFINED
+            adjusted["exclusiveMaximum"] = entry.get("maximum", UNDEFINED)
+        schemas.append(adjusted)
+
+    tags: list[str] = []
+
+    def isInteger(type: Any) -> bool:
+        return type == "integer" or (isinstance(type, list) and "integer" in type)
+
+    if any(isInteger(entry.get("type")) for entry in schemas):
+        tags.append("@integer")
+    for keyword in TAG_KEYWORDS:
+        values = [entry.get(keyword, UNDEFINED) for entry in schemas]
+        if keyword in LOWER_BOUNDS or keyword in UPPER_BOUNDS:
+            numbers = [value for value in values if _isNumber(value)]
+            if len(numbers) == 0:
+                continue
+            tags.append(f"@{keyword} {jsString(max(numbers) if keyword in LOWER_BOUNDS else min(numbers))}")
+            continue
+        # `new Set(values)`: each distinct value once, in order; a number and a string never match.
+        seen: set[tuple[str, Any]] = set()
+        for value in values:
+            if not (_isNumber(value) or isinstance(value, str)):
+                continue
+            key = ("number" if _isNumber(value) else "string", value)
+            if key in seen:
+                continue
+            seen.add(key)
+            tags.append(f"@{keyword} {jsString(value)}")
+    if any(entry.get("uniqueItems") is True for entry in schemas):
+        tags.append("@uniqueItems")
+    # Annotations, unlike constraints, come from the property itself.
+    default = property.get("default", UNDEFINED)
+    if default is not UNDEFINED and default is not None:
+        tags.append(f"@default {jsonStringify(default)}")
+    if property.get("deprecated") is True:
+        tags.append("@deprecated")
+    return " ".join(
+        LINE_TERMINATORS.sub(_escapeLineTerminator, tag) for tag in tags if jsLength(tag) <= MAX_TAG_CHARS
+    )
+
+
 def objectType(schema: dict[str, Any], context: SchemaContext) -> str:
     properties: dict[str, Any] = schema["properties"] if isObject(schema.get("properties")) else {}
     required_ = schema.get("required")
@@ -375,14 +383,19 @@ def objectType(schema: dict[str, Any], context: SchemaContext) -> str:
         members.append("[key: string]: unknown;")
     if len(members) == 0:
         return "{}"
-    if not any(descriptionOf(properties[name]) for name in names):
+    comments: list[list[str]] = []
+    for name in names:
+        lines_ = [jsTrim(line) for line in LINE_TERMINATORS.split(descriptionOf(properties[name]))]
+        lines_ = [line for line in lines_ if line]
+        tags = constraintTags(properties[name]) if context.tags else ""
+        comments.append([*lines_, tags] if tags else lines_)
+    if not any(len(comment) > 0 for comment in comments):
         return "{ " + " ".join(members) + " }"
 
     lines = ["{"]
-    for index, name in enumerate(names):
-        for line in re.split(r"\r?\n", descriptionOf(properties[name])):
-            if jsTrim(line):
-                lines.append(f"{INDENT}// {jsTrim(line)}")
+    for index, comment in enumerate(comments):
+        for line in comment:
+            lines.append(f"{INDENT}// {line}")
         lines.append(f"{INDENT}{members[index].replace(chr(10), chr(10) + INDENT)}")
     for member in members[len(names) :]:
         lines.append(f"{INDENT}{member}")
@@ -392,9 +405,7 @@ def objectType(schema: dict[str, Any], context: SchemaContext) -> str:
 
 __all__ = [
     "DEFAULT_INPUT_SCHEMA_MAX_CHARS",
-    "MCP_TYPESCRIPT_PREAMBLE",
     "RenderDeclarationsOptions",
-    "mcpStructuredContentSchema",
     "renderDeclarations",
     "renderToolOutputType",
     "renderToolSample",

@@ -1,5 +1,7 @@
 """pi-env: a small daemon that gives a Pi Durable host an execution environment on this machine over stdin/stdout
-(docs/protocol.md). Started as ``pi-env serve --token <hex>``, usually through ``ssh``."""
+(docs/protocol.md). Started as ``pi-env serve --token <hex>``, usually through ``ssh``.
+
+Ported from pi's ``packages/env/daemon/src/main.rs`` (v1.3.0)."""
 
 from __future__ import annotations
 
@@ -9,13 +11,17 @@ import os
 import platform
 import queue
 import signal
+import struct
 import sys
 import threading
 import time
 from collections.abc import Callable
 from typing import Any, BinaryIO
 
-from . import exec, fs, scan, system, watch
+from . import exec, fs, pty, scan, system, watch
+
+# MISAKA fork: Rust's `list` module, imported under another name so that it does not shadow Python's `list`.
+from . import list as listing
 from .errors import Failure
 from .exec import Control
 from .frame import (
@@ -35,9 +41,11 @@ from .frame import (
 from .output import Output
 
 PROTOCOL = 1
+# Operations added after protocol 1's first release; clients check `hello.features` before using them.
+FEATURES = ["listFiles"]
 # MISAKA fork: pi's build.rs bakes in the version of the npm package the daemon ships with; this is the pi-env release
 # the port follows.
-VERSION = "1.1.0"
+VERSION = "1.3.0"
 PING_INTERVAL = 5.0
 SILENCE_LIMIT_MS = 30_000
 SCAN_CHUNK = 64 * 1024
@@ -137,6 +145,7 @@ class Server:
         self.controls_lock = threading.Lock()
         self.controls: dict[int, Control] = {}
         self.groups = exec.Groups()
+        self.terminals = pty.Terminals()
 
     def file(self, json: Any) -> FileHandle:
         key = number(json, "handle")
@@ -176,6 +185,7 @@ class Server:
                 "cwd": system.cwd(),
                 "driveCwds": system.drive_cwds(),
                 "pid": os.getpid(),
+                "features": FEATURES,
             }, b""
         if op == "lstat":
             return fs.lstat(field(json, "path")), b""
@@ -255,6 +265,8 @@ class Server:
             return {"handle": self.insert(DirHandle(entries, path))}, b""
         if op == "readdir":
             return self.read_dir(json), b""
+        if op == "listFiles":
+            return listing.run(json, control.aborted.is_set)
         if op == "close":
             key = number(json, "handle")
             with self.handles_lock:
@@ -268,6 +280,8 @@ class Server:
             return exec.run(id, exec.ExecRequest.from_json(json), self.tmpdir, self.output, control, self.groups), b""
         if op == "watch":
             return watch.run(id, json, self.output, control), b""
+        if op == "pty":
+            return pty.run(id, pty.PtyRequest.from_json(json), self.output, control, self.groups, self.terminals), b""
         raise Failure("EINVAL", f"unknown operation {op}")
 
     def read_dir(self, json: Any) -> dict[str, Any]:
@@ -354,7 +368,7 @@ def start_workers() -> queue.SimpleQueue[Job]:
 
 
 def respond(server: Server, id: int, request: Frame, control: Control) -> None:
-    is_exec = as_str(get(request.json, "op")) == "exec"
+    is_exec = as_str(get(request.json, "op")) in ("exec", "pty")
     try:
         json, payload = server.dispatch(id, request.json, request.payload, control)
         reply = Frame(RESULT, id, json, payload)
@@ -397,14 +411,29 @@ def serve_frames(server: Server, input: BinaryIO) -> None:
         request = read_frame(input)
         if request is None:
             return
-        if request.kind == REQUEST:
+        op = as_str(get(request.json, "op")) if request.kind == REQUEST else None
+        if op in ("ptyWrite", "ptyResize", "ptyForeground"):
+            # Answered here, in arrival order: through the worker pool, two writes could swap.
+            try:
+                if op == "ptyWrite":
+                    answer = pty.write(server.terminals, request.json, request.payload)
+                elif op == "ptyResize":
+                    answer = pty.resize(server.terminals, request.json)
+                else:
+                    answer = pty.foreground(server.terminals, request.json)
+                reply = Frame(RESULT, request.id, answer)
+            except Failure as failure:
+                reply = Frame(ERROR, request.id, failure.to_json())
+            except Exception as error:  # noqa: BLE001 - MISAKA fork: as in `respond`, where Rust cannot fail
+                reply = Frame(ERROR, request.id, Failure("unknown", f"pi-env: {error}").to_json())
+            server.output.control(reply)
+        elif request.kind == REQUEST:
             id = request.id
             # Registered before the request runs, so a cancel right behind it is not lost.
             control = Control()
             with server.controls_lock:
                 server.controls[id] = control
-            op = as_str(get(request.json, "op"))
-            if op in ("exec", "watch"):
+            if op in ("exec", "watch", "pty"):
                 # Commands and watchers last; they get their own threads (watchers recurse through trees).
                 thread = threading.Thread(
                     target=respond, args=(server, id, request, control), name=f"pi-env-{op}", daemon=True
@@ -478,6 +507,69 @@ def serve(token: str) -> None:
         raise failure
 
 
+def startup_environment() -> dict[bytes, bytes] | None:
+    """The environment this process was started with, as the system keeps it: ``/proc/self/environ`` on Linux and
+    Android, ``KERN_PROCARGS2`` on macOS; ``None`` where it cannot be read. Read as CPython reads ``environ``: each entry
+    up to its first ``=``, the first of two equal names kept."""
+    if sys.platform.startswith("linux") or hasattr(sys, "getandroidapilevel"):
+        try:
+            with open("/proc/self/environ", "rb") as file:
+                entries = file.read().split(b"\0")
+        except OSError:
+            return None
+    elif sys.platform == "darwin":
+        try:
+            import ctypes
+
+            libc = ctypes.CDLL(None, use_errno=True)
+            # CTL_KERN, KERN_PROCARGS2: argc, the executable's path, NUL padding, the arguments, the environment, an
+            # empty string, then the system's own strings.
+            mib = (ctypes.c_int * 3)(1, 49, os.getpid())
+            length = ctypes.c_size_t(0)
+            if libc.sysctl(mib, 3, None, ctypes.byref(length), None, 0) != 0:
+                return None
+            buffer = ctypes.create_string_buffer(length.value)
+            if libc.sysctl(mib, 3, buffer, ctypes.byref(length), None, 0) != 0:
+                return None
+            raw = buffer.raw[: length.value]
+            argc = struct.unpack_from("i", raw)[0]
+        except (ImportError, OSError, AttributeError, ValueError, struct.error):
+            return None
+        rest = raw[4:]
+        parts = rest[rest.find(b"\0") :].lstrip(b"\0").split(b"\0")[argc:]
+        end = parts.index(b"") if b"" in parts else len(parts)
+        entries = parts[:end]
+    else:
+        return None
+    environment: dict[bytes, bytes] = {}
+    for entry in entries:
+        key, equals, value = entry.partition(b"=")
+        if equals:
+            environment.setdefault(key, value)
+    return environment
+
+
+def restore_environment() -> None:
+    """MISAKA fork: give the daemon the environment it was started with, which Rust's ``std::env`` reads and every
+    command inherits. Python's startup adds to its own: PEP 538 locale coercion sets ``LC_CTYPE=C.UTF-8`` when no
+    locale is set (a daemon started over ``ssh`` without ``LANG``), and on macOS ``__CF_USER_TEXT_ENCODING`` appears.
+    Without this, every ``exec`` and ``pty`` program would inherit them, which upstream's never do."""
+    original = startup_environment()
+    if original is None:
+        return
+    for key in [key for key in os.environb if key not in original]:
+        try:
+            del os.environb[key]
+        except (KeyError, ValueError, OSError):
+            pass
+    for key, value in original.items():
+        if os.environb.get(key) != value:
+            try:
+                os.environb[key] = value
+            except (ValueError, OSError):
+                pass
+
+
 def _usage() -> None:
     sys.stderr.write("usage: pi-env serve --token <hex>\n")
     sys.stderr.flush()
@@ -497,6 +589,7 @@ def main(argv: list[str] | None = None) -> None:
         if token is None:
             _usage()
             return
+        restore_environment()
         try:
             serve(token)
         except Exception as error:  # noqa: BLE001 - the daemon's exit status reports it

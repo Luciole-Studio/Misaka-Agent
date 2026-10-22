@@ -1,6 +1,6 @@
 """The agent of a conversation: its stored state, settings resolution, and extension, tool and section selection.
 
-Translated from pi's ``packages/durable/src/harness/agent.ts``. The agent state, a change, the settings and a resolved
+Translated from pi's ``packages/durable/src/harness/agent.ts`` (v1.3.0). The agent state, a change, the settings and a resolved
 agent are plain ``dict`` objects with the upstream keys; an absent key is ``undefined`` and ``None`` in a change clears
 the stored field.
 """
@@ -15,6 +15,7 @@ from misaka.chord.json import copyJson
 from misaka.utils.js import UNDEFINED, nullishCoalesce
 
 from ..documents import defineDoc
+from ..session.session import documentRetention
 from ..types import ConversationId, ConversationRecord, Tx
 
 DEFAULT_RETRY_POLICY: dict[str, Any] = {
@@ -78,6 +79,7 @@ def resolveSettings(settings: dict[str, Any] | None) -> dict[str, Any]:
         "steeringMode": settings["steeringMode"] if settings.get("steeringMode") is not None else "one-at-a-time",
         "followUpMode": settings["followUpMode"] if settings.get("followUpMode") is not None else "one-at-a-time",
         "contextRetentionMs": nullishCoalesce(settings.get("contextRetentionMs"), DEFAULT_CONTEXT_RETENTION_MS),
+        "documentRetentionMs": documentRetention(settings.get("documentRetentionMs")),
     }
 
 
@@ -89,20 +91,33 @@ async def configure(tx: Tx, conversationId: ConversationId, change: dict[str, An
 
 
 async def addTools(tx: Tx, conversationId: ConversationId, added: list[str]) -> None:
-    """``addTools`` of a tool round: an array gets each name it lacks appended, ``{ remove }`` loses the names, and
-    unset tools already offer every tool, so nothing is written."""
+    """``addTools`` of a tool round, applied to ``tools`` and ``modelTools``, so the next request offers the tools: an
+    array gets each name it lacks appended, and ``{ remove }`` loses the names. An unset ``tools`` already enables every
+    tool, so nothing is written for it. An unset or object ``modelTools`` also gets each name appended to its ``add``,
+    which loads deferred tools and has no effect for others. By name, without the registry: a tool that is not
+    registered now, such as one of an MCP server that is reconnecting, is offered once it is again."""
     state = await tx.doc(AgentDoc, conversationId)
     tools = state["tools"]
-    if tools is UNDEFINED:
-        return
     if isinstance(tools, DraftArray):
         for name in added:
             if tools.indexOf(name) < 0:
                 tools.push(name)
-    else:
-        remove = list(tools["remove"])
-        if any(name in added for name in remove):
-            state["tools"] = {"remove": [name for name in remove if name not in added]}
+    elif tools is not UNDEFINED and any(name in added for name in tools["remove"]):
+        state["tools"] = {"remove": [name for name in tools["remove"] if name not in added]}
+    modelTools = state["modelTools"]
+    if isinstance(modelTools, DraftArray):
+        for name in added:
+            if modelTools.indexOf(name) < 0:
+                modelTools.push(name)
+        return
+    # Assigned whole; a document write of an equal value records no change.
+    stored: Any = {} if modelTools is UNDEFINED else modelTools
+    remove = [name for name in stored.get("remove", None) or [] if name not in added]
+    add = list(stored.get("add", None) or [])
+    for name in added:
+        if name not in add:
+            add.append(name)
+    state["modelTools"] = {**({} if len(remove) == 0 else {"remove": remove}), "add": add}
 
 
 def applyChange(state: Any, change: dict[str, Any]) -> None:
@@ -138,6 +153,19 @@ def applyChange(state: Any, change: dict[str, Any]) -> None:
         set("tools", names(tools))
     else:
         set("tools", {"remove": names(tools["remove"])})
+    modelTools = change.get("modelTools", UNDEFINED)
+    if modelTools is UNDEFINED or modelTools is None:
+        set("modelTools", modelTools)
+    elif isList(modelTools):
+        set("modelTools", names(modelTools))
+    else:
+        set(
+            "modelTools",
+            {
+                **({} if modelTools.get("remove", UNDEFINED) is UNDEFINED else {"remove": names(modelTools["remove"])}),
+                **({} if modelTools.get("add", UNDEFINED) is UNDEFINED else {"add": names(modelTools["add"])}),
+            },
+        )
     set("instructions", change.get("instructions", UNDEFINED))
     set("cwd", change.get("cwd", UNDEFINED))
 
@@ -198,19 +226,16 @@ def resolveAgent(
             else:
                 applyWrap(sections, wrap["section"], wrap["wrap"], lambda section: section["key"], report)
 
-    filter = state.get("tools")
-    tools: list[Any]
-    if filter is None:
-        tools = list(composed.values())
-    elif isinstance(filter, list):
-        tools = []
-        for name in dict.fromkeys(filter):
-            tool = composed.get(name)
-            if tool is not None:
-                tools.append(tool)
-    else:
-        removed = set(filter["remove"])
-        tools = [tool for tool in composed.values() if tool["name"] not in removed]
+    enabled = filterTools(list(composed.values()), state.get("tools"))
+
+    def callableBy(caller: str) -> Callable[[Any], bool]:
+        return lambda tool: tool.get("callers") is None or caller in tool["callers"]
+
+    modelCallable = [tool for tool in enabled if callableBy("model")(tool)]
+    tools = offeredTools(modelCallable, state.get("modelTools"))
+    offered = {id(tool) for tool in tools}
+    deferred = [tool for tool in modelCallable if tool.get("deferred") is True and id(tool) not in offered]
+    callable = [tool for tool in enabled if callableBy("tools")(tool)]
 
     instructions = state.get("instructions")
     agentSections = list(sections.values())
@@ -222,10 +247,40 @@ def resolveAgent(
         "thinkingLevel": state["thinkingLevel"] if state.get("thinkingLevel") is not None else "off",
         "extensions": extensions,
         "tools": tools,
+        "callable": callable,
+        "deferred": deferred,
         "sections": agentSections,
         **({} if instructions is None else {"instructions": instructions}),
         **({} if state.get("cwd") is None else {"cwd": state["cwd"]}),
     }
+
+
+def offeredTools(tools: list[Any], filter: Any) -> list[Any]:
+    """The tools offered to the model, as ``AgentState.modelTools`` describes."""
+    if isinstance(filter, list):
+        return filterTools(tools, filter)
+    removed = set((filter or {}).get("remove") or [])
+    kept = [tool for tool in tools if tool.get("deferred") is not True and tool["name"] not in removed]
+    # Loaded deferred tools follow in load order, so loading one appends to the declared tools.
+    byName = {tool["name"]: tool for tool in tools}
+    loaded: list[Any] = []
+    for name in dict.fromkeys((filter or {}).get("add") or []):
+        tool = byName.get(name)
+        if tool is not None and tool.get("deferred") is True and name not in removed:
+            loaded.append(tool)
+    return [*kept, *loaded]
+
+
+def filterTools(tools: list[Any], filter: Any) -> list[Any]:
+    """``tools`` through a stored filter: an array selects exactly its names, in its order; ``{ remove }`` drops
+    names."""
+    if filter is None:
+        return tools
+    if isinstance(filter, list):
+        byName = {tool["name"]: tool for tool in tools}
+        return [byName[name] for name in dict.fromkeys(filter) if name in byName]
+    removed = set(filter["remove"])
+    return [tool for tool in tools if tool["name"] not in removed]
 
 
 def selectExtensions(stored: Any, snapshot: Any, settings: dict[str, Any]) -> list[Any]:
@@ -279,6 +334,8 @@ __all__ = [
     "applyChange",
     "configure",
     "createAgent",
+    "filterTools",
+    "offeredTools",
     "resolveAgent",
     "resolveSettings",
 ]

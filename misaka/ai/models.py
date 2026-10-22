@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/src/models.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/src/models.ts`` (v1.3.0).
 
 MISAKA fork (each is marked where it happens): providers, models and options are Python objects, so a provider's
 optional members are read with ``getattr``, options are read whether they are mappings or objects, and resolved auth
@@ -124,6 +124,9 @@ class RefreshModelsContext:
     force: bool | None = None
     # Always present, including when the public refresh caller omits its optional signal.
     signal: Any
+    # Base URL of the registered provider, including configuration overrides that wrappers apply
+    # outside the provider receiving this context.
+    baseUrl: str | None = None
 
 
 @dataclass(slots=True)
@@ -546,6 +549,8 @@ class _ModelsImpl:
                 allowNetwork=allowNetwork,
                 force=force if allowNetwork else None,
                 signal=signal,
+                # MISAKA fork: `getattr`, since a provider's optional members may be absent (module docstring).
+                baseUrl=getattr(provider, "baseUrl", None),
             )
         )
 

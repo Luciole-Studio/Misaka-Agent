@@ -74,6 +74,7 @@ from misaka.mcp.transports.transport import (
     McpTransportCloseListener,
     McpTransportErrorListener,
     McpTransportMessageListener,
+    McpTransportSendOptions,
 )
 
 __all__ = [
@@ -120,6 +121,7 @@ __all__ = [
     "McpTransportCloseListener",
     "McpTransportErrorListener",
     "McpTransportMessageListener",
+    "McpTransportSendOptions",
     "ProgressNotification",
     "ReadResourceResult",
     "Resource",

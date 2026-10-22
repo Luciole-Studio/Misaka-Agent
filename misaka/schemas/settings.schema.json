@@ -1,0 +1,840 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Luciole-Studio/Misaka-Agent/v0.19.17/misaka/schemas/settings.schema.json",
+  "$comment": "This file is generated from Python source. Do not edit it manually; run python scripts/generate_schemas.py.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference."
+    },
+    "defaultProvider": {
+      "type": "string",
+      "description": "Provider of the default model. A role's own settings.json may hold its own pair, which wins for that role."
+    },
+    "defaultModel": {
+      "type": "string",
+      "description": "Default model id, with defaultProvider. A role's own settings.json may hold its own pair, which wins for that role."
+    },
+    "defaultThinkingLevel": {
+      "$ref": "#/$defs/ModelThinkingLevel",
+      "description": "Thinking level a new session starts at. A role's own settings.json may hold its own, which wins for that role."
+    },
+    "modelThinkingLevels": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ModelThinkingLevel"
+      },
+      "description": "Per-model default thinking level overrides keyed by \"provider/modelId\"."
+    },
+    "transport": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "sse",
+        "websocket",
+        "websocket-cached"
+      ],
+      "default": "auto"
+    },
+    "sessionShareDestination": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "gist",
+        "radius"
+      ],
+      "default": "auto",
+      "description": "Destination used by /share. \"auto\" uses Radius when authenticated and otherwise creates a GitHub gist."
+    },
+    "steeringMode": {
+      "type": "string",
+      "enum": [
+        "all",
+        "one-at-a-time"
+      ],
+      "default": "one-at-a-time"
+    },
+    "followUpMode": {
+      "type": "string",
+      "enum": [
+        "all",
+        "one-at-a-time"
+      ],
+      "default": "one-at-a-time"
+    },
+    "theme": {
+      "type": "string"
+    },
+    "compaction": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "reserveTokens": {
+          "type": "integer",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "default": 16384
+        },
+        "keepRecentTokens": {
+          "type": "integer",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "default": 20000
+        },
+        "modelOverrides": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "reserveTokens": {
+                "type": "integer",
+                "maximum": 9007199254740991,
+                "minimum": 0
+              },
+              "keepRecentTokens": {
+                "type": "integer",
+                "maximum": 9007199254740991,
+                "minimum": 0
+              }
+            }
+          },
+          "description": "Per-model overrides keyed by exact \"provider/modelId\" strings."
+        }
+      }
+    },
+    "branchSummary": {
+      "type": "object",
+      "properties": {
+        "reserveTokens": {
+          "type": "number",
+          "default": 16384,
+          "description": "Tokens reserved for the prompt and LLM response."
+        },
+        "skipPrompt": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, skips the \"Summarize branch?\" prompt and defaults to no summary."
+        }
+      }
+    },
+    "retry": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "maxRetries": {
+          "type": "number",
+          "default": 3
+        },
+        "baseDelayMs": {
+          "type": "number",
+          "default": 2000,
+          "description": "Exponential backoff base delay in milliseconds: 2s, 4s, 8s."
+        },
+        "maxAgentDelayMs": {
+          "type": "number",
+          "default": 60000
+        },
+        "provider": {
+          "type": "object",
+          "properties": {
+            "timeoutMs": {
+              "type": "number",
+              "description": "SDK or provider request timeout in milliseconds."
+            },
+            "maxRetries": {
+              "type": "number",
+              "description": "SDK or provider retry attempts."
+            },
+            "maxRetryDelayMs": {
+              "type": "number",
+              "default": 60000,
+              "description": "Maximum server-requested delay before failing."
+            }
+          }
+        }
+      }
+    },
+    "hideThinkingBlock": {
+      "type": "boolean",
+      "default": false
+    },
+    "showCacheMissNotices": {
+      "type": "boolean",
+      "default": false,
+      "description": "Show cache cost and provider recovery notices."
+    },
+    "externalEditor": {
+      "type": "string",
+      "description": "Command for Ctrl+G external editor; takes precedence over VISUAL and EDITOR."
+    },
+    "shellPath": {
+      "type": "string",
+      "description": "Custom shell path, for example for Cygwin on Windows, with support for leading ~ expansion."
+    },
+    "quietStartup": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string",
+          "const": "header"
+        }
+      ],
+      "default": false,
+      "description": "When true, hide all startup output. When \"header\", keep only the startup header."
+    },
+    "defaultProjectTrust": {
+      "type": "string",
+      "enum": [
+        "ask",
+        "always",
+        "never"
+      ],
+      "default": "ask",
+      "description": "Global setting only."
+    },
+    "shellCommandPrefix": {
+      "type": "string",
+      "description": "Prefix prepended to every bash command, for example to enable shell aliases."
+    },
+    "collapseChangelog": {
+      "type": "boolean",
+      "default": false,
+      "description": "Kept for compatibility; MISAKA ships no changelog, so this has no effect."
+    },
+    "enableInstallTelemetry": {
+      "type": "boolean",
+      "default": false,
+      "description": "Name this client \"misaka\" to aggregator gateways such as OpenRouter, NVIDIA and Cloudflare; nothing else is sent."
+    },
+    "extensions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Local extension file paths or directories, and +builtin:<name> or -builtin:<name> entries that turn a built-in extension on or off."
+    },
+    "deviceId": {
+      "type": "string",
+      "description": "Stable installation UUID, generated when authentication first needs it. Global only."
+    },
+    "skills": {
+      "type": "object",
+      "properties": {
+        "external_dirs": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "More folders of skills to read; ~/.agents/skills is always read when it exists."
+        },
+        "disabled": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "Skill names to hide from every role."
+        },
+        "platform_disabled": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "description": "Skill names to hide on one surface, keyed by its name."
+        },
+        "copy_cap_mb": {
+          "type": "integer",
+          "description": "Total size of the skill copies one session may hold in its sandbox. Default: 200."
+        }
+      },
+      "description": "MISAKA's skill index: more skill folders, and skills to hide. A list of skill paths is not read here."
+    },
+    "prompts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Local prompt template file paths or directories."
+    },
+    "themes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Local theme file paths or directories."
+    },
+    "enableSkillCommands": {
+      "type": "boolean",
+      "default": true,
+      "description": "Register skills as /skill:name commands."
+    },
+    "terminal": {
+      "type": "object",
+      "properties": {
+        "showImages": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show images when the terminal supports them."
+        },
+        "imageWidthCells": {
+          "type": "number",
+          "default": 60,
+          "description": "Preferred inline image width in terminal cells."
+        },
+        "clearOnShrink": {
+          "type": "boolean",
+          "default": false,
+          "description": "Clear empty rows when content shrinks."
+        },
+        "showTerminalProgress": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show OSC 9;4 terminal progress indicators."
+        },
+        "hyperlinks": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string",
+              "const": "auto"
+            }
+          ]
+        },
+        "images": {
+          "enum": [
+            "kitty",
+            "iterm2",
+            "auto",
+            false
+          ]
+        },
+        "trueColor": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string",
+              "const": "auto"
+            }
+          ]
+        }
+      }
+    },
+    "images": {
+      "type": "object",
+      "properties": {
+        "autoResize": {
+          "type": "boolean",
+          "default": true,
+          "description": "Resize images to 2000x2000 maximum for better model compatibility."
+        },
+        "blockImages": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, prevents all images from being sent to LLM providers."
+        }
+      }
+    },
+    "enabledModels": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Model patterns for cycling, in the same format as the --models CLI flag."
+    },
+    "defaultTools": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Initial tool selection. Plain names replace the inherited selection; +name and -name entries add or remove tools."
+    },
+    "doubleEscapeAction": {
+      "type": "string",
+      "enum": [
+        "fork",
+        "tree",
+        "none"
+      ],
+      "default": "tree",
+      "description": "Action for double-escape with an empty editor."
+    },
+    "treeFilterMode": {
+      "type": "string",
+      "enum": [
+        "default",
+        "no-tools",
+        "user-only",
+        "labeled-only",
+        "all"
+      ],
+      "default": "default",
+      "description": "Default filter when opening /tree."
+    },
+    "thinkingBudgets": {
+      "type": "object",
+      "properties": {
+        "minimal": {
+          "type": "number"
+        },
+        "low": {
+          "type": "number"
+        },
+        "medium": {
+          "type": "number"
+        },
+        "high": {
+          "type": "number"
+        }
+      },
+      "description": "Custom token budgets for thinking levels."
+    },
+    "editorPaddingX": {
+      "type": "number",
+      "default": 0,
+      "description": "Horizontal padding for the input editor."
+    },
+    "outputPad": {
+      "type": "integer",
+      "enum": [
+        0,
+        1
+      ],
+      "default": 1,
+      "description": "Horizontal padding for transcript content."
+    },
+    "autocompleteMaxVisible": {
+      "type": "number",
+      "default": 5,
+      "description": "Maximum visible items in the autocomplete dropdown."
+    },
+    "showHardwareCursor": {
+      "type": "boolean",
+      "description": "Use the terminal cursor instead of MISAKA's drawn cursor."
+    },
+    "markdown": {
+      "type": "object",
+      "properties": {
+        "codeBlockIndent": {
+          "type": "string",
+          "default": "  "
+        },
+        "mermaid": {
+          "type": "string",
+          "enum": [
+            "off",
+            "final",
+            "streaming"
+          ],
+          "default": "streaming"
+        }
+      }
+    },
+    "warnings": {
+      "type": "object",
+      "properties": {
+        "anthropicExtraUsage": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "codemode": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "on",
+            "only"
+          ],
+          "default": "on",
+          "description": "How codemode presents tools. \"on\" keeps direct tools declared and annotates tools callable from scripts; codemode lists only tools without direct exposure. \"only\" lists every script-callable tool in codemode and does not declare active direct tools."
+        },
+        "inlineBudget": {
+          "type": "number",
+          "minimum": 0,
+          "default": 3000,
+          "description": "Estimated tokens available for inline codemode tool declarations."
+        }
+      }
+    },
+    "sessionDir": {
+      "type": "string",
+      "description": "Custom session storage directory, in the same format as the --session-dir CLI flag."
+    },
+    "httpProxy": {
+      "type": "string",
+      "description": "Proxy URL applied as HTTP_PROXY and HTTPS_PROXY for MISAKA-managed HTTP clients."
+    },
+    "httpIdleTimeoutMs": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "const": "disabled"
+        }
+      ],
+      "description": "HTTP header or body idle timeout in milliseconds; 0 or \"disabled\" disables it."
+    },
+    "cacheWarming": {
+      "type": "string",
+      "enum": [
+        "off",
+        "streaming",
+        "idle"
+      ],
+      "default": "streaming",
+      "description": "Cache-warming profile. \"idle\" also warms between agent runs. Global only because each refresh costs money."
+    },
+    "websocketConnectTimeoutMs": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "const": "disabled"
+        }
+      ],
+      "description": "WebSocket connect or open handshake timeout in milliseconds; 0 or \"disabled\" disables it."
+    },
+    "web": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Web search and fetch backends, their tiers, caches and blocklists; `misaka web` writes it. A role's own settings.json may hold its own web section, laid over this one."
+    },
+    "moa": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Mixture-of-Agents presets (presets, default_preset), published as models of the moa provider."
+    },
+    "allies": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Other vendors' agents that can take cards, by name: a preset name, or an entry with command, env and description."
+    },
+    "agents": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "description": "Sub-agent types, by name: description, prompt, and the other fields of an agent definition file."
+    },
+    "pluginOptions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "description": "Options for each plugin's sub-agents, by plugin name."
+    },
+    "permissions": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tool rules that are allowed without asking, such as \"Bash(git status)\"."
+        },
+        "ask": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tool rules that always ask first."
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tool rules that are refused; \"Agent(type)\" hides that sub-agent type."
+        },
+        "additionalDirectories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "More folders sub-agents may work in, besides the workspace."
+        },
+        "writeDirectories": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": "Absolute folders that write or edit (the keys) may change outside the workspace."
+        }
+      },
+      "description": "Permission rules for sub-agents and their hooks."
+    },
+    "hooks": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "description": "Sub-agent hooks, by event: matchers, each with the hooks it runs."
+    },
+    "disableAllHooks": {
+      "type": "boolean",
+      "description": "Run no sub-agent hooks."
+    },
+    "worktree": {
+      "type": "object",
+      "properties": {
+        "sparsePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Check out only these repository paths."
+        },
+        "symlinkDirectories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Repository folders linked into the worktree instead of copied (trusted projects only)."
+        }
+      },
+      "description": "How the git worktree of a sub-agent started with isolation \"worktree\" is made."
+    },
+    "cleanupPeriodDays": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Days after which a sub-agent worktree that is no longer used is removed. Default: 30."
+    },
+    "autoMemoryEnabled": {
+      "type": "boolean",
+      "description": "Let sub-agents keep memory between tasks. Default: true."
+    },
+    "documents": {
+      "type": "object",
+      "properties": {
+        "ocr_langs": {
+          "type": "string",
+          "description": "Languages for reading scanned PDFs, joined with \"+\". Default: eng+chi_sim+jpn."
+        }
+      },
+      "description": "Document reading."
+    },
+    "mcp": {
+      "type": "object",
+      "properties": {
+        "required_wait": {
+          "type": "number",
+          "description": "Seconds a sub-agent waits for an MCP server its definition requires. Default: 30."
+        }
+      },
+      "description": "MCP servers, as sub-agents wait for them. The servers themselves are in each role's mcp.json."
+    },
+    "network": {
+      "type": "object",
+      "properties": {
+        "max_concurrent_per_sister": {
+          "type": "integer",
+          "description": "Cards one Sister runs at once. Default: the machine limit."
+        },
+        "max_concurrent_sisters": {
+          "type": "integer",
+          "description": "Cards running at once on this machine. Default: free memory / 256 MiB, between 4 and 12."
+        }
+      },
+      "description": "How many Sister cards run at once."
+    },
+    "panel": {
+      "type": "object",
+      "properties": {
+        "prefix": {
+          "type": "string",
+          "description": "The panel's prefix key, \"ctrl+\" and a letter. Default: ctrl+b."
+        }
+      },
+      "description": "The panel."
+    },
+    "research": {
+      "type": "object",
+      "properties": {
+        "beast_at": {
+          "type": "number",
+          "description": "Share of the token cap at which a card is told to wrap up. Default: 0.85."
+        },
+        "plan_approval": {
+          "type": "boolean",
+          "description": "Every research plan waits for your go-ahead. Default: true."
+        },
+        "token_cap": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Token budget of one research run, its cards and sub-agents included; 0 is no cap."
+        }
+      },
+      "description": "Research runs."
+    },
+    "subagents": {
+      "type": "object",
+      "properties": {
+        "agent_list_in_messages": {
+          "type": "boolean",
+          "description": "List the available sub-agent types in messages."
+        },
+        "auto_background_tasks": {
+          "type": "boolean",
+          "description": "Move a foreground sub-agent to the background after two minutes."
+        },
+        "auto_memory": {
+          "type": "boolean",
+          "description": "Let sub-agents keep memory between tasks."
+        },
+        "background_tasks": {
+          "type": "boolean",
+          "description": "Allow sub-agents to run in the background."
+        },
+        "builtin_agents": {
+          "type": "boolean",
+          "description": "Offer the built-in sub-agent types."
+        },
+        "coordinator_mode": {
+          "type": "boolean",
+          "description": "Coordinator mode: a session does not fork sub-agents from its own conversation."
+        },
+        "effort_level": {
+          "description": "\"auto\", \"low\", \"medium\", \"high\", \"xhigh\" or \"max\", for models that take an effort setting."
+        },
+        "inherit_process_group": {
+          "type": "boolean",
+          "description": "Run sub-agents in the session's own process group instead of a new one."
+        },
+        "managed_agents_dir": {
+          "type": "string",
+          "description": "A folder of sub-agent definitions that take precedence over all others."
+        },
+        "max_concurrent": {
+          "type": "integer",
+          "description": "Sub-agents one session runs at once. Default: 20."
+        },
+        "memory_home": {
+          "type": "string",
+          "description": "Where sub-agent memory is kept. Default: state/agent-memory."
+        },
+        "memory_snapshot": {
+          "type": "boolean",
+          "description": "In a trusted project, start a sub-agent's memory from the project's memory snapshot."
+        },
+        "simple": {
+          "type": "boolean",
+          "description": "Simple mode: sub-agents keep no memory."
+        },
+        "small_fast_model": {
+          "type": "string",
+          "description": "The model a sub-agent type's hooks use when they name none."
+        },
+        "task_max_output": {
+          "type": "integer",
+          "description": "Characters from the end of a background task's output that the output tool shows."
+        },
+        "verification_agent": {
+          "type": "boolean",
+          "description": "Offer the built-in verification sub-agent type."
+        }
+      },
+      "description": "Sub-agents of a session."
+    },
+    "tui": {
+      "type": "object",
+      "properties": {
+        "esc_timeout_ms": {
+          "type": "number",
+          "description": "How long Esc waits to see whether it starts an Alt+key, in milliseconds."
+        }
+      },
+      "description": "The chat window."
+    },
+    "vision": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "One vision model (provider/model) for the whole home, which reads images for models that cannot see."
+        }
+      },
+      "description": "Reading images for models that cannot see."
+    },
+    "lcm": {
+      "type": "object",
+      "description": "The long-conversation context engine (bundled extension): context_threshold is the share of the context window at which a session compacts (default 0.35). Other behaviour is set with LCM_* variables."
+    },
+    "auxiliary": {
+      "type": "object",
+      "description": "Models for auxiliary tasks of the bundled extensions, by task: compression (provider, model) writes the conversation summaries; the default is the session's own model."
+    },
+    "compression": {
+      "type": "object",
+      "description": "Conversation compression, as the long-conversation context engine reads it: threshold is the share of the context window at which a session compacts when lcm.context_threshold is not set; enabled false ignores it."
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "ModelThinkingLevel": {
+      "type": "string",
+      "enum": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    }
+  }
+}

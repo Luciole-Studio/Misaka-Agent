@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/coding-agent/src/core/auth-storage.ts`` (v1.1.0).
+"""Translated from pi's ``packages/coding-agent/src/core/auth-storage.ts`` (v1.3.0).
 
 CredentialStore implementation backed by auth.json. Provider auth orchestration belongs to ModelRuntime and pi-ai Models.
 
@@ -230,24 +230,24 @@ class FileAuthStorageBackend(AuthStorageBackend):
             raise RuntimeError("Auth storage lock was compromised")
 
     def acquireLockSyncWithRetry(self) -> FileLock:
+        # MISAKA fork: pi 1.2 also retries EPERM on Windows (`getRetryableLockErrorCode`, capped by
+        # `MAX_EPERM_RETRIES` in the async loop): a lock directory pending deletion fails mkdir until its
+        # last handle closes. filelock's Windows lock already reports a name pending deletion or a sharing
+        # conflict as "not acquired", which is the `Timeout` retried here, and fails fast on a real access
+        # denial, so there is no EPERM case to retry.
         maxAttempts = 10
         delay_ms = 20
-        lastError: Exception | None = None
-
-        for attempt in range(1, maxAttempts + 1):
+        attempt = 1
+        while True:
             lock = self._create_lock()
             try:
                 lock.acquire(timeout=0)
                 return lock
-            except Timeout as error:
-                lastError = error
+            except Timeout:
                 if attempt == maxAttempts:
                     raise
                 time.sleep(delay_ms / 1000)
-
-        if lastError is not None:
-            raise lastError
-        raise RuntimeError("Failed to acquire auth storage lock")
+            attempt += 1
 
     def withLock(self, fn: Callable[[str | None], LockResult]) -> Any:
         self.ensureParentDir()

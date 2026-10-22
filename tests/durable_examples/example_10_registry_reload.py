@@ -25,7 +25,7 @@ context = BACKGROUND_CONTEXT
 
 def exampleTool(name: str, description: str) -> dict[str, Any]:
     async def execute(args: dict[str, Any], api: Any, callContext: Any) -> dict[str, Any]:
-        return {"content": [{"type": "text", "text": f"{name} {args['path']}"}]}
+        return {"output": [{"type": "text", "text": f"{name} {args['path']}"}]}
 
     return defineTool(
         {

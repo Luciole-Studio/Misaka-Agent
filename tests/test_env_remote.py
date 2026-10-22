@@ -4,20 +4,27 @@ from __future__ import annotations
 
 import asyncio
 import os
+import platform
 import signal
 import sys
 import tempfile
 import time
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from misaka.chord.context import BACKGROUND_CONTEXT, withAbortSignal
 from misaka.durable.env import getOrThrow
-from misaka.env import Connection, RemoteExecutionEnv
+from misaka.env import Connection, RemoteError, RemoteExecutionEnv, nodePlatform
 from misaka.utils.js import AbortController
-from tests.env_support import closeConnection, daemonCommand, removeTempDir
+from tests.env_support import (
+    closeConnection,
+    daemonCommand,
+    oldDaemonCommand,
+    removeTempDir,
+)
 
 context = BACKGROUND_CONTEXT
 
@@ -41,6 +48,14 @@ async def environments() -> AsyncIterator[Callable[[], tuple[RemoteExecutionEnv,
         await closeConnection(connection)
     for directory in dirs:
         removeTempDir(directory)
+
+
+def processArch() -> str:
+    """``process.arch``: Node's name for this machine's architecture."""
+    machine = platform.machine().lower()
+    return {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "i386": "ia32", "i686": "ia32", "x86": "ia32"}.get(
+        machine, machine
+    )
 
 
 def killProcess(pid: int) -> None:
@@ -95,6 +110,49 @@ async def test_aborts_commands_cancelled_right_after_they_are_sent(environments)
         result = await running
         assert ("ok" if result["ok"] else result["error"].code) == "aborted"
     assert time.monotonic() - started < 10
+
+
+async def test_reports_the_remote_system_in_nodes_names(environments):
+    _, connection = environments()
+    names = nodePlatform(await connection.info())
+    assert names["platform"] == sys.platform
+    # CI runs the darwin-x64 release daemon on arm64 macOS through Rosetta, so it reports x64 to arm64 Node.
+    arch = processArch()
+    rosetta = sys.platform == "darwin" and arch == "arm64" and names["arch"] == "x64"
+    if not rosetta:
+        assert names["arch"] == arch
+    assert nodePlatform({"os": "windows", "arch": "aarch64"}) == {"platform": "win32", "arch": "arm64"}
+    assert nodePlatform({"os": "macos", "arch": "x86_64"}) == {"platform": "darwin", "arch": "x64"}
+
+
+async def test_reports_list_files_as_not_supported_by_daemons_released_before_it(environments):
+    env, _ = environments()
+    assert "listFiles" in (await env.connection.info())["features"]
+    connection = Connection({"command": oldDaemonCommand()})
+    environments.connections.append(connection)
+    old = RemoteExecutionEnv({"connection": connection, "id": "pi-env:old", "cwd": env.cwd})
+    listed = await old.listFiles(".", None, context)
+    assert ("ok" if listed["ok"] else listed["error"].code) == "not_supported"
+
+
+async def test_cancels_a_listing_in_the_daemon(environments):
+    env, connection = environments()
+    for directory in range(100):
+        os.mkdir(os.path.join(env.cwd, f"d{directory}"))
+        for file in range(100):
+            Path(env.cwd, f"d{directory}", f"f{file}").write_bytes(b"")
+    # The cancel follows the request at once, bypassing the client's own abort check, so the daemon stops the walk.
+    controller = AbortController()
+    controller.abort()
+    cancelled = connection.request("listFiles", {"path": env.cwd}, {"signal": controller.signal})
+    with pytest.raises(RemoteError) as rejected:
+        await cancelled
+    assert rejected.value.code == "aborted"
+    listed = getOrThrow(await env.listFiles(".", None, context))
+    assert [len(listed["entries"]), listed["truncated"]] == [10_100, False]
+    bounded = getOrThrow(await env.listFiles(".", {"maxEntries": 5000}, context))
+    assert [len(bounded["entries"]), bounded["truncated"]] == [5000, True]
+    # Creating 10,000 files takes several seconds on Windows CI.
 
 
 async def test_times_out_a_command_that_produces_no_output(environments):

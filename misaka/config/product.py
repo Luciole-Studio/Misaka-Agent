@@ -141,13 +141,13 @@ def validate_settings() -> list[str]:
         except _Unfit as error:
             errors.append(f"{section}.{key}={block[key]!r} {error}")
             continue
-        if (section, key) in _NOT_NEGATIVE and value < 0:
+        if (section, key) in NOT_NEGATIVE and value < 0:
             errors.append(f"{section}.{key}={block[key]!r} is negative (0 is none)")
     return errors
 
 
-# A negative cap stopped every research run at its start.
-_NOT_NEGATIVE = {("research", "token_cap")}
+# A negative cap stopped every research run at its start. The settings schema says so too (`minimum: 0`).
+NOT_NEGATIVE = {("research", "token_cap")}
 
 
 def _models():

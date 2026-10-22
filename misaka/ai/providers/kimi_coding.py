@@ -1,8 +1,8 @@
-"""Translated from pi's ``packages/ai/src/providers/kimi-coding.ts`` (v1.1.0)."""
+"""Translated from pi's ``packages/ai/src/providers/kimi-coding.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
-from misaka.ai.api.anthropic_messages_lazy import anthropicMessagesApi
+from misaka.ai.api.openai_completions_lazy import openAICompletionsApi
 from misaka.ai.auth.helpers import envApiKeyAuth, lazyOAuth
 from misaka.ai.auth.oauth.load import loadKimiCodingOAuth
 from misaka.ai.auth.types import ProviderAuth
@@ -15,13 +15,13 @@ def kimiCodingProvider() -> Provider:
         CreateProviderOptions(
             id="kimi-coding",
             name="Kimi For Coding",
-            baseUrl="https://api.kimi.com/coding",
+            baseUrl="https://api.kimi.com/coding/v1",
             auth=ProviderAuth(
                 apiKey=envApiKeyAuth("Kimi API key", ["KIMI_API_KEY"]),
                 oauth=lazyOAuth({"name": "Kimi Code (subscription)", "isSubscription": True, "loginLabel": "Sign in with Kimi Code", "load": loadKimiCodingOAuth}),
             ),
             models=list(KIMI_CODING_MODELS.values()),
-            api=anthropicMessagesApi(),
+            api=openAICompletionsApi(),
         )
     )
 

@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/src/utils/json-parse.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/src/utils/json-parse.ts`` (v1.3.0).
 
 MISAKA fork: ``partial-json``'s ``parse`` is ``misaka.ai.utils._partial_json.parse`` (no Python port of the npm
 package); ``JSON.parse`` is ``misaka.utils.js.jsonParse``; ``parseJsonWithRepair`` has one more step,
@@ -7,12 +7,12 @@ package); ``JSON.parse`` is ``misaka.utils.js.jsonParse``; ``parseJsonWithRepair
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 from misaka.ai.utils._partial_json import parse as partialParse
 from misaka.utils.js import jsonParse, jsTrim
 
-_VALID_JSON_ESCAPES = frozenset({'"', "\\", "/", "b", "f", "n", "r", "t", "u"})
+_VALID_JSON_ESCAPES = frozenset({'"', "\\", "/", "b", "f", "n", "r", "t"})
 
 
 def _isControlCharacter(char: str) -> bool:
@@ -149,6 +149,32 @@ def parseJsonWithRepair(json: str) -> Any:
         raise
 
 
+class _ToolCallArguments(TypedDict):
+    """MISAKA fork: ``Pick<ToolCall, "arguments" | "argumentsError">``, named."""
+
+    arguments: dict[str, Any]
+    argumentsError: NotRequired[str]
+
+
+def parseToolCallArguments(json: str | None) -> _ToolCallArguments:
+    """Parses the model's complete arguments text of a finished tool call.
+
+    Unlike :func:`parseStreamingJson`, this never keeps a partially parsed prefix: once the call is
+    finished, text that is not a valid JSON object means the model sent malformed arguments. In that
+    case `arguments` is `{}` and `argumentsError` describes the problem, including the text the
+    model sent, so tool validation can report it back to the model.
+    """
+    if not json or not jsTrim(json):
+        return {"arguments": {}}
+    try:
+        parsed = parseJsonWithRepair(json)
+        if not isinstance(parsed, dict):
+            raise ValueError("Tool arguments must be a JSON object")  # noqa: TRY004 - upstream's `throw new Error`
+        return {"arguments": parsed}
+    except Exception as error:  # noqa: BLE001 - a parse error normally, RecursionError when nesting is pathological
+        return {"arguments": {}, "argumentsError": f"{error}\n\nReceived arguments:\n{json}"}
+
+
 def parseStreamingJson(partialJson: str | None) -> Any:
     """Attempts to parse potentially incomplete JSON during streaming.
     Always returns a valid object, even if the JSON is incomplete.
@@ -172,4 +198,4 @@ def parseStreamingJson(partialJson: str | None) -> Any:
                 return {}
 
 
-__all__ = ["parseJsonWithRepair", "parseStreamingJson", "repairJson"]
+__all__ = ["parseJsonWithRepair", "parseStreamingJson", "parseToolCallArguments", "repairJson"]

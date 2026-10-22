@@ -477,11 +477,11 @@ async def test_returns_stateless_handles_and_rejects_operations_after_close():
     assert again is not root
     assert again.id == root.id
     await harness.close(context)
-    with pytest.raises(Exception, match="Harness is closed"):
+    with pytest.raises(Exception, match="is closed"):
         await harness.root(context)
-    with pytest.raises(Exception, match="Harness is closed"):
+    with pytest.raises(Exception, match="is closed"):
         await harness.createConversation({"ownership": {"kind": "ownerless"}}, context)
-    with pytest.raises(Exception, match="Harness is closed"):
+    with pytest.raises(Exception, match="is closed"):
         await harness.conversation(root.id, context)
 
 

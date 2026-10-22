@@ -263,9 +263,12 @@ def loadProjectContextFiles(options: dict[str, str]) -> list[dict[str, str]]:
     root = os.path.abspath(os.sep)
     while True:
         contextFile = loadContextFileFromDir(currentDir)
+        # Compare the directory's real path, not the file's: a worktree AGENTS.md that
+        # symlinks to the main repo's file resolves to the shadowed path itself.
         isShadowed = (
             shadowedContextFile is not None
-            and canonicalizePath(contextFile["path"] if contextFile is not None else "") == shadowedContextFile
+            and contextFile is not None
+            and os.path.join(canonicalizePath(currentDir), os.path.basename(contextFile["path"])) == shadowedContextFile
         )
         if contextFile is not None and not isShadowed and contextFile["path"] not in seenPaths:
             ancestorContextFiles.insert(0, contextFile)

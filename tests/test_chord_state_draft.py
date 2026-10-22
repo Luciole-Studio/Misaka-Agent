@@ -78,7 +78,7 @@ def test_supports_deletion_and_native_array_mutators():
     assert prepared.value == {"values": [5, 5, 9, 2]}
 
 
-def test_copies_inserted_draft_values_without_aliasing_their_original_handle():
+def test_copies_inserted_draft_values_without_aliasing_their_original_reference():
     tracker = track({"values": [{"value": 1}, {"value": 2}]})
     change = tracker.beginChange()
     held = change.state["values"][0]
@@ -104,7 +104,7 @@ def test_keeps_comparator_edits_when_sorting_object_drafts():
     assert [row["comparisons"] for row in prepared.value["rows"]] == [1, 1]
 
 
-def test_drops_writes_through_detached_child_handles():
+def test_drops_writes_through_detached_child_references():
     tracker = track({"child": {"value": "removed"}, "items": [{"value": "removed"}, {"value": "kept"}]})
     change = tracker.beginChange()
     child = change.state["child"]

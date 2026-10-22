@@ -21,6 +21,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from misaka.ai.utils.text import contentText
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.platform.vocabulary import MANAGEMENT_TOOL_NAMES
 from misaka.utils.values import read_field
@@ -1435,7 +1436,12 @@ class AgentPolicy:
         return {key: value for key, value in payload.items() if value is not None}
 
     async def before_agent(self, event: Any) -> Any:
-        payload = self._payload("SubagentStart", prompt=str(read_field(event, "prompt", "")))
+        # A custom message that opens a turn (moments.TURN) stands in for the prompt.
+        if read_field(event, "messageType", "user") == "custom":
+            prompt = contentText(read_field(read_field(event, "message"), "content") or [], "")
+        else:
+            prompt = str(read_field(event, "prompt", ""))
+        payload = self._payload("SubagentStart", prompt=prompt)
         context: list[str] = []
         results = await self._execute_hooks(
             "SubagentStart",

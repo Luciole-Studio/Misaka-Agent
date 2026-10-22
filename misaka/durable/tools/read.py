@@ -1,20 +1,27 @@
 """The ``read`` tool.
 
-Translated from pi's ``packages/durable/src/tools/read.ts`` (v1.1.0). Reads text files; remarks about truncation and
-continuation are diagnostics, and the content is only file text.
+Translated from pi's ``packages/durable/src/tools/read.ts`` (v1.3.0). Reads text files and images; remarks about
+truncation, continuation, and image processing are diagnostics, and the content is only file text, or one image.
+``createReadTool(options)`` takes an optional ``dict`` (``ReadToolOptions``) with ``images``, an ``ImageProcessor``.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, TypedDict
 
 from misaka.chord.context import Context
-from misaka.utils.js import Utf8Decoder, formatNumber, jsIsInteger, jsIsSafeInteger
+from misaka.chord.output import characterEnd
+from misaka.utils.js import (
+    Utf8Decoder,
+    formatNumber,
+    jsIsInteger,
+    jsIsSafeInteger,
+    toFixed,
+)
 
 from ..env import getOrThrow, rangeDecoder, startsWithBom
 from ..harness.define import defineTool
-from ..harness.output import characterEnd
 from ..truncate import (
     DEFAULT_MAX_BYTES,
     DEFAULT_MAX_LINES,
@@ -23,7 +30,14 @@ from ..truncate import (
     utf8ByteLength,
 )
 from .env import requireEnv
-from .image import detectSupportedImageMimeTypeOf
+from .image import detectSupportedImageMimeTypeOf, imageDimensions
+from .image_processor import (
+    DEFAULT_IMAGE_LIMITS,
+    INLINE_IMAGE_TYPES,
+    ImageProcessor,
+    base64Length,
+    toBase64,
+)
 from .path_utils import resolveReadToolPath
 
 readSchema: dict[str, Any] = {
@@ -81,8 +95,19 @@ async def _readHead(reader: Any, start: int, end: int, skipBom: bool, context: C
     return text + decoder.decode(b"", final=True)
 
 
-def createReadTool() -> dict[str, Any]:
-    """Reads text files. Remarks about truncation and continuation are diagnostics; the content is only file text."""
+class ReadToolOptions(TypedDict, total=False):
+    images: ImageProcessor
+    """Resizes and converts images; without one, images within ``DEFAULT_IMAGE_LIMITS["maxBytes"]`` pass through as they
+    are."""
+
+
+def createReadTool(options: ReadToolOptions | None = None) -> dict[str, Any]:
+    """Reads text files and images. Remarks about truncation, continuation, and image processing are diagnostics; the
+    content is only file text, or one image, which programs get as its ``ImageContent``."""
+    if options is None:
+        options = {}
+    images = options.get("images")
+    formats = "jpg, png, gif, webp" if images is None else "jpg, png, gif, webp, bmp"
 
     async def execute(args: dict[str, Any], api: Any, context: Context) -> dict[str, Any]:
         path = args["path"]
@@ -93,15 +118,20 @@ def createReadTool() -> dict[str, Any]:
         reader = getOrThrow(await env.openBinaryReader(absolutePath, None, context))
         try:
             # A concurrent writer can change the file between the scan and the reads. Appending (a growing log) leaves
-            # the scanned bytes as they were; a file that shrank or was rewritten in place is read again once.
+            # the scanned text as it was; an image must be whole. Otherwise the file is read again once.
             attempt = 0
             while True:
                 before = getOrThrow(await reader.info(context))
-                result = await _readText(reader, before, path, offset, limit, context)
+                mimeType = await detectSupportedImageMimeTypeOf(_ReaderSource(reader, before["size"], context))
+                if mimeType is None:
+                    result = await _readText(reader, path, offset, limit, context)
+                else:
+                    result = await _readImage(
+                        reader, before, path, mimeType, images, await _imageModel(api, context), context
+                    )
                 after = getOrThrow(await reader.info(context))
-                if after["size"] > before["size"] or (
-                    after["size"] == before["size"] and after["mtimeMs"] == before["mtimeMs"]
-                ):
+                unchanged = after["size"] == before["size"] and after["mtimeMs"] == before["mtimeMs"]
+                if unchanged or (mimeType is None and after["size"] > before["size"]):
                     return result
                 if attempt == 1:
                     raise RuntimeError(f"{path} changed while it was read")
@@ -112,11 +142,91 @@ def createReadTool() -> dict[str, Any]:
     return defineTool(
         {
             "name": "read",
-            "description": f"Read the contents of a text file. Output is truncated to {DEFAULT_MAX_LINES} lines or {DEFAULT_MAX_BYTES // 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+            "description": f"Read the contents of a file. Supports text files and images ({formats}). Images are sent as attachments. For text files, output is truncated to {DEFAULT_MAX_LINES} lines or {DEFAULT_MAX_BYTES // 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
             "parameters": readSchema,
             "execute": execute,
         }
     )
+
+
+async def _readImage(
+    reader: Any,
+    info: dict[str, Any],
+    path: str,
+    mimeType: str,
+    processor: ImageProcessor | None,
+    model: dict[str, Any],
+    context: Context,
+) -> dict[str, Any]:
+    """One image block, prepared by ``processor`` or, without one, as it is when its format is inline and it fits the
+    limits (its size is checked before reading it, its dimensions from its header); otherwise an error result saying
+    why. What happened to the image is an ``info`` diagnostic, so programs get the bare ``ImageContent``. A model without
+    image input sees pi-ai's placeholder instead; a diagnostic says so. ``model`` is ``{"vision", "limits"}``."""
+    vision = model["vision"]
+    limits = model["limits"]
+    notes: list[str] = []
+    if processor is not None:
+        data = getOrThrow(await reader.read(0, info["size"], context))
+        prepared = await processor.prepare(data, mimeType, limits)
+        if prepared is None:
+            return _imageError(f"{path} is an image ({mimeType}) that cannot be prepared for the model")
+        image = {"data": prepared["data"], "mimeType": prepared["mimeType"]}
+        if prepared.get("convertedFrom") is not None:
+            notes.append(f"Converted from {prepared['convertedFrom']} to {prepared['mimeType']}.")
+        if prepared.get("resized") is not None:
+            source = prepared["resized"]["from"]
+            target = prepared["resized"]["to"]
+            scale = toFixed(source["width"] / target["width"], 2)
+            notes.append(
+                f"Resized from {source['width']}x{source['height']} to {target['width']}x{target['height']}. Multiply coordinates by {scale} to map them to the original."
+            )
+    else:
+        if mimeType not in INLINE_IMAGE_TYPES:
+            return _imageError(f"{path} is an image ({mimeType}) that needs converting, and no image processor is configured")
+        unshrinkable = "and no image processor is configured to shrink it"
+        if base64Length(info["size"]) > limits["maxBytes"]:
+            return _imageError(
+                f"{path} is an image ({mimeType}) of {formatSize(info['size'])}, too large to send, {unshrinkable}"
+            )
+        data = getOrThrow(await reader.read(0, info["size"], context))
+        size = imageDimensions(data, mimeType)
+        if size is None:
+            return _imageError(f"{path} is an image ({mimeType}) whose size cannot be read")
+        if size["width"] > limits["maxWidth"] or size["height"] > limits["maxHeight"]:
+            return _imageError(
+                f"{path} is an image ({mimeType}) of {size['width']}x{size['height']}, larger than {limits['maxWidth']}x{limits['maxHeight']}, {unshrinkable}"
+            )
+        image = {"data": toBase64(data), "mimeType": mimeType}
+    if not vision:
+        notes.append("The current model does not support images; it sees a placeholder instead.")
+    diagnostics = [
+        {"severity": "info", "code": "image", "message": " ".join([f"Read image file [{image['mimeType']}].", *notes])}
+    ]
+    return {"output": [{"type": "image", "data": image["data"], "mimeType": image["mimeType"]}], "diagnostics": diagnostics}
+
+
+async def _imageModel(api: Any, context: Context) -> dict[str, Any]:
+    """What the conversation's model takes (``ImageModel``): whether images (``vision``), and within which ``limits``:
+    ``DEFAULT_IMAGE_LIMITS`` overridden by its ``inputLimits.images.resize``. Without a resolvable model, it counts as
+    one that takes images within the defaults."""
+    ref = (await api.agent(context)).get("model")
+    model = None if ref is None else api.models.getModel(ref["provider"], ref["modelId"])
+    inputLimits = None if model is None else model.inputLimits
+    images = None if inputLimits is None else inputLimits.images
+    resize = None if images is None else images.resize
+
+    def limit(name: str) -> int:
+        value = None if resize is None else getattr(resize, name)
+        return DEFAULT_IMAGE_LIMITS[name] if value is None else value  # type: ignore[literal-required]
+
+    return {
+        "vision": True if model is None else "image" in model.input,
+        "limits": {"maxWidth": limit("maxWidth"), "maxHeight": limit("maxHeight"), "maxBytes": limit("maxBytes")},
+    }
+
+
+def _imageError(message: str) -> dict[str, Any]:
+    return {"output": [], "isError": True, "diagnostics": [{"severity": "error", "code": "unsupported_image", "message": message}]}
 
 
 class _ReaderSource:
@@ -129,27 +239,10 @@ class _ReaderSource:
         return getOrThrow(await self._reader.read(position, length, self._context))
 
 
-async def _readText(
-    reader: Any, info: dict[str, Any], path: str, offset: float | None, limit: float | None, context: Context
-) -> dict[str, Any]:
+async def _readText(reader: Any, path: str, offset: float | None, limit: float | None, context: Context) -> dict[str, Any]:
     """The read result for the opened file. It equals decoding the whole file with ``TextDecoder``, splitting it on
     ``\\n``, and bounding the selected lines with ``truncateHead``, while reading only one scan's worth of the file plus
     the head."""
-    mimeType = await detectSupportedImageMimeTypeOf(_ReaderSource(reader, info["size"], context))
-    if mimeType:
-        # Image content is not supported yet.
-        return {
-            "content": [],
-            "isError": True,
-            "diagnostics": [
-                {
-                    "severity": "error",
-                    "code": "unsupported_image",
-                    "message": f"{path} is an image ({mimeType}); reading images is not supported",
-                }
-            ],
-        }
-
     startLine: float = max(0, offset - 1) if _truthy(offset) else 0  # type: ignore[operator]
     startLineDisplay = startLine + 1
     # Lines are selected like `allLines.slice(startLine, endLine)`, which truncates fractional indices.
@@ -238,10 +331,10 @@ async def _readText(
         )
 
     return {
-        "content": [] if outputText == "" else [{"type": "text", "text": outputText}],
+        "output": [] if outputText == "" else [{"type": "text", "text": outputText}],
         **({} if details is None else {"details": details}),
         "diagnostics": diagnostics,
     }
 
 
-__all__ = ["createReadTool"]
+__all__ = ["ReadToolOptions", "createReadTool"]

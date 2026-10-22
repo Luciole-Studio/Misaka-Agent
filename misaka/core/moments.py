@@ -44,6 +44,17 @@ TURN = "turn"       # True: the message opens a turn the way a user prompt does 
 _MISSING = object()
 
 
+def opens_turn(event: Any) -> bool:
+    """Whether a ``before_agent_start`` event starts a turn the way a user prompt does: a user
+    prompt, or a custom message that says so with ``details[TURN]`` (a research phase, a failed
+    node). A run a notification wakes (a Sister's result, a task or shell notification, mail)
+    does not; per-prompt work keys on this. An event without ``messageType`` is a user prompt."""
+    if _field(event, "messageType", "user") == "user":
+        return True
+    details = _field(_field(event, "message"), "details")
+    return isinstance(details, dict) and details.get(TURN) is True
+
+
 def _field(result: Any, name: str, default: Any = None) -> Any:
     if isinstance(result, dict):
         return result.get(name, default)
@@ -220,9 +231,11 @@ class Moments:
                 return result
         return None
 
-    async def before_agent_start(self, prompt: str, images: Any, options: Any) -> BeforeAgentStart:
+    async def before_agent_start(self, trigger: Any, options: Any) -> BeforeAgentStart:
         """Runner ``emit_before_agent_start``: each part sees the prompt options as the previous
-        one left them, and ``systemPrompt`` renders them on every read."""
+        one left them, and ``systemPrompt`` renders them on every read. The event carries the
+        run's trigger as the runner's does: ``messageType`` ``"user"`` with ``prompt``/``images``,
+        or ``"custom"`` with the custom ``message`` that starts the run (see ``opens_turn``)."""
         current_options = normalizeBuildSystemPromptOptions(options)
         folded = BeforeAgentStart(system_prompt_options=current_options)
         if not self.parts:
@@ -230,9 +243,8 @@ class Moments:
         ctx = self._ctx()
         for part in self.parts:
             result = await self._call(part, "before_agent_start", {
+                **trigger,
                 "type": "before_agent_start",
-                "prompt": prompt,
-                "images": images,
                 "systemPrompt": buildSystemPrompt(current_options),
                 "systemPromptOptions": current_options,
             }, ctx)
@@ -409,4 +421,4 @@ def _restore_system_messages(current: list[Any], visible: list[Any], returned: l
     return [head, *returned] if head else returned
 
 
-__all__ = ["BeforeAgentStart", "CoreCommand", "Moments"]
+__all__ = ["BeforeAgentStart", "CoreCommand", "Moments", "opens_turn"]

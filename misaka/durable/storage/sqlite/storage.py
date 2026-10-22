@@ -1,6 +1,6 @@
 """Portable SQLite implementation of the Pico storage contract.
 
-Translated from pi's ``packages/durable/src/storage/sqlite/storage.ts``. Records are plain ``dict`` objects stored as
+Translated from pi's ``packages/durable/src/storage/sqlite/storage.ts`` (v1.3.0). Records are plain ``dict`` objects stored as
 JSON text next to the columns that index them. Public async methods are ``@eager``: calling them starts the body, as
 calling a JavaScript async function does, and returns the future of the result.
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any
+from typing import Any, TypedDict
 
 from misaka.chord.context import Context
 from misaka.chord.delta import apply
@@ -23,15 +23,22 @@ from misaka.utils.js import (
     startTask,
 )
 
-from ...errors import StorageRejected
+from ...errors import StorageRequestError
 from ...ids import idFromNumber, seqFromNumber
 from ...types import Cursor, DocumentPoint, Page, ScanOrder, Seq
 from ..scan import ScanStart, nextCursor, scanStart
 from .database import SqliteDatabase, SqliteExecutor, SqliteValue
-from .migrations import applySqliteMigrations
+from .migrations import applySqliteMigrationsForSchema
+from .schema import SqliteSchema, createSqliteSchema
 
 _MAX_SAFE_INTEGER = 2**53 - 1
 _INFINITY = float("inf")
+
+
+class SqliteStorageOptions(TypedDict, total=False):
+    prefix: str
+    """Prefix for every table and index in the durable schema. It must be a SQLite identifier and must not use SQLite's
+    reserved ``sqlite_`` prefix. Existing data is not migrated when this changes."""
 
 
 def parseJson(value: str) -> Any:
@@ -53,7 +60,7 @@ def cursorId(cursor: Cursor | None) -> int | None:
     if after is UNDEFINED:
         return None
     if not jsIsInteger(after) or abs(after) > _MAX_SAFE_INTEGER:
-        raise TypeError("Invalid storage cursor")
+        raise StorageRequestError("Invalid storage cursor")
     return idFromNumber(after)
 
 
@@ -120,8 +127,9 @@ def writeId(write: dict[str, Any]) -> int | None:
 class SqliteStorage:
     """Portable SQLite implementation of the Pico storage contract. Create it with ``SqliteStorage.open``."""
 
-    def __init__(self, db: SqliteDatabase, nextId: int) -> None:
+    def __init__(self, db: SqliteDatabase, schema: SqliteSchema, nextId: int) -> None:
         self._db = db
+        self._schema = schema
         self._nextId = nextId
         self._closed = False
         self._closing: asyncio.Future[None] | None = None
@@ -131,14 +139,15 @@ class SqliteStorage:
 
     @staticmethod
     @eager
-    async def open(db: SqliteDatabase) -> SqliteStorage:
+    async def open(db: SqliteDatabase, options: SqliteStorageOptions | None = None) -> SqliteStorage:
         """Initialize storage over an owned SQLite database facade."""
         try:
-            await applySqliteMigrations(db)
-            metadata = await db.get("SELECT next_id, next_seq FROM durable_metadata WHERE singleton = 1")
+            schema = createSqliteSchema(None if options is None else options.get("prefix"))
+            await applySqliteMigrationsForSchema(db, schema)
+            metadata = await db.get(f"SELECT next_id, next_seq FROM {schema['tables']['durableMetadata']} WHERE singleton = 1")
             if metadata is None:
                 raise RuntimeError("Durable SQLite metadata is missing")
-            return SqliteStorage(db, int(metadata["next_id"]))
+            return SqliteStorage(db, schema, int(metadata["next_id"]))
         except BaseException:
             with contextlib.suppress(Exception):  # Preserve the initialization failure.
                 await db.close()
@@ -151,7 +160,7 @@ class SqliteStorage:
         candidateNextId = self._candidateNextId(writes)
 
         async def transact(transaction: SqliteExecutor) -> Seq:
-            metadata = await transaction.get("SELECT next_id, next_seq FROM durable_metadata WHERE singleton = 1")
+            metadata = await transaction.get(f"SELECT next_id, next_seq FROM {self._schema['tables']['durableMetadata']} WHERE singleton = 1")
             if metadata is None:
                 raise RuntimeError("Durable SQLite metadata is missing")
             committedSeq = seqFromNumber(metadata["next_seq"])
@@ -161,7 +170,7 @@ class SqliteStorage:
                 await self._applyTableWrite(transaction, write, committedSeq)
             await self._applyDocumentActions(transaction, documentActions, committedSeq)
             await transaction.run(
-                "UPDATE durable_metadata SET next_id = ?, next_seq = ? WHERE singleton = 1",
+                f"UPDATE {self._schema['tables']['durableMetadata']} SET next_id = ?, next_seq = ? WHERE singleton = 1",
                 str(max(int(metadata["next_id"]), candidateNextId)),
                 committedSeq + 1,
             )
@@ -183,7 +192,7 @@ class SqliteStorage:
     @eager
     async def conversation(self, id: int, _context: Context) -> dict[str, Any] | None:
         self._assertOpen()
-        row = await self._db.get("SELECT record FROM conversations WHERE id = ?", id)
+        row = await self._db.get(f"SELECT record FROM {self._schema['tables']['conversations']} WHERE id = ?", id)
         return None if row is None else parseJson(row["record"])
 
     @eager
@@ -201,7 +210,7 @@ class SqliteStorage:
             params.append(query["ownerTaskId"])
         params.append(limit + 1)
         rows = await self._db.all(
-            f"SELECT record FROM conversations WHERE {' AND '.join(clauses)} ORDER BY id {scan['direction']} LIMIT ?", *params
+            f"SELECT record FROM {self._schema['tables']['conversations']} WHERE {' AND '.join(clauses)} ORDER BY id {scan['direction']} LIMIT ?", *params
         )
         return page([parseJson(row["record"]) for row in rows], limit, start["order"])
 
@@ -225,13 +234,13 @@ class SqliteStorage:
         else:
             id = idFromNumber(args[1]) if isinstance(args[1], int) and not isinstance(args[1], bool) else None
         if id is None:
-            raise TypeError("Storage.entry() requires an entry ID")
+            raise StorageRequestError("Storage.entry() requires an entry ID")
         if len(args) != 2:
             conversationId = idFromNumber(args[0])
             conversation = await self._readConversation(conversationId)
             if conversation is None:
-                raise RuntimeError(f"Unknown conversation: {conversationId}")
-        row = await self._db.get("SELECT record, commit_seq FROM entries WHERE id = ?", id)
+                raise StorageRequestError(f"Unknown conversation: {conversationId}")
+        row = await self._db.get(f"SELECT record, commit_seq FROM {self._schema['tables']['entries']} WHERE id = ?", id)
         if row is None:
             return None
         entry = parseJson(row["record"])
@@ -250,17 +259,17 @@ class SqliteStorage:
     async def _readLatestHeadMarker(self, conversationId: int, atOrBeforeEntryId: int | None) -> dict[str, Any] | None:
         conversation = await self._readConversation(conversationId)
         if conversation is None:
-            raise RuntimeError(f"Unknown conversation: {conversationId}")
+            raise StorageRequestError(f"Unknown conversation: {conversationId}")
         upper = atOrBeforeEntryId
         while True:
             if upper is None:
                 row = await self._db.get(
-                    "SELECT record FROM entries WHERE conversation_id = ? AND head IS NOT NULL ORDER BY id DESC LIMIT 1",
+                    f"SELECT record FROM {self._schema['tables']['entries']} WHERE conversation_id = ? AND head IS NOT NULL ORDER BY id DESC LIMIT 1",
                     conversation["id"],
                 )
             else:
                 row = await self._db.get(
-                    "SELECT record FROM entries WHERE conversation_id = ? AND head IS NOT NULL AND id <= ? ORDER BY id DESC LIMIT 1",
+                    f"SELECT record FROM {self._schema['tables']['entries']} WHERE conversation_id = ? AND head IS NOT NULL AND id <= ? ORDER BY id DESC LIMIT 1",
                     conversation["id"],
                     upper,
                 )
@@ -279,7 +288,7 @@ class SqliteStorage:
             return await self._readEntriesAscending(query, limit, after)
         conversation = await self._readConversation(query["conversationId"])
         if conversation is None:
-            raise RuntimeError(f"Unknown conversation: {query['conversationId']}")
+            raise StorageRequestError(f"Unknown conversation: {query['conversationId']}")
         upper: int | None = query.get("maxEntryId")
         if after is not None:
             upper = min(_MAX_SAFE_INTEGER if upper is None else upper, after - 1)
@@ -294,7 +303,7 @@ class SqliteStorage:
                 clauses.append("id <= ?")
                 params.append(upper)
             params.append(limit + 1 - len(values))
-            rows = await self._db.all(f"SELECT record FROM entries WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ?", *params)
+            rows = await self._db.all(f"SELECT record FROM {self._schema['tables']['entries']} WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ?", *params)
             values.extend(parseJson(row["record"]) for row in rows)
             if len(values) > limit or conversation.get("parent") is None:
                 break
@@ -310,7 +319,7 @@ class SqliteStorage:
         segments: list[tuple[int, int | None]] = []
         conversation = await self._readConversation(query["conversationId"])
         if conversation is None:
-            raise RuntimeError(f"Unknown conversation: {query['conversationId']}")
+            raise StorageRequestError(f"Unknown conversation: {query['conversationId']}")
         upper: int | None = query.get("maxEntryId")
         while True:
             segments.append((conversation["id"], upper))
@@ -335,7 +344,7 @@ class SqliteStorage:
                 clauses.append("id <= ?")
                 params.append(segmentUpper)
             params.append(limit + 1 - len(values))
-            rows = await self._db.all(f"SELECT record FROM entries WHERE {' AND '.join(clauses)} ORDER BY id ASC LIMIT ?", *params)
+            rows = await self._db.all(f"SELECT record FROM {self._schema['tables']['entries']} WHERE {' AND '.join(clauses)} ORDER BY id ASC LIMIT ?", *params)
             values.extend(parseJson(row["record"]) for row in rows)
             if len(values) > limit:
                 break
@@ -344,7 +353,7 @@ class SqliteStorage:
     @eager
     async def task(self, id: int, _context: Context) -> dict[str, Any] | None:
         self._assertOpen()
-        row = await self._db.get("SELECT record FROM tasks WHERE id = ?", id)
+        row = await self._db.get(f"SELECT record FROM {self._schema['tables']['tasks']} WHERE id = ?", id)
         return None if row is None else parseJson(row["record"])
 
     @eager
@@ -371,14 +380,14 @@ class SqliteStorage:
             params.append(1 if query["background"] else 0)
         params.append(limit + 1)
         rows = await self._db.all(
-            f"SELECT record FROM tasks WHERE {' AND '.join(clauses)} ORDER BY id {scan['direction']} LIMIT ?", *params
+            f"SELECT record FROM {self._schema['tables']['tasks']} WHERE {' AND '.join(clauses)} ORDER BY id {scan['direction']} LIMIT ?", *params
         )
         return page([parseJson(row["record"]) for row in rows], limit, start["order"])
 
     @eager
     async def submission(self, id: int, _context: Context) -> dict[str, Any] | None:
         self._assertOpen()
-        row = await self._db.get("SELECT record FROM submissions WHERE id = ?", id)
+        row = await self._db.get(f"SELECT record FROM {self._schema['tables']['submissions']} WHERE id = ?", id)
         return None if row is None else parseJson(row["record"])
 
     @eager
@@ -396,7 +405,7 @@ class SqliteStorage:
             params.append(query["status"])
         params.append(limit + 1)
         rows = await self._db.all(
-            f"SELECT record FROM submissions WHERE {' AND '.join(clauses)} ORDER BY id {scan['direction']} LIMIT ?", *params
+            f"SELECT record FROM {self._schema['tables']['submissions']} WHERE {' AND '.join(clauses)} ORDER BY id {scan['direction']} LIMIT ?", *params
         )
         return page([parseJson(row["record"]) for row in rows], limit, start["order"])
 
@@ -404,7 +413,7 @@ class SqliteStorage:
     async def submissionByRequest(self, conversationId: int, requestId: str, _context: Context) -> dict[str, Any] | None:
         self._assertOpen()
         row = await self._db.get(
-            "SELECT record FROM submissions WHERE conversation_id = ? AND request_id = ?",
+            f"SELECT record FROM {self._schema['tables']['submissions']} WHERE conversation_id = ? AND request_id = ?",
             conversationId,
             encodeIndexedString(requestId),
         )
@@ -415,11 +424,11 @@ class SqliteStorage:
         self._assertOpen()
         parts = addressParts(address)
         if at == "current":
-            sql = """SELECT record FROM documents
+            sql = f"""SELECT record FROM {self._schema['tables']['documents']}
 					WHERE kind = ? AND scope_kind = ? AND owner_id = ? AND family = ? AND key_value = ?
 					AND retired_at IS NULL ORDER BY created_at DESC LIMIT 1"""
         else:
-            sql = """SELECT record FROM documents
+            sql = f"""SELECT record FROM {self._schema['tables']['documents']}
 					WHERE kind = ? AND scope_kind = ? AND owner_id = ? AND family = ? AND key_value = ?
 					AND created_at <= ? AND (retired_at IS NULL OR retired_at > ?)
 					ORDER BY created_at DESC LIMIT 1"""
@@ -451,7 +460,7 @@ class SqliteStorage:
             clauses.extend(["created_at <= ?", "(retired_at IS NULL OR retired_at > ?)"])
             params.extend([query["at"], query["at"]])
         params.append(limit + 1)
-        rows = await self._db.all(f"SELECT record FROM documents WHERE {' AND '.join(clauses)} ORDER BY id LIMIT ?", *params)
+        rows = await self._db.all(f"SELECT record FROM {self._schema['tables']['documents']} WHERE {' AND '.join(clauses)} ORDER BY id LIMIT ?", *params)
         return page([parseJson(row["record"]) for row in rows], limit)
 
     def close(self, _context: Context) -> asyncio.Future[None]:
@@ -485,21 +494,21 @@ class SqliteStorage:
                 self._readsDrained.set_result(None)
 
     async def _readConversation(self, id: int) -> dict[str, Any] | None:
-        row = await self._db.get("SELECT record FROM conversations WHERE id = ?", id)
+        row = await self._db.get(f"SELECT record FROM {self._schema['tables']['conversations']} WHERE id = ?", id)
         return None if row is None else parseJson(row["record"])
 
     async def _materializeDocument(self, executor: SqliteExecutor, id: int, at: DocumentPoint) -> dict[str, Any] | None:
-        row = await executor.get("SELECT record FROM documents WHERE id = ?", id)
+        row = await executor.get(f"SELECT record FROM {self._schema['tables']['documents']} WHERE id = ?", id)
         if row is None:
             return None
         record = parseJson(row["record"])
         if at != "current" and isCurrentOnly(record):
-            raise RuntimeError(f"Document {id} does not retain historical content")
+            raise StorageRequestError(f"Document {id} does not retain historical content")
         if not isAliveAt(record, at):
             return None
         upper = _MAX_SAFE_INTEGER if at == "current" else at
         base = await executor.get(
-            """SELECT seq, kind, version, content FROM document_revisions
+            f"""SELECT seq, kind, version, content FROM {self._schema['tables']['documentRevisions']}
 				WHERE document_id = ? AND kind = 'base' AND seq <= ? ORDER BY seq DESC LIMIT 1""",
             id,
             upper,
@@ -508,7 +517,7 @@ class SqliteStorage:
             raise RuntimeError(f"Document {id} is missing a required base")
         value = parseJson(base["content"])
         tail = await executor.all(
-            """SELECT seq, kind, version, content FROM document_revisions
+            f"""SELECT seq, kind, version, content FROM {self._schema['tables']['documentRevisions']}
 				WHERE document_id = ? AND seq > ? AND seq <= ? ORDER BY seq""",
             id,
             base["seq"],
@@ -536,7 +545,7 @@ class SqliteStorage:
             document = write["type"] in ("document.create", "document.copy")
             table = "document" if document else write["type"]
             id = write["record"]["id"] if document else write["value"]["id"]
-            row = await executor.get("SELECT record_type FROM record_ids WHERE id = ?", id)
+            row = await executor.get(f"SELECT record_type FROM {self._schema['tables']['recordIds']} WHERE id = ?", id)
             existing = None if row is None else row["record_type"]
             earlier = claimed.get(id)
             if table in ("conversation", "entry", "document"):
@@ -588,8 +597,8 @@ class SqliteStorage:
         for id, action in actions.items():
             copy = action.get("copy")
             if copy is not None and copy["id"] in actions:
-                raise StorageRejected(f"Document copy {id} source is changed in the copy batch")
-            row = await executor.get("SELECT record FROM documents WHERE id = ?", id)
+                raise RuntimeError(f"Document copy {id} source is changed in the copy batch")
+            row = await executor.get(f"SELECT record FROM {self._schema['tables']['documents']} WHERE id = ?", id)
             existing = None if row is None else parseJson(row["record"])
             create = action.get("create")
             if create is None and existing is None:
@@ -601,7 +610,7 @@ class SqliteStorage:
             content = action.get("content")
             if content is not None and content["kind"] == "delta":
                 previous = await executor.get(
-                    "SELECT version FROM document_revisions WHERE document_id = ? ORDER BY seq DESC LIMIT 1", id
+                    f"SELECT version FROM {self._schema['tables']['documentRevisions']} WHERE document_id = ? ORDER BY seq DESC LIMIT 1", id
                 )
                 if previous is None:
                     raise RuntimeError(f"Document {id} delta has no base")
@@ -625,7 +634,7 @@ class SqliteStorage:
     async def _currentDocumentId(self, executor: SqliteExecutor, address: dict[str, Any]) -> int | None:
         parts = addressParts(address)
         row = await executor.get(
-            """SELECT id FROM documents
+            f"""SELECT id FROM {self._schema['tables']['documents']}
 				WHERE kind = ? AND scope_kind = ? AND owner_id = ? AND family = ? AND key_value = ? AND retired_at IS NULL
 				LIMIT 1""",
             parts["kind"],
@@ -643,7 +652,7 @@ class SqliteStorage:
             await self._claimId(executor, value["id"], "conversation")
             owner = value.get("owner")
             await executor.run(
-                "INSERT INTO conversations (id, owner_conversation_id, owner_task_id, record) VALUES (?, ?, ?, ?)",
+                f"INSERT INTO {self._schema['tables']['conversations']} (id, owner_conversation_id, owner_task_id, record) VALUES (?, ?, ?, ?)",
                 value["id"],
                 None if owner is None else owner["conversationId"],
                 None if owner is None else owner["taskId"],
@@ -653,7 +662,7 @@ class SqliteStorage:
             value = write["value"]
             await self._claimId(executor, value["id"], "entry")
             await executor.run(
-                "INSERT INTO entries (id, conversation_id, head, commit_seq, record) VALUES (?, ?, ?, ?, ?)",
+                f"INSERT INTO {self._schema['tables']['entries']} (id, conversation_id, head, commit_seq, record) VALUES (?, ?, ?, ?, ?)",
                 value["id"],
                 value["conversationId"],
                 value.get("head"),
@@ -664,7 +673,7 @@ class SqliteStorage:
             value = write["value"]
             await self._claimId(executor, value["id"], "task")
             await executor.run(
-                """INSERT INTO tasks (id, conversation_id, kind, status, abort_requested, background, record)
+                f"""INSERT INTO {self._schema['tables']['tasks']} (id, conversation_id, kind, status, abort_requested, background, record)
 						VALUES (?, ?, ?, ?, ?, ?, ?)
 						ON CONFLICT(id) DO UPDATE SET conversation_id = excluded.conversation_id, kind = excluded.kind,
 						status = excluded.status, abort_requested = excluded.abort_requested,
@@ -681,7 +690,7 @@ class SqliteStorage:
             value = write["value"]
             await self._claimId(executor, value["id"], "submission")
             await executor.run(
-                """INSERT INTO submissions (id, conversation_id, request_id, status, record) VALUES (?, ?, ?, ?, ?)
+                f"""INSERT INTO {self._schema['tables']['submissions']} (id, conversation_id, request_id, status, record) VALUES (?, ?, ?, ?, ?)
 						ON CONFLICT(id) DO UPDATE SET conversation_id = excluded.conversation_id,
 						request_id = excluded.request_id, status = excluded.status, record = excluded.record""",
                 value["id"],
@@ -692,7 +701,7 @@ class SqliteStorage:
             )
 
     async def _claimId(self, executor: SqliteExecutor, id: int, table: str) -> None:
-        await executor.run("INSERT OR IGNORE INTO record_ids (id, record_type) VALUES (?, ?)", id, table)
+        await executor.run(f"INSERT OR IGNORE INTO {self._schema['tables']['recordIds']} (id, record_type) VALUES (?, ?)", id, table)
 
     async def _applyDocumentActions(self, executor: SqliteExecutor, actions: dict[int, dict[str, Any]], seq: Seq) -> None:
         for id, action in actions.items():
@@ -714,17 +723,15 @@ class SqliteStorage:
                     ):
                         raise RuntimeError(f"Fork source document {copy['id']} does not match the copied record")
                     content = {"kind": "base", "version": stored["version"], "value": stored["value"]}
-                except StorageRejected:
-                    raise
                 except Exception as error:
-                    raise StorageRejected(f"Document copy {id} was rejected", {"cause": error}) from error
+                    raise RuntimeError(f"Document copy {id} was rejected") from error
             create = action.get("create")
             if create is not None:
                 record = {**create, "createdAt": seq, **({"retiredAt": seq} if action["retire"] else {})}
                 parts = addressParts(record)
                 await self._claimId(executor, id, "document")
                 await executor.run(
-                    """INSERT INTO documents
+                    f"""INSERT INTO {self._schema['tables']['documents']}
 						(id, kind, family, key_value, scope_kind, owner_id, created_at, retired_at, record)
 						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     id,
@@ -738,16 +745,16 @@ class SqliteStorage:
                     encodeJson(record),
                 )
             else:
-                row = await executor.get("SELECT record FROM documents WHERE id = ?", id)
+                row = await executor.get(f"SELECT record FROM {self._schema['tables']['documents']} WHERE id = ?", id)
                 assert row is not None
                 record = parseJson(row["record"])
 
             if content is not None:
                 if content["kind"] == "base" and isCurrentOnly(record):
-                    await executor.run("DELETE FROM document_revisions WHERE document_id = ?", id)
+                    await executor.run(f"DELETE FROM {self._schema['tables']['documentRevisions']} WHERE document_id = ?", id)
                 encodedContent = encodeJson(content["value"]) if content["kind"] == "base" else encodeJson(content["ops"])
                 await executor.run(
-                    "INSERT INTO document_revisions (document_id, seq, kind, version, content) VALUES (?, ?, ?, ?, ?)",
+                    f"INSERT INTO {self._schema['tables']['documentRevisions']} (document_id, seq, kind, version, content) VALUES (?, ?, ?, ?, ?)",
                     id,
                     seq,
                     content["kind"],
@@ -759,14 +766,14 @@ class SqliteStorage:
                 if create is None:
                     record = {**record, "retiredAt": seq}
                     await executor.run(
-                        "UPDATE documents SET retired_at = ?, record = ? WHERE id = ?", seq, encodeJson(record), id
+                        f"UPDATE {self._schema['tables']['documents']} SET retired_at = ?, record = ? WHERE id = ?", seq, encodeJson(record), id
                     )
                 if isCurrentOnly(record):
-                    await executor.run("DELETE FROM document_revisions WHERE document_id = ?", id)
+                    await executor.run(f"DELETE FROM {self._schema['tables']['documentRevisions']} WHERE document_id = ?", id)
 
     def _assertOpen(self) -> None:
         if self._closed:
             raise RuntimeError("SqliteStorage is closed")
 
 
-__all__ = ["SqliteStorage"]
+__all__ = ["SqliteStorage", "SqliteStorageOptions"]

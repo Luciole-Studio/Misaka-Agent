@@ -43,7 +43,7 @@ async def addTodo(args: dict[str, Any], api: Any, callContext: Any) -> dict[str,
         (await tx.doc(Todos, api.conversationId))["items"].push(args["item"])
 
     await api.commit(change, callContext)
-    return {"content": [{"type": "text", "text": f"added {args['item']}"}]}
+    return {"output": [{"type": "text", "text": f"added {args['item']}"}]}
 
 
 async def renderTodos(input: dict[str, Any], renderContext: Any) -> str | None:

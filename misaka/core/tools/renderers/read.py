@@ -1,4 +1,4 @@
-"""Translated from pi's ``core/tools/renderers/read.ts`` (v1.1.0).
+"""Translated from pi's ``core/tools/renderers/read.ts`` (v1.3.0).
 
 Presentation for the read tool.
 
@@ -25,6 +25,7 @@ from misaka.core.tools import render_utils
 from misaka.core.tools.path_utils import resolveToCwd
 from misaka.core.tools.render_utils import (
     argOf,
+    formatReadLineRange,
     getTextOutput,
     renderToolPath,
     replaceTabs,
@@ -53,20 +54,14 @@ def _rawPathOf(args: Any) -> str | None:
     return render_utils.str(filePath if filePath is not None and filePath is not UNDEFINED else argOf(args, "path"))
 
 
-def formatReadLineRange(args: Any, theme: Any) -> str:
-    # Strict tool schemas make models send null for omitted optional fields.
-    offset = argOf(args, "offset")
-    limit = argOf(args, "limit")
-    if (offset is None or offset is UNDEFINED) and (limit is None or limit is UNDEFINED):
-        return ""
-    startLine = offset if offset is not None and offset is not UNDEFINED else 1
-    endLine = startLine + limit - 1 if limit is not None and limit is not UNDEFINED else ""
-    return theme.fg("warning", f":{jsString(startLine)}{f'-{jsString(endLine)}' if endLine else ''}")
+def styledReadLineRange(args: Any, theme: Any) -> str:
+    range = formatReadLineRange(argOf(args, "offset"), argOf(args, "limit"))
+    return theme.fg("warning", range) if range else ""
 
 
 def formatReadCall(args: Any, theme: Any, cwd: str) -> str:
     pathDisplay = renderToolPath(_rawPathOf(args), theme, cwd)
-    return f"{theme.fg('toolTitle', theme.bold('read'))} {pathDisplay}{formatReadLineRange(args, theme)}"
+    return f"{theme.fg('toolTitle', theme.bold('read'))} {pathDisplay}{styledReadLineRange(args, theme)}"
 
 
 def trimTrailingEmptyLines(lines: list[str]) -> list[str]:
@@ -102,7 +97,7 @@ def formatCompactReadCall(classification: CompactReadClassification, args: Any, 
         return (
             theme.fg("customMessageLabel", "\x1b[1m[skill]\x1b[22m ")
             + theme.fg("customMessageText", classification.label)
-            + formatReadLineRange(args, theme)
+            + styledReadLineRange(args, theme)
             + expandHint
         )
 
@@ -110,7 +105,7 @@ def formatCompactReadCall(classification: CompactReadClassification, args: Any, 
         theme.fg("toolTitle", theme.bold(f"read {classification.kind}"))
         + " "
         + theme.fg("accent", classification.label)
-        + formatReadLineRange(args, theme)
+        + styledReadLineRange(args, theme)
         + expandHint
     )
 

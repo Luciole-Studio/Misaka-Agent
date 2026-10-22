@@ -202,6 +202,186 @@ async def test_leads_with_a_system_message_that_only_user_messages_precede_and_k
     assert [describeMessage(message) for message in view["messages"]] == ["system:preamble", "user:handoff"]
 
 
+# #10904
+async def test_leads_with_the_baseline_after_a_compaction_that_keeps_assistant_messages():
+    s = await setup()
+    await s.message(user("old"))
+    kept = await s.message(user("kept"))
+    await s.message(assistant("calling", calls=["a"]))
+    await s.message(toolResult("a"))
+    await s.message(assistant("answer"))
+    await s.append({"kind": "summary", "head": kept["id"], "model": [user("summary")]})
+    await s.message(user("next"))
+    await s.message(system({"preamble": "Baseline."}), "pi.system")
+    view = await s.root.context(context)
+    assert [describeMessage(message) for message in view["messages"]] == [
+        "system:preamble",
+        "user:summary",
+        "user:kept",
+        "assistant:calling",
+        "result:a:result a",
+        "assistant:answer",
+        "user:next",
+    ]
+
+    # Later system messages stay in place.
+    await s.message(assistant("done"))
+    await s.message(system({"cwd": "/repo"}), "pi.system")
+    view = await s.root.context(context)
+    described = [describeMessage(message) for message in view["messages"]]
+    assert described[:2] == ["system:preamble", "user:summary"]
+    assert described[-2:] == ["assistant:done", "system:cwd"]
+
+
+# #10904
+async def test_leads_with_a_baseline_written_after_the_first_answers_when_the_agent_had_no_section_or_tool_before():
+    s = await setup()
+    await s.message(user("first"), "pi.user")
+    await s.message(assistant("answer"), "pi.assistant")
+    await s.message(user("next"), "pi.user")
+    await s.message(system({"plan": "Plan."}), "pi.system")
+    view = await s.root.context(context)
+    assert [describeMessage(message) for message in view["messages"]] == [
+        "system:plan",
+        "user:first",
+        "assistant:answer",
+        "user:next",
+    ]
+
+
+# #10904
+async def test_keeps_system_messages_other_than_the_baseline_in_place_once_an_assistant_message_precedes_them():
+    s = await setup()
+    await s.message(user("first"))
+    await s.message(assistant("answer"))
+    # Another kind's system message is positional; the baseline after it is not the first system message.
+    await s.message(system({"note": "From here on."}), "host.note")
+    await s.message(system({"preamble": "Baseline."}), "pi.system")
+    view = await s.root.context(context)
+    assert [describeMessage(message) for message in view["messages"]] == [
+        "user:first",
+        "assistant:answer",
+        "system:note",
+        "system:preamble",
+    ]
+
+    # After a compaction that keeps the other kind's system message, the new baseline does not move ahead of it.
+    kept = await s.message(user("kept"))
+    await s.message(assistant("kept answer"))
+    await s.message(system({"mode": "plan"}), "host.note")
+    await s.append({"kind": "summary", "head": kept["id"], "model": [user("summary")]})
+    await s.message(user("next"))
+    await s.message(system({"preamble": "Baseline."}), "pi.system")
+    view = await s.root.context(context)
+    assert [describeMessage(message) for message in view["messages"]] == [
+        "user:summary",
+        "user:kept",
+        "assistant:kept answer",
+        "system:mode",
+        "user:next",
+        "system:preamble",
+    ]
+
+
+# #10904
+async def test_does_not_lead_with_a_first_system_entry_written_after_another_system_message_even_once_that_is_omitted():
+    s = await setup()
+    host = await s.message(system({"legacy": "Use the legacy format."}), "host.system")
+    await s.message(user("first"))
+    await s.message(assistant("answer"))
+    # Generation wrote this entry against the host's message: it only removes a section, so it is no baseline.
+    await s.message(system({"legacy": None}), "pi.system")
+    await s.append({"kind": "edit", "edits": [{"target": host["id"], "action": "omit"}]})
+    view = await s.root.context(context)
+    assert [describeMessage(message) for message in view["messages"]] == [
+        "user:first",
+        "assistant:answer",
+        "system:legacy",
+    ]
+
+    # The same holds for a system message an edit put before it.
+    other = await setup()
+    first = await other.message(user("first"))
+    replaced = {"target": first["id"], "action": "replace", "messages": [user("first"), system({"note": "Note."})]}
+    await other.append({"kind": "edit", "edits": [replaced]})
+    await other.message(assistant("answer"))
+    await other.message(system({"note": None}), "pi.system")
+    await other.append({"kind": "edit", "edits": [{"target": first["id"], "action": "replace", "messages": [user("first")]}]})
+    view = await other.root.context(context)
+    assert [describeMessage(message) for message in view["messages"]] == [
+        "user:first",
+        "assistant:answer",
+        "system:note",
+    ]
+
+
+# #10904
+async def test_does_not_lead_with_a_retained_edited_or_later_system_entry_in_place_of_the_baseline():
+    s = await setup()
+    kept = await s.message(user("kept"))
+    await s.message(assistant("answer"))
+    retained = await s.message(system({"cwd": "/repo"}), "pi.system")
+    # Before generation writes the baseline after the head marker, a retained system entry stays in place.
+    await s.append({"kind": "summary", "head": kept["id"], "model": [user("summary")]})
+    await s.message(user("next"))
+    view = await s.root.context(context)
+    assert [describeMessage(message) for message in view["messages"]] == [
+        "user:summary",
+        "user:kept",
+        "assistant:answer",
+        "system:cwd",
+        "user:next",
+    ]
+
+    # The baseline omits the retained entry, as generation writes it, and leads.
+    baseline = await s.append(
+        {
+            "kind": "pi.system",
+            "model": [system({"preamble": "Baseline."})],
+            "edits": [{"target": retained["id"], "action": "omit"}],
+        }
+    )
+    await s.message(assistant("done"))
+    await s.message(system({"preamble": None}), "pi.system")
+    view = await s.root.context(context)
+    assert [describeMessage(message) for message in view["messages"]] == [
+        "system:preamble",
+        "user:summary",
+        "user:kept",
+        "assistant:answer",
+        "user:next",
+        "assistant:done",
+        "system:preamble",
+    ]
+
+    # An omitted baseline leaves no message to lead; the delta after it is not a baseline and stays in place.
+    await s.append({"kind": "edit", "edits": [{"target": baseline["id"], "action": "omit"}]})
+    view = await s.root.context(context)
+    assert [describeMessage(message) for message in view["messages"]] == [
+        "user:summary",
+        "user:kept",
+        "assistant:answer",
+        "user:next",
+        "assistant:done",
+        "system:preamble",
+    ]
+
+    # A replacement of the baseline is not one either.
+    await s.append(
+        {"kind": "edit", "edits": [{"target": baseline["id"], "action": "replace", "messages": [system({"other": "Other."})]}]}
+    )
+    view = await s.root.context(context)
+    assert [describeMessage(message) for message in view["messages"]] == [
+        "user:summary",
+        "user:kept",
+        "assistant:answer",
+        "user:next",
+        "system:other",
+        "assistant:done",
+        "system:preamble",
+    ]
+
+
 async def test_synthesizes_missing_tool_results_after_a_fork_and_drops_results_cut_from_their_call():
     s = await setup()
     await s.message(user("go"))
@@ -456,8 +636,10 @@ async def test_derives_the_same_view_from_extended_reads_as_from_whole_reads():
                 id = calls.pop(random(len(calls))) if matched else f"stray{nextId()}"
                 return {"kind": "message", "model": [toolResult(id)]}
             if pick < 9:
-                count("system")
-                return {"kind": "message", "model": [system({"s": f"v{nextId()}"})]}
+                # `pi.system` entries can be the baseline that leads the context (#10904).
+                kind = "pi.system" if random(2) == 0 else "message"
+                count("baseline system" if kind == "pi.system" else "system")
+                return {"kind": kind, "model": [system({"s": f"v{nextId()}"})]}
             if pick < 10:
                 count("note")
                 return {"kind": "note", "data": {"n": nextId()}}
@@ -484,7 +666,16 @@ async def test_derives_the_same_view_from_extended_reads_as_from_whole_reads():
 
         for step in range(150):
             await append(root.id)
-            assert await runtime.context(root.id, taskContext) == await root.context(taskContext)
+            whole = await root.context(taskContext)
+            assert await runtime.context(root.id, taskContext) == whole
+            contributed = [message for messages in whole["contributions"] for message in messages]
+            first = next((index for index, message in enumerate(contributed) if message["role"] == "system"), -1)
+            if (
+                first > 0
+                and whole["messages"][0] is contributed[first]
+                and any(message["role"] == "assistant" for message in contributed[:first])
+            ):
+                count("baseline past assistant")
             if step % 10 == 9:
                 # Overlapping reads, one with an earlier cutoff, share the kept range.
                 at = written[random(len(written))]["id"]
@@ -505,9 +696,98 @@ async def test_derives_the_same_view_from_extended_reads_as_from_whole_reads():
     s.harness.resume()
     id = await s.harness.commit(lambda tx: tx.createTask(Steps, {}, conversationTask(root)), context)
     assert (await s.harness.waitForTask(id, context))["state"]["outcome"] == DONE["outcome"]
-    categories = ["user", "assistant", "aborted", "error", "deferred", "result", "stray result", "system", "note"]
+    categories = [
+        "user",
+        "assistant",
+        "aborted",
+        "error",
+        "deferred",
+        "result",
+        "stray result",
+        "system",
+        "baseline system",
+        "baseline past assistant",
+        "note",
+    ]
     for category in [*categories, "omit", "replace", "head"]:
         assert seen.get(category, 0) > 0, category
+    await s.harness.close(context)
+
+
+# #10904
+async def test_finds_the_baseline_among_the_entries_an_extended_read_adds():
+    s = await countingSetup()
+    root, first, storage = s.root, s.first, s.storage
+
+    async def run(_task: Any, runtime: Any, taskContext: Any) -> None:
+        async def append(conversationId: int, draft: dict[str, Any]) -> None:
+            async def change(tx: Any, _current: Any) -> None:
+                await tx.appendEntry(conversationId, draft)
+
+            await runtime.commit(change, taskContext)
+
+        async def read(conversation: Any) -> SimpleNamespace:
+            before = storage.rows
+            view = await runtime.context(conversation.id, taskContext)
+            rows = storage.rows - before
+            assert view == await conversation.context(taskContext)
+            return SimpleNamespace(messages=[describeMessage(message) for message in view["messages"]], rows=rows)
+
+        def ownerless(conversation: Any) -> Any:
+            return conversation.fork(first["id"], {"ownership": {"kind": "ownerless"}}, taskContext)
+
+        # The cached range has answers and no system message; the baseline arrives in a later read.
+        assert (await read(root)).messages[0] == "user:first"
+        await append(root.id, {"kind": "pi.system", "model": [system({"plan": "Plan."})]})
+        read2 = await read(root)
+        # One bounds probe and the added entry: the range was extended, not derived again.
+        assert read2.rows == 2
+        assert read2.messages[:3] == ["system:plan", "user:first", "assistant:old 0"]
+
+        # A system message the cached range already has keeps a later first `pi.system` entry in place.
+        fork = await ownerless(root)
+        await append(fork.id, {"kind": "message", "model": [assistant("answer")]})
+        await append(fork.id, {"kind": "host.system", "model": [system({"note": "Note."})]})
+        assert (await read(fork)).messages == ["user:first", "assistant:answer", "system:note"]
+        await append(fork.id, {"kind": "pi.system", "model": [system({"note": None})]})
+        read2 = await read(fork)
+        assert read2.rows == 2
+        assert read2.messages == ["user:first", "assistant:answer", "system:note", "system:note"]
+
+        # An omitted system message still rules out a later baseline; the extended read keeps that.
+        omitted = await ownerless(root)
+        await append(omitted.id, {"kind": "message", "model": [assistant("answer")]})
+        host: dict[str, Any] = {}
+
+        async def hostChange(tx: Any, _current: Any) -> None:
+            host["entry"] = await tx.appendEntry(
+                omitted.id, {"kind": "host.system", "model": [system({"legacy": "Legacy."})]}
+            )
+
+        await runtime.commit(hostChange, taskContext)
+        await append(omitted.id, {"kind": "edit", "edits": [{"target": host["entry"]["id"], "action": "omit"}]})
+        assert (await read(omitted)).messages == ["user:first", "assistant:answer"]
+        await append(omitted.id, {"kind": "pi.system", "model": [system({"legacy": None})]})
+        read2 = await read(omitted)
+        assert read2.rows == 2
+        assert read2.messages == ["user:first", "assistant:answer", "system:legacy"]
+
+        # A first `pi.system` entry without a system message leaves no baseline for a later one to take.
+        empty = await ownerless(root)
+        await append(empty.id, {"kind": "pi.system"})
+        await append(empty.id, {"kind": "message", "model": [assistant("answer")]})
+        assert (await read(empty)).messages == ["user:first", "assistant:answer"]
+        await append(empty.id, {"kind": "pi.system", "model": [system({"s": "Delta."})]})
+        read2 = await read(empty)
+        assert read2.rows == 2
+        assert read2.messages == ["user:first", "assistant:answer", "system:s"]
+        await runtime.commit(lambda tx, current: DONE, taskContext)
+
+    Steps = oneRun("test.context-baseline", run)
+    addTask(s.registry, Steps)
+    s.harness.resume()
+    id = await s.harness.commit(lambda tx: tx.createTask(Steps, {}, conversationTask(root)), context)
+    assert (await s.harness.waitForTask(id, context))["state"]["outcome"] == DONE["outcome"]
     await s.harness.close(context)
 
 

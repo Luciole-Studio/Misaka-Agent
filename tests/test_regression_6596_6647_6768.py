@@ -28,7 +28,7 @@ from misaka.ai.utils.event_stream import createAssistantMessageEventStream
 from misaka.utils import shell
 from misaka.utils.shell import killProcessTree
 from misaka.utils.values import read_field
-from tests.experimental_support import flush
+from tests.fake_timers import flush
 from tests.suite_harness import createHarness
 
 # --- issue #6596 taskkill spawn failures --------------------------------------------------------

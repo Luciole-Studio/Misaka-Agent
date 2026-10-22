@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from misaka.codemode.declarations import renderToolOutputType
 from misaka.config import home
 from misaka.core.auth_storage import InMemoryAuthStorageBackend
 from misaka.core.tools.truncate import truncateMiddle
@@ -28,7 +29,11 @@ from misaka.extensions.mcp.runtime import (
     McpServerLog,
     createDefaultTransport,
 )
-from misaka.extensions.mcp.tools import convertMcpResult, createMcpToolName
+from misaka.extensions.mcp.tools import (
+    convertMcpResult,
+    createMcpResultSchema,
+    createMcpToolName,
+)
 from misaka.mcp import (
     LATEST_PROTOCOL_VERSION,
     McpAuthRequiredError,
@@ -310,6 +315,59 @@ def test_creates_provider_safe_tool_names():
     assert createMcpToolName("s", "a\U0001f600b") == "mcp__s__a__b"
 
 
+def test_declares_the_call_tool_result_scripts_receive_keeping_references_in_the_servers_output_schema():
+    content = (
+        'content: Array<{ data?: string; mimeType?: string; text?: string; type: "text" | "image" | "audio" | '
+        '"resource_link" | "resource"; [key: string]: unknown; }>; isError?: boolean;'
+    )
+    # #10416: without an output schema, structured content may be any JSON value.
+    assert renderToolOutputType(createMcpResultSchema(None)) == f"{{ {content} structuredContent?: unknown; [key: string]: unknown; }}"
+
+    hit = {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}
+    schema = createMcpResultSchema({
+        "type": "object",
+        "properties": {
+            "hits": {"type": "array", "items": {"$ref": "#/$defs/Hit~1v1"}},
+            "again": {"$ref": "#/properties/hits"},
+            "children": {"type": "array", "items": {"$ref": "#"}},
+            # A property named like a keyword whose value is data.
+            "default": {"$ref": "#/definitions/Hit"},
+            "remote": {"$ref": "https://example.com/schema.json"},
+        },
+        "required": ["hits"],
+        "$defs": {"Hit/v1": {**hit, "default": {"$ref": "#/stays"}}},
+        "definitions": {"Hit": hit},
+    })
+    # Data that looks like a reference is kept as is.
+    assert schema["properties"]["structuredContent"]["$defs"]["Hit/v1"]["default"] == {"$ref": "#/stays"}
+    assert renderToolOutputType(schema) == (
+        f"{{ {content} structuredContent?: {{ again?: Array<{{ id: string; }}>; children?: Array<{{ again?: "
+        "Array<{ id: string; }>; children?: Array<unknown>; default?: { id: string; }; hits: Array<{ id: string; }>; "
+        "remote?: unknown; }>; default?: { id: string; }; hits: Array<{ id: string; }>; remote?: unknown; }; "
+        "[key: string]: unknown; }"
+    )
+
+
+def test_relocates_only_local_references_and_leaves_data_and_names_alone():
+    """MISAKA adaptation: ``relocateSchema`` on Python values -- lists map item by item, other non-dicts pass
+    through, map keywords keep their keys, data keywords are copied as they are."""
+    from misaka.extensions.mcp.tools import relocateSchema
+
+    pointer = "#/properties/structuredContent"
+    assert relocateSchema({"$ref": "#"}, pointer) == {"$ref": pointer}
+    assert relocateSchema([{"$ref": "#/a"}, 1, None], pointer) == [{"$ref": f"{pointer}/a"}, 1, None]
+    assert relocateSchema({"$ref": "other.json#/a"}, pointer) == {"$ref": "other.json#/a"}
+    assert relocateSchema({"enum": [{"$ref": "#"}], "examples": [{"$ref": "#"}]}, pointer) == {
+        "enum": [{"$ref": "#"}],
+        "examples": [{"$ref": "#"}],
+    }
+    assert relocateSchema({"properties": {"$ref": {"$ref": "#/x"}}}, pointer) == {
+        "properties": {"$ref": {"$ref": f"{pointer}/x"}}
+    }
+    # A map keyword whose value is not an object is a schema like any other.
+    assert relocateSchema({"properties": [{"$ref": "#"}]}, pointer) == {"properties": [{"$ref": pointer}]}
+
+
 async def test_converts_results_passing_the_call_tool_result_to_scripts_and_flagging_errors():
     blocks = [
         {"type": "resource_link", "uri": "file:///a", "name": "a"},
@@ -331,6 +389,11 @@ async def test_converts_results_passing_the_call_tool_result_to_scripts_and_flag
 
     empty = await convertMcpResult("docs", "t", {"content": [], "structuredContent": {"n": 1}})
     assert dumped(empty.content) == [{"type": "text", "text": '{\n  "n": 1\n}'}]
+    # #10416: array structured content reaches the model as JSON and scripts as sent.
+    listed = await convertMcpResult("docs", "t", {"content": [], "structuredContent": [{"id": 1}]})
+    assert dumped(listed.content) == [{"type": "text", "text": '[\n  {\n    "id": 1\n  }\n]'}]
+    assert listed.details == {"server": "docs", "tool": "t"}
+    assert listed.structuredContent == {"content": [], "structuredContent": [{"id": 1}]}
 
     failed = await convertMcpResult("docs", "t", {"content": [{"type": "text", "text": "nope"}], "isError": True})
     assert dumped(failed.content) == [{"type": "text", "text": "nope"}]
@@ -474,7 +537,9 @@ class Transports:
         self.servers: list = []
         self.tasks: set[asyncio.Task] = set()
 
-    def create(self, *, expireFirstCall: bool = False, methods: list[str] | None = None, noTools: bool = False):
+    def create(
+        self, *, expireFirstCall: bool = False, methods: list[str] | None = None, noTools: bool = False, resources: bool = False
+    ):
         pair = createInMemoryTransportPair()
         self.servers.append(pair["server"])
 
@@ -489,7 +554,10 @@ class Transports:
                     "id": message["id"],
                     "result": {
                         "protocolVersion": LATEST_PROTOCOL_VERSION,
-                        "capabilities": {"prompts": {}} if noTools else {"tools": {}},
+                        "capabilities": {
+                            **({"prompts": {}} if noTools else {"tools": {}}),
+                            **({"resources": {}} if resources else {}),
+                        },
                         "serverInfo": {"name": "fake", "version": "1.0.0"},
                     },
                 }
@@ -511,10 +579,10 @@ class Transports:
             send = pair["client"].send
 
             # Simulates the HTTP transport's 404 for a session the server no longer knows.
-            async def expiring(message):
+            async def expiring(message, options=None):
                 if "method" in message and message["method"] == "tools/call":
                     raise McpSessionExpiredError("gone")
-                return await send(message)
+                return await send(message, options)
 
             pair["client"].send = expiring
         return pair["client"]
@@ -645,7 +713,7 @@ HTTP_ENTRY = {"name": "fake", "config": {"url": "http://unused.invalid", "header
 def failing(transports, status: int, message: str):
     transport = transports.create()
 
-    async def send(_message):
+    async def send(_message, _options=None):
         raise McpHttpError(status, message)
 
     transport.send = send
@@ -724,12 +792,12 @@ async def test_retries_resource_reads_but_not_tool_calls_after_a_transient_http_
     failedMethods: set[str] = set()
 
     # The first read and the first call fail with 502.
-    async def flaky(message):
+    async def flaky(message, options=None):
         method = message.get("method", "") if "method" in message else ""
         if method in ("resources/read", "tools/call") and method not in failedMethods:
             failedMethods.add(method)
             raise McpHttpError(502, "MCP HTTP request failed with status 502")
-        return await send(message)
+        return await send(message, options)
 
     transport.send = flaky
     connection, _opened = connect(STDIO_ENTRY, [lambda: transport])
@@ -743,7 +811,7 @@ async def test_asks_oauth_servers_that_keep_rejecting_requests_for_a_new_sign_in
     def rejecting():
         transport = transports.create()
 
-        async def send(_message):
+        async def send(_message, _options=None):
             raise McpAuthRequiredError(Response(None, status=401))
 
         transport.send = send
@@ -831,6 +899,17 @@ async def test_resolves_the_oauth_client_secret_lazily(transports):
     assert await connection.callTool("echo", {}, {}) == {"content": [{"type": "text", "text": "ok"}]}
     with pytest.raises(Exception, match="oauth.clientSecret"):
         connection.oauthSettings()
+    await connection.close()
+
+
+# #10526: listing every resource can take long (a large drive), so connecting must not wait for it.
+async def test_connects_to_servers_with_resources_without_listing_them(transports):
+    methods: list[str] = []
+    connection, _opened = connect(STDIO_ENTRY, [lambda: transports.create(resources=True, methods=methods)])
+    await connection.getClient()
+    assert connection.state == "connected"
+    assert connection.hasResources is True
+    assert methods == ["initialize", "tools/list"]
     await connection.close()
 
 

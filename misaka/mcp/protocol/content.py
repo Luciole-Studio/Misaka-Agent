@@ -90,7 +90,8 @@ CallToolResult = TypedDict(
     "CallToolResult",
     {
         "content": list[ContentBlock],
-        "structuredContent": NotRequired[dict[str, Any]],
+        # Any JSON value, including arrays and `null` (MCP 2026-07-28; earlier revisions allowed only objects).
+        "structuredContent": NotRequired[Any],
         "isError": NotRequired[bool],
         "_meta": NotRequired[dict[str, Any]],
     },

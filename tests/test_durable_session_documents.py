@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from misaka.durable.documents import defineDoc, defineDocFamily
+from misaka.durable.errors import SessionFailed
 from misaka.utils.js import UNDEFINED
 from tests.chord_helpers import matches
 from tests.durable_support import (
@@ -505,7 +506,7 @@ class TestSessionDocumentTransactions:
         await session.commit(next_, context)
         assert (await session.snapshot(CounterDoc, context))["count"] == 3
 
-    async def test_poisons_the_session_after_an_uncertain_storage_failure_and_publishes_nothing(self):
+    async def test_fails_the_session_after_a_storage_failure_and_publishes_nothing(self):
         ts, conversationId = await setupLive()
         session, storage, publications = ts.session, ts.storage, ts.publications
         await flush()
@@ -521,9 +522,9 @@ class TestSessionDocumentTransactions:
         await flush()
         assert len(publications) == published
         assert "message" not in before
-        with throws("poisoned"):
+        with pytest.raises(SessionFailed):
             await session.snapshot(LiveDoc, conversationId, context)
-        with throws("poisoned"):
+        with pytest.raises(SessionFailed):
             await session.commit(lambda tx: None, context)
         await session.close(context)
 

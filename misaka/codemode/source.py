@@ -100,13 +100,23 @@ def _parseOptions(directive: str) -> CodemodeSourceOptions:
 
 def parseCodemodeSource(input: str) -> ParsedCodemodeSource:
     """Split an optional first-line ``// @options: {...}`` from the script. Raises
-    :class:`CodemodeSourceError` for empty input and invalid options."""
+    :class:`CodemodeSourceError` for empty input, invalid options, and an options line that is not the
+    first line, which would otherwise be ignored without notice."""
     if jsTrim(input) == "":
         raise CodemodeSourceError(
             'Expected JavaScript source text (non-empty). Provide JS only, optionally with a first line `// @options: {"max_output_tokens": 1000}`.'
         )
+    lines = input.split("\n")
+    misplaced = next(
+        (index for index, line in enumerate(lines) if index > 0 and jsTrimStart(line).startswith(CODEMODE_OPTIONS_PREFIX)),
+        -1,
+    )
+    if misplaced != -1:
+        raise CodemodeSourceError(
+            f"The {CODEMODE_OPTIONS_PREFIX} line must be the first line of the input; found one on line {misplaced + 1}"
+        )
     newline = input.find("\n")
-    firstLine = re.sub(r"\r$", "", input if newline == -1 else input[:newline])
+    firstLine = re.sub(r"\r$", "", lines[0])
     trimmed = jsTrimStart(firstLine)
     if not trimmed.startswith(CODEMODE_OPTIONS_PREFIX):
         return {"code": input, "options": {}}

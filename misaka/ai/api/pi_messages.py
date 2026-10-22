@@ -435,15 +435,12 @@ def _resolveCacheRetention(cacheRetention: CacheRetention | None = None, env: Pr
 
 
 def _serializeContext(context: TranscriptContext | Mapping[str, Any]) -> Any:
-    """MISAKA fork: the context as ``JSON.stringify`` would write the upstream objects -- absent fields left out, a
-    tool's pydantic ``parameters`` class as its JSON schema, and the native ``argumentsError`` kept out of the wire."""
+    """MISAKA fork: the context as ``JSON.stringify`` would write the upstream objects -- absent fields left out and a
+    tool's pydantic ``parameters`` class as its JSON schema. A tool call's ``argumentsError`` travels like any field,
+    as upstream sends ``context`` whole."""
     if not isinstance(context, BaseModel):
         return context
-    payload = context.model_dump(
-        mode="json",
-        exclude_none=True,
-        exclude={"messages": {"__all__": {"content": {"__all__": {"argumentsError"}}, "toolsAdded": True}}},
-    )
+    payload = context.model_dump(mode="json", exclude_none=True, exclude={"messages": {"__all__": {"toolsAdded": True}}})
     for message, dumped in zip(context.messages, payload["messages"], strict=True):
         tools = getattr(message, "toolsAdded", None)
         # `is not None`: `JSON.stringify` writes `"toolsAdded":[]` for an empty list.

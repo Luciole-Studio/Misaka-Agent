@@ -743,6 +743,56 @@ def test_shares_immutable_operation_placements_with_the_materialized_candidate()
 # -- piece arrays --------------------------------------------------------------------------------
 
 
+def test_emits_one_insert_for_an_append_to_a_long_array():
+    tracker = track({"values": list(range(10_000))})
+    change = tracker.beginChange()
+    change.state["values"].push(-1)
+    prepared = change.prepare()
+    assert prepared.ops == [["p", ["values"], 10_000, 0, [-1]]]
+    tracker.adopt(prepared)
+    assert tracker.value["values"][-1] == -1
+    assert len(tracker.value["values"]) == 10_001
+
+
+def test_emits_removals_from_the_end_backwards_then_inserts_when_kept_elements_keep_their_order():
+    def mutate(values):
+        values.shift()  # gap before the first kept element
+        values.splice(1, 2, 20)  # gap between kept elements, with an insert
+        values.splice(5, 1)  # another gap
+        values.pop()  # gap after the last kept element
+        values.push(30)
+
+    tracker = track({"values": list(range(10))})
+    values = settle(tracker, lambda draft: mutate(draft["values"]))
+    assert values["values"] == [1, 20, 4, 5, 6, 8, 30]
+    change = track({"values": list(range(10))}).beginChange()
+    mutate(change.state["values"])
+    assert change.prepare().ops == [
+        ["p", ["values"], 9, 1, []],
+        ["p", ["values"], 7, 1, []],
+        ["p", ["values"], 2, 2, []],
+        ["p", ["values"], 0, 1, []],
+        ["p", ["values"], 1, 0, [20]],
+        ["p", ["values"], 6, 0, [30]],
+    ]
+
+
+def test_emits_a_permutation_when_kept_elements_change_order():
+    def oddLast(left, right):
+        return (left % 2) - (right % 2) or left - right
+
+    for mutate, expected in (
+        (lambda values: values.reverse(), [4, 3, 2, 1, 0]),
+        (lambda values: values.sort(oddLast), [0, 2, 4, 1, 3]),
+    ):
+        tracker = track({"values": [0, 1, 2, 3, 4]})
+        change = tracker.beginChange()
+        mutate(change.state["values"])
+        prepared = change.prepare()
+        assert any(operation[0] == "m" for operation in prepared.ops)
+        assert replay(tracker.value, prepared.ops) == {"values": expected}
+
+
 def test_keeps_adoption_independent_from_mutable_detached_permutation_metadata():
     tracker = track({"values": [3, 1, 2]})
     change = tracker.beginChange()

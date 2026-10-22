@@ -1,4 +1,4 @@
-"""Translated from pi's ``modes/interactive/components/tree-selector.ts`` (v1.1.0)."""
+"""Translated from pi's ``modes/interactive/components/tree-selector.ts`` (v1.3.0)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from misaka.core.session_manager import SessionTreeNode
+from misaka.core.tools.render_utils import formatReadLineRange
 from misaka.modes.interactive.theme.theme import theme
 from misaka.ui.tui import (
     Container,
@@ -907,15 +908,7 @@ class TreeList:
         match name:
             case "read":
                 path = shortenPath(jsString(args.get("path") or args.get("file_path") or ""))
-                offset = args.get("offset", UNDEFINED)
-                limit = args.get("limit", UNDEFINED)
-                display = path
-                if offset is not UNDEFINED or limit is not UNDEFINED:
-                    start = offset if offset is not UNDEFINED and offset is not None else 1
-                    # JS adds `null` as 0.
-                    end = start + (limit or 0) - 1 if limit is not UNDEFINED else ""
-                    display += f":{jsString(start)}{f'-{jsString(end)}' if end else ''}"
-                return f"[read: {display}]"
+                return f"[read: {path}{formatReadLineRange(args.get('offset', UNDEFINED), args.get('limit', UNDEFINED))}]"
             case "write":
                 path = shortenPath(jsString(args.get("path") or args.get("file_path") or ""))
                 return f"[write: {path}]"

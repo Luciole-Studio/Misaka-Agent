@@ -54,7 +54,7 @@ lists them all.
 | `misaka mcp add SERVER [-l] --url URL` | add a Streamable HTTP MCP server; `misaka mcp --help` lists the options |
 | `misaka mcp remove SERVER [-l]` | remove a server |
 | `misaka mcp list [--json]` | connect the servers of Last Order's file and the project's and show their state, tools and errors; exits 1 while anything is wrong |
-| `misaka mcp login SERVER [--timeout SECONDS]` / `logout SERVER` | sign in to an OAuth server through the browser, or delete the stored sign-in |
+| `misaka mcp login SERVER [--timeout SECONDS]` / `logout SERVER` | sign in to an OAuth server through the browser, or delete the stored sign-in. `--timeout` limits the whole sign-in, including the requests to the server's sign-in service (default 300 seconds) |
 | `misaka mcp --as SISTER ...` | any of the above for that Sister: her `mcp.json` and her sign-ins |
 
 ### Documents and the web
@@ -178,7 +178,7 @@ Available in Last Order's window.
 | `/copy` | copy the last reply |
 | `/export [PATH]` | save the conversation as HTML, or as `.jsonl` |
 | `/import PATH.jsonl` | load a saved conversation |
-| `/share` | share the conversation as a secret GitHub gist (needs the `gh` tool) |
+| `/share` | upload the conversation: as a Radius artifact, visible to your Radius organization, when you are signed in to Radius (`/login radius`); otherwise as a secret GitHub gist (needs the `gh` tool). The `sessionShareDestination` setting (or `/settings`) can force either one. Look the conversation over first: it holds your prompts, tool output and file contents |
 
 ### The project
 
@@ -205,7 +205,7 @@ Available in Last Order's window.
 | `/settings` | the settings menu |
 | `/hotkeys` | every keyboard shortcut |
 | `/reload` | reload keybindings, extensions, skills, prompts and themes, and turn on tools newly added to `defaultTools` |
-| `/debug` | write the screen and the conversation to a file, for a bug report |
+| `/debug` | write the screen's text and the conversation to a file, for a bug report |
 | `/lcm-settings [on\|off\|status\|check]` | turn automatic recall from earlier conversations on or off |
 | `/quit` | leave |
 
@@ -247,4 +247,20 @@ A message that starts with `//` is not treated as a command; it goes to the agen
 Windows and WSL get the alternatives because their terminals keep Ctrl+V, Alt+Enter and Shift+Ctrl+P
 for themselves. `/hotkeys` shows the complete list as it applies on this machine, including your own
 changes. To change a key, edit
-`~/.misaka/keybindings.json` and run `/reload`.
+`~/.misaka/keybindings.json` and run `/reload`. Map each action to one key or a list of keys:
+
+```json
+{
+  "app.session.new": "ctrl+shift+n",
+  "app.session.tree": ["ctrl+shift+t", "alt+shift+t"]
+}
+```
+
+A key is written as `/hotkeys` shows it but in lower case (`pageUp` and `pageDown` aside), with any
+of `ctrl+`, `shift+`, `alt+` and `super+` in front (on macOS `/hotkeys` says Option; write it `alt+`): `ctrl+x`, `shift+tab`, `alt+enter`, `f5`, `+`.
+An action whose key, or one of whose keys, MISAKA cannot read is ignored and keeps its default:
+`Ctrl+X` (capital letters), `control+x`, `ctrl+ctrl+x`, an unknown key name, or text that is not a
+key. Earlier versions accepted `Ctrl+X`; write `ctrl+x` instead.
+A `"$schema"` key is allowed and ignored, so an editor can check the file as you type and complete
+the action names: `keybindings.schema.json` lists every action with what it does (see
+[Schemas for your editor](configuration.md#schemas-for-your-editor)).

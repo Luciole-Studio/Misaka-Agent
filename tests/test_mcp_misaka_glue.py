@@ -126,7 +126,8 @@ def test_a_sister_sees_only_her_own_mcp_json(monkeypatch, tmp_path):
 def test_last_order_reads_her_own_profile_and_the_home_mcp_json_reaches_no_one(monkeypatch, tmp_path):
     """Each role's profile is a Hermes profile for MCP: Last Order's `mcp.json` is in `profiles/last_order`, a
     session without a role reads hers, and the home keeps none."""
-    home = Path(os.environ["MISAKA_HOME"])
+    # Resolved, as `config.home` resolves it: on macOS the test home under /tmp is really under /private/tmp.
+    home = Path(os.environ["MISAKA_HOME"]).resolve()
     _writeConfig(home / "mcp.json", {"stray": {"command": "home-stray"}})
     lastOrder = home / "profiles" / "last_order"
     _writeConfig(lastOrder / "mcp.json", {"docs": {"command": "lo-docs"}})

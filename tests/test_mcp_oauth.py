@@ -476,12 +476,16 @@ async def test_exchanges_a_code_only_when_its_iss_parameter_names_the_authorizat
     codes: list[str] = []
 
     async def handler(request, response, _serverOrigin):
+        if request.method != "POST":
+            response.statusCode = 404
+            response.end()
+            return
         codes.append(URLSearchParams(await readBody(request)).get("code") or "")
         jsonResponse(response, {"access_token": "token", "token_type": "Bearer"})
 
     origin = await listen(handler)
 
-    async def exchange(code, iss, issParameterSupported):
+    async def exchange(code, iss, issParameterSupported, metadata=True):
         provider = OAuthTestProvider("http://127.0.0.1/callback")
         provider.client = {"client_id": "client"}
         provider.verifier = "verifier"
@@ -493,7 +497,9 @@ async def test_exchanges_a_code_only_when_its_iss_parameter_names_the_authorizat
                 "token_endpoint": f"{origin}/token",
                 "response_types_supported": ["code"],
                 "authorization_response_iss_parameter_supported": issParameterSupported,
-            },
+            }
+            if metadata
+            else None,
         }
         options = {"serverUrl": f"{origin}/mcp", "authorizationCode": code}
         if iss is not None:
@@ -507,7 +513,11 @@ async def test_exchanges_a_code_only_when_its_iss_parameter_names_the_authorizat
     assert await exchange("matching", origin, True) == "AUTHORIZED"
     # Servers that do not promise the parameter may omit it.
     assert await exchange("omitted", None, False) == "AUTHORIZED"
-    assert codes == ["matching", "omitted"]
+    # Without metadata there is no issuer to compare with, so a server cannot skip the check by hiding it.
+    with pytest.raises(OAuthIssuerMismatchError):
+        await exchange("unverifiable", "https://attacker.example", False, False)
+    assert await exchange("no-metadata", None, False, False) == "AUTHORIZED"
+    assert codes == ["matching", "omitted", "no-metadata"]
 
 
 # #10565
@@ -760,12 +770,15 @@ async def test_metadata_without_response_types_fails_as_a_type_error():
         )
 
 
-def test_an_issuer_mismatch_against_a_missing_issuer_names_it_undefined():
+def test_an_issuer_mismatch_without_an_expected_issuer_names_it_none():
     from misaka.utils.js import UNDEFINED
 
-    assert str(OAuthIssuerMismatchError(UNDEFINED, "https://other")) == (
-        'OAuth issuer mismatch: expected undefined, received "https://other"'
-    )
+    # 1.2.0: both sides print `none` when absent (was `undefined` for a missing expected issuer).
+    for expected in (None, UNDEFINED):
+        error = OAuthIssuerMismatchError(expected, "https://other")
+        assert str(error) == 'OAuth issuer mismatch: expected none, received "https://other"'
+        assert error.expected is expected
+    assert str(OAuthIssuerMismatchError(None, None)) == "OAuth issuer mismatch: expected none, received none"
 
 
 def test_www_authenticate_fields_follow_javascripts_whitespace_and_case_rules():

@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/coding-agent/src/core/project-trust.ts`` (v1.1.0).
+"""Translated from pi's ``packages/coding-agent/src/core/project-trust.ts`` (v1.3.0).
 
 MISAKA forks:
 - No RPC mode.
@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping
 from typing import Any, Literal, TypedDict
 
 from misaka.config import APP_NAME, home
+from misaka.core.settings_defaults import SETTINGS_DEFAULTS
 from misaka.core.trust_manager import (
     ProjectTrustDecision,
     ProjectTrustOption,
@@ -93,7 +94,7 @@ async def resolveProjectTrusted(options: ResolveProjectTrustedOptions) -> bool:
     if decision is not None:
         return decision
 
-    match options.get("defaultProjectTrust") or "ask":
+    match options.get("defaultProjectTrust") or SETTINGS_DEFAULTS["defaultProjectTrust"]:
         case "always":
             return True
         case "never":

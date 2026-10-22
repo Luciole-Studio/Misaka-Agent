@@ -5,6 +5,7 @@ the built-in resolution case of ``package-manager.test.ts``, the ``registerMcpSe
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -162,6 +163,32 @@ async def test_resolves_built_in_extensions_with_user_exclusions_and_project_ove
         ("builtin:mcp", False, "builtin", "user"),
         ("builtin:llama.cpp", True, "builtin", "user"),
     ]
+
+
+# #10765. MISAKA fork: pi's case uses the `skills` setting, which misaka does not have (its skills are
+# core/skills); prompt templates go through the same pattern matching.
+async def test_expands_tilde_in_exclusion_and_exact_patterns(tmp_path, monkeypatch):
+    monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cwd = tmp_path / "project"
+    agent_dir = tmp_path / "agent"
+    cwd.mkdir()
+    agent_dir.mkdir()
+    prompts_dir = tmp_path / "extra" / "prompts"
+    prompts_dir.mkdir(parents=True)
+    for name in ("keep", "glob-excluded", "exact-excluded"):
+        (prompts_dir / f"{name}.md").write_text(f"---\ndescription: {name}\n---\n{name}\n", encoding="utf-8")
+    settings = SettingsManager.create(str(cwd), str(agent_dir), {"projectTrusted": True})
+    settings.setPromptTemplatePaths([
+        "~/extra/prompts",
+        "!~/extra/prompts/glob-*",
+        "-~/extra/prompts/exact-excluded.md",
+    ])
+    pm = DefaultPackageManager({"cwd": str(cwd), "agentDir": str(agent_dir), "settingsManager": settings})
+
+    enabled = {os.path.basename(resource.path): resource.enabled for resource in (await pm.resolve()).prompts}
+
+    assert enabled == {"keep.md": True, "glob-excluded.md": False, "exact-excluded.md": False}
 
 
 # --- structured content ----------------------------------------------------------------------

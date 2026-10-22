@@ -16,6 +16,7 @@ import pytest
 from misaka.ai.api import _openai_sdk, openai_completions, openai_responses
 from misaka.ai.api import anthropic_messages as anthropic
 from misaka.ai.api import mistral_conversations as mistral
+from misaka.ai.api.constrained_sampling import createGrammarToolInputProperties
 from misaka.ai.api.openai_responses_shared import processResponsesStream
 from misaka.ai.compat import completeSimple, getModel, stream
 from misaka.ai.models import CreateModelsOptions
@@ -31,7 +32,7 @@ from misaka.ai.types import (
     UserMessage,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
-from misaka.ai.utils.transcript import normalizeContext
+from misaka.ai.utils.transcript import getDeclaredTools, normalizeContext
 from tests.anthropic_sse import patchRawResponse
 
 CONTEXT = Context(messages=[UserMessage(content="hi", timestamp=0)])
@@ -340,7 +341,17 @@ async def test_responses_usage_counts_cache_writes_and_reasoning():
 
 def _sign_in_params(api_key: str, model: Model | None = None) -> dict:
     options = {"apiKey": api_key, "maxTokens": 1000, "temperature": 0.5, "cacheRetention": "long"}
-    return openai_responses._buildParams(model or _responses_model(), normalizeContext(CONTEXT), options)
+    model = model or _responses_model()
+    context = normalizeContext(CONTEXT)
+    compat = openai_responses._getCompat(model)
+    return openai_responses._buildParams(
+        model,
+        context,
+        options,
+        compat,
+        createGrammarToolInputProperties(getDeclaredTools(context.messages), compat["supportsOpenAIGrammarTools"]),
+        openai_responses._getConfigurationUpdateEffort(model, options, compat),
+    )
 
 
 def test_chatgpt_sign_in_omits_request_fields_that_token_sharing_rejects():
@@ -748,8 +759,8 @@ def test_anthropic_refuses_a_request_without_any_auth(monkeypatch):
 def test_anthropic_configured_beta_header_replaces_the_computed_betas():
     model = getModel("anthropic", "claude-fable-5")
 
-    configured = anthropic._buildParams(model, normalizeContext(CONTEXT), False, {"headers": {"anthropic-beta": "a, b,a"}})
-    suppressed = anthropic._buildParams(model, normalizeContext(CONTEXT), False, {"headers": {"Anthropic-Beta": None}})
+    configured = anthropic._buildParams(model, normalizeContext(CONTEXT), False, {"headers": {"anthropic-beta": "a, b,a"}}).params
+    suppressed = anthropic._buildParams(model, normalizeContext(CONTEXT), False, {"headers": {"Anthropic-Beta": None}}).params
 
     assert configured["betas"] == ["a", "b"]
     assert "betas" not in suppressed
@@ -1360,20 +1371,23 @@ async def test_mistral_reports_http_errors_and_missing_finish_reasons(mistral_wi
     assert result.errorMessage == "Invalid Mistral streaming event"
 
 
-async def test_mistral_timeout_bounds_the_whole_stream(mistral_wire):
+async def test_mistral_timeout_bounds_only_the_response_headers(mistral_wire):
+    # pi 1.2.0 (#10609): `timeoutMs` no longer cuts off a stream that outlives it; body stalls are the HTTP client's
+    # idle timeout's to end.
     _requests, responses = mistral_wire
 
-    class Hanging(httpx.AsyncByteStream):
+    class Slow(httpx.AsyncByteStream):
         async def __aiter__(self):
             yield b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
-            await asyncio.Event().wait()
+            await asyncio.sleep(0.1)
+            yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
 
-    responses.append(httpx.Response(200, stream=Hanging()))
+    responses.append(httpx.Response(200, stream=Slow()))
     result = await mistral.stream(
         _mistral_model(), normalizeContext(CONTEXT), {"apiKey": "k", "timeoutMs": 50}
     ).result()
 
-    assert (result.stopReason, result.errorMessage) == ("error", "The operation was aborted due to timeout")
+    assert (result.stopReason, [block.text for block in result.content]) == ("stop", ["a"])
 
 
 def test_mistral_requires_an_api_key_in_options(monkeypatch):

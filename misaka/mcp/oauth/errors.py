@@ -18,15 +18,15 @@ class OAuthError(Exception):
 
 
 class OAuthIssuerMismatchError(Exception):
-    def __init__(self, expected: str, received: str | None) -> None:
-        message = (
-            # `JSON.stringify(undefined)` is undefined, which the template prints as "undefined".
-            f"OAuth issuer mismatch: expected {'undefined' if expected is UNDEFINED else jsonStringify(expected)}, "
-            f"received {'none' if received is None else jsonStringify(received)}"
-        )
+    def __init__(self, expected: str | None, received: str | None) -> None:
+        def format(issuer: str | None) -> str:
+            return "none" if issuer is None or issuer is UNDEFINED else jsonStringify(issuer)
+
+        message = f"OAuth issuer mismatch: expected {format(expected)}, received {format(received)}"
         super().__init__(message)
         self.message = message
         self.name = "OAuthIssuerMismatchError"
+        # `None` when no authorization server metadata was discovered.
         self.expected = expected
         # `None` when an authorization response lacks the `iss` parameter its server promised (RFC 9207).
         self.received = received

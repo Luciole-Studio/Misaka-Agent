@@ -140,19 +140,72 @@ def _toContent(blocks: Sequence[LlmContent]) -> list[TextContent | ImageContent]
     ]
 
 
+# MCP content blocks as one compact type with the fields of text and image blocks, which scripts read
+# most (`image(block)` takes an image block as is). Rendered into every MCP tool's declaration.
+CONTENT_BLOCK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "type": {"enum": ["text", "image", "audio", "resource_link", "resource"]},
+        "text": {"type": "string"},
+        "data": {"type": "string"},
+        "mimeType": {"type": "string"},
+    },
+    "required": ["type"],
+    "additionalProperties": True,
+}
+
+# Keywords whose values are data, so a `$ref` key in them is not a reference.
+SCHEMA_DATA_KEYWORDS: frozenset[str] = frozenset({"const", "enum", "default", "examples"})
+# Keywords whose values map names to schemas, so their keys are names, not keywords.
+SCHEMA_MAP_KEYWORDS: frozenset[str] = frozenset({
+    "properties",
+    "patternProperties",
+    "dependentSchemas",
+    "dependencies",
+    "$defs",
+    "definitions",
+})
+
+
+def relocateSchema(schema: Any, pointer: str) -> Any:
+    """``schema`` as a subschema at the JSON pointer ``pointer`` (``#/properties/structuredContent``) of
+    another schema: its local references (``#``, ``#/$defs/Item``) are rewritten to point below
+    ``pointer``, so they resolve to the same subschemas as before."""
+    if isinstance(schema, list):
+        return [relocateSchema(item, pointer) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    relocated: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "$ref" and isinstance(value, str) and (value == "#" or value.startswith("#/")):
+            relocated[key] = f"{pointer}{value[1:]}"
+        elif key in SCHEMA_DATA_KEYWORDS:
+            relocated[key] = value
+        elif key in SCHEMA_MAP_KEYWORDS and isinstance(value, dict):
+            relocated[key] = {name: relocateSchema(subschema, pointer) for name, subschema in value.items()}
+        else:
+            relocated[key] = relocateSchema(value, pointer)
+    return relocated
+
+
 def createMcpResultSchema(structuredContentSchema: dict[str, Any] | None) -> dict[str, Any]:
-    """Output schema of every MCP tool: the ``CallToolResult`` scripts receive, with the tool's own output
-    schema as ``structuredContent``. Codemode detects this shape to render ``CallToolResult<T>``
-    declarations."""
+    """Output schema of every MCP tool: the ``CallToolResult`` scripts receive (without ``_meta``, which
+    ``convertMcpResult`` drops), with the tool's own output schema as ``structuredContent``."""
     return {
         "type": "object",
         "properties": {
-            "content": {"type": "array", "items": {"type": "object"}},
-            **({"structuredContent": structuredContentSchema} if jsTruthy(structuredContentSchema) else {}),
+            "content": {"type": "array", "items": CONTENT_BLOCK_SCHEMA},
+            # Servers may send structured content without declaring a schema for it, and it may be any JSON value.
+            "structuredContent": (
+                relocateSchema(structuredContentSchema, "#/properties/structuredContent")
+                if jsTruthy(structuredContentSchema)
+                else {}
+            ),
             "isError": {"type": "boolean"},
-            "_meta": {"type": "object"},
         },
         "required": ["content"],
+        # Fields newer protocol versions add.
+        "additionalProperties": True,
     }
 
 

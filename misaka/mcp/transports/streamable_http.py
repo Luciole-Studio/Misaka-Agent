@@ -23,19 +23,25 @@ from misaka.mcp.protocol.jsonrpc import (
     JSON_RPC_ERROR_CODES,
     JsonRpcId,
     JsonRpcMessage,
+    McpAbortError,
     McpConnectionClosedError,
     isJsonRpcRequest,
     isJsonRpcResponse,
     parseJsonRpcMessage,
     toError,
 )
-from misaka.mcp.transports.transport import DEFAULT_MAX_MESSAGE_BYTES, TransportEvents
+from misaka.mcp.transports.transport import (
+    DEFAULT_MAX_MESSAGE_BYTES,
+    McpTransportSendOptions,
+    TransportEvents,
+)
 from misaka.utils import whatwg_fetch as _fetch
 from misaka.utils.js import (
     AbortController,
     AbortSignal,
     Utf8Decoder,
     addAbortListener,
+    isAborted,
     jsLength,
     jsNumber,
     jsonParse,
@@ -292,7 +298,8 @@ class StreamableHttpTransport(TransportEvents):
     def setProtocolVersion(self, version: str) -> None:
         self._protocolVersion = version
 
-    async def send(self, message: JsonRpcMessage) -> None:
+    async def send(self, message: JsonRpcMessage, options: McpTransportSendOptions | None = None) -> None:
+        signal = (options or {}).get("signal")
         if not self._started or self._closed:
             raise McpConnectionClosedError()
         response = await self._authorizedFetch(
@@ -301,6 +308,7 @@ class StreamableHttpTransport(TransportEvents):
                 "headers": {"accept": "application/json, text/event-stream", "content-type": "application/json"},
                 "body": jsonStringify(message),
             },
+            signal,
         )
         await self._checkResponse(response)
         self._captureSession(response)
@@ -359,14 +367,22 @@ class StreamableHttpTransport(TransportEvents):
         if self._client is not None:
             await self._client.aclose()
 
-    async def _authorizedFetch(self, method: Literal["GET", "POST"], init: dict[str, Any]) -> _fetch.Response:
+    async def _authorizedFetch(
+        self, method: Literal["GET", "POST"], init: dict[str, Any], signal: Any = None
+    ) -> _fetch.Response:
         """Fetch with auth headers. A 401 (or a 403 asking for more scope) is handed to the auth provider
-        once, and the request is retried with whatever credentials it left behind."""
+        once, and the request is retried with whatever credentials it left behind.
+
+        ``signal`` only stops dispatch: getting a token or the authorization recovery can take a while, and a
+        request its sender gave up on in the meantime must not reach the server. It does not abort the shared
+        recovery, which other requests may wait for."""
         authProvider = self.options.get("authProvider")
         onUnauthorized = getattr(authProvider, "onUnauthorized", None) if authProvider is not None else None
         attempt = 0
         while True:
             headers, token = await self._headers(init["headers"])
+            if isAborted(signal):
+                raise McpAbortError()
             response = await self._fetch(
                 self.url,
                 {"method": method, "headers": headers, "body": init.get("body"), "signal": self._controller.signal},

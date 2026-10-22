@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, Protocol, TypeGuard
@@ -29,6 +30,7 @@ from misaka.codemode import (
     toCodemodeIdentifier,
 )
 from misaka.codemode.types import CodemodeFailure, CodemodeOutputItem, CodemodeResult
+from misaka.core.extensions.types import ToolNamespace
 from misaka.core.tools.truncate import formatSize
 from misaka.core.usage_totals import combineUsage
 from misaka.utils.js import (
@@ -70,6 +72,15 @@ MAX_CONCURRENT_MODEL_CALLS = 4
 # script can grow to wasm32's 4 GiB and take the session down. Overruns throw
 # `InternalError: out of memory` inside the script.
 CODEMODE_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024
+# Shared across calls and sessions. Allow one replacement while a cancelled worker is still exiting.
+# MISAKA fork: "sessions" are those of one OS process; every Sister card, headless node, and subagent runs in a
+# process of its own, so one Sister's stuck workers never block another's. A worker thread cannot be killed, so a
+# cancelled one counts until its built-in returns.
+MAX_CONCURRENT_CODEMODE_WORKERS = 2
+activeCodemodeWorkers = 0
+# MISAKA fork: workers are reserved on whichever event loop thread runs the session and released on the worker's own
+# thread as it ends (see `CodemodeSandboxOptions.acquireWorker`), so the counter is guarded.
+_activeCodemodeWorkersLock = threading.Lock()
 MODEL_TYPES: frozenset[str] = frozenset({"chat", "image", "classifier"})
 
 
@@ -361,15 +372,32 @@ def formatOutput(output: Sequence[CodemodeOutputItem]) -> list[TextContent | Ima
 
 
 def joinAdjacentText(items: Sequence[TextContent | ImageContent]) -> list[TextContent | ImageContent]:
-    """Join adjacent text items into one, each part starting on its own line."""
+    """Join adjacent text items into one, each part starting on its own line. The separator check looks
+    at the last non-empty part, not the joined text: rebuilding a growing concatenation on every item
+    is quadratic (#10678)."""
     joined: list[TextContent | ImageContent] = []
+    parts: list[str] = []
+    lastPart = ""
+
+    def flush() -> None:
+        nonlocal parts, lastPart
+        if len(parts) > 0:
+            joined.append(TextContent(text="".join(parts)))
+        parts = []
+        lastPart = ""
+
     for item in items:
-        last = joined[-1] if len(joined) > 0 else None
-        if isinstance(item, TextContent) and isinstance(last, TextContent):
-            separator = "" if last.text == "" or last.text.endswith("\n") else "\n"
-            joined[-1] = TextContent(text=f"{last.text}{separator}{item.text}")
-        else:
+        if not isinstance(item, TextContent):
+            flush()
             joined.append(item)
+            continue
+        if lastPart != "" and not lastPart.endswith("\n"):
+            parts.append("\n")
+            lastPart = "\n"
+        parts.append(item.text)
+        if item.text != "":
+            lastPart = item.text
+    flush()
     return joined
 
 
@@ -528,6 +556,9 @@ async def executeCodemode(
         if onUpdate is not None:
             onUpdate(AgentToolResult(content=[], details=snapshot()))
 
+    # Show the script as running before its first nested call, so the row's timer starts.
+    publish()
+
     callable = getCodemodeCallableTools(ctx.tools) if ctx is not None else []
     # ALL_TOOLS entries carry the declaration.
     guidelines = options.getToolGuidelines() if options.getToolGuidelines is not None else None
@@ -578,6 +609,7 @@ async def executeCodemode(
         ],
         "timeoutMs": sourceOptions.get("timeoutMs", float("inf")),
         "memoryLimitBytes": CODEMODE_MEMORY_LIMIT_BYTES,
+        "acquireWorker": acquireCodemodeWorker,
     })
 
     result: CodemodeResult
@@ -627,17 +659,33 @@ async def executeCodemode(
     )
 
 
-def isNamespaceName(namespace: str, query: str) -> bool:
-    """Whether ``query`` names the namespace: its name, its script identifier (``mcp__dev-radius`` is
-    ``mcp__dev_radius``), or the part after its last ``__`` in either form (``dev-radius``,
-    ``dev_radius``)."""
-    id = toCodemodeIdentifier(namespace)
+def acquireCodemodeWorker() -> Callable[[], None]:
+    """``CodemodeSandboxOptions.acquireWorker`` of every codemode call in this process."""
+    global activeCodemodeWorkers
+    with _activeCodemodeWorkersLock:
+        if activeCodemodeWorkers >= MAX_CONCURRENT_CODEMODE_WORKERS:
+            raise RuntimeError(
+                f"Codemode worker limit reached ({MAX_CONCURRENT_CODEMODE_WORKERS} workers are still running or "
+                "shutting down). Retry after they exit."
+            )
+        activeCodemodeWorkers += 1
+
+    def release() -> None:
+        global activeCodemodeWorkers
+        with _activeCodemodeWorkersLock:
+            activeCodemodeWorkers -= 1
+
+    return release
+
+
+def isNamespaceName(namespace: ToolNamespace, query: str) -> bool:
+    """Whether ``query`` names the namespace: its name or one of its aliases, as written or as the same
+    script identifier (``dev-radius`` and ``dev_radius`` are both ``dev_radius``)."""
     queryId = toCodemodeIdentifier(query)
-
-    def suffix(name: str) -> str | None:
-        return name[name.rindex("__") + 2 :] if "__" in name else None
-
-    return namespace == query or id == queryId or suffix(namespace) == query or suffix(id) == queryId
+    return any(
+        name == query or toCodemodeIdentifier(name) == queryId
+        for name in [namespace["name"], *(namespace.get("aliases") or [])]
+    )
 
 
 def createDiscoveryGlobals(tools: Sequence[Any], samples: Mapping[str, str], options: CodemodeToolOptions) -> list[CodemodeTool]:
@@ -667,7 +715,7 @@ def createDiscoveryGlobals(tools: Sequence[Any], samples: Mapping[str, str], opt
         documents = []
         for tool in tools:
             toolNamespace = getNamespace(tool.name)
-            if namespace and (toolNamespace is None or not isNamespaceName(toolNamespace["name"], namespace)):
+            if namespace and (toolNamespace is None or not isNamespaceName(toolNamespace, namespace)):
                 continue
             documents.append(createToolSearchDocument(tool, toolNamespace))
         return [entry(match.name) for match in ranker.rank(query, documents, int(limit))]
@@ -687,7 +735,7 @@ def createDiscoveryGlobals(tools: Sequence[Any], samples: Mapping[str, str], opt
         names: list[str] = []
         for tool in tools:
             toolNamespace = getNamespace(tool.name)
-            if toolNamespace is None or not isNamespaceName(toolNamespace["name"], name):
+            if toolNamespace is None or not isNamespaceName(toolNamespace, name):
                 continue
             if namespace is None:
                 namespace = toolNamespace

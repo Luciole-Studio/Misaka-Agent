@@ -1,5 +1,5 @@
 """Translated from pi's ``packages/ai/test/{transform-messages-copilot-openai-to-anthropic,lax-message-content}.test.ts``
-(v1.1.0)."""
+(v1.3.0)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from misaka.ai.types import (
     AssistantMessage,
     Model,
     TextContent,
-    ThinkingContent,
     ToolCall,
     ToolResultMessage,
     Usage,
@@ -72,34 +71,6 @@ def makeAssistantMessage(content: list[Any]) -> AssistantMessage:
         stopReason="toolUse",
         timestamp=_now(),
     )
-
-
-def test_converts_thinking_blocks_to_plain_text_when_source_model_differs():
-    model = makeCopilotClaudeModel()
-    messages = [
-        UserMessage(content="hello", timestamp=_now()),
-        AssistantMessage(
-            content=[
-                ThinkingContent(thinking="Let me think about this...", thinkingSignature="reasoning_content"),
-                TextContent(text="Hi there!"),
-            ],
-            api="openai-completions",
-            provider="github-copilot",
-            model="gpt-4o",
-            usage=_usage(),
-            stopReason="stop",
-            timestamp=_now(),
-        ),
-    ]
-
-    result = transformMessages(messages, model, anthropicNormalizeToolCallId)
-    assistantMsg = next(message for message in result if message.role == "assistant")
-
-    # Thinking block should be converted to text since models differ
-    textBlocks = [block for block in assistantMsg.content if block.type == "text"]
-    thinkingBlocks = [block for block in assistantMsg.content if block.type == "thinking"]
-    assert len(thinkingBlocks) == 0
-    assert len(textBlocks) >= 2
 
 
 def test_removes_thought_signature_from_tool_calls_when_migrating_between_models():

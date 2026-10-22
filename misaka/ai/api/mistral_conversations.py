@@ -1,11 +1,12 @@
-"""Translated from pi's ``packages/ai/src/api/mistral-conversations.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/src/api/mistral-conversations.ts`` (v1.3.0).
 
 MISAKA fork, kept to what the Python platform forces (each is marked where it happens):
 
-- httpx stands in for ``fetch``: the client has no timeouts of its own (the signal is the only bound), a 204/205
-  stands in for a null body, and the event reader closes the response and the client it was handed.
-- A tool call's ``partialArgs`` scratch buffer rides beside the block (``StreamingArgs``), and the final parse records
-  a malformed object as ``argumentsError``.
+- httpx stands in for ``fetch``: its read timeout is the configured dispatcher's idle timeout (undici's, which bounds
+  body stalls upstream), a 204/205 stands in for a null body, and the event reader closes the response and the client
+  it was handed.
+- A tool call's ``partialArgs`` scratch buffer rides beside the block (``StreamingArgs``), and the final parse is
+  upstream's ``parseToolCallArguments`` (``finish_into``).
 - The event iterator is closed with the reply, and after each event the loop turns once, as a JavaScript ``for await``
   hands control to the consumer.
 """
@@ -59,6 +60,7 @@ from misaka.ai.types import (
     UsageCost,
 )
 from misaka.ai.utils._streaming_args import StreamingArgs
+from misaka.ai.utils.abort_signals import combineAbortSignals
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.hash import shortHash
 from misaka.ai.utils.headers import headersToRecord
@@ -66,7 +68,8 @@ from misaka.ai.utils.pi_user_agent import getPiUserAgent
 from misaka.ai.utils.sanitize_unicode import sanitizeSurrogates
 from misaka.ai.utils.text import getSystemMessageText, renderSystemMessageUpdate
 from misaka.ai.utils.transcript import getCurrentTools, resolveTranscript
-from misaka.utils._abort_signal import AnyAbortSignal, TimeoutAbortSignal, abort_reason
+from misaka.core.http_dispatcher import dispatcherIdleTimeout
+from misaka.utils._abort_signal import TimeoutAbortSignal, abort_reason
 from misaka.utils.js import (
     jsonParse,
     jsonStringify,
@@ -297,11 +300,14 @@ async def _requestMistralStream(
     baseUrl = urlsplit(model.baseUrl)
     url = urlunsplit((baseUrl.scheme, baseUrl.netloc, f"{re.sub(r'/+$', '', baseUrl.path)}/v1/chat/completions", "", ""))
     headers = _buildMistralHeaders(model, apiKey, options)
-    timeoutSignal = TimeoutAbortSignal(nullishCoalesce(_option(options, "timeoutMs"), 60_000))
-    signal = AnyAbortSignal(_option(options, "signal"), timeoutSignal) if _option(options, "signal") else timeoutSignal
-    # MISAKA fork: `fetch` has no timeouts of its own, the signal above is the only bound;
-    # httpx's defaults would add a five-second one.
-    client = httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(None))
+    # The timeout covers only the wait for response headers. Long streams (e.g. extended thinking)
+    # must not be cut off by a fixed deadline; body stalls are left to the HTTP client idle timeout.
+    timeoutMs = nullishCoalesce(_option(options, "timeoutMs"), 60_000)
+    headerTimeoutSignal = TimeoutAbortSignal(timeoutMs)
+    combinedSignal = combineAbortSignals([_option(options, "signal"), headerTimeoutSignal])
+    # MISAKA fork: undici's idle timeout, which bounds a stalled body upstream, is httpx's read timeout here; httpx's
+    # defaults would add a five-second one.
+    client = httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(None, read=dispatcherIdleTimeout()))
     try:
         request = client.build_request(
             "POST",
@@ -309,14 +315,23 @@ async def _requestMistralStream(
             headers=headers,
             content=jsonStringify(_toMistralWirePayload(payload)).encode("utf-8"),
         )
-        response = await _awaitOrThrowReason(client.send(request, stream=True), signal)
+        try:
+            response = await _awaitOrThrowReason(client.send(request, stream=True), combinedSignal.signal)
+        except Exception:
+            if headerTimeoutSignal.aborted and not signal_aborted(_option(options, "signal")):
+                raise RuntimeError(f"Mistral response headers timed out after {jsString(timeoutMs)}ms") from None
+            raise
+        finally:
+            combinedSignal.cleanup()
 
         onResponse = _option(options, "onResponse")
         if onResponse:
             await maybe_await(onResponse({"status": response.status_code, "headers": headersToRecord(response.headers)}, model))
 
         if not response.is_success:
-            body = (await _awaitOrThrowReason(response.aread(), signal)).decode("utf-8", errors="replace")
+            # MISAKA fork: `response.text()` reads under no signal once the header wait is over; the caller's still
+            # aborts it, as it would cancel the fetch body.
+            body = (await _awaitOrThrowReason(response.aread(), _option(options, "signal"))).decode("utf-8", errors="replace")
             await response.aclose()
             raise _MistralHttpError(response.status_code, body, response.reason_phrase)
         # MISAKA fork: a fetch Response has a null body exactly for these statuses; httpx always has a stream.
@@ -327,7 +342,7 @@ async def _requestMistralStream(
         await client.aclose()
         raise
 
-    return _readMistralEvents(response, signal, client)
+    return _readMistralEvents(response, _option(options, "signal"), client)
 
 
 class _MistralHttpError(Exception):
@@ -442,7 +457,7 @@ _MISTRAL_STREAM_DONE = object()
 
 
 async def _readMistralEvents(
-    response: httpx.Response, signal: Any, client: httpx.AsyncClient | None = None
+    response: httpx.Response, signal: Any | None = None, client: httpx.AsyncClient | None = None
 ) -> AsyncIterator[dict[str, Any]]:
     # MISAKA fork: httpx's text iterator stands in for the body reader and its streaming `TextDecoder`; the response
     # and the client are closed here, as the reader is cancelled. One abort task serves the whole body.
@@ -769,8 +784,7 @@ async def _consumeChatStream(
         if block.type != "toolCall":
             continue
         toolBlock = block
-        # MISAKA fork: the final arguments go through `finish_into`, which records a
-        # malformed object as `argumentsError` instead of running a repaired prefix.
+        # `Object.assign(toolBlock, parseToolCallArguments(toolBlock.partialArgs))`.
         partialArgsByIndex.get(index, StreamingArgs("")).finish_into(toolBlock)
         # Finalize in-place and strip the scratch buffer so replay only
         # carries parsed arguments.

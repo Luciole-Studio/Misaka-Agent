@@ -287,7 +287,11 @@ class _SisterManager(SubagentManager):
         self.model = f"{provider}/{model_id}"
         selected = runtime.getModel(provider, normalize_model_for_api(model_id))
         if selected is None:
-            raise ValueError(f"Unknown Sister model: {self.model}")
+            from misaka.core.model_runtime import personalizedCatalogHint
+
+            # An OpenRouter model leaves the catalog when the user's key may not use it (pi 1.2 per-key lists).
+            hint = personalizedCatalogHint(provider)
+            raise ValueError(f"Unknown Sister model: {self.model}" + (f".{hint}" if hint else ""))
         if not runtime.hasConfiguredAuth(selected.provider):
             # The generic runtime resolves against authenticated providers. An
             # absent provider there must not turn this pin into a bare LO ID.

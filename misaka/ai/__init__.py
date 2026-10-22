@@ -1,4 +1,4 @@
-"""Translated from pi's ``packages/ai/src/index.ts`` (v1.1.0).
+"""Translated from pi's ``packages/ai/src/index.ts`` (v1.3.0).
 
 Core only, side-effect free: no generated catalogs, no provider factories,
 no api-registry, no OAuth implementations, no compat. Provider factories
@@ -63,7 +63,6 @@ _STAR_MODULES: tuple[str, ...] = (
     "providers.faux",
     "session_resources",
     "types",
-    "utils.assistant_message_frame",
     "utils.diagnostics",
     "utils.event_stream",
     "utils.json_parse",

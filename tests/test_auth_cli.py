@@ -137,6 +137,16 @@ async def test_prints_a_resolved_api_key(capsys):
     assert capsys.readouterr().out == "test-api-key\n"
 
 
+async def test_resolves_model_without_provider_only_among_catalog_models_of_configured_providers(capsys):
+    # pi 1.3 credential-print.test.ts. anthropic has no gpt-5.5; an uncatalogued id on a configured provider must
+    # not count as a match.
+    _store({"openai": {"type": "api_key", "key": "openai-test-key"},
+            "anthropic": {"type": "api_key", "key": "anthropic-test-key"}})
+
+    assert await runAuthCommand(["auth", "print-api-key", "--model", "gpt-5.5"]) == 0
+    assert capsys.readouterr().out == "openai-test-key\n"
+
+
 async def test_prints_bearer_tokens_resolved_from_an_authorization_header(capsys):
     _store({"kimi-coding": {
         "type": "oauth", "access": "header-test-token", "refresh": "test-refresh-token", "expires": _hour_ms(),

@@ -22,6 +22,7 @@ from misaka.utils.node_fs import readdirEntries
 from misaka.utils.paths import (
     canonicalizePath,
     isLocalPath,
+    normalizePath,
     resolvePath,
 )
 
@@ -152,7 +153,7 @@ def splitPatterns(entries: list[str]) -> tuple[list[str], list[str]]:
 
 
 def _match_pattern(pattern: str, *candidates: str) -> bool:
-    normalized = toPosixPath(pattern)
+    normalized = toPosixPath(normalizePath(pattern))
     return any(wc_glob.globmatch(candidate, normalized, flags=_GLOB_MATCH_FLAGS) for candidate in candidates)
 
 
@@ -175,7 +176,7 @@ def matchesAnyPattern(file_path: str, patterns: list[str], base_dir: str) -> boo
 def normalizeExactPattern(pattern: str) -> str:
     if pattern.startswith(("./", ".\\")):
         pattern = pattern[2:]
-    return toPosixPath(pattern)
+    return toPosixPath(normalizePath(pattern))
 
 
 def matchesAnyExactPattern(file_path: str, patterns: list[str], base_dir: str) -> bool:

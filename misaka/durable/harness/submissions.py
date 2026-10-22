@@ -1,6 +1,6 @@
 """Admission, waits and withdrawal of the durable submissions of one Harness.
 
-Translated from pi's ``packages/durable/src/harness/submissions.ts``. A draft, a record and a boundary are plain ``dict``
+Translated from pi's ``packages/durable/src/harness/submissions.ts`` (v1.3.0). A draft, a record and a boundary are plain ``dict``
 objects with the upstream keys; public async methods are ``@eager`` (they run when called, as JavaScript async functions
 do) and return a future.
 """
@@ -13,15 +13,24 @@ from typing import Any
 
 from misaka.chord.context import Context
 from misaka.chord.json import copyJson
-from misaka.utils.js import eager, resolvedPromise
+from misaka.utils.js import UNDEFINED, eager, jsString, resolvedPromise
 
-from ..entries import UserEntry
 from ..errors import ConversationBusy
 from ..types import ConversationId, Storage, SubmissionId, SubmissionRecord, Tx
 from .generation import startRun
-from .inbox import InboxDoc, applyBoundary, isStale, prepareBoundary, removeInboxItem
+from .inbox import (
+    InboxDoc,
+    appendInput,
+    applyBoundary,
+    hasQueuedReset,
+    isDisplayOnly,
+    isStale,
+    pickInputEntry,
+    prepareBoundary,
+    removeInboxItem,
+)
 from .live import LiveDoc
-from .util import Waiters, closedError
+from .util import LineWait, Waiters, closedError
 
 
 class Submissions:
@@ -45,9 +54,9 @@ class Submissions:
 
         def onClose() -> None:
             self._closed = True
-            self._waiters.rejectAll(closedError())
+            self._waiters.rejectAll(closedError(self._session))
 
-        session.subscribeCommits(lambda publication, context: self._observe(publication))
+        session.observeCommits(lambda publication, context: self._observe(publication))
         session.subscribeClose(onClose)
 
     @eager
@@ -75,6 +84,7 @@ class Submissions:
     @eager
     async def wait(self, id: SubmissionId, context: Context) -> dict[str, Any]:
         self._resume()
+        line = LineWait()
 
         # Check and register on the line so no settling publication falls between them.
         async def job() -> dict[str, Any]:
@@ -85,10 +95,14 @@ class Submissions:
                 return {"promise": resolvedPromise(record)}
             # Close rejects registered waiters synchronously and may begin during the read.
             if self._closed:
-                raise closedError()
-            return {"promise": self._waiters.add(id, context)}
+                raise closedError(self._session)
+            return {"promise": line.register(self._waiters.add(id, context))}
 
-        found = await self._session.readOnLine(job)
+        try:
+            found = await self._session.readOnLine(job)
+        except BaseException:
+            line.abandon()
+            raise
         return await found["promise"]  # type: ignore[no-any-return]
 
     def abort(self, id: SubmissionId, context: Context, conversationId: ConversationId | None = None) -> asyncio.Future[str]:
@@ -139,15 +153,33 @@ def isSettled(record: SubmissionRecord) -> bool:
     return record["status"] == "done" or record["status"] == "unanswered"
 
 
+def checkInputEntry(entry: Any) -> None:
+    """Reject an input entry an untyped caller got wrong: its kind must be a non-empty string outside the ``pi.``
+    prefix."""
+    if entry is None:
+        # Destructuring `null`, as upstream's `const { kind } = entry` does.
+        raise TypeError("Cannot destructure property 'kind' of 'entry' as it is null.")
+    kind = entry.get("kind", UNDEFINED) if isinstance(entry, dict) else UNDEFINED
+    if not isinstance(kind, str) or len(kind) == 0 or kind.startswith("pi."):
+        raise TypeError(
+            f'An input entry\'s kind must be a non-empty string not starting with "pi.", got {jsString(kind)}'
+        )
+
+
 async def admitSubmission(
     tx: Tx, conversationId: ConversationId, draft: dict[str, Any], now: int, queueModes: dict[str, Any]
 ) -> SubmissionId:
     """Admit a submission inside a commit (spec section 6); ``Conversation.submit()`` and conversation-owned compactions
-    share it. A known request ID returns its existing submission without writing. A busy conversation queues it in
-    ``pi.inbox``, or rejects ``whenBusy: "reject"`` input with ``ConversationBusy``. An idle conversation with queued
-    items queues it behind them and runs a final boundary. Otherwise idle input places a user entry and starts a run,
-    and an idle write appends its entry and settles ``done``, or ``stale`` when its head reaches before the active
-    range."""
+    share it. A known request ID returns its existing submission without writing. A display-only write (only ``kind`` and
+    ``data``) is appended and settled ``done`` at once, busy or not, as it changes nothing the model sees; only behind a
+    queued reset it queues, so it lands after the reset instead of before it in the context the reset ends. A busy
+    conversation queues anything else in ``pi.inbox``, or rejects ``whenBusy: "reject"`` input with
+    ``ConversationBusy``. An idle conversation with queued items queues it behind them and runs a final boundary.
+    Otherwise idle input places its entry (``pi.user``, or the input's own) and starts a run, and an idle write appends
+    its entry and settles ``done``, or ``stale`` when its head reaches before the active range."""
+    # An absent entry is `undefined`; an explicit `None` is `null`, which the check rejects.
+    if draft["type"] == "input" and draft.get("entry", UNDEFINED) is not UNDEFINED:
+        checkInputEntry(draft["entry"])
     if draft.get("requestId") is not None:
         existing = await tx.submissionByRequest(conversationId, draft["requestId"])
         if existing is not None:
@@ -156,11 +188,19 @@ async def admitSubmission(
                     f"Request {draft['requestId']} already identifies a submission of type {existing['type']}"
                 )
             return existing["id"]  # type: ignore[no-any-return]
+    requestId = {} if draft.get("requestId") is None else {"requestId": draft["requestId"]}
+    if (
+        draft["type"] == "write"
+        and isDisplayOnly(draft["entry"])
+        and not hasQueuedReset((await tx.doc(InboxDoc, conversationId))["items"])
+    ):
+        entry = await tx.appendEntry(conversationId, draft["entry"])
+        write = {"conversationId": conversationId, **requestId, "type": "write", "status": "done", "entry": entry["id"]}
+        return (await tx.createSubmission(write))["id"]  # type: ignore[no-any-return]
     live = await tx.doc(LiveDoc, conversationId)
     busy = "run" in live
     if busy and draft["type"] == "input" and draft.get("whenBusy") == "reject":
         raise ConversationBusy(conversationId)
-    requestId = {} if draft.get("requestId") is None else {"requestId": draft["requestId"]}
     # A boundary reads the table, so it is prepared before the first table write; a busy one needs none.
     boundary = None if busy else await prepareBoundary(tx, conversationId, queueModes)
     if boundary is None or len(boundary["inbox"]["items"]) > 0:
@@ -177,7 +217,8 @@ async def admitSubmission(
             items.push({"id": id, "mode": "write", "entry": value})
         else:
             mode = "steer" if draft.get("whenBusy") == "steer" else "followUp"
-            items.push({"id": id, "mode": mode, "content": value})
+            entryField = {} if draft.get("entry") is None else {"entry": pickInputEntry(draft["entry"])}
+            items.push({"id": id, "mode": mode, "content": value, **entryField})
         if boundary is None:
             return id  # type: ignore[no-any-return]
         result = await applyBoundary(tx, boundary, "final", now)
@@ -198,8 +239,7 @@ async def admitSubmission(
             "entry": entry["id"],
         }
         return (await tx.createSubmission(write))["id"]  # type: ignore[no-any-return]
-    message = {"role": "user", "content": draft["content"], "timestamp": now}
-    entry = await tx.appendEntry(UserEntry, conversationId, {"model": [message]})
+    entry = await appendInput(tx, conversationId, draft["content"], draft.get("entry"), now)
     placed = {
         "conversationId": conversationId,
         **requestId,
@@ -213,4 +253,4 @@ async def admitSubmission(
     return id  # type: ignore[no-any-return]
 
 
-__all__ = ["SubmissionHandle", "Submissions", "admitSubmission"]
+__all__ = ["SubmissionHandle", "Submissions", "admitSubmission", "checkInputEntry"]

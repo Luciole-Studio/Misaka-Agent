@@ -21,7 +21,11 @@ from misaka.mcp.protocol.jsonrpc import (
     parseJsonRpcMessage,
 )
 from misaka.mcp.transports import _cross_spawn as crossSpawn
-from misaka.mcp.transports.transport import DEFAULT_MAX_MESSAGE_BYTES, TransportEvents
+from misaka.mcp.transports.transport import (
+    DEFAULT_MAX_MESSAGE_BYTES,
+    McpTransportSendOptions,
+    TransportEvents,
+)
 from misaka.utils.js import Timeout, jsonParse, jsonStringify, jsTrim, setTimeout
 
 DEFAULT_MAX_STDERR_BYTES: Final = 64 * 1024
@@ -189,7 +193,8 @@ class StdioTransport(TransportEvents):
         await spawned
         child.on("error", lambda error: None if self._closed else self._emitError(error))
 
-    async def send(self, message: JsonRpcMessage) -> None:
+    async def send(self, message: JsonRpcMessage, options: McpTransportSendOptions | None = None) -> None:
+        # MISAKA fork: `options` is accepted and ignored, as upstream's `send(message)` ignores it (see `McpTransport`).
         stdin = self._child.stdin if self._child is not None else None
         if not self._started or self._closed or stdin is None or not stdin.writable:
             raise McpConnectionClosedError()

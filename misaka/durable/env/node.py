@@ -917,10 +917,17 @@ class _ExecRun:
             and (self.spillStream is None or self.spillBackpressured)
         )
 
+    def _spawned(self, child: ChildProcess) -> None:
+        self.child = child
+
     async def run(self) -> Result:
         try:
             # MISAKA fork: `spawn` plus `waitForChildProcess` are misaka.utils.child_process, an asyncio subprocess
-            # protocol with the same exit-then-stdio settling.
+            # protocol with the same exit-then-stdio settling. As upstream wires `spillIsDraining` and the child before
+            # any event of it can fire, the check goes in at construction and the child is ours at `on_spawn`, before
+            # its first chunk (a spill pauses that one already): set later, the exit could have armed the 100 ms
+            # post-exit grace first, and a loop that took that long to resume closed the pipes on a backpressured
+            # spill, losing what a descendant wrote afterwards.
             self.child = await spawn_child_process(
                 self.program,
                 *self.args,
@@ -930,6 +937,8 @@ class _ExecRun:
                 start_new_session=sys.platform != "win32",
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
                 on_data=self.feed,
+                is_draining=self.spillIsDraining,
+                on_spawn=self._spawned,
             )
             if self.child.pid:
                 self.env._activeChildPids.add(self.child.pid)
@@ -954,7 +963,6 @@ class _ExecRun:
             else:
                 self.signal.addEventListener("abort", self.onAbort, once=True)
 
-        self.child.set_draining_check(self.spillIsDraining)
         try:
             code = await self.child.wait()
         except Exception as error:  # noqa: BLE001
