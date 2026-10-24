@@ -445,7 +445,6 @@ async def amain() -> int:
     workspace = os.environ.get("MISAKA_WORKSPACE") or os.getcwd()
     mcp_role = os.environ.get("MISAKA_MCP_ROLE") or role
     card = os.environ.get("MISAKA_SISTER_OWNER_TASK_ID")    # set only on the child that is a card's own session
-    sandbox = os.environ.get("MISAKA_SKILL_SANDBOX")         # a Sister card: the parent's read-only skill copies
     from misaka.core import session_overrides
     from misaka.core.wiring import SessionSpec, assemble, spec_overrides
     runtime, session, error = await engine_session.open_session(
@@ -461,7 +460,6 @@ async def amain() -> int:
             receive_messages=bool(card),
             task_id=card,
             workflow_context=bool(card) and os.environ.get("MISAKA_WORKFLOW_CONTEXT") == "1",
-            skill_roots=(("sandbox", sandbox),) if sandbox else None,
             overrides=spec_overrides(session_overrides.from_env()) if card else (),
         )),
     )
@@ -1029,8 +1027,8 @@ async def amain() -> int:
             await asyncio.gather(parent_watch, return_exceptions=True)
             return 2
 
-    # Discovery/sealing is complete before this handshake. The parent retains
-    # ownership of blocking preload work, but resolves against THIS child's roots.
+    # Discovery is complete before this handshake. The parent retains ownership of
+    # blocking preload work, but resolves against THIS child's roots.
     from misaka.core.skills.wiring.skills import SkillsPart
     skills_part = next((p for p in session.moments.parts if isinstance(p, SkillsPart)), None)
     skill_roots = skills_part.resolution_roots() if skills_part is not None else []

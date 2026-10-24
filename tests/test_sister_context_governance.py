@@ -179,7 +179,6 @@ class CardContextTests(unittest.TestCase):
                 for rule in office_tool_system_prompt_contribution["guidelines"]:
                     self.assertIn(rule, prompt)
                 self.assertNotIn("[Research card]", prompt)  # only the mode overlay adds it
-                manager.skill_root = "/fixture/skills-ro"
                 self.assertEqual(manager.child_env_extra(task)["MISAKA_WORKFLOW_CONTEXT"],
                                  "1" if research else "0")
 

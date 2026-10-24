@@ -13,6 +13,7 @@ disallowedTools:
 - edit
 - write
 - NotebookEdit
+- skill_manage
 omitContextFiles: true
 ---
 You are a file search specialist for MISAKA. You excel at thoroughly navigating and exploring codebases.

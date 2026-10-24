@@ -13,7 +13,6 @@ from misaka.core.platform import tasks as task_store
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.platform.session import run_coro, run_session
 from misaka.core.platform.vocabulary import MANAGEMENT_TOOLS
-from misaka.core.skills import sandbox as skill_sandbox
 from misaka.utils.paths import posix_relpath
 
 logger = logging.getLogger(__name__)
@@ -529,21 +528,17 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
     prompt = card_prompt(task)
 
     role = profiles.role_of(profile_dir)
-    # The engine has no skill loading of its own; the skills extension reads the
-    # card's sandbox (SessionSpec.skill_roots) and nothing else.
     from misaka.config import sessions as session_roots
 
     # New cards follow saved thinking defaults; resumed cards keep their native setting.
     flags = ["--session-dir", session_roots.card_session_dir(task)]
     if model:
         flags += ["--model", model]
-    ro_root = os.path.join(state_dir, ".skills-ro")
     sender = role.rsplit("/", 1)[-1]
     from misaka.core.wiring import SessionSpec, assemble, spec_overrides
 
     kind = "beast" if beast else "card"
     delegates = not profiles.is_last_order(profile_dir)
-    skill_roots = None
     if beast:
         # Beast mode gets no builtin tools: with DELEGATE it keeps only the child-management
         # tools, otherwise none (Last Order has no DELEGATE, so it runs tool-less).
@@ -554,11 +549,6 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         # A `-t` list without `mcp__` entries keeps MCP tools registered (pi 1.0.4); a wrap-up turn
         # starts no MCP servers at all.
         flags.append("--no-mcp")
-    else:
-        # Regular cards run against read-only copies of the role's skill stack: skills are
-        # read-only at run time (constitution), and a card never sees the live tree.
-        skill_sandbox.snapshot_stack(profile_dir, workspace, ro_root)
-        skill_roots = (("sandbox", ro_root),)
     assembly = assemble(SessionSpec(
         profile_dir=profile_dir,
         role=role,
@@ -568,14 +558,13 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         receive_messages=True,          # a card hears Last Order (and her Sisters) at its next tool boundary
         task_id=task.get("id"),
         tool_ceiling=MANAGEMENT_TOOLS if beast and delegates else None,
-        skill_roots=skill_roots,
         workflow_context=bool(task.get("_owner_context")),
         overrides=spec_overrides(task.get("_session_overrides")),
     ))
     from misaka.config import identity
     for section in identity.base_prompt_sources(profile_dir, role):
         flags += ["--append-system-prompt", section]
-    return flags, assembly, prompt, ro_root, role
+    return flags, assembly, prompt, role
 
 
 def continue_flags(session_file, session_dir):
@@ -614,7 +603,7 @@ def run_card(
 ):
     """Run one task card; its session lifecycle finalizes the board row."""
     task_id = task.get("id") if isinstance(task, dict) else None
-    flags, assembly, prompt, ro_root, role = card_session_setup(
+    flags, assembly, prompt, role = card_session_setup(
         task, workspace, profile_dir, provider, default_model
     )
     if task.get("_say") is not None:
@@ -632,8 +621,6 @@ def run_card(
            "MISAKA_MCP_ROLE": role,
            "MISAKA_WORKSPACE": workspace,
            "MISAKA_TASK_OUTPUT_DIR": str(task.get("output_dir") or workspace)}
-    if os.path.isdir(ro_root):
-        env["MISAKA_SKILL_SANDBOX"] = ro_root    # nested agents pin the same read-only skill snapshot
     if usage_db and task_id and usage_generation is not None:
         env.update({
             "MISAKA_USAGE_DB": str(usage_db),
@@ -644,14 +631,9 @@ def run_card(
         if usage_claim_lock:
             env["MISAKA_USAGE_CLAIM_LOCK"] = str(usage_claim_lock)
     if over_cap(usage_db, task_id, usage_token_cap):
-        skill_sandbox.cleanup(ro_root)
         return {"ok": False, "reason": budget_cap_reason(), "exit_code": 0, "budget_stop": True}
-    r = None
-    try:
-        r = run_coro(run_session(flags, prompt, workspace, on_event=on_event, timeout=None,
-                                 assembly=assembly, env=env))
-    finally:
-        skill_sandbox.cleanup(ro_root)          # the read-only copies go with the run, however it ended
+    r = run_coro(run_session(flags, prompt, workspace, on_event=on_event, timeout=None,
+                             assembly=assembly, env=env))
 
     row = task_store.get(con, task_id) if con is not None and task_id else None
     if row is not None and row["status"] != "running":

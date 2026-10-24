@@ -28,7 +28,6 @@ from misaka.core.platform import admission, budget, notifications, owners
 from misaka.core.platform import processes as process_tree
 from misaka.core.platform import tasks as db
 from misaka.core.session_manager import findMostRecentSession
-from misaka.core.skills import sandbox as skill_sandbox
 from misaka.core.subagent.agents import AgentDefinition
 from misaka.core.subagent.runtime import (
     AgentTask,
@@ -231,18 +230,7 @@ class _SisterManager(SubagentManager):
         self.sister = str(row["assignee"])
         self.profile_dir = os.path.join(str(cfg["profiles_root"]), self.sister)
         self.output_dir = str(row["output_dir"] or workspace)
-        state_dir = Path(db.task_state_dir(self.board_id))
         self.runtime_dir = Path(session_roots.card_session_dir(row))
-        self.skill_root_base = str(state_dir / ".skills-ro" / "sister")
-        # A generation is a board-result epoch, not an ownership epoch: an
-        # abandoned running card is reclaimed without incrementing it.  Give
-        # every manager its own copy root so a late old owner can only clean up
-        # its own files after a same-generation takeover.
-        self.skill_scope = secrets.token_hex(8)
-        self.skill_root = os.path.join(
-            self.skill_root_base,
-            f"g{int(row['generation'])}-{self.skill_scope}",
-        )
         self.beast = False
         self.owner_context = dict(row).get("_owner_context")
         self.session_overrides = dict(row).get("_session_overrides") or {}
@@ -343,8 +331,6 @@ class _SisterManager(SubagentManager):
             resolvePromptInput(source, "role system prompt")
             for source in identity.base_prompt_sources(self.profile_dir,
                                                         profiles.role_of(self.profile_dir)))
-        # The same stack a card in a pane sees (project, role, shared), as read-only copies.
-        skill_sandbox.snapshot_stack(self.profile_dir, cwd or self.role_context.workspace, self.skill_root)
         return AgentDefinition(
             name=self.agent_type,
             description=f"MISAKA Sister {self.sister}",
@@ -376,11 +362,9 @@ class _SisterManager(SubagentManager):
         return flags
 
     def child_env_extra(self, _task: AgentTask) -> dict[str, str]:
-        # The child indexes the read-only copies this manager made, never the live trees.
         from misaka.core import session_overrides
 
-        return {"MISAKA_SKILL_SANDBOX": self.skill_root,
-                "MISAKA_WORKFLOW_CONTEXT": "1" if self.owner_context else "0",
+        return {"MISAKA_WORKFLOW_CONTEXT": "1" if self.owner_context else "0",
                 # The run's compaction threshold and output limit, for this Sister's session only.
                 **session_overrides.to_env(getattr(self, "session_overrides", None))}
 
@@ -497,16 +481,6 @@ class SisterRuntime:
         """Install a new handle epoch and return its immutable completion pair."""
         handle.generation = int(generation)
         if handle.manager and hasattr(handle.manager, "role_context"):
-            if hasattr(handle.manager, "skill_root_base") and hasattr(
-                handle.manager, "skill_scope"
-            ):
-                next_skill_root = os.path.join(
-                    handle.manager.skill_root_base,
-                    f"g{int(generation)}-{handle.manager.skill_scope}",
-                )
-                if next_skill_root != handle.manager.skill_root:
-                    skill_sandbox.cleanup(handle.manager.skill_root)
-                    handle.manager.skill_root = next_skill_root
             handle.manager.role_context = replace(
                 handle.manager.role_context,
                 usage_generation=int(generation),
@@ -745,7 +719,6 @@ class SisterRuntime:
                                 metadata.unlink(missing_ok=True)
                         if manager:
                             await manager.close()
-                            skill_sandbox.cleanup(manager.skill_root)
                         if not db.clear_runtime(
                             self.con,
                             task_id,
@@ -829,7 +802,6 @@ class SisterRuntime:
                         await asyncio.shield(manager.close())
                     except BaseException:  # noqa: BLE001, S110 - closing during teardown must not mask the board transition
                         pass
-                    skill_sandbox.cleanup(manager.skill_root)
                 self._handles.pop(task_id, None)
                 raise
 
@@ -1139,7 +1111,6 @@ class SisterRuntime:
                     await self._notify(handle, token)
         finally:
             if self._is_current(handle, token) and handle.manager:
-                skill_sandbox.cleanup(handle.manager.skill_root)
                 row = db.get(self.con, handle.board_id)
                 if row is not None and row["status"] in TERMINAL_BOARD_STATUSES:
                     # Release resources and drop the handle; a later restore rebuilds

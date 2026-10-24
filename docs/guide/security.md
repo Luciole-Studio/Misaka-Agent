@@ -18,13 +18,18 @@ write.
 What MISAKA does keep out of the models' way, as defence in depth (a shell command can still
 reach all of it):
 
-- the live skill folders, which change only through `skill_manage`;
+- the skills hub caches (`skills/.hub` in the home and in the session's own role), which the
+  file tools do not open: fetched hub content is read through `skill_view`, as in Hermes. Skills
+  themselves run from where they live, and `skill_manage` is the reviewed way to change them;
 - MISAKA's own credentials, `~/.misaka/credentials/` and the `.env` of the home and of its roles,
   which the file tools (`read`, `grep`, `find`) do not open, in any spelling of the path;
 - the files every later session loads as its instructions -- `PROJECT.md`, `AGENTS.md`,
   `CLAUDE.md` in the project or a folder above it -- which a Sister or a sub-agent does not
   change (Last Order and you can);
-- `~/.misaka` itself, which an unattended session (a card, a sub-agent) does not write into;
+- `~/.misaka` itself, which an unattended session (a card, a sub-agent) does not write into
+  with its file tools, except `shared/` and the folders it was handed: the skills there change
+  through `skill_manage`, and a skill whose real path lies in `shared/` is writable like the rest
+  of it;
 - API keys, which an MCP server does not inherit: it gets a small part of the environment (paths,
   locale, proxy and certificate settings) and the variables it is configured with.
 

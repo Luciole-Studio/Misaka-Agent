@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 def usage_key(entry, profile):
-    origin = Path(entry.get("origin_dir", entry["dir"])).resolve()
+    origin = Path(entry["dir"]).resolve()
     root = (Path(profile) / "skills").resolve()
     if origin.is_relative_to(root):
         return origin.relative_to(root).as_posix()

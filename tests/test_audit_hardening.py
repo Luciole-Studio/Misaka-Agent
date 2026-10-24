@@ -3,16 +3,14 @@ import asyncio
 
 import pytest
 
-from misaka.core.skills.wiring.skills import SkillsPart
+from misaka.core.platform.home_guard import HomeGuard
 
 
 def _write(tmp_path, kind, path):
     workspace = tmp_path / "project"
     workspace.mkdir(exist_ok=True)
-    part = SkillsPart(None, str(tmp_path / "profile"), cwd=str(workspace), kind=kind)
-    part._live_roots = set()
-    part._refresh_roots = lambda: None
-    return asyncio.run(part.tool_call({"toolName": "write", "input": {"path": path, "content": "x"}}, None))
+    guard = HomeGuard(kind, str(workspace), guard_paths=True)
+    return asyncio.run(guard.tool_call({"toolName": "write", "input": {"path": path, "content": "x"}}, None))
 
 
 # -- H4: a card rewriting the instructions every later session loads --------------------------------------
@@ -34,15 +32,6 @@ def test_on_a_file_system_that_keeps_case_a_variant_is_another_file(tmp_path, mo
     monkeypatch.setattr(home, "FOLDS_CASE", False)
     assert _write(tmp_path, "card", "project.md") is None
     assert _write(tmp_path, "card", "PROJECT.md")["block"]
-
-
-def test_the_shell_guard_reads_a_live_tree_in_any_case(tmp_path, monkeypatch):
-    from misaka.config import home
-    from misaka.core.skills.wiring.skills import _command_touches
-    monkeypatch.setattr(home, "FOLDS_CASE", True)
-    live = str(tmp_path / ".misaka" / "skills")
-    variant = str(tmp_path / ".MISAKA" / "Skills" / "x")
-    assert _command_touches(f"rm -rf {variant}", str(tmp_path), {live}) == "path"
 
 
 def test_web_evidence_originals_are_refused_in_any_case(tmp_path, monkeypatch):

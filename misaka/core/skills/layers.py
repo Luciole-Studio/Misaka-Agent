@@ -273,59 +273,6 @@ def skill_roots(profile_dir, cwd=None, *, extension_paths=()):
     return out
 
 
-def protected_skill_roots(profile_dir, cwd=None, *, extension_paths=(), linked=True):
-    """Workflow protection includes absent and other-role Skill and bundle roots.
-
-    With ``linked`` the real locations of symlinked skills are included too: the file tools
-    resolve their target and would otherwise write a live skill through its link. The shell
-    guard passes ``linked=False``: it can only refuse a command that *names* a root, reads
-    included, and a skill kept in a library is used from there (its runtime, its documented
-    entry) far more often than written."""
-    roles = Path(os.path.expanduser(CFG["roles_root"]))
-    roots = [Path(shared_skills_dir())]
-    if profile_dir:
-        roots.append(Path(profile_dir) / "skills")
-    # Profiles may be nested (Sisters); the nearest existing role ancestors are
-    # covered by their expected skills root, regardless of whether it exists yet.
-    if roles.is_dir():
-        for here, dirs, files in os.walk(roles):
-            dirs[:] = [d for d in dirs if d not in {"skills", "skill-bundles", ".git", "sessions", "cache"}]
-            roots.extend((Path(here) / "skills", Path(here) / "skill-bundles"))
-    workspace = Path(cwd or os.getcwd()).expanduser().absolute()
-    if not (workspace / "skills").resolve().is_relative_to(roles.resolve()):
-        roots.append(workspace / "skills")
-    roots.extend(Path(root) for _, root in skill_roots(profile_dir, cwd, extension_paths=extension_paths))
-    protected = {str(p) for root in roots for p in (root.absolute(), root.resolve())}
-    # A skill kept as a symlink (a library elsewhere, linked into a root) really lives where the
-    # link points; the file tools compare real paths, so that place must be protected too.
-    if linked:
-        for root in roots:
-            protected.update(_linked_skill_targets(root))
-    return protected
-
-
-_LINKED_TARGETS = {}     # root -> (directory mtimes seen, real locations): the guard asks on every tool call
-
-
-def _linked_skill_targets(root):
-    """Real locations of the symlinked directories inside a skills root (any nesting level;
-    the walk does not enter the links themselves). Resolving a few hundred links costs more
-    than a tool call should, so the answer is kept until a directory in the root changes."""
-    if not root.is_dir():
-        return set()
-    stamps, links = [], []
-    for here, dirs, _files in os.walk(root):
-        stamps.append((here, os.stat(here).st_mtime_ns))
-        links.extend(Path(here) / name for name in dirs if (Path(here) / name).is_symlink())
-    key = str(root)
-    cached = _LINKED_TARGETS.get(key)
-    if cached is not None and cached[0] == stamps:
-        return cached[1]
-    targets = {os.path.realpath(link) for link in links}
-    _LINKED_TARGETS[key] = (stamps, targets)
-    return targets
-
-
 def extension_resources(loader):
     """Keep provider metadata when available; old resource loaders remain usable."""
     getter = getattr(loader, "getExtensionSkillResources", None)

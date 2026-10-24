@@ -84,7 +84,9 @@ def card(tmp_path, monkeypatch):
 
     for key in ("MISAKA_SISTER_OWNER_TASK_ID", "MISAKA_SISTER_OWNER_GENERATION", "MISAKA_SISTER_OWNER_CLAIM_LOCK",
                 "MISAKA_SUBAGENT_PERMISSION_SETTINGS", "MISAKA_SUBAGENT_PERMISSION_MODE"):
-        monkeypatch.delenv(key, raising=False)
+        # Set first so teardown also removes what the refresh writes (delenv of an absent key records nothing).
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
     monkeypatch.setenv("MISAKA_USAGE_TASK_ID", "fixture-card")
     monkeypatch.setenv("MISAKA_USAGE_GENERATION", "1")
     monkeypatch.setenv("MISAKA_USAGE_CLAIM_LOCK", "fixture-owner")

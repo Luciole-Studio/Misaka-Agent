@@ -1,7 +1,8 @@
 """Translated from pi's ``packages/coding-agent/src/core/tools/find.ts`` (v1.1.0).
 
 MISAKA forks:
-- MISAKA's credentials and the web evidence vault are out of the tools' reach.
+- MISAKA's credentials and the web evidence vault are out of the tools' reach: the search path is checked, and a
+  result inside a credential store or a skills hub cache is passed over (Hermes ``_filter_read_blocked_search_results``).
 - fd is never downloaded (``tools_manager``); a missing one says how to install it.
 """
 
@@ -112,6 +113,13 @@ def _details(details: FindToolDetails) -> FindToolDetails | None:
     return details if any(getattr(details, field.name) is not None for field in fields(details)) else None
 
 
+def _out_of_reach(path: str, searchPath: str) -> bool:
+    # MISAKA fork: a search over the home passes its credential stores and skills hub caches by.
+    from misaka.core.web.evidence import is_credential_store, is_skills_hub_cache
+    full = os.path.join(searchPath, path)
+    return is_credential_store(full) or is_skills_hub_cache(full)
+
+
 def _readlineLines(data: bytes) -> list[str]:
     """The lines ``readline`` emits for ``data``: split at ``\\n``, ``\\r\\n`` or ``\\r``, no empty last line."""
     lines = re.split(r"\r\n|\r|\n", data.decode("utf-8", errors="replace"))
@@ -158,12 +166,14 @@ def createFindToolDefinition(
                 )
                 if signal_aborted(signal):
                     raise RuntimeError("Operation aborted")
+                found = len(results)
+                results = [p for p in results if not _out_of_reach(p, searchPath)]
                 if len(results) == 0:
                     return AgentToolResult(content=[TextContent(text="No files found matching pattern")], details=None)
 
                 # Relativize paths against the search root for stable output.
                 relativized = [relativizeFindResultPath(p, searchPath) for p in results]
-                resultLimitReached = len(relativized) >= effectiveLimit
+                resultLimitReached = found >= effectiveLimit
                 rawOutput = "\n".join(relativized)
                 truncation = truncateHead(rawOutput, TruncationOptions(maxLines=2**53 - 1))
                 resultOutput = truncation.content
@@ -251,13 +261,19 @@ def createFindToolDefinition(
                 return AgentToolResult(content=[TextContent(text="No files found matching pattern")], details=None)
 
             relativized = []
+            found = 0
             for rawLine in lines:
                 line = jsTrim(rawLine.removesuffix("\r"))
                 if not line:
                     continue
+                found += 1
+                if _out_of_reach(line, searchPath):
+                    continue
                 relativized.append(relativizeFindResultPath(line, searchPath))
+            if not relativized:
+                return AgentToolResult(content=[TextContent(text="No files found matching pattern")], details=None)
 
-            resultLimitReached = len(relativized) >= effectiveLimit
+            resultLimitReached = found >= effectiveLimit
             rawOutput = "\n".join(relativized)
             truncation = truncateHead(rawOutput, TruncationOptions(maxLines=2**53 - 1))
             resultOutput = truncation.content

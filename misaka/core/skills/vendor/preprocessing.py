@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # ${HERMES_SKILL_DIR} / ${HERMES_SESSION_ID} tokens. Unresolvable ones (e.g. no
 # session) are left as-is so the author can spot them.
-_SKILL_TEMPLATE_RE = re.compile(r"\$\{(HERMES_SKILL_DIR|HERMES_SESSION_ID|MISAKA_SKILL_DIR|MISAKA_SESSION_ID)\}")
+_SKILL_TEMPLATE_RE = re.compile(r"\$\{(HERMES_SKILL_DIR|HERMES_SESSION_ID)\}")
 # Inline shell snippets like !`date +%Y-%m-%d` — single-line only.
 _INLINE_SHELL_RE = re.compile(r"!`([^`\n]+)`")
 # Cap inline-shell output so a runaway command can't blow out the context.
@@ -35,7 +35,7 @@ def substitute_template_vars(content: str, skill_dir: Path | None, session_id: s
         "HERMES_SKILL_DIR": str(skill_dir) if skill_dir else None,
         "HERMES_SESSION_ID": str(session_id) if session_id else None,
     }
-    return _SKILL_TEMPLATE_RE.sub(lambda m: values[m.group(1).replace("MISAKA_", "HERMES_")] or m.group(0), content)
+    return _SKILL_TEMPLATE_RE.sub(lambda m: values[m.group(1)] or m.group(0), content)
 
 
 def run_inline_shell(command: str, cwd: Path | None, timeout: int) -> str:

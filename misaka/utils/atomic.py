@@ -39,7 +39,7 @@ def write_bytes(path, data, *, mode=None):
             os.fsync(f.fileno())
         if os.name == "nt" and os.path.isfile(path) and not os.path.islink(path):
             # Windows will not replace a read-only file, which POSIX does whenever the directory
-            # lets it (a sealed skill manifest is 0o444): clear the flag; the new file keeps its own.
+            # lets it (a 0o444 file): clear the flag; the new file keeps its own.
             os.chmod(path, stat.S_IMODE(os.stat(path).st_mode) | stat.S_IWRITE)
         os.replace(tmp, path)
         try:

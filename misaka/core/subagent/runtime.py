@@ -120,8 +120,6 @@ class RoleContext:
     host_hooks: str | None = None
     memory_dir: str | None = None
     critical_system_reminder: str | None = None
-    # The pinned skill snapshot (a card's read-only copies); every nested agent inherits it.
-    skill_sandbox: str | None = field(default_factory=lambda: os.environ.get("MISAKA_SKILL_SANDBOX") or None)
 
     @classmethod
     def capture(
@@ -2521,8 +2519,8 @@ class SubagentManager:
                 del task.stderr[:100]
 
     async def _initial_message(self, task: AgentTask, prompt: str, *, roots=None) -> str:
-        # CCB runAgent preloads skills for every invocation, including resume.
-        # MISAKA resolves the same sealed role/project snapshot each time.
+        # CCB runAgent preloads skills for every invocation, including resume, from
+        # where they live (Hermes build_preloaded_skills_prompt).
         if task.forked:
             from misaka.core.subagent.fork import child_message
             message = child_message(prompt)
@@ -2745,18 +2743,14 @@ class SubagentManager:
             return []
         from misaka.core.skills import index as skill_index
         from misaka.core.skills import layers as skill_layers
-        from misaka.core.skills.sandbox import execution_entry
         from misaka.core.skills.wiring.skills import build_skill_message
 
-        sandbox = self.child_env_extra(task).get("MISAKA_SKILL_SANDBOX")
         if roots is None:  # older protocol peers/direct callers do not report roots
-            roots = [("sandbox", sandbox)] if sandbox else skill_layers.skill_roots(
-                self.role_context.profile_dir or None, cwd=task.cwd)
-        pinned = any(layer == "sandbox" for layer, _ in roots)
+            roots = skill_layers.skill_roots(self.role_context.profile_dir or None, cwd=task.cwd)
         loaded: list[str] = []
         seen: set[Path] = set()
         for value in task.definition.skills:
-            entry, _ = skill_index.resolve_definition(roots, value, task.definition.base_dir if not pinned else None)
+            entry, _ = skill_index.resolve_definition(roots, value, task.definition.base_dir)
             if entry is None:
                 _log_warning(f"Agent {task.id}: requested skill {value!r} is unavailable")
                 continue
@@ -2765,11 +2759,7 @@ class SubagentManager:
                 continue
             seen.add(path)
             try:
-                # Like transcripts, these copies are task artifacts: stable across
-                # child restarts/continuations, not unowned temporary directories.
-                # Snapshot children already have a complete pinned collection.
-                if not pinned:
-                    entry = await run_in_thread(execution_entry, entry, task.metadata_path.with_suffix(".skills"))
+                # As Hermes preloads a child's skills: from where they live (build_preloaded_skills_prompt).
                 content = await run_in_thread(build_skill_message, entry, session_id=task.id,
                                               activation_note=f"Skill {entry['name']} (preloaded):", profile_dir=self.role_context.profile_dir)
             except OSError as error:
@@ -2790,11 +2780,7 @@ class SubagentManager:
         await runner.emit({"type": "subagent_start", "subagentId": task.id, "cwd": task.cwd, "env": env})
 
     def child_env_extra(self, _task: AgentTask) -> dict[str, str]:
-        """Extra child environment. The pinned skill snapshot travels to every nested agent, so a
-        card's children index the same read-only copies as the card itself (a Sister manager
-        overrides this with the sandbox it built)."""
-        if self.role_context.skill_sandbox:
-            return {"MISAKA_SKILL_SANDBOX": self.role_context.skill_sandbox}
+        """Extra child environment (a Sister manager adds its card's workflow context)."""
         return {}
 
     def _warn_inline_mcp_servers(self, task: AgentTask) -> None:

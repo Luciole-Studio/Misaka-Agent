@@ -454,12 +454,12 @@ def wake_contact(role, message_id, *, sender):
     """
     argv = [sys.executable, "-m", "misaka", "dm", "--wait-message", str(message_id),
             "--from", sender, "--", role]
-    # The detached recipient owns neither the sender's task, pane, space nor skill snapshot.
+    # The detached recipient owns neither the sender's task, pane nor space.
     child_env = {
         k: v
         for k, v in os.environ.items()
         if not k.startswith(("MISAKA_USAGE_", "MISAKA_SISTER_OWNER_"))
-        and k not in {"MISAKA_DM_CARD_ALLOWLIST", "MISAKA_NET_PANE", "MISAKA_NET_SPACE", "MISAKA_SKILL_SANDBOX"}
+        and k not in {"MISAKA_DM_CARD_ALLOWLIST", "MISAKA_NET_PANE", "MISAKA_NET_SPACE"}
     }
     try:
         # Hermes runs the turn with stdin=DEVNULL too. Inherited, it is the sender's terminal: once

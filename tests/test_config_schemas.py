@@ -271,7 +271,7 @@ def test_settings_schema_describes_misakas_settings_not_pis():
     assert "maxDelayMs" not in properties["retry"]["properties"]
     # The skill index's section, not pi's list of skill paths.
     assert properties["skills"]["type"] == "object"
-    assert {"external_dirs", "disabled", "copy_cap_mb"} <= set(properties["skills"]["properties"])
+    assert {"external_dirs", "disabled"} <= set(properties["skills"]["properties"])
     # Every product knob, typed as `product.setting()` casts it.
     for (section, key), cast in KNOBS.items():
         knob = properties[section]["properties"][key]

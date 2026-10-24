@@ -173,7 +173,7 @@ class _SkillsSettingsSchema(TypeBoxObject):
     """MISAKA's skill index: more skill folders, and skills to hide. A list of skill paths is not read here."""
 
     # MISAKA fork: the whole class (MISAKA's skill index, core/skills/layers.py, replaced upstream's skills and its
-    # list of skill paths). `copy_cap_mb` is a product knob, added from `KNOBS` below.
+    # list of skill paths).
     external_dirs: str | list[str] | None = _optional(
         "More folders of skills to read; ~/.agents/skills is always read when it exists."
     )
@@ -209,7 +209,6 @@ _KNOB_DESCRIPTIONS: dict[tuple[str, str], str] = {
     ("research", "beast_at"): "Share of the token cap at which a card is told to wrap up. Default: 0.85.",
     ("research", "plan_approval"): "Every research plan waits for your go-ahead. Default: true.",
     ("research", "token_cap"): "Token budget of one research run, its cards and sub-agents included; 0 is no cap.",
-    ("skills", "copy_cap_mb"): "Total size of the skill copies one session may hold in its sandbox. Default: 200.",
     ("subagents", "agent_list_in_messages"): "List the available sub-agent types in messages.",
     ("subagents", "auto_background_tasks"): "Move a foreground sub-agent to the background after two minutes.",
     ("subagents", "auto_memory"): "Let sub-agents keep memory between tasks.",

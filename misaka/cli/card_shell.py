@@ -64,7 +64,7 @@ def launch(task_id, resume_only=False, say=None):
         sys.exit(f"Sister {task['assignee']} is not in the roster.")
 
     cfg = current_config()
-    flags, assembly, prompt, ro_root, role = worker.card_session_setup(
+    flags, assembly, prompt, role = worker.card_session_setup(
         task, workspace, profile_dir, cfg["provider"], cfg["default_model"]
     )
     from misaka.config import sessions as session_roots
@@ -92,20 +92,12 @@ def launch(task_id, resume_only=False, say=None):
         "MISAKA_APP_TITLE": f"MISAKA · {task['assignee']} · {task_id}",
         "MISAKA_TAGLINE": f"Card {task_id}: {task['title']}",
     })
-    if os.path.isdir(ro_root):
-        os.environ["MISAKA_SKILL_SANDBOX"] = ro_root
-    else:
-        os.environ.pop("MISAKA_SKILL_SANDBOX", None)
     os.chdir(run_dir)
 
     from misaka.cli.engine import main as engine_main
-    try:
-        from misaka.utils import loop_watchdog
-        # A claimed card is the daemon's to reclaim when its process ends; a session reopened
-        # without a claim is only for a person to read, and stays open.
-        loop_watchdog.configure(f"card-{task_id}", exit_on_stall=bool(lock and generation))
-        code = asyncio.run(loop_watchdog.watched(engine_main(flags, assembly.engine_options())))
-    finally:
-        from misaka.core.skills import sandbox as skill_sandbox
-        skill_sandbox.cleanup(ro_root)
+    from misaka.utils import loop_watchdog
+    # A claimed card is the daemon's to reclaim when its process ends; a session reopened
+    # without a claim is only for a person to read, and stays open.
+    loop_watchdog.configure(f"card-{task_id}", exit_on_stall=bool(lock and generation))
+    code = asyncio.run(loop_watchdog.watched(engine_main(flags, assembly.engine_options())))
     sys.exit(code)

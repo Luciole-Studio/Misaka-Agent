@@ -55,17 +55,6 @@ class SkillPromptDescriptionTests(unittest.TestCase):
                 self.assertEqual(current["skills"][0]["description"], "x" * 197 + "...")
                 self.assertEqual(index._load_snapshot(root, manifest)["version"], index.SNAPSHOT_VERSION)
 
-    def test_sealed_snapshot_description_is_rederived_without_writing(self):
-        with tempfile.TemporaryDirectory() as directory:
-            skill = Path(directory) / "SKILL.md"
-            skill.write_text(skill_text("研" * 150), encoding="utf-8")
-            original = skill.read_bytes()
-            saved = {"entries": [{"path": str(skill), "description": "研" * 57 + "..."}]}
-            with patch("misaka.core.skills.sandbox.read_manifest", return_value=saved):
-                result = index._layer("sandbox", directory)
-            self.assertEqual(result["skills"][0]["description"], "研" * 150)
-            self.assertEqual(skill.read_bytes(), original)
-
     def test_authoring_uses_the_same_budget(self):
         self.assertIsNone(validate_frontmatter(skill_text("x" * 200), new_skill=True))
         self.assertIn("200-character", validate_frontmatter(skill_text("x" * 201), new_skill=True))

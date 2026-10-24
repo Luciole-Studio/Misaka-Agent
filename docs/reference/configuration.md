@@ -168,7 +168,6 @@ turns one off, for example `"extensions": ["-builtin:llama.cpp"]`; a trusted pro
 |---|---|---|
 | `skills.external_dirs` | none | more folders of skills to read (`~/.agents/skills` is always read when it exists) |
 | `skills.disabled` | none | skill names to hide from every role |
-| `skills.copy_cap_mb` | `200` | total size of the skill copies one session may hold in its sandbox |
 | `mcp.required_wait` | `30` | seconds a sub-agent waits for an MCP server its definition requires |
 
 MCP servers are configured in `mcp.json` files, in the `mcpServers` shape other MCP clients use:

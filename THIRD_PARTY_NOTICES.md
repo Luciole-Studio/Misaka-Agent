@@ -289,6 +289,17 @@ and host patches are in `vendor/PROVENANCE.json`; regenerate/check with
 `scripts/skills_vendor_sync.py <upstream-checkout> [--write]`.
 The MISAKA scope, scanner enforcement, transactions and lifecycle adapters
 are not represented as verbatim upstream code.
+On 2026-10-24 how skills run was aligned with Hermes `bda3a363e9`: a skill is
+served and run from its own directory (no execution copies, no card snapshots,
+no guard on skill trees or on shell expansions); the file tools refuse the
+skills hub cache as Hermes `agent/file_safety.py` does
+(`misaka/core/web/evidence.py`); `_is_community_hub_skill` is copied from
+Hermes `agent/skill_preprocessing.py` into `misaka/core/skills/preprocessing.py`.
+One difference stays: the home's own write rule (`misaka/core/platform/home_guard.py`),
+which Hermes does not have, still keeps a card's or a sub-agent's `write`/`edit`/`office`
+out of the home outside `shared/`, so skills in the home and in a role change there through
+`skill_manage`; a skill whose real path lies in `shared/` (a link into it) can be written
+by those tools too.
 
 ## Hermes Bot Mode 联系会话
 

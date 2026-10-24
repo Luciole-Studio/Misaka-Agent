@@ -117,18 +117,50 @@ def is_credential_store(path: str) -> bool:
                                              or roles in resolved.parents)))
 
 
+def _misaka_dirs() -> list[Path]:
+    """Hermes ``_hermes_dirs``: the active role's home (``MISAKA_PROFILE_DIR``, Hermes' profile
+    HERMES_HOME) and MISAKA's home (Hermes' root), deduplicated -- folded as the home compares names."""
+    from misaka.config import home
+    return list(dict.fromkeys(home.folded(directory)
+                              for directory in (os.environ.get("MISAKA_PROFILE_DIR"), str(home.home()))
+                              if directory))
+
+
+def _is_under(resolved: Path, base: Path) -> bool:
+    """Hermes ``_is_under``: True when ``resolved`` equals ``base`` or lies below it."""
+    try:
+        return resolved.relative_to(base) is not None
+    except ValueError:
+        return False
+
+
+def is_skills_hub_cache(path: str) -> bool:
+    """Whether ``path`` is a skills hub cache file -- ``skills/.hub`` of the active role or of the
+    home. Hermes' file tools refuse these as prompt-injection carriers (``agent/file_safety.py``
+    ``get_read_block_error``); skills are read with skill_view."""
+    from misaka.config import home
+    resolved = home.folded(path)
+    return any(_is_under(resolved, directory / "skills" / ".hub") for directory in _misaka_dirs())
+
+
+HUB_REFUSED = ("is an internal MISAKA cache file and cannot be read directly to prevent "
+               "prompt injection. Use the skills_list or skill_view tools instead.")
+
+
 CREDENTIALS_REFUSED = ("MISAKA's credentials (credentials/, .env and their backups in its home) are not read through file tools. "
                        "(Defense in depth, not a security boundary: a shell command can still reach them.)")
 
 
 def check_material_read(path: str) -> None:
-    """Keep vault key/ciphertext, restricted originals and MISAKA's credentials out of ordinary
-    readers (issue #10 audit, M1: read and grep reached credentials/auth.json).
+    """Keep skills hub caches, vault key/ciphertext, restricted originals and MISAKA's credentials
+    out of ordinary readers (issue #10 audit, M1: read and grep reached credentials/auth.json).
 
     Resolved paths also cover symlinks. This is a tool/corpus boundary, not an OS
     sandbox for an independently approved terminal command.
     """
     from misaka.config import home
+    if is_skills_hub_cache(path):
+        raise ValueError(f"Access denied: {path} {HUB_REFUSED}")
     if is_credential_store(path):
         raise ValueError(CREDENTIALS_REFUSED)
     resolved = Path(path).resolve()

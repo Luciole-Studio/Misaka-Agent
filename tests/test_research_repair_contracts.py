@@ -631,96 +631,25 @@ async def test_shared_session_environment_restored_after_dispose(
         await asyncio.gather(task, return_exceptions=True)
 
 
-@pytest.mark.parametrize(
-    "command,reason",
-    [
-        ("printf '%s' '`literal`'", None),
-        ("echo '${literal}'", None),
-        ('printf "%s" "$(printf ok)"', "dynamic"),
-        ("bash -c 'echo $(cat $PRIVATE)'", "dynamic"),
-        ("printf '%s' '`literal`'; bash -c 'echo ${PRIVATE}'", "dynamic"),
-        ("cat /tmp/live-skills/SKILL.md", "path"),
-    ],
-)
-def test_skill_guard_keeps_policy_but_allows_literal_display(command, reason):
-    from misaka.core.skills.wiring.skills import _command_touches
-
-    assert _command_touches(command, "/tmp/workspace", {"/tmp/live-skills"}) == reason
-    if "`" in command:
-        assert _command_touches(
-            command, "/tmp/workspace", {"/tmp/live-skills"}, shell="powershell"
-        )
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "cp board.db board.db.bak-$(date +%s)",
-        "for pid in $(ps aux | grep card-shell | awk '{print $2}'); do echo $pid; done",
-        'printf "%s" "$(printf ok)"',
-        'echo "unterminated',
-    ],
-)
-def test_substitution_alone_is_refused_only_where_nobody_is_watching(command):
-    """2026-09-18 (B23): the guard refused every command carrying $( , ` or ${ , whatever it
-    pointed at and whoever was watching. Backing up the board and listing processes were both
-    killed in Last Order's own window, under a message about skill trees."""
-    from misaka.core.skills.wiring.skills import _command_touches
-
-    roots = {"/tmp/live-skills"}
-    assert _command_touches(command, "/tmp/workspace", roots) == "dynamic"
-    assert _command_touches(command, "/tmp/workspace", roots, unattended=False) is None
-
-
-def test_a_path_into_a_live_tree_is_refused_with_a_person_watching_too():
-    from misaka.core.skills.wiring.skills import _command_touches
-
-    roots = {"/tmp/live-skills"}
-    for command in ("cat /tmp/live-skills/SKILL.md", "rm -rf /tmp/live-skills/$(whoami)"):
-        assert _command_touches(command, "/tmp/workspace", roots, unattended=False) == "path"
-
-
-@pytest.mark.parametrize("kind,refused", [
-    ("foreground", False),      # a window with a person in it
-    ("dm", True),               # a scripted turn: nobody reads the command but the guard
-    ("bare", True),
-    ("card", True),
-    ("child", True),
+@pytest.mark.parametrize("kind", ["foreground", "dm", "bare", "card", "child"])
+@pytest.mark.parametrize("command", [
+    "cp board.db board.db.bak-$(date +%s)",
+    'EI=/data/scripts\nls "$EI"',
+    'SKILLS=/Users/me/.misaka/skills; python3 -B "$SKILLS/cnki/scripts/run.py" search q',
+    "cat ~/.misaka/skills/pptx/SKILL.md",
+    "bash -c 'cat ~/.misaka/profiles/sisters/10032/skills/s/SKILL.md'",
 ])
-def test_only_a_window_with_a_person_in_it_is_exempt(tmp_path, kind, refused):
-    """Every kind but ``foreground`` runs unattended, so the substitution it cannot resolve is
-    refused there -- including a DM turn and a bare one-shot, which look like Last Order but
-    have nobody watching."""
+def test_no_shell_command_is_refused_for_a_skill_path_or_an_expansion(tmp_path, kind, command):
+    """2026-10-24: a Sister's card could not run `$SKILLS/.../run.py` as its SKILL.md says. Hermes
+    runs a skill where it lives and refuses no shell command for naming one or expanding a
+    variable (tools/skills_tool.py returns the live `skill_dir`; approval_detection.py does not
+    evaluate `$var`); neither the skills extension nor the home guard looks at a shell command."""
+    from misaka.core.platform.home_guard import HomeGuard
     from misaka.core.skills.wiring.skills import SkillsPart
 
-    live = tmp_path / "skills"
-    live.mkdir()
-    part = SkillsPart(None, str(tmp_path / "profile"), cwd=str(tmp_path), kind=kind)
-    part._live_roots = {str(live)}
-    part._refresh_roots = lambda: None
-    decision = asyncio.run(part.tool_call(
-        {"toolName": "bash", "input": {"command": "cp board.db board.db.bak-$(date +%s)"}}, None))
-    assert bool(decision and decision.get("block")) is refused
-    if refused:
-        assert "unattended" in decision["reason"]
-
-
-def test_the_refusal_names_the_bare_variable_it_refuses(tmp_path):
-    """2026-10-01: `EI=<path>; ls "$EI"` was refused, but the message named only $(...), backticks
-    and ${...} -- two Sisters rewrote ${X} as $X and were refused again, five times in one run."""
-    from misaka.core.skills.wiring.skills import SkillsPart
-
-    live = tmp_path / "skills"
-    live.mkdir()
-    part = SkillsPart(None, str(tmp_path / "profile"), cwd=str(tmp_path), kind="card")
-    part._live_roots = {str(live)}
-    part._refresh_roots = lambda: None
-    decision = asyncio.run(part.tool_call(
-        {"toolName": "bash", "input": {"command": 'EI=/data/scripts\nls "$EI"'}}, None))
-    assert decision["block"] and "$NAME" in decision["reason"] and "set earlier in the same command" in decision["reason"]
-    # A dollar sign inside single quotes stays literal, as the message says.
-    assert asyncio.run(part.tool_call(
-        {"toolName": "bash", "input": {"command": "awk '{print $1}' data.csv"}}, None)) is None
+    assert not hasattr(SkillsPart(None, str(tmp_path / "profile"), cwd=str(tmp_path), kind=kind), "tool_call")
+    guard = HomeGuard(kind, str(tmp_path), guard_paths=True)
+    assert asyncio.run(guard.tool_call({"toolName": "bash", "input": {"command": command}})) is None
 
 
 @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
@@ -1014,32 +943,6 @@ async def test_stop_or_takeover_during_start_prevents_next_spawn(
 def test_depth_keeps_integer_and_cli_string_compatibility():
     for value in [0, 1, 12, "2"]:
         assert runs.normalize_limits({"max_depth": value})["max_depth"] == int(value)
-
-
-@pytest.mark.parametrize("command,reason", [
-    # A bare variable hides a path exactly as ${...} does.
-    ("cat $HOME/.misaka/profiles/last-order/skills/S.md", "dynamic"),
-    ("echo '$HOME is literal here'", None),
-    # A token that is itself a command line hides its paths one level down.
-    ("bash -c 'cat /tmp/live-skills/S.md'", "path"),
-    ("sh -c 'ls ~/nothing'", None),
-])
-def test_the_guard_looks_through_variables_and_nested_command_lines(command, reason):
-    """2026-09-18 (review of B23): the token scan cannot expand, so substitution is what keeps
-    an unattended session out of a tree it could otherwise name indirectly -- and a path inside
-    `bash -c "..."` is a path."""
-    from misaka.core.skills.wiring.skills import _command_touches
-
-    assert _command_touches(command, "/tmp/workspace", {"/tmp/live-skills"}) == reason
-
-
-def test_a_literal_command_is_still_allowed_everywhere():
-    from misaka.core.skills.wiring.skills import _command_touches
-
-    for command in ("ls -la", "git status", "sqlite3 board.db 'select 1'", "printf '%s' ok"):
-        assert _command_touches(command, "/tmp/workspace", {"/tmp/live-skills"}) is None
-        assert _command_touches(command, "/tmp/workspace", {"/tmp/live-skills"},
-                                unattended=False) is None
 
 
 def test_a_failed_node_is_retried_with_its_failed_cards_and_the_loop_is_capped(state, tmp_path):

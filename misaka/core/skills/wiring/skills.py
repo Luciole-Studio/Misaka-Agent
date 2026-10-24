@@ -3,27 +3,23 @@
 commands (hermes skills_tool + skill commands).
 
 The engine has no skill loading of its own: this extension is the only
-thing that decides which skills a session sees -- the role's three layers, or the
-read-only sandbox a card runs against (``SessionSpec.skill_roots``).
+thing that decides which skills a session sees -- the role's layers (project, role,
+shared). As in Hermes, a skill is served and run from where it lives: ``skill_view``
+returns its own directory.
 """
 import asyncio
 import json
 import os
-import re
 import shlex
-import tempfile
 import threading
 from pathlib import Path
 
 from misaka.ai.utils.typebox_helpers import typeboxSchema
-from misaka.config import home
 from misaka.core.moments import CoreCommand
-from misaka.core.platform import home_guard
-from misaka.core.skills import bundles, reader, sandbox, visibility
+from misaka.core.skills import bundles, reader, visibility
 from misaka.core.skills import index as skill_index
 from misaka.core.skills.layers import (
     extension_resources,
-    extension_roots,
     parse_skill_name,
     skill_roots,
 )
@@ -33,7 +29,6 @@ from misaka.core.skills.manage import (
     prepare_arguments,
 )
 from misaka.core.skills.vendor import commands as hermes_commands
-from misaka.core.tools.path_utils import resolveToCwd
 from misaka.utils.async_lifecycle import run_in_thread, settle
 
 _SKILL_INVOCATION_PREFIX = "[IMPORTANT: The user has invoked the "
@@ -102,7 +97,7 @@ def _render_loaded(loaded, entry, *, activation_note, user_instruction="", sessi
         loaded, Path(entry["dir"]), activation_note, user_instruction=user_instruction, session_id=session_id,
         preprocess=preprocess, inject_config=inject_config,
         support_files=[p for files in (loaded.get("linked_files") or {}).values() for p in files],
-        skill_view_target=_runtime_name(entry), skill_view_source=entry.get("origin_path", entry["path"]),
+        skill_view_target=_runtime_name(entry), skill_view_source=entry["path"],
         register_prefix=register_stable_prefix)
 
 
@@ -169,8 +164,6 @@ class SkillsPart:
         self._startup_prompt = None
         self._command_snapshot = {}
         self._read_lock = asyncio.Lock()
-        self._execution_tmp = None
-        self._copy_lock = threading.RLock()
         self._closed = False
         self._curator_task = None
         self._review_scope = None
@@ -179,7 +172,6 @@ class SkillsPart:
         self._sync_owner = SyncOwner(self.scope)
         self._sync_started = False
         self._activated_providers = set()
-        self._sealed_root = None
         self.tools = []
         self._commands = []
         from pydantic import BaseModel, ConfigDict, Field
@@ -192,8 +184,6 @@ class SkillsPart:
         self._roots = roots
         workspace = cwd or os.getcwd()
         self._profile_dir, self._workspace = profile_dir, workspace
-        self._live_roots = set()          # what the file tools may not touch (linked skills at their real place too)
-        self._shell_roots = set()         # what a shell command may not name (the roots themselves)
 
         def entries():
             return self._entries()
@@ -222,7 +212,7 @@ class SkillsPart:
             section = skill_index.render_prompt(prompt_entries(), skill_index.categories(roots),
                                                 compact_skill_categories(workspace, platform=self._platform),
                                                 can_manage=("skill_manage" in active if active is not None
-                                                            else kind not in ("card", "child")), available_tools=active)
+                                                            else True), available_tools=active)
             sections = [s for s in (section, self._startup_prompt) if s]
             if sections:
                 return {"systemPrompt": event["systemPrompt"].rstrip() + "\n\n" + "\n\n".join(sections)}
@@ -231,80 +221,6 @@ class SkillsPart:
             skill_index.invalidate()
 
         self._advertise, self._fresh = advertise, fresh
-
-        # Live skill trees change only through skill_manage (gate, scan, ledger): the generic file
-        # and shell tools are refused on them in every kind of session. A card's sandbox copies are
-        # not live trees, so reading them stays possible. Unresolvable shell substitution is refused
-        # as well, but only where no one is watching the command (see `_command_touches`).
-        live_roots = self._live_roots
-        shell_roots = self._shell_roots
-        self._refresh_roots()
-
-        # A window with a person in it is the only attended session: a card, a child, a DM turn
-        # and a bare one-shot all run with this guard as the only reader of the command. Naming
-        # the attended kind rather than the unattended ones keeps a new kind safe by default.
-        unattended = kind != "foreground"
-
-        def _touches_live_skills(tool, args):
-            """Why this call is refused -- "path", "dynamic", or the home's own sentence -- or None."""
-            if tool in ("write", "edit"):
-                # Resolved as write and edit resolve it (a leading @, file://, Unicode spaces): a
-                # target read any other way let `@PROJECT.md` past this check onto PROJECT.md.
-                target = os.path.realpath(resolveToCwd(str(args.get("path") or ""), workspace))
-                folded = home.folded(target)
-                if any(folded == root or root in folded.parents for root in map(home.folded, live_roots)):
-                    return "path"
-                if kind in _WORKER_KINDS and _is_context_file_above(target, workspace):
-                    return ("PROJECT.md, AGENTS.md and CLAUDE.md here are what every later session in this "
-                            "project reads as its instructions; a Sister or sub-agent does not change them. "
-                            "Tell Last Order what should change.")
-                # The one place a file tool's target is resolved, so the home's rule is asked here too,
-                # and the card owners': what a workflow's run saved and froze is not the tools' to change (B126).
-                from misaka.core.platform import owners
-                return home_guard.refusal(target, workspace, kind) or owners.frozen_refusal(target)
-            if tool in {"bash", "powershell"}:
-                return _command_touches(str(args.get("command") or ""), workspace, shell_roots,
-                                        shell=tool, unattended=unattended)
-            return None
-
-        async def guard_live_skills(event, _ctx):
-            args = event.get("input") if isinstance(event, dict) else getattr(event, "input", None)
-            tool = event.get("toolName") if isinstance(event, dict) else getattr(event, "toolName", "")
-            args = args if isinstance(args, dict) else {}
-            prepared = None
-            if tool == "office":
-                from misaka.core.tools._office.paths import output_paths
-                from misaka.core.tools.office import prepare_office_input
-                parsed, path, ops = prepare_office_input(args, workspace)
-                # Pass the very ops we checked onward; re-reading @ops could change destinations.
-                prepared = {"path": path, "ops": ops, "overwrite": parsed.overwrite}
-                protected = next(filter(None, (_touches_live_skills("write", {"path": path})
-                                               for path in output_paths(path, ops))), None)
-            else:
-                protected = _touches_live_skills(str(tool or ""), args)
-            if protected == "dynamic":
-                return {"block": True, "reason": (
-                    # The message names a bare $NAME too: it is refused like ${...}, and a message
-                    # that left it out sent Sisters back to the same refusal five times (2026-10-01).
-                    "This session runs unattended, so a shell command that expands a variable or "
-                    "substitutes a command ($NAME, ${...}, $(...), backticks) is refused -- a variable "
-                    "set earlier in the same command included: the guard that keeps live skill trees "
-                    "read-only here cannot resolve where the expansion would point. Write every path out "
-                    "literally; a $ inside single quotes stays literal and is fine. Skills themselves are "
-                    "read with skill_view and changed with skill_manage."
-                )}
-            if protected and protected != "path":
-                return {"block": True, "reason": protected}
-            if protected:
-                return {"block": True, "reason": (
-                    "Live skill trees change only through skill_manage (approval, scan, ledger). "
-                    "This call reaches a path inside one; write, edit and office are refused on output "
-                    "paths there, and bash and powershell on commands that name one. "
-                    "Use skill_view to read skills and skill_manage to change them."
-                )}
-            return {"updatedInput": prepared} if prepared is not None else None
-
-        self._guard = guard_live_skills
 
         # ── the [Skills] block on the startup screen ──
         # The engine loads no skills of its own, so it has no section to show; this one takes
@@ -414,20 +330,18 @@ class SkillsPart:
                     "isError": not result.get("success"),
                     "details": {k: v for k, v in result.items() if k != "message"}}
 
-        if kind not in ("card", "child"):   # skills are read-only at run time inside a card and its children
-            self.tools.append(ToolDefinition(
-                name="skill_manage", label="Manage skills",
-                description="Create, update, or delete a reusable skill; every change goes through approval, validation, the security scan, and the rollback ledger.",
-                parameters=MANAGE_PARAMETERS,
-                prepareArguments=prepare_arguments,
-                execute=manage_execute,
-                promptSnippet="Create or update a reusable skill",
-                promptGuidelines=[
-                    f"New skill descriptions must be one sentence of at most {skill_index.SKILL_PROMPT_DESC_LIMIT} characters; put detail in the body.",
-                    "Use `skill_manage`, never generic file tools, for every skill mutation.",
-                    "Keep reasoning Skills Markdown-only: no code, executable helpers, validators or scoring gates.",
-                    "When the user-controlled gate blocks a write, report it and do not seek a bypass.",
-                ]))
+        self.tools.append(ToolDefinition(
+            name="skill_manage", label="Manage skills",
+            description="Create, update, or delete a reusable skill; every change goes through approval, validation, the security scan, and the rollback ledger.",
+            parameters=MANAGE_PARAMETERS,
+            prepareArguments=prepare_arguments,
+            execute=manage_execute,
+            promptSnippet="Create or update a reusable skill",
+            promptGuidelines=[
+                f"New skill descriptions must be one sentence of at most {skill_index.SKILL_PROMPT_DESC_LIMIT} characters; put detail in the body.",
+                "Keep reasoning Skills Markdown-only: no code, executable helpers, validators or scoring gates.",
+                "When the user-controlled gate blocks a write, report it and do not seek a bypass.",
+            ]))
 
         # ── commands ──
         async def skill_cmd(args, ctx):
@@ -478,8 +392,7 @@ class SkillsPart:
             if decision == "off":
                 raise ValueError("Skill writing is disabled globally. Change the write mode before using /learn.")
             prompt += (
-                "\n\n---\n[Write path] Use `skill_manage` for every skill change; never write the skill tree with generic file tools. "
-                "Create a skill with `skill_manage(action='create', name=..., content=<complete SKILL.md>)` and add support files "
+                "\n\n---\n[Write path] Create a skill with `skill_manage(action='create', name=..., content=<complete SKILL.md>)` and add support files "
                 f"with `action='write_file'`. New descriptions must be one sentence of at most {skill_index.SKILL_PROMPT_DESC_LIMIT} characters; put detail in the body."
             )
             if decision == "stage":
@@ -522,9 +435,8 @@ class SkillsPart:
                 "skill-mode",
                 "Show or change the skill write mode: off, forbid / ask (writes wait for your review), or allow.",
                 skill_mode_cmd))
-        if kind not in ("card", "child"):
-            self._commands.append(CoreCommand(
-                "learn", "Create or improve a reusable skill from files, links, notes, or the workflow just completed.", learn_cmd, is_prompt=True))
+        self._commands.append(CoreCommand(
+            "learn", "Create or improve a reusable skill from files, links, notes, or the workflow just completed.", learn_cmd, is_prompt=True))
 
         if kind in ("foreground", "dm"):
             async def refine(args, ctx):
@@ -628,7 +540,7 @@ class SkillsPart:
             disabled_names=disabled)
 
     async def _prepare_provider(self, name, source=None):
-        if self._base_roots is not None:  # sealed card/child snapshots never activate live extensions
+        if self._base_roots is not None:  # a caller's explicit roots never activate live extensions
             return
         from misaka.core.skills.providers import prepare
         if not source and isinstance(name, str) and ':' in name:
@@ -734,12 +646,7 @@ class SkillsPart:
             return bundles.scan(bundles.bundle_roots(self._profile_dir, self._workspace))
         out = {}
         for layer, root in self._base_roots:
-            if layer == "sandbox":
-                manifest = sandbox.read_manifest(root)
-                records = (manifest or {}).get("bundles", [])
-                for info in records:
-                    out.setdefault("/" + info["slug"], dict(info))
-            elif layer in ("role", "project", "shared"):
+            if layer in ("role", "project", "shared"):
                 for key, info in bundles.scan([(layer, str(Path(root).parent / "skill-bundles"))]).items():
                     out.setdefault(key, info)
         return out
@@ -759,18 +666,17 @@ class SkillsPart:
         if error:
             return None
         if skill_index.is_disabled(entry, self._platform, disabled=disabled):
-            return {}, None, _runtime_name(entry)  # native block loader skips BEFORE any execution copy/preprocessing
+            return {}, None, _runtime_name(entry)  # native block loader skips BEFORE any preprocessing
         try:
-            copied = self._execution_entry(entry)
-            loaded = reader.load(copied, task_id, profile_dir=self._profile_dir, preprocess=False, runtime=self.runtime)
+            loaded = reader.load(entry, task_id, profile_dir=self._profile_dir, preprocess=False, runtime=self.runtime)
         except (OSError, ValueError):
             return None
         if not loaded.get("success"):
             return None
         from misaka.core.skills.operations import observe
         observe(entry, self._profile_dir, self._workspace, view=False, task_id=task_id)
-        loaded["_entry"] = copied
-        return loaded, Path(copied["dir"]), _runtime_name(entry)
+        loaded["_entry"] = entry
+        return loaded, Path(entry["dir"]), _runtime_name(entry)
 
     def _load_blocks(self, *args, cancelled=None, **kwargs):
         def render(loaded, note, task_id):
@@ -818,7 +724,7 @@ class SkillsPart:
 
     def _refresh_roots(self):
         # Hermes discovers current roots on access. Extension contributions are a
-        # replaceable set, not an append-only history; explicit sandbox roots stay pinned.
+        # replaceable set, not an append-only history; a caller's explicit roots stay pinned.
         loader = getattr(self.session, "resourceLoader", None)
         extension_paths = extension_resources(loader)
         live = skill_roots(self._profile_dir, self._workspace, extension_paths=extension_paths)
@@ -833,36 +739,13 @@ class SkillsPart:
         if roots != self._roots:
             self._roots[:] = roots
             skill_index.invalidate()
-        from misaka.core.skills.layers import protected_skill_roots
-        bundle_roots = {str(Path(root).resolve()) for _, root in bundles.bundle_roots(self._profile_dir, self._workspace)}
-        self._live_roots.clear()
-        self._live_roots.update(protected_skill_roots(self._profile_dir, self._workspace, extension_paths=extension_paths))
-        self._live_roots.update(bundle_roots)
-        self._shell_roots.clear()
-        self._shell_roots.update(protected_skill_roots(self._profile_dir, self._workspace, extension_paths=extension_paths, linked=False))
-        self._shell_roots.update(bundle_roots)
-
-    def _execution_entry(self, entry):
-        with self._copy_lock:
-            if self._closed:
-                raise RuntimeError("Skill session is closed.")
-            return self._copy_entry(entry)
-
-    def _copy_entry(self, entry):
-        """Advertised absolute script paths point to an owned copy, never a guarded live tree."""
-        if self._base_roots is not None:
-            return entry
-        if self._execution_tmp is None:
-            self._execution_tmp = str(Path(tempfile.mkdtemp(prefix="misaka-skill-execution-")).resolve())
-        return sandbox.execution_entry(entry, self._execution_tmp)
 
     def _load_payload(self, entry, session_id=None, *, file_path=None, cancelled=None):
         try:
-            copied = self._execution_entry(entry)
-            payload = reader.load(copied, session_id, file_path=file_path, profile_dir=self._profile_dir, runtime=self.runtime)
+            payload = reader.load(entry, session_id, file_path=file_path, profile_dir=self._profile_dir, runtime=self.runtime)
             if payload.get("success"):
                 from misaka.core.skills.operations import observe
-                observe({**entry, "origin_path": str(Path(entry.get("origin_dir", entry["dir"])) / file_path)} if file_path else entry,
+                observe({**entry, "origin_path": str(Path(entry["dir"]) / file_path)} if file_path else entry,
                         self._profile_dir, self._workspace, use=not file_path, task_id=session_id)
             return payload
         except (OSError, ValueError) as error:
@@ -880,26 +763,6 @@ class SkillsPart:
         async with self._read_lock:
             if self._closed:
                 raise RuntimeError("Skill session is closed.")
-            if self._base_roots is not None and self._sealed_root is None:
-                loader = getattr(self.session, "resourceLoader", None)
-                extensions = list(extension_roots(extension_resources(loader)))
-                prepared = next((root for layer, root in self._base_roots if layer == "sandbox"), None)
-                manifest = await run_in_thread(sandbox.read_manifest, prepared, verify_files=True) if prepared else None
-                if self._kind == "child" and manifest and manifest["state"] != "sealed":
-                    raise ValueError("Nested child received an unsealed Skill snapshot.")
-                if prepared:
-                    if self._kind != "child":
-                        await run_in_thread(sandbox.seal, prepared, extensions)
-                    self._sealed_root = prepared
-                else:
-                    if self._execution_tmp is None:
-                        self._execution_tmp = str(Path(tempfile.mkdtemp(prefix="misaka-skill-collection-")).resolve())
-                    sealed_root = str(Path(self._execution_tmp) / "sealed")
-                    await run_in_thread(sandbox.readonly_copies, skill_index.all_entries(self._base_roots, platform=self._platform), sealed_root,
-                                        bundle_records=list(self._bundles().values()), category_descriptions=skill_index.categories(self._base_roots))
-                    await run_in_thread(sandbox.seal, sealed_root, extensions)
-                    self._sealed_root = sealed_root  # publish only the completed collection
-                self._base_roots = [("sandbox", self._sealed_root)]
             self._refresh_roots()
             if self._startup_prompt is None and self._startup_skills:
                 prompt, loaded, missing = await self._run_activation(self._preload, self._session_id(ctx))
@@ -991,15 +854,9 @@ class SkillsPart:
     async def session_compact(self, event, ctx):
         self._dedup.clear()
 
-    def _close_copies(self):
-        with self._copy_lock:
-            self._closed = True
-            try:
-                self.runtime.close()
-            finally:
-                if self._execution_tmp:
-                    sandbox.cleanup(self._execution_tmp)
-                    self._execution_tmp = None
+    def _close(self):
+        self._closed = True
+        self.runtime.close()
 
     async def session_shutdown(self, event, ctx):
         self._closed = True  # Fence queued review/reload callbacks before awaiting.
@@ -1011,7 +868,7 @@ class SkillsPart:
         self._dedup.clear()
         if event.get("reason") != "reload":
             async with self._read_lock:
-                await run_in_thread(self._close_copies)
+                await run_in_thread(self._close)
 
     async def before_agent_start(self, event, ctx):
         self._refresh_roots()
@@ -1032,144 +889,8 @@ class SkillsPart:
         self._refresh_roots()
         await self._fresh(event, ctx)
 
-    async def tool_call(self, event, ctx):
-        self._refresh_roots()
-        return await self._guard(event, ctx)
-
 
 SESSION_KINDS = {"foreground", "dm", "card", "child", "bare"}
-
-
-# Command substitution, parameter expansion and a bare variable: everything whose value this
-# guard cannot know. PowerShell spells its variables the same way.
-_SUBSTITUTION = re.compile(r"\$[({A-Za-z_]|`")
-
-
-def _has_dynamic_shell_syntax(command, shell):
-    # PowerShell has different quoting/escape rules. Keep its conservative policy;
-    # this Bash-only literal recognition is not a cross-shell permission parser.
-    if shell != "bash":
-        return bool(_SUBSTITUTION.search(command))
-    if not _SUBSTITUTION.search(command):
-        return False
-    quote = None
-    i = 0
-    while i < len(command):
-        char = command[i]
-        if quote == "'":
-            if char == "'":
-                quote = None
-        elif char == "\\":
-            if quote is None or command[i + 1:i + 2] in ('$', '`', '"', "\\", "\n"):
-                i += 1
-        elif char == '"' and quote == '"':
-            quote = None
-        elif quote is None and char in ("'", '"'):
-            quote = char
-        elif char == "`" or command[i:i + 2] in ("$(", "${") or (
-                char == "$" and (command[i + 1:i + 2].isalpha() or command[i + 1:i + 2] == "_")):
-            # A bare `$HOME` hides a path exactly as `${HOME}` does; the quote state above is
-            # what keeps a single-quoted dollar sign literal.
-            return True
-        i += 1
-    if quote is not None:
-        return True
-    # A quoted string may itself be code (bash -c, eval, python -c, ...). Only
-    # exempt simple literal display commands, not every shell-quoted program.
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        argv = list(lexer)
-    except ValueError:
-        return True
-    return (not argv or argv[0] not in {"printf", "echo"}
-            or "\n" in command
-            or any(token and all(c in ";&|()<>" for c in token) for token in argv))
-
-
-# Sisters' cards and the sub-agents they start: the sessions that work for Last Order, unattended.
-_WORKER_KINDS = frozenset({"card", "beast", "child"})
-
-
-def _is_context_file_above(target, workspace):
-    """Whether ``target`` is a file a session in ``workspace`` loads as its instructions: a context
-    file name in the workspace or a folder above it (issue #10 audit, H4: a card could rewrite
-    PROJECT.md, and every later session of the project took it as its brief)."""
-    from misaka.core.resource_loader import CONTEXT_FILE_NAMES
-    target = home.folded(target)
-    if target.name not in {home.fold(name) for name in CONTEXT_FILE_NAMES}:
-        return False
-    here = home.folded(workspace)
-    return here == target.parent or target.parent in here.parents
-
-
-def _command_touches(command, workspace, live_roots, *, shell="bash", unattended=True):
-    """Why a shell command is refused near a live skill tree: "path", "dynamic", or None.
-
-    The literal substring test this replaces read the command as text, so only the
-    expanded absolute form was caught: `cd ~/.misaka/profiles/<role>/skills`, or any
-    path relative to the workspace, walked straight past a guard whose whole job is to
-    keep unattended card sessions out of the live trees.
-
-    Every token that could be a path is resolved the way the shell would resolve it --
-    `~` expanded, relatives taken against the workspace, symlinks followed -- and
-    compared as a path, not as text. Tokens are taken from `shlex`.
-
-    A command carrying substitution (`$(...)`, backticks, `${...}`), or one `shlex` cannot
-    parse at all, hides where it would point. Where nobody is watching -- ``unattended``, a
-    card or a child -- refusing it is the safe direction: `skill_view` reads skills and
-    `skill_manage` writes them, so nothing legitimate needs the shell to reach one. In a
-    conversation with a person in it, that verdict costs more than it buys and only a path
-    the guard can actually resolve is refused.
-    """
-    if not command.strip():
-        return None
-    # Compared as the file system compares names: `rm -rf ~/.MISAKA/skills/x` is the live tree on
-    # macOS and Windows (0.18.9 sweep).
-    live_roots = {home.fold(root) for root in live_roots}
-    if any(root in home.fold(command) for root in live_roots):
-        return "path"
-    # Substitution is only a reason by itself where nobody is watching. In a card or a child
-    # the guard is the only reader of the command, so an expansion it cannot resolve is refused
-    # (2026-09-18, B23: that verdict was reaching Last Order too, where it killed
-    # `cp board.db board.db.bak-$(date +%s)` and read as if a skill tree were involved).
-    dynamic = _has_dynamic_shell_syntax(command, shell)
-    # shlex neither expands ${HOME} nor evaluates $(...), so the token scan below cannot see
-    # through substitution; refusing it is what keeps an unattended session out of a tree it
-    # could otherwise name indirectly.
-    try:
-        argv = shlex.split(command)
-    except ValueError:
-        return "dynamic" if unattended else None
-    pending = list(argv)
-    while pending:
-        item = pending.pop()
-        if not item or item.startswith("-"):
-            continue
-        if item.strip() != item or any(char.isspace() for char in item):
-            # A token that is itself a command line -- `bash -c "..."`, `eval "..."`, a
-            # `find -exec` payload -- hides its paths one level down.
-            try:
-                words = shlex.split(item)
-            except ValueError:
-                if unattended:
-                    return "dynamic"
-                continue
-            if words != [item]:
-                pending.extend(words)
-                continue
-            # Only whitespace shlex does not split on is left (U+3000, U+00A0, ...). Bash does not
-            # split on it either, so this is one word: check it as a path. Re-queueing it unchanged
-            # never ended -- the guard spun on the session's event loop forever (GitHub issue #10).
-        candidate = os.path.expanduser(item)
-        if not os.path.isabs(candidate):
-            candidate = os.path.join(workspace, candidate)
-        for resolved in (os.path.abspath(candidate), os.path.realpath(candidate)):
-            resolved = home.fold(resolved)
-            if any(resolved == root or resolved.startswith(root + os.sep) for root in live_roots):
-                return "path"
-    return "dynamic" if dynamic and unattended else None
 
 
 def part(spec):
@@ -1177,4 +898,4 @@ def part(spec):
         from misaka.config.profiles import is_last_order
         if not is_last_order(spec.profile_dir):
             return None
-    return SkillsPart(spec.skill_roots, spec.profile_dir, cwd=spec.workspace, kind=spec.kind, startup_skills=spec.startup_skills)
+    return SkillsPart(None, spec.profile_dir, cwd=spec.workspace, kind=spec.kind, startup_skills=spec.startup_skills)

@@ -111,7 +111,6 @@ def card_flags(root, monkeypatch, model=None):
 
     monkeypatch.setattr(worker.task_store, "task_state_dir", lambda _: str(root / "state"))
     monkeypatch.setattr(sessions, "card_session_dir", lambda _: str(root / "cards"))
-    monkeypatch.setattr(worker.skill_sandbox, "snapshot_stack", lambda *args: None)
     monkeypatch.setattr(identity, "base_prompt_sources", lambda *args: [])
     monkeypatch.setattr(wiring, "assemble", lambda spec: NS(spec=spec))
     row = {"id": "fixture", "model": model, "body": "Task"}

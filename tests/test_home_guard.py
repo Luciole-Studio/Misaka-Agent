@@ -41,21 +41,17 @@ def test_a_session_with_a_person_in_it_is_not_refused():
 
 
 def test_the_path_guard_asks_the_homes_rule_for_write_edit_and_office(tmp_path):
-    from misaka.core.skills.wiring.skills import SkillsPart
+    guard = home_guard.HomeGuard("card", str(tmp_path), guard_paths=True)
 
-    part = SkillsPart([], None, cwd=str(tmp_path), kind="card")
-    try:
-        def call(tool, **arguments):
-            return asyncio.run(part.tool_call({"toolName": tool, "input": arguments}, SimpleNamespace()))
+    def call(tool, **arguments):
+        return asyncio.run(guard.tool_call({"toolName": tool, "input": arguments}, SimpleNamespace()))
 
-        refused = call("write", path=str(home.home() / "audits" / "x.md"), content="x")
-        assert refused["block"] and "MISAKA home" in refused["reason"]
-        assert call("edit", path=str(home.path("settings")), oldText="a", newText="b")["block"]
-        assert call("write", path=str(home.path("shared") / "x.md"), content="x") is None
-        assert call("write", path=str(tmp_path / "report.md"), content="x") is None
-        assert call("bash", command=f"cat {home.path('settings')}") is None      # a read is never refused
-    finally:
-        asyncio.run(part.session_shutdown({}, SimpleNamespace()))
+    refused = call("write", path=str(home.home() / "audits" / "x.md"), content="x")
+    assert refused["block"] and "MISAKA home" in refused["reason"]
+    assert call("edit", path=str(home.path("settings")), oldText="a", newText="b")["block"]
+    assert call("write", path=str(home.path("shared") / "x.md"), content="x") is None
+    assert call("write", path=str(tmp_path / "report.md"), content="x") is None
+    assert call("bash", command=f"cat {home.path('settings')}") is None      # a read is never refused
 
 
 def test_a_shell_command_that_litters_the_home_is_told_so_once_on_its_own_result():
@@ -76,30 +72,26 @@ def test_a_shell_command_that_litters_the_home_is_told_so_once_on_its_own_result
         (home.home() / name).rmdir()
 
 
-def test_a_skill_kept_as_a_symlink_is_guarded_at_its_real_place_too(tmp_path):
-    """The user keeps skills as links into a library under shared/. The guard compares real
-    paths, so a write aimed at the link resolves into shared/ -- which the home's rule allows.
-    The live-skill roots must therefore include where each linked skill really is."""
-    from misaka.core.skills.wiring.skills import SkillsPart
-
+def test_a_skill_is_guarded_only_by_the_homes_rule(tmp_path):
+    """Hermes keeps no guard on skill trees (tools/skill_manager_tool.py: "edit the file directly
+    (file tools / terminal)"). What still stops an unattended card is the home's own rule, which
+    is about the home, not about skills: a skill under ``~/.misaka/skills`` is in the home, one
+    kept as a link into ``shared/`` really lives where agents may write. The shell is never
+    refused, so a skill's scripts run where they are."""
     real = home.path("shared") / "library" / "pptx"
     real.mkdir(parents=True)
     (real / "SKILL.md").write_text("---\nname: pptx\ndescription: d\n---\nbody\n", encoding="utf-8")
     home.path("shared_skills").mkdir(parents=True, exist_ok=True)
     (home.path("shared_skills") / "pptx").symlink_to(real)
-    part = SkillsPart(None, None, cwd=str(tmp_path), kind="card")
-    try:
-        def call(tool, **arguments):
-            return asyncio.run(part.tool_call({"toolName": tool, "input": arguments}, SimpleNamespace()))
+    (home.path("shared_skills") / "docx").mkdir()
+    guard = home_guard.HomeGuard("card", str(tmp_path), guard_paths=True)
 
-        for target in (home.path("shared_skills") / "pptx" / "SKILL.md", real / "SKILL.md"):
-            refused = call("write", path=str(target), content="x")
-            assert refused and refused["block"], target
-        assert call("write", path=str(home.path("shared") / "library" / "notes.md"), content="x") is None
-        # The shell guard can only refuse a command that names a root, reads included; a skill
-        # kept in a library is run from there (its documented entry, its runtime), so the real
-        # place is not a shell root -- only the link's root is, as before.
-        assert call("bash", command=f"cd {real} && python scripts/run.py") is None
-        assert call("bash", command=f"cat {home.path('shared_skills') / 'pptx' / 'SKILL.md'}")["block"]
-    finally:
-        asyncio.run(part.session_shutdown({}, SimpleNamespace()))
+    def call(tool, **arguments):
+        return asyncio.run(guard.tool_call({"toolName": tool, "input": arguments}, SimpleNamespace()))
+
+    refused = call("write", path=str(home.path("shared_skills") / "docx" / "SKILL.md"), content="x")
+    assert refused["block"] and "MISAKA home" in refused["reason"]
+    for target in (home.path("shared_skills") / "pptx" / "SKILL.md", real / "SKILL.md"):
+        assert call("write", path=str(target), content="x") is None, target
+    assert call("bash", command=f"cd {real} && python scripts/run.py") is None
+    assert call("bash", command=f"cat {home.path('shared_skills') / 'pptx' / 'SKILL.md'}") is None

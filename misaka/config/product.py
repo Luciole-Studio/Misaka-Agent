@@ -40,7 +40,6 @@ KNOBS = {
     ("research", "beast_at"): float,
     ("research", "plan_approval"): bool,
     ("research", "token_cap"): int,
-    ("skills", "copy_cap_mb"): int,
     ("subagents", "agent_list_in_messages"): bool,
     ("subagents", "auto_background_tasks"): bool,
     ("subagents", "auto_memory"): bool,

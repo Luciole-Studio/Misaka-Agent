@@ -63,7 +63,6 @@ class WorkerModelTests(unittest.TestCase):
             ("misaka.config.sessions.card_session_dir", str(self.root / "session")),
             ("misaka.config.profiles.shared_soul", str(self.root / "MISAKA.md")),
             ("misaka.config.identity.prompt_sections", []),
-            ("misaka.core.skills.sandbox.snapshot_stack", None),
         ):
             mock = patch(target, return_value=value)
             mock.start()

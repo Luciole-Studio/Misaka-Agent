@@ -98,21 +98,19 @@ def test_the_path_guard_refuses_last_order_s_own_window_too(lab):
     import asyncio
     from types import SimpleNamespace
 
-    from misaka.core.skills.wiring.skills import SkillsPart
+    from misaka.core.platform.home_guard import HomeGuard
 
     con, run = lab
     draft = _saved_draft(con, run)
-    part = SkillsPart([], None, cwd=run["workspace"], kind="foreground")
-    try:
-        def call(tool, **arguments):
-            return asyncio.run(part.tool_call({"toolName": tool, "input": arguments}, SimpleNamespace()))
+    guard = HomeGuard("foreground", run["workspace"], guard_paths=True)
 
-        refused = call("edit", path=draft["path"], oldText="Report", newText="Rapport")
-        assert refused["block"] and "final adjudication" in refused["reason"]
-        assert call("write", path=draft["path"], content="x")["block"]
-        assert call("write", path=str(Path(run["workspace"]) / "notes.md"), content="x") is None
-    finally:
-        asyncio.run(part.session_shutdown({}, SimpleNamespace()))
+    def call(tool, **arguments):
+        return asyncio.run(guard.tool_call({"toolName": tool, "input": arguments}, SimpleNamespace()))
+
+    refused = call("edit", path=draft["path"], oldText="Report", newText="Rapport")
+    assert refused["block"] and "final adjudication" in refused["reason"]
+    assert call("write", path=draft["path"], content="x")["block"]
+    assert call("write", path=str(Path(run["workspace"]) / "notes.md"), content="x") is None
 
 
 def test_a_frozen_file_is_refused_in_any_spelling_its_file_system_takes(tmp_path, monkeypatch):

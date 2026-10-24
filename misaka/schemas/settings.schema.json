@@ -273,10 +273,6 @@
             ]
           },
           "description": "Skill names to hide on one surface, keyed by its name."
-        },
-        "copy_cap_mb": {
-          "type": "integer",
-          "description": "Total size of the skill copies one session may hold in its sandbox. Default: 200."
         }
       },
       "description": "MISAKA's skill index: more skill folders, and skills to hide. A list of skill paths is not read here."

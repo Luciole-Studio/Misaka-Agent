@@ -180,40 +180,6 @@ def test_research_registration_does_not_relabel_post_submission_bytes(state, mut
         assert artifacts[0]["sha256"] == original_sha
 
 
-@pytest.mark.parametrize("tool", ["write", "office"])
-async def test_live_skill_guard_covers_office_writer(tmp_path, monkeypatch, tool):
-    from misaka.core.extensions import startup_sections
-    from misaka.core.skills.wiring.skills import SkillsPart
-    from misaka.core.tools.office import createOfficeToolDefinition
-
-    live = tmp_path / "profile" / "skills" / "fixture"
-    live.mkdir(parents=True)
-    path = live / "SKILL.md"
-    path.write_text("before", encoding="utf-8")
-    monkeypatch.setattr(
-        SkillsPart,
-        "_refresh_roots",
-        lambda self: self._live_roots.update({str(live.resolve())}),
-    )
-    monkeypatch.setattr(startup_sections, "register", lambda *a, **k: None)
-    part = SkillsPart(
-        [],
-        str(tmp_path / "profile"),
-        cwd=str(tmp_path),
-        runtime=SimpleNamespace(close=lambda: None),
-    )
-    params = {"path": str(path), "content": "after", "overwrite": True}
-    decision = await part.tool_call({"toolName": tool, "input": params}, None)
-    if not decision and tool == "office":
-        await createOfficeToolDefinition(str(tmp_path)).execute(
-            "fixture", params, None, None, None
-        )
-    assert path.read_text(encoding="utf-8") == "before", (
-        "office changed protected skill without skill_manage approval/scan/ledger"
-    )
-    assert decision and decision.get("block")
-
-
 @pytest.mark.parametrize("added", [True, False])
 async def test_responses_fallback_call_is_in_final_message(added):
     from misaka.ai.api.openai_responses_shared import processResponsesStream
@@ -555,38 +521,31 @@ async def test_office_guard_checks_secondary_exports_and_freezes_ops(
 ):
     import json
 
-    from misaka.core.extensions import startup_sections
-    from misaka.core.skills.wiring.skills import SkillsPart
+    from misaka.config import home
+    from misaka.core.platform.home_guard import HomeGuard
     from misaka.core.tools.office import prepare_office_input
 
-    live = tmp_path / "live-skills"
-    live.mkdir()
+    # A place this card may not write: MISAKA's home outside `shared`, reached through a link.
+    monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
+    walled = tmp_path / "home" / "state"
+    walled.mkdir(parents=True)
     alias = tmp_path / "alias"
-    alias.symlink_to(live, target_is_directory=True)
-    monkeypatch.setattr(
-        SkillsPart,
-        "_refresh_roots",
-        lambda self: self._live_roots.update({str(live.resolve())}),
-    )
-    monkeypatch.setattr(startup_sections, "register", lambda *a, **k: None)
-    part = SkillsPart(
-        [],
-        str(tmp_path),
-        cwd=str(tmp_path),
-        runtime=SimpleNamespace(close=lambda: None),
-    )
-    destination = alias / "export.pdf" if protected else tmp_path / "ordinary.pdf"
+    alias.symlink_to(walled, target_is_directory=True)
+    project = tmp_path / "project"
+    project.mkdir()
+    guard = HomeGuard("card", str(project), guard_paths=True)
+    destination = alias / "export.pdf" if protected else project / "ordinary.pdf"
     ops = [{"export_pdf": {"out": str(destination)}}]
-    source = tmp_path / "ops.json"
+    source = project / "ops.json"
     source.write_text(json.dumps(ops), encoding="utf-8")
     args = {"path": "document.docx", "ops": "@ops.json" if ops_file else ops}
-    decision = await part.tool_call({"toolName": "office", "input": args}, None)
+    decision = await guard.tool_call({"toolName": "office", "input": args}, None)
     if protected:
         assert decision["block"]
     else:
         assert not decision.get("block")
-        source.write_text(json.dumps([{"export_pdf": {"out": str(live / "bad.pdf")}}]), encoding="utf-8")
-        _, _, checked = prepare_office_input(decision["updatedInput"], str(tmp_path))
+        source.write_text(json.dumps([{"export_pdf": {"out": str(walled / "bad.pdf")}}]), encoding="utf-8")
+        _, _, checked = prepare_office_input(decision["updatedInput"], str(project))
         assert checked == ops
 
 
@@ -795,41 +754,35 @@ async def test_cancel_after_assignment_before_drive_stops_new_card(state, monkey
     assert linked[0]["status"] == "stopped"
 
 
+@pytest.mark.parametrize("kind", ["card", "child", "dm", "foreground"])
 async def test_office_executes_the_approved_ops_not_later_file_bytes(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, kind
 ):
     import json
 
-    from misaka.core.extensions import startup_sections
-    from misaka.core.skills.wiring.skills import SkillsPart
+    from misaka.config import home
+    from misaka.core.platform.home_guard import HomeGuard
     from misaka.core.tools.office import createOfficeToolDefinition
 
-    live = tmp_path / "skills"
-    live.mkdir()
-    protected = live / "SKILL.md"
+    monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
+    walled = tmp_path / "home" / "state"
+    walled.mkdir(parents=True)
+    protected = walled / "notes.md"
     protected.write_text("keep", encoding="utf-8")
-    monkeypatch.setattr(
-        SkillsPart,
-        "_refresh_roots",
-        lambda self: self._live_roots.update({str(live.resolve())}),
-    )
-    monkeypatch.setattr(startup_sections, "register", lambda *a, **k: None)
-    part = SkillsPart(
-        [],
-        str(tmp_path),
-        cwd=str(tmp_path),
-        runtime=SimpleNamespace(close=lambda: None),
-    )
-    ops = tmp_path / "ops.json"
+    project = tmp_path / "project"
+    project.mkdir()
+    # Every checked kind runs the ops it was shown, a person's session too (it may write the home).
+    guard = HomeGuard(kind, str(project), guard_paths=True)
+    ops = project / "ops.json"
     ops.write_text(json.dumps([{"create": {"content": "approved"}}]), encoding="utf-8")
-    decision = await part.tool_call(
+    decision = await guard.tool_call(
         {"toolName": "office", "input": {"path": "output.md", "ops": "@ops.json"}}, None
     )
     ops.write_text(json.dumps([{"export_pdf": {"out": str(protected)}}]), encoding="utf-8")
-    await createOfficeToolDefinition(str(tmp_path)).execute(
+    await createOfficeToolDefinition(str(project)).execute(
         "fixture", decision["updatedInput"], None, None, None
     )
-    assert (tmp_path / "output.md").read_text(encoding="utf-8") == "approved"
+    assert (project / "output.md").read_text(encoding="utf-8") == "approved"
     assert protected.read_text(encoding="utf-8") == "keep"
 
 

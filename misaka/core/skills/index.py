@@ -202,14 +202,6 @@ def _write_snapshot(root, manifest, scanned):
 def _layer(layer, root):
     """A layer's skills: from its snapshot when the tree is unchanged (personal layers), else
     a scan -- written back as the new snapshot."""
-    if layer == "sandbox":
-        from .sandbox import read_manifest
-        if manifest := read_manifest(root):
-            for entry in manifest["entries"]:
-                (prompt, _), (runtime, _) = _documents(entry["path"])
-                entry["prompt_frontmatter"], entry["frontmatter"] = prompt, runtime
-                entry["description"] = truncate_skill_description(str(prompt.get("description") or ""))
-            return {"skills": manifest["entries"], "categories": manifest.get("categories", {})}
     if layer == "project":
         return _scan_root(root, iter_project_skill_files(root))
     if layer not in PERSONAL_LAYERS:
@@ -257,9 +249,8 @@ def _assemble(roots):
                 entry["runtime_name"] = f"{namespace}:{entry['runtime_name']}"
             if owner is not None:
                 entry.update(layer="project", origin_layer="project", project_name=owner["runtime_name"], project_rel=owner["rel"])
-            if layer != "sandbox":
-                from .vendor.org_header import _org_provenance_header
-                entry["org_provenance"], entry["org_header"] = _org_provenance_header(Path(entry["dir"]), Path(root))
+            from .vendor.org_header import _org_provenance_header
+            entry["org_provenance"], entry["org_header"] = _org_provenance_header(Path(entry["dir"]), Path(root))
             all_entries.append(entry)
         for category, text in scanned["categories"].items():
             categories.setdefault(category, text)
@@ -306,7 +297,7 @@ def is_disabled(entry, platform="cli", *, disabled=None):
     if entry.get("namespace"):
         names.add(f"{entry['namespace']}:{entry['rel']}")
     else:
-        names.update((entry["rel"], Path(entry["dir"]).name, Path(entry.get("origin_dir", entry["dir"])).name))
+        names.update((entry["rel"], Path(entry["dir"]).name))
     return bool(names & (set(disabled_skill_names(platform)) if disabled is None else disabled))
 
 
@@ -451,13 +442,12 @@ __all__ = ["SKILL_PROMPT_DESC_LIMIT", "build", "candidates", "categories", "find
 
 
 def resolve(roots, name, *, source=None, platform="cli", include_disabled=False, require_compatible=True):
-    """Select one admitted identity. Absolute references match indexed origins only."""
+    """Select one admitted identity. Absolute references match indexed paths only."""
     wanted = str(name or "").strip()
     if source or Path(wanted).expanduser().is_absolute():
         selected = os.path.abspath(os.path.expanduser(source or wanted))
         found = [e for e in _cached(roots)["entries"] if selected in {
-            e["path"], e["dir"], e.get("origin_path"), e.get("origin_dir"),
-            os.path.realpath(e["path"]), os.path.realpath(e["dir"])}]
+            e["path"], e["dir"], os.path.realpath(e["path"]), os.path.realpath(e["dir"])}]
         if source:
             ids = {e["path"] for e in candidates(roots, wanted, platform=platform, include_disabled=include_disabled)}
             found = [e for e in found if e["path"] in ids]
@@ -484,7 +474,7 @@ def resolve(roots, name, *, source=None, platform="cli", include_disabled=False,
 def resolve_definition(roots, name, base_dir=None, *, platform="cli"):
     """Trusted definition-local compatibility, never a disabled-layer escape hatch."""
     entry, error = resolve(roots, name, platform=platform)
-    if entry is not None or not base_dir or any(layer == "sandbox" for layer, _ in roots):
+    if entry is not None or not base_dir:
         return entry, error
     direct = Path(name).expanduser()
     if not direct.is_absolute():

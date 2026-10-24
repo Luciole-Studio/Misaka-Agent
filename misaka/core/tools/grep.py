@@ -148,7 +148,11 @@ def createGrepToolDefinition(
 
         searchPath = resolveToCwd(searchDir or ".", read_field(ctx, "cwd") or cwd)
         # MISAKA fork: MISAKA's credentials and the web evidence vault are out of the tools' reach.
-        from misaka.core.web.evidence import check_material_read, is_credential_store
+        from misaka.core.web.evidence import (
+            check_material_read,
+            is_credential_store,
+            is_skills_hub_cache,
+        )
         check_material_read(searchPath)
         ops = customOps or defaultGrepOperations
         try:
@@ -250,8 +254,8 @@ def createGrepToolDefinition(
             if isinstance(event, dict) and event.get("type") == "match":
                 data = event.get("data") if isinstance(event.get("data"), dict) else {}
                 filePath = (data.get("path") or {}).get("text") if isinstance(data.get("path"), dict) else None
-                # MISAKA fork: a search over the home passes its credential stores by.
-                if isinstance(filePath, str) and is_credential_store(filePath):
+                # MISAKA fork: a search over the home passes its credential stores and skills hub caches by.
+                if isinstance(filePath, str) and (is_credential_store(filePath) or is_skills_hub_cache(filePath)):
                     return
                 matchCount += 1
                 lineNumber = data.get("line_number")
