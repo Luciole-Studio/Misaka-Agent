@@ -25,7 +25,7 @@
 - `/lcm-settings` 由插件自行注册，使用已有扩展 UI；通用设置页不增加 LCM 专用代码。
 - 插件偏好文件持久化开关和向量模型配置；项目任务缓存仍在最后 owner 退出时清理。
 - 普通 native 请求也调用原版召回 builder；仅临时附加，不等待必须发生压缩，也不把注入块写入原生 checkpoint。
-- 仅对 FastEmbed 本地路由，用原版 profile/backfill API 为已载入内容建立有界索引；不自动导入旧归档、不自动下载模型、不自动向云端发原文。
+- 仅对原版判定的本地 provider（`command._is_local_embedding_provider`：fastembed、ollama），用原版 profile/backfill API 为已载入内容建立有界索引；不自动导入旧归档、不自动下载模型、不自动向云端发原文。
 - 设置、原版阈值/分块边界、退出所有权及验收见 [SETTINGS.md](SETTINGS.md)。核心源码未改。
 
 ## 2026-09-15：项目缓存后续 bug 验收

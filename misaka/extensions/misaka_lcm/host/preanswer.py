@@ -22,13 +22,15 @@ RECALL_HEADER = ("Possibly relevant notes from other sessions in this project (L
 
 
 def _local_index(built):
-    """Bounded original indexing of loaded content; never send raw text to a cloud provider."""
+    """Bounded original indexing of loaded content, on a provider upstream counts as local
+    (``command._is_local_embedding_provider``: fastembed, ollama); never send raw text to a cloud one."""
+    from ..vendor import command
     config = dataclasses.replace(built._config)
     if (not config.proactive_recall_enabled or not config.embeddings_enabled
-            or config.embedding_provider.strip().lower() not in {'fastembed', 'fast-embed'}
+            or not command._is_local_embedding_provider(config.embedding_provider)
             or getattr(built, '_misaka_index_busy', False)):
         return
-    from ..vendor import command, tools
+    from ..vendor import tools
     from ..vendor.embedding_provider import resolve_provider
     from ..vendor.vector_store import VectorStore
     # Freeze the worker's config. An expired worker may finish after a settings
