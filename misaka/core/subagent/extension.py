@@ -455,20 +455,47 @@ class SubagentPart:
 
     def set_permission_mode(self, mode):
         from misaka.core.subagent import policy as subagent_policy
-        from misaka.core.subagent.configuration import validate_permission_mode
+        from misaka.core.subagent.configuration import (
+            TOP_LEVEL_PERMISSION_MODES,
+            validate_permission_mode,
+        )
 
         mode = validate_permission_mode(mode)
+        if self._top_level() and mode not in TOP_LEVEL_PERMISSION_MODES:
+            raise ValueError(f"A top-level session cannot use permission mode {mode}: auto needs the "
+                             "transcript classifier, which runs in sub-agents, and bubble is a sub-agent's mode")
         if self.policy is None:
             self.policy = subagent_policy.AgentPolicy(self.role_context)
             self.policy.session = self.session
         self.policy.permission_mode = mode
 
+    def _top_level(self) -> bool:
+        """No parent started this session (a child always carries MISAKA_SUBAGENT_ID)."""
+        return self.role_context.parent_agent_id is None
+
     def attach(self, session: Any) -> None:
         self.session = session
         if self.manager is not None:
             self.manager.session = session
+        if self._top_level() and not (self.policy is not None and self.policy.top_level):
+            # CCB: the main session runs in its permission mode too, and its sub-agents inherit
+            # from it (runAgent.agentGetAppState); the mode comes from the settings, once: a session
+            # switched to keeps the mode the person chose, as CCB's app state does.
+            from misaka.core.subagent.configuration import initial_permission_mode
+
+            self.set_permission_mode(initial_permission_mode(session))
+            self.policy.top_level = True
+            if self.manager is not None:
+                self.manager.permission_updates = self.policy.apply_permission_updates
         if self.policy is not None:
             self.policy.session = session
+
+    def get_session_permissions(self):
+        """What this session's permission dialog granted it (CCB destination "session")."""
+        if self.policy is None:
+            return None
+        grant = self.policy.session_permissions()
+        return grant if grant["allow"] or grant["additionalDirectories"] else None
 
     def configure_agents(self, definitions: Any) -> None:
         """MISAKA CLI/SDK adapter for CCB --agents JSON (flagSettings)."""
@@ -523,7 +550,7 @@ class SubagentPart:
         if name.casefold() in self._disallowed_tools:
             return {"block": True, "reason": f"{name} is excluded by the upstream generic-child tool policy."}
         if self.policy is not None:
-            return await self.policy.before_tool(event)
+            return await self.policy.before_tool(event, _ctx)
 
     async def tool_result(self, event: Any, _ctx: Any) -> Any:
         if self.policy is not None:

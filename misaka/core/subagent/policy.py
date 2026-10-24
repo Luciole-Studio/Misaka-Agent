@@ -636,21 +636,29 @@ def _bash_read_paths(command: str) -> list[str] | None:
 def _bash_has_restricted_path(
     command: str, workspace: str, layers: Sequence[Sequence[str]], additional_dirs: Sequence[str] = ()
 ) -> bool:
+    return _bash_path_problem(command, workspace, layers, additional_dirs) is not None
+
+
+def _bash_path_problem(
+    command: str, workspace: str, layers: Sequence[Sequence[str]], additional_dirs: Sequence[str] = ()
+) -> tuple[str, str | None] | None:
+    """Why a command's paths need approval: ``("outside", path)`` for the first path outside the
+    working directories, ``("protected", path)``, ``("ambiguous", None)``; None when none does."""
     paths = _bash_read_paths(command)
     if paths is None:
         if _has_shell_expansion(command):
-            return True
+            return "ambiguous", None
         try:
             argv = shlex.split(command)
         except ValueError:
-            return True
+            return "ambiguous", None
         if not argv:
-            return False
+            return None
         # A recognized read command with syntax we could not prove safe must
         # fail closed.  Other exact Bash grants may still run commands without
         # path operands (for example ``pytest``).
         if argv[0] in PLAN_READ_COMMANDS or argv[0] == "git":
-            return True
+            return "ambiguous", None
         candidates: list[str] = []
         if "/" in argv[0] or argv[0].startswith((".", "~")):
             candidates.append(argv[0])
@@ -677,12 +685,12 @@ def _bash_has_restricted_path(
         paths = candidates
     for raw in paths:
         if _sensitive_path(raw, workspace):
-            return True
+            return "protected", raw
         if not _path_in_working_directories(raw, workspace, additional_dirs) and not _path_rule_allows(
             layers, "read", raw, workspace
         ):
-            return True
-    return False
+            return "outside", raw
+    return None
 
 
 def _safe_sed_script(script: str) -> bool:
@@ -1105,6 +1113,12 @@ class AgentPolicy:
 
         self.host_hooks = validate_hooks(self.host_hooks)
         self.session: Any = None
+        # A session no parent started (``SubagentPart`` sets it): it asks its own person.
+        self.top_level = False
+        # CCB destination "session": what "Yes, and don't ask again" granted this session alone
+        # (allow rules and working directories); its sub-agents inherit them.
+        self.session_rules: list[str] = []
+        self.session_directories: list[str] = []
         try:
             self.inherited_permissions = json.loads(os.environ.get("MISAKA_SUBAGENT_PERMISSION_SETTINGS", "[]"))
             if not isinstance(self.inherited_permissions, list) or any(
@@ -1466,7 +1480,7 @@ class AgentPolicy:
             }
         }
 
-    async def before_tool(self, event: Any) -> Any:
+    async def before_tool(self, event: Any, ctx: Any = None) -> Any:
         name = str(read_field(event, "toolName", ""))
         tool_input = read_field(event, "input", {})
         tool_input = tool_input if isinstance(tool_input, Mapping) else {}
@@ -1516,18 +1530,24 @@ class AgentPolicy:
         current_permissions = [*self.inherited_permissions, *permission_settings(self.session)]
         additional_dirs = tuple(dict.fromkeys(path for layer in current_permissions
                                              for path in layer.get("additionalDirectories", [])))
+        # A path-scoped Read rule granted from the dialog (or configured) reaches past the
+        # workspace, as CCB's Read rules do; a bare tool name still does not.
+        vocabulary = self._vocabulary()
+        layers = (*self.layers, tuple(
+            rule for layer in current_permissions for rule in layer.get("allow", ()) or ()
+            if isinstance(rule, str) and split_rule(rule)[0] in READ_ONLY_TOOLS and split_rule(rule)[1] is not None))
         action, reason = _permission_action(
             self.permission_mode,
-            self.layers,
+            layers,
             name,
             tool_input,
             workspace,
-            self.vocabulary,
+            vocabulary,
             self.memory_dir,
             additional_dirs,
         )
         restriction = _permission_restriction(
-            self.layers, name, tool_input, workspace, self.vocabulary, self.memory_dir, additional_dirs
+            layers, name, tool_input, workspace, vocabulary, self.memory_dir, additional_dirs
         )
         configured = self._configured_permission(name, tool_input, current_permissions)
         if configured == "deny":
@@ -1567,12 +1587,13 @@ class AgentPolicy:
         if action == "deny":
             return {"block": True, "reason": reason or "Agent permission denied"}
         if action == "ask":
+            suggestions, always = self._suggestions(name, tool_input, workspace, layers, additional_dirs, restriction)
             permission_payload = self._payload(
                 "PermissionRequest",
                 tool_name=name,
                 tool_input=dict(tool_input),
                 tool_use_id=read_field(event, "toolCallId"),
-                permission_suggestions=[],
+                permission_suggestions=suggestions,
             )
             permission_results = await self._execute_hooks(
                 "PermissionRequest", name, permission_payload, name, tool_input
@@ -1587,15 +1608,15 @@ class AgentPolicy:
                     except (TypeError, ValueError) as error:
                         return {"block": True, "reason": f"Invalid Office input: {error}"}
                     restriction = _permission_restriction(
-                        self.layers, name, tool_input, workspace, self.vocabulary, self.memory_dir, additional_dirs
+                        layers, name, tool_input, workspace, vocabulary, self.memory_dir, additional_dirs
                     )
                     if self._configured_permission(name, tool_input, current_permissions) == "deny":
                         return {"block": True, "reason": "Updated hook input is denied by the current permission settings"}
                     # Rewrites are new actions: an approved read must not turn
                     # into a plan-mode mutation or bypass a role/path ceiling.
                     rewritten_action, rewritten_reason = _permission_action(
-                        self.permission_mode, self.layers, name, tool_input,
-                        workspace, self.vocabulary, self.memory_dir, additional_dirs,
+                        self.permission_mode, layers, name, tool_input,
+                        workspace, vocabulary, self.memory_dir, additional_dirs,
                     )
                     if rewritten_action == "deny":
                         return {"block": True, "reason": rewritten_reason}
@@ -1611,13 +1632,28 @@ class AgentPolicy:
                 action = "allow"
 
             can_prompt = bool(getattr(self.context, "permission_can_prompt", False))
-            if action == "ask" and (not can_prompt or not callable(_permission_broker)):
+            if action == "ask" and self.top_level:
+                # CCB's main session shows its permission dialog to the person at it; a headless one
+                # (here a card, a contact turn: nobody watches) is refused.
+                from misaka.core.subagent.permission_suggestions import ask_in_ui
+                try:
+                    choice = await ask_in_ui(ctx, "Permission", name, dict(tool_input), always)
+                except Exception as error:  # noqa: BLE001 - an ask path fails closed
+                    return {"block": True, "reason": f"Permission request failed: {error}"}
+                if choice is None:
+                    return {"block": True, "reason": f"Permission to use {name} has been denied: this session cannot "
+                                                     f"display a permission prompt ({reason or 'approval required'})."}
+                if choice == "no":
+                    return {"block": True, "reason": reason or "Permission denied"}
+                if choice == "always":
+                    self.apply_permission_updates(suggestions)
+            elif action == "ask" and (not can_prompt or not callable(_permission_broker)):
                 return {
                     "block": True,
                     "reason": reason
                     or "Background agent cannot display a permission prompt",
                 }
-            if action == "ask":
+            elif action == "ask":
                 try:
                     approved = await request_permission(
                         {
@@ -1626,6 +1662,9 @@ class AgentPolicy:
                             "toolCallId": read_field(event, "toolCallId"),
                             "mode": self.permission_mode or "default",
                             "reason": reason,
+                            # CCB's dialog in the parent offers what this ask would save there.
+                            "suggestions": suggestions,
+                            "suggestionLabel": always,
                         }
                     )
                 except Exception as error:  # noqa: BLE001 - an ask path fails closed
@@ -1639,6 +1678,78 @@ class AgentPolicy:
                         "reason": reason or "Parent denied agent permission",
                     }
         return {"updatedInput": updated_input} if updated_input is not None else None
+
+    def _vocabulary(self) -> frozenset[str]:
+        """The tool names this session may use without classification: a child's are its parent's;
+        a top-level session's are its own tools (CCB asks only for the tools that ask)."""
+        if not self.top_level or self.session is None:
+            return self.vocabulary
+        getter = getattr(self.session, "getAllTools", None)
+        tools = getter() if callable(getter) else ()
+        return frozenset(_tool_name(str(getattr(tool, "name", ""))) for tool in tools or ()) | self.vocabulary
+
+    def _suggestions(self, name, tool_input, workspace, layers, additional_dirs, restriction):
+        """``(updates, label)`` CCB's dialog offers as "Yes, and don't ask again" for this ask, or
+        ``([], None)`` where it offers nothing: a protected or ambiguous path, which no grant lifts."""
+        from misaka.core.subagent import permission_suggestions as offers
+
+        if restriction and restriction.startswith(("protected path", "mutating tool did not", "invalid")):
+            return [], None
+        if name == "bash":
+            command = str(tool_input.get("command") or "")
+            problem = _bash_path_problem(command, workspace, layers, additional_dirs) if restriction else None
+            if restriction and (problem is None or problem[0] != "outside"):
+                return [], None    # CCB: no suggestion that would save a dangerous command
+            updates = []
+            if problem is not None:
+                program = command.split(maxsplit=1)[0]
+                operation = ("read" if program in PLAN_READ_COMMANDS
+                             else "write" if program in ACCEPT_EDITS_COMMANDS else None)
+                updates += offers.path_suggestions(problem[1], operation)
+            # MISAKA checks every command's paths, CCB only its path commands': a command that is
+            # not read-only would still ask once its directory is granted, so its rule comes too.
+            if problem is None or _plan_denial(name, tool_input) is not None:
+                updates += offers.suggestion_for_exact_command(command)
+            return updates, offers.shell_suggestions_label(updates, workspace)
+        raw = tool_input.get("path") or tool_input.get("file_path")
+        if (name in MUTATING_PATH_TOOLS or name in READ_ONLY_TOOLS) and isinstance(raw, str) and raw.strip():
+            operation = "read" if name in READ_ONLY_TOOLS else "write"
+            outside = not _path_in_working_directories(raw, workspace, additional_dirs)
+            updates = offers.file_suggestions(raw, operation, self.permission_mode, outside)
+            return (updates, offers.file_suggestions_label(raw, operation, outside)) if updates else ([], None)
+        return offers.fallback_suggestions(name), f"Yes, and don't ask again for {name} commands in {workspace}"
+
+    def apply_permission_updates(self, updates: Any) -> None:
+        """CCB ``applyPermissionUpdates`` for the destinations MISAKA has: ``session`` (this policy)
+        and ``localSettings`` (the project's settings; this session when they cannot be written)."""
+        from misaka.core.subagent.configuration import validate_permission_mode
+        from misaka.core.subagent.permission_suggestions import (
+            rule_string,
+            save_local_rules,
+        )
+
+        local: list[str] = []
+        for update in updates if isinstance(updates, list) else ():
+            kind = update.get("type") if isinstance(update, Mapping) else None
+            if kind == "addRules" and update.get("behavior") == "allow":
+                rules = [rule_string(rule) for rule in update.get("rules") or ()
+                         if isinstance(rule, Mapping) and isinstance(rule.get("toolName"), str)]
+                if update.get("destination") == "localSettings":
+                    local += rules
+                else:
+                    self.session_rules = list(dict.fromkeys([*self.session_rules, *rules]))
+            elif kind == "addDirectories":
+                directories = [str(Path(d).expanduser().resolve()) for d in update.get("directories") or ()
+                               if isinstance(d, str)]
+                self.session_directories = list(dict.fromkeys([*self.session_directories, *directories]))
+            elif kind == "setMode":
+                self.permission_mode = validate_permission_mode(update.get("mode"))
+        if local and not save_local_rules(self.session, local):
+            self.session_rules = list(dict.fromkeys([*self.session_rules, *local]))
+
+    def session_permissions(self) -> dict[str, list[str]]:
+        """This session's own grants, as a settings ``permissions`` layer."""
+        return {"allow": list(self.session_rules), "additionalDirectories": list(self.session_directories)}
 
     def _configured_permission(self, name: str, tool_input: Mapping[str, Any], permissions=None) -> str | None:
         from misaka.core.subagent.configuration import (

@@ -382,6 +382,10 @@ class _PiSettingsSchema(_SettingsSchemaObject):
 # MISAKA fork: MISAKA's own sections, whose modules read whatever shape they are given and normalize it.
 # MISAKA fork: the sub-agent system's own keys (core/subagent, ported from CCB), read from the home's settings.json,
 # a trusted project's and the managed settings.
+# The modes a top-level session can start in (subagent.configuration.TOP_LEVEL_PERMISSION_MODES).
+_TopLevelPermissionModeField = TypeBoxLiteralUnion("default", "plan", "acceptEdits", "bypassPermissions", "dontAsk")
+
+
 class _SubagentPermissionsSchema(TypeBoxObject):
     """Permission rules for sub-agents and their hooks."""
 
@@ -391,6 +395,14 @@ class _SubagentPermissionsSchema(TypeBoxObject):
     additionalDirectories: list[str] | None = _optional("More folders sub-agents may work in, besides the workspace.")
     writeDirectories: dict[str, list[str]] | None = _optional(
         "Absolute folders that write or edit (the keys) may change outside the workspace."
+    )
+    defaultMode: _TopLevelPermissionModeField | None = _optional(
+        "The permission mode every session starts in (CCB's defaultMode); its sub-agents inherit it. "
+        "Unset is bypassPermissions: nothing asks. A session nobody watches (a card, a contact turn) "
+        "refuses what would ask."
+    )
+    disableBypassPermissionsMode: Literal["disable"] | None = _optional(
+        '"disable" keeps every session out of bypassPermissions; an unset defaultMode is then default.'
     )
 
 

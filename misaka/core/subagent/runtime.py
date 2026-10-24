@@ -1088,6 +1088,8 @@ class SubagentManager:
         # The session this manager serves; None until the part that owns it is attached.
         self.session = session
         self.role_context = role_context or RoleContext.capture()
+        # Applies what a child's permission dialog here saved (the session's own policy), if any.
+        self.permission_updates: Any = None
         from misaka.config.product import setting
 
         limit = max(1, setting("subagents", "max_concurrent", DEFAULT_MAX_CONCURRENCY, int))
@@ -2422,28 +2424,24 @@ class SubagentManager:
             except Exception:  # noqa: BLE001 - notification can still be delivered
                 return False
 
-        context = task.permission_context
+        from misaka.core.subagent import policy as subagent_policy
+        from misaka.core.subagent.permission_suggestions import ask_in_ui
+
+        suggestions = event.get("suggestions") if isinstance(event.get("suggestions"), list) else []
         try:
-            if context is not None and bool(getattr(context, "hasUI", False)):
-                ui = getattr(context, "ui", None)
-                confirm = getattr(ui, "confirm", None)
-                if callable(confirm):
-                    tool_name = str(event.get("toolName") or "tool")
-                    rendered = json.dumps(
-                        event.get("toolInput") or {},
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    )
-                    value = confirm(
-                        f"Agent {task.id} permission",
-                        f"Allow {tool_name}?\n{rendered[:4000]}",
-                    )
-                    return bool(await value) if inspect.isawaitable(value) else bool(value)
+            choice = await ask_in_ui(
+                task.permission_context, f"Agent {task.id} permission",
+                str(event.get("toolName") or "tool"), event.get("toolInput"),
+                event.get("suggestionLabel") if suggestions else None)
+            if choice is not None:
+                # CCB: what the parent's dialog saves is the parent's; the child reads it back
+                # through its next permission refresh.
+                if choice == "always" and callable(self.permission_updates):
+                    self.permission_updates(suggestions)
+                return choice != "no"
 
             # This manager may itself live in a headless child.  Relay through
             # that child's JSONL broker until the request reaches the root UI.
-            from misaka.core.subagent import policy as subagent_policy
-
             return await subagent_policy.request_permission(
                 {
                     "toolName": event.get("toolName"),
@@ -2452,6 +2450,8 @@ class SubagentManager:
                     "mode": event.get("mode"),
                     "reason": event.get("reason"),
                     "agentId": task.id,
+                    "suggestions": suggestions,
+                    "suggestionLabel": event.get("suggestionLabel"),
                 }
             )
         except Exception:  # noqa: BLE001 - a failed permission bubble reads as denied

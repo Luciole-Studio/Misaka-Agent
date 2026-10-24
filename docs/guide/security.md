@@ -1,7 +1,8 @@
 # Running MISAKA safely
 
 Treat what the models do as untrusted. Last Order, the Sisters and their sub-agents read, change
-and run files with the permissions of your account, and they do not ask before every tool call.
+and run files with the permissions of your account, and by default they do not ask before a tool
+call (`permissions.defaultMode`, see [Approvals](../reference/configuration.md#approvals)).
 Extensions, MCP servers and the programs a command starts run with the same permissions. This is
 pi's design, which MISAKA keeps; its wording is pi's (`docs/security.md`).
 

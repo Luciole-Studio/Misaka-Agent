@@ -323,6 +323,18 @@ by those tools too.
   this notice does not assign it an MIT or other open-source license.
 - Behavioral source pointers are retained in the ported modules. Native adaptations
   preserve MISAKA role/project ownership, Pi sessions, and the Hermes Skill/LCM hosts.
+- Top-level permission mode and dialog (2026-10-24): `configuration.initial_permission_mode`
+  follows `utils/permissions/permissionSetup.ts` `initialPermissionModeFromCLI` over the settings'
+  `permissions.defaultMode`/`disableBypassPermissionsMode` (no launch flags: MISAKA starts its
+  sessions itself; unset falls back to `bypassPermissions` instead of `default`, by user ruling; `auto`
+  falls back as under CCB's circuit breaker, the transcript classifier running in sub-agents only);
+  `misaka/core/subagent/permission_suggestions.py` ports the dialog's "Yes / Yes, and don't ask
+  again / No" with `BashTool/bashPermissions.ts` (`getSimpleCommandPrefix`,
+  `suggestionForExactCommand`, `SAFE_ENV_VARS`), `BashTool/pathValidation.ts` path suggestions,
+  `utils/permissions/filesystem.ts` `generateSuggestions`/`createReadRuleSuggestion`,
+  `shellPermissionHelpers.tsx` `generateShellSuggestionsLabel`,
+  `FilePermissionDialog/permissionOptions.tsx` and `FallbackPermissionRequest.tsx`; CCB's
+  `localSettings` is the project's `.misaka/settings.json`.
 
 ## shell-quote (selected lexer port)
 

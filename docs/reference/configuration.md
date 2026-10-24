@@ -140,6 +140,24 @@ Sisters can hand work to sub-agents. These settings rarely need changing.
 | `subagents.memory_home` | `state/agent-memory` | where that memory is kept |
 | `subagents.managed_agents_dir` | none | a folder of sub-agent definitions that take precedence over all others |
 
+### Approvals
+
+Whether a tool call asks first works as in Claude Code: every session (Last Order's, a Sister's,
+a card, a contact turn) runs in a permission mode, and its sub-agents inherit it.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `permissions.defaultMode` | unset: `bypassPermissions` | the mode sessions start in: `bypassPermissions` (nothing asks), `default` (commands, edits and other tools ask), `acceptEdits` (edits in the project do not), `plan` (only reading), `dontAsk` (what would ask is refused) |
+| `permissions.disableBypassPermissionsMode` | none | `"disable"` keeps sessions out of `bypassPermissions`; an unset `defaultMode` is then `default` |
+| `permissions.allow` / `ask` / `deny` | none | rules such as `"Bash(npm run:*)"` or `"Read(/path/**)"`; `deny` holds in every mode |
+| `permissions.additionalDirectories` | none | folders besides the project that tools may work in |
+
+What asks shows a dialog in a window you are at: **Yes**, **Yes, and don't ask again …** (a
+command's rule saved in the project's `.misaka/settings.json`, or a folder or edits granted for
+this session), **No**. A session nobody watches, such as a card or a contact turn, refuses what
+would ask. `/agents mode <mode>` changes a Sister's live session; `auto` needs the classifier that
+runs in sub-agents, so a top-level session cannot use it.
+
 ## Tools and extensions
 
 | Setting | Default | Meaning |

@@ -4,7 +4,9 @@ import os
 
 from misaka.core.platform.vocabulary import MANAGEMENT_TOOLS
 
-ROLES = {"sisters"}
+# Last Order too, since CCB's permission mode governs the main session as well (``initial_permission_mode``):
+# she starts no sub-agents (``extension.allows_subagents``), so her part holds the policy and hooks alone.
+ROLES = {"sisters", "last_order"}
 
 
 def disallowed_management_tools(kind, *, is_async=None):

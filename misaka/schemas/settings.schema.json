@@ -605,6 +605,22 @@
             }
           },
           "description": "Absolute folders that write or edit (the keys) may change outside the workspace."
+        },
+        "defaultMode": {
+          "type": "string",
+          "enum": [
+            "default",
+            "plan",
+            "acceptEdits",
+            "bypassPermissions",
+            "dontAsk"
+          ],
+          "description": "The permission mode every session starts in (CCB's defaultMode); its sub-agents inherit it. Unset is bypassPermissions: nothing asks. A session nobody watches (a card, a contact turn) refuses what would ask."
+        },
+        "disableBypassPermissionsMode": {
+          "type": "string",
+          "const": "disable",
+          "description": "\"disable\" keeps every session out of bypassPermissions; an unset defaultMode is then default."
         }
       },
       "description": "Permission rules for sub-agents and their hooks."

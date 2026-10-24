@@ -478,7 +478,8 @@ def test_the_settings_schema_describes_the_sub_agent_and_compression_keys_misaka
     for key in ("agents", "pluginOptions", "permissions", "hooks", "disableAllHooks", "worktree", "cleanupPeriodDays",
                 "autoMemoryEnabled", "compression"):
         assert properties[key].get("description") or properties[key].get("properties"), key
-    assert set(properties["permissions"]["properties"]) == {"allow", "ask", "deny", "additionalDirectories", "writeDirectories"}
+    assert set(properties["permissions"]["properties"]) == {"allow", "ask", "deny", "additionalDirectories", "writeDirectories",
+                                                            "defaultMode", "disableBypassPermissionsMode"}
     validator = _validator("settings")
     assert validator.is_valid({
         "permissions": {"deny": ["Agent(explore)"], "writeDirectories": {"write": ["/tmp/out"]}},
