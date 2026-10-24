@@ -23,7 +23,8 @@ Differences from Hermes are structural, not semantic:
 
 The turn itself follows Hermes: no wall clock, only the gateway's inactivity timeout; one
 retry, and only for a transient failure (``bot_failure_reasons``); a failed delivery is
-reported to the windows that wrote, in Hermes' words, and settled.
+reported to the windows that wrote, in Hermes' words, and settled. A delivery ends with the
+windows that wrote, as Hermes kills it with its sender (``_abandoned``): its rows stay queued.
 """
 import asyncio
 import json
@@ -112,9 +113,27 @@ def _serial(to):
     finally:
         os.close(fd)   # Closing releases the lock.
 
-async def _leased(turn, con, ids, token):
+def _abandoned(rows):
+    """Whether everyone who wrote ``rows`` has gone. Hermes runs a delivery as a background process
+    of the session that sent it (``bot_mode_dm._spawn_delivery``) and kills it with that session
+    (``client_lifecycle._close_task_resources``, ``source="agent_close"``; gateway shutdown and
+    /stop kill it too). A row from the command line has no such session, and one from a contact
+    session is not tied to it: that session lasts one turn by design and is never answered
+    (``messages.return_reply``)."""
+    from misaka.core import session_catalog
+
+    for row in rows:
+        session_id = row["sender_session"]
+        record = session_catalog.find_session(session_id) if session_id else None
+        if record is None or record.get("kind") == "dm" or session_catalog.live_session(session_id):
+            return False
+    return bool(rows)
+
+
+async def _leased(turn, con, ids, token, rows=()):
     """Await ``turn`` with ``ids`` kept leased, as the inbox pump keeps its own (``messages.renew``):
-    a turn with no wall clock would outlive any fixed lease and hand its rows to another reader."""
+    a turn with no wall clock would outlive any fixed lease and hand its rows to another reader.
+    Each renewal first asks whether the turn is ``_abandoned``; then it is stopped and None returned."""
     from misaka.core.network import messages
     from misaka.utils.async_lifecycle import run_in_thread
 
@@ -122,9 +141,12 @@ async def _leased(turn, con, ids, token):
     try:
         while not task.done():
             await asyncio.wait({task}, timeout=messages.DELIVERY_RENEW_SECONDS)
-            if not task.done():
-                await run_in_thread(messages.renew, con, ids,
-                                    ttl_seconds=messages.DELIVERY_LEASE_SECONDS, token=token)
+            if task.done():
+                break
+            if await run_in_thread(_abandoned, rows):
+                return None
+            await run_in_thread(messages.renew, con, ids,
+                                ttl_seconds=messages.DELIVERY_LEASE_SECONDS, token=token)
         return task.result()
     finally:
         if not task.done():
@@ -144,9 +166,10 @@ def _deliver_once(to, message=None, sender=None, model=None, idle_timeout=IDLE_T
     """Queue ``message`` (when given) and deliver everything queued for ``to`` into its contact
     session in one turn. A message is a row first: the turn claims the rows and keeps them leased.
 
-    Returns an exit code: 0 got a reply (or nothing was queued), 1 the delivery failed. A failure
-    is retried once when Hermes would (a transient one), then reported to the windows that wrote;
-    the rows whose sender heard of it are settled, and the rest stay queued for another wake-up."""
+    Returns an exit code: 0 got a reply (or nothing was queued), 1 the delivery failed or nobody
+    who wrote is left (``_abandoned``: no turn starts, a running one stops, the rows stay queued).
+    A failure is retried once when Hermes would (a transient one), then reported to the windows that
+    wrote; the rows whose sender heard of it are settled, and the rest stay queued for another wake-up."""
     from misaka.cli import chat
     from misaka.config import profiles, sisters
     from misaka.core.network import messages
@@ -198,6 +221,9 @@ def _deliver_once(to, message=None, sender=None, model=None, idle_timeout=IDLE_T
             if not mine:
                 print(f"Nothing is queued for {to}.")
                 return 0
+            if _abandoned(mine):
+                print(f"Nobody who wrote to {to} is still there; the messages stay queued.", file=sys.stderr)
+                return 1
 
             card_allowlist = []
             if to == "last-order" and any(row["task_id"] for row in mine):
@@ -286,16 +312,20 @@ def _deliver_once(to, message=None, sender=None, model=None, idle_timeout=IDLE_T
                 return run_coro(_leased(
                     run_session(flags + (["-c"] if resume else []), text, user_home, timeout=None,
                                 idle_timeout=idle_timeout, assembly=session_assembly, env=env),
-                    con, list(leased), token))
+                    con, list(leased), token, mine))
 
             started = int(time.time())
             r = turn()
-            failure = _failure(r)
-            if failure and retry_action(classify_agent_error(failure)) != RETRY_NONE:
+            failure = _failure(r) if r is not None else None
+            if failure and retry_action(classify_agent_error(failure)) != RETRY_NONE and not _abandoned(mine):
                 # Hermes ``_run_local_turn``: one policy-gated retry on the same session, and the
                 # retry is never retried. An overflow resumes too: the engine compacts before it asks.
                 r = turn()
-                failure = _failure(r)
+                failure = _failure(r) if r is not None else None
+            if r is None:
+                print(f"Everyone who wrote to {to} has gone; the turn stopped and the messages stay queued.",
+                      file=sys.stderr)
+                return 1
             if failure is None:
                 messages.ack(con, [row["id"] for row in mine], token=token)
                 leased.clear()

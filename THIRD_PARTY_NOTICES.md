@@ -304,7 +304,7 @@ by those tools too.
 ## Hermes Bot Mode 联系会话
 
 - Hermes 源码：https://github.com/nousresearch/hermes-agent ，MIT，Copyright (c) 2025 Nous Research；许可证文本：`misaka/core/web/LICENSE.hermes-agent`。
-- `misaka/cli/dm.py`：Bot Mode 私信模型的移植（永久 Bot Chat 会话、署名前缀、协议段；2026-08-19 按当时的 `tools/bot_mode_probe.py`）。2026-10-24 按 `bda3a363e9695e3f63fce4a7ca85ba17b5fecb61` 对齐联系轮的语义：网关的无活动超时（`gateway/run_turn.py`、`gateway/run.py` 的 `_watch_gateway_turn_inactivity`）代替 600 秒墙钟，一次按策略的重试，失败回告发信方（`tools/bot_mode_dm.py` 的 `_wait_reply_main` 措辞）。
+- `misaka/cli/dm.py`：Bot Mode 私信模型的移植（永久 Bot Chat 会话、署名前缀、协议段；2026-08-19 按当时的 `tools/bot_mode_probe.py`）。2026-10-24 按 `bda3a363e9695e3f63fce4a7ca85ba17b5fecb61` 对齐联系轮的语义：网关的无活动超时（`gateway/run_turn.py`、`gateway/run.py` 的 `_watch_gateway_turn_inactivity`）代替 600 秒墙钟，一次按策略的重试，失败回告发信方（`tools/bot_mode_dm.py` 的 `_wait_reply_main` 措辞）；发信的窗口都已关闭时停下这一轮（上游把投递作为发信会话的后台进程起，`_spawn_delivery`，并随该会话收掉，`agent/client_lifecycle.py` 的 `_close_task_resources`）。
 - `misaka/core/network/bot_failure_reasons.py`：同一提交的 `tools/bot_failure_reasons.py` 原文节选（原因码、分类器、重试策略）。
 
 ## CCB subagent implementation reference

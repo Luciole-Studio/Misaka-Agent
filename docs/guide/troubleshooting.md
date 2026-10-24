@@ -164,7 +164,8 @@ misaka dm 10032
 Her answer goes back to the window that wrote; so does a failure, as
 `Delivery to 10032 failed [reason: …]: …` (a rate limit or a server error is retried once first).
 Her turn has no time limit of its own: it is stopped only after 30 minutes without any activity
-(`misaka dm --timeout`). One sent to a card that has not started waits for
+(`misaka dm --timeout`), or once every window that wrote has closed -- closing the panel stops it
+-- and then the message stays queued for her next turn. One sent to a card that has not started waits for
 it to start; one sent to a running card or a live session arrives at its next tool boundary, which
 can take a while if it is in the middle of a long step. A finished card is woken by the message,
 so its answer comes after a new turn of hers.

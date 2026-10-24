@@ -692,14 +692,86 @@ def test_a_failure_the_retry_cannot_fix_reaches_the_sender_and_settles(world, mo
 
 
 def test_a_failure_nobody_could_be_told_of_stays_queued(world, monkeypatch):
+    """The window closed while the turn ran: a transient failure is not retried for nobody, and the
+    report has nobody to reach."""
+    from misaka.cli import dm
+    from misaka.core.platform import session as platform_session
+
+    window = _live(world, _sid(), role="last-order", space=SPACE_T1)
+    calls = []
+
+    async def turn(flags, text, cwd, **kw):
+        calls.append(flags)
+        _live(world, window, role="last-order", space=SPACE_T1, alive=False)
+        return {"text": None, "error": "Error code: 529 overloaded_error", "timed_out": False}
+
+    monkeypatch.setattr(platform_session, "run_session", turn)
+    mid = messages.send(world.mail, "10032", "hello there", summary="hi", sender="last-order",
+                        sender_session=window)
+    assert dm.deliver("10032", sender="last-order", wait_message=mid) == 1
+    assert len(calls) == 1 and not _delivered(world, mid)
+    assert world.mail.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
+
+
+def test_a_contact_turn_stops_once_everyone_who_wrote_has_gone(world, monkeypatch):
+    """2026-10-24: the panel closed (Last Order gone, the run stopped) and 10032's wake-up went on
+    thinking for nobody. Hermes runs a delivery as a background process of the sender and kills
+    it with her (process_registry.kill_all on agent_close, gateway shutdown, /stop)."""
+    from misaka.cli import dm
+    from misaka.core.platform import session as platform_session
+
+    monkeypatch.setattr(messages, "DELIVERY_RENEW_SECONDS", 0.02)
+    window = _live(world, _sid(), role="last-order", space=SPACE_T1)
+    stopped = []
+
+    async def turn(flags, text, cwd, **kw):
+        _live(world, window, role="last-order", space=SPACE_T1, alive=False)   # the panel closes
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            stopped.append(True)
+            raise
+        return {"text": "too late", "error": None, "timed_out": False}
+
+    monkeypatch.setattr(platform_session, "run_session", turn)
+    mid = messages.send(world.mail, "10032", "review the plan", summary="r", sender="last-order",
+                        sender_session=window)
+    started = time.monotonic()
+    assert dm.deliver("10032", sender="last-order", wait_message=mid) == 1
+    assert stopped and time.monotonic() - started < 10
+    assert not _delivered(world, mid)
+    row = world.mail.execute("SELECT lease_token FROM messages WHERE id=?", (mid,)).fetchone()
+    assert row[0] is None                                   # back in the queue, for a later turn
+
+
+def test_no_contact_turn_starts_for_windows_already_gone(world, monkeypatch):
     from misaka.cli import dm
 
-    _contact_turns(monkeypatch, "Error code: 401 authentication_error")
+    calls = _contact_turns(monkeypatch, None)
     gone = _live(world, _sid(), role="last-order", space=SPACE_T1, alive=False)
     mid = messages.send(world.mail, "10032", "hello there", summary="hi", sender="last-order",
                         sender_session=gone)
     assert dm.deliver("10032", sender="last-order", wait_message=mid) == 1
-    assert not _delivered(world, mid)
+    assert calls == [] and not _delivered(world, mid)
+
+
+@pytest.mark.parametrize("writer", ["command line", "contact session", "a live window too"])
+def test_a_contact_turn_with_someone_left_to_hear_it_runs(world, monkeypatch, writer):
+    """A row from the command line has no session to die with; a contact session lasts one turn by
+    design and is never answered, so its mail is not tied to it; one live window keeps the turn."""
+    from misaka.cli import dm
+
+    calls = _contact_turns(monkeypatch, None)
+    gone = _live(world, _sid(), role="last-order", space=SPACE_T1, alive=False)
+    first = messages.send(world.mail, "10032", "hello there", summary="hi", sender="last-order",
+                          sender_session=gone)
+    other = {"command line": None,
+             "contact session": _live(world, _sid(), role="10036", kind="dm", alive=False),
+             "a live window too": _live(world, _sid(), role="last-order", space=SPACE_T1)}[writer]
+    messages.send(world.mail, "10032", "and this", summary="a", sender="10036" if other else "user",
+                  sender_session=other)
+    assert dm.deliver("10032", sender="last-order", wait_message=first) == 0
+    assert len(calls) == 1 and _delivered(world, first)
 
 
 def test_the_wake_up_does_not_hold_the_senders_terminal(monkeypatch):
