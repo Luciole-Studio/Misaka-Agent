@@ -195,10 +195,8 @@ def test_a_deliverable_written_by_an_earlier_attempt_is_still_the_cards_product(
     assert (out / "choson-tusol-genealogy.md").relative_to(tmp_path).as_posix() in submission["artifacts"]
 
 
-def test_bookkeeping_lists_know_the_tool():
+def test_the_completion_tool_is_listed_where_sisters_and_the_contract_name_it():
     from misaka.core.network.wiring.collaboration import SISTER_TOOLS
-    from misaka.core.platform.session import BOOKKEEPING_TOOLS
-    assert "misaka_card_complete" in BOOKKEEPING_TOOLS
     assert "misaka_card_complete" in SISTER_TOOLS
     assert "misaka_card_complete" in worker.COMPLETION_INSTRUCTIONS
 

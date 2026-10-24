@@ -150,7 +150,7 @@ class CardOwner:
         return 1.0
 
     def read_only_tools(self) -> frozenset[str]:
-        """The owner's tools that only look: a session calling nothing else is idle, not working."""
+        """The owner's tools that only look: an ally's card bridge lends these to its runner."""
         return frozenset()
 
     def owns_card_process(self, argv: list[str]) -> bool:

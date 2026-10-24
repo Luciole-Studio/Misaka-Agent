@@ -21,12 +21,15 @@ MANAGEMENT_TOOLS = ("Agent", "TaskOutput", "SendMessage", "TaskStop")
 # The same set for the permission and hook paths, which compare lowered names.
 MANAGEMENT_TOOL_NAMES = frozenset(name.casefold() for name in MANAGEMENT_TOOLS)
 
-# Spawning a descendant is work; reading, steering or stopping one is paperwork.
-# ``platform.session``'s idle test needs the second group alone, and deriving it
-# here keeps the reason for the split beside the set it splits.
-BOOKKEEPING_MANAGEMENT_TOOLS = tuple(
-    name for name in MANAGEMENT_TOOLS if name != "Agent"
-)
+# ``NoProgressGuard``'s vocabulary (FrontierAgent's four tools, by role): ``Agent`` creates a
+# child and hands it its prompt; ``SendMessage`` assigns a running one more work; a report
+# comes back through ``TaskOutput``, or from a foreground ``Agent`` itself.
+NO_PROGRESS_VOCABULARY = {
+    "management": MANAGEMENT_TOOLS,
+    "create": ("Agent",),
+    "assign": ("Agent", "SendMessage"),
+    "collect": ("Agent", "TaskOutput"),
+}
 
 # The ordinary board tools a workflow's driver owns while it drives the session's cards (it
 # creates, starts, links, reviews and deletes them itself): withheld from that session.
@@ -37,8 +40,8 @@ DRIVER_OWNED_TOOLS = frozenset({
 })
 
 __all__ = [
-    "BOOKKEEPING_MANAGEMENT_TOOLS",
     "DRIVER_OWNED_TOOLS",
     "MANAGEMENT_TOOLS",
     "MANAGEMENT_TOOL_NAMES",
+    "NO_PROGRESS_VOCABULARY",
 ]

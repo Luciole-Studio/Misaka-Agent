@@ -12,8 +12,7 @@ Differences from Hermes are structural, not semantic:
   is the canonical session. The "Bot Chat" title is kept in MISAKA_APP_TITLE as
   the gate that enables protocol injection.
 - There is no resident gateway queue; concurrent deliveries to one recipient are
-  serialized with a per-recipient flock. A timed-out message is already in the
-  recipient's session file, so it is not lost.
+  serialized with a per-recipient flock, and the rows of a turn stay leased while it runs.
 - A contact session reads only the mail no live session of its role was found
   for: SendMessage pins a name to the one session of that role in the sender's
   panel space, and only with none there does the row wait here. An automatic
@@ -21,7 +20,12 @@ Differences from Hermes are structural, not semantic:
   when none is.
 - Every delivery is recorded as delivered in messages.db for auditing.
 - Sessions run with cwd=~ (Hermes ``--in ~``).
+
+The turn itself follows Hermes: no wall clock, only the gateway's inactivity timeout; one
+retry, and only for a transient failure (``bot_failure_reasons``); a failed delivery is
+reported to the windows that wrote, in Hermes' words, and settled.
 """
+import asyncio
 import json
 import os
 import sys
@@ -32,13 +36,9 @@ from misaka.config import CFG, current_config, home
 from misaka.utils import file_lock
 
 DM_TITLE = "Bot Chat"   # Hermes BOT_CHAT_TITLE verbatim; the injection gate keys on it.
-WAKE_ATTEMPTS = 5          # contact turns one automatic wake-up may start before it gives up
+IDLE_TIMEOUT_SECONDS = 1800  # Hermes HERMES_AGENT_TIMEOUT default: inactivity, not a wall clock
 LIVE_WAIT_SECONDS = 600    # how long a wake-up watches a live session before leaving the row to it
 LIVE_POLL_SECONDS = 2.0
-
-
-class WakeAbandoned(RuntimeError):
-    """A contact turn failed for a reason no retry can fix (credentials, credit)."""
 
 # Port of Hermes bot_mode_probe._build_section. Hermes teaches a CLI plus
 # temp-file discipline; MISAKA roles have a SendMessage tool whose arguments
@@ -112,19 +112,49 @@ def _serial(to):
     finally:
         os.close(fd)   # Closing releases the lock.
 
-def _deliver_once(to, message=None, sender=None, model=None, timeout=600,
-                  task_id=None, generation=None, summary=None, *, automatic=False):
-    """Queue ``message`` (when given) and deliver everything queued for ``to`` into its contact
-    session in one turn. A message is a row first: the turn claims the rows, and a failed
-    turn puts them back for the next wake-up.
+async def _leased(turn, con, ids, token):
+    """Await ``turn`` with ``ids`` kept leased, as the inbox pump keeps its own (``messages.renew``):
+    a turn with no wall clock would outlive any fixed lease and hand its rows to another reader."""
+    from misaka.core.network import messages
+    from misaka.utils.async_lifecycle import run_in_thread
 
-    Returns an exit code: 0 got a reply (or nothing was queued), 1 the session failed,
-    2 timed out. Failed and timed-out turns put their messages back for another wake-up.
-    An ``automatic`` wake-up raises ``WakeAbandoned`` instead of returning 1 when the failure
-    is one no retry can fix."""
+    task = asyncio.ensure_future(turn)
+    try:
+        while not task.done():
+            await asyncio.wait({task}, timeout=messages.DELIVERY_RENEW_SECONDS)
+            if not task.done():
+                await run_in_thread(messages.renew, con, ids,
+                                    ttl_seconds=messages.DELIVERY_LEASE_SECONDS, token=token)
+        return task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+def _failure(result):
+    """What went wrong with a contact turn, or None when it answered."""
+    from misaka.core.platform.session import IDLE_TIMEOUT_REASON
+
+    return result["error"] or (IDLE_TIMEOUT_REASON if result["timed_out"] else None)
+
+
+def _deliver_once(to, message=None, sender=None, model=None, idle_timeout=IDLE_TIMEOUT_SECONDS,
+                  task_id=None, generation=None, summary=None):
+    """Queue ``message`` (when given) and deliver everything queued for ``to`` into its contact
+    session in one turn. A message is a row first: the turn claims the rows and keeps them leased.
+
+    Returns an exit code: 0 got a reply (or nothing was queued), 1 the delivery failed. A failure
+    is retried once when Hermes would (a transient one), then reported to the windows that wrote;
+    the rows whose sender heard of it are settled, and the rest stay queued for another wake-up."""
     from misaka.cli import chat
     from misaka.config import profiles, sisters
     from misaka.core.network import messages
+    from misaka.core.network.bot_failure_reasons import (
+        RETRY_NONE,
+        classify_agent_error,
+        retry_action,
+    )
     from misaka.core.platform.session import run_coro, run_session
 
     to = (to or "").strip()
@@ -139,9 +169,10 @@ def _deliver_once(to, message=None, sender=None, model=None, timeout=600,
         con = messages.connect()
         token = messages.new_lease_token()
         leased = set()
+        own = None
         try:
             if body:
-                messages.send(
+                own = messages.send(
                     con,
                     to,
                     body,
@@ -156,7 +187,7 @@ def _deliver_once(to, message=None, sender=None, model=None, timeout=600,
             won = messages.claim(
                 con,
                 list(leased),
-                ttl_seconds=int(timeout) + 120,
+                ttl_seconds=messages.DELIVERY_LEASE_SECONDS,
                 token=token,
             )
             leased &= won
@@ -236,46 +267,55 @@ def _deliver_once(to, message=None, sender=None, model=None, timeout=600,
                 "MISAKA_USAGE_GENERATION": "0",
             }
             from misaka.core.wiring import SessionSpec, assemble
-            session_assembly = assemble(SessionSpec(
-                profile_dir=prof,
-                role=role,
-                workspace=user_home,
-                kind="dm",
-                sender=to,
-                mcp_role=to,
-                receive_messages=True,
-            ))
 
-            # Check for an existing session only after taking the lock.
-            try:
-                if any(n.endswith(".jsonl") for n in os.listdir(sess_dir)):
-                    flags.append("-c")
-            except OSError:
-                pass
+            def turn():
+                # Check for an existing session only after taking the lock.
+                try:
+                    resume = any(n.endswith(".jsonl") for n in os.listdir(sess_dir))
+                except OSError:
+                    resume = False
+                session_assembly = assemble(SessionSpec(
+                    profile_dir=prof,
+                    role=role,
+                    workspace=user_home,
+                    kind="dm",
+                    sender=to,
+                    mcp_role=to,
+                    receive_messages=True,
+                ))
+                return run_coro(_leased(
+                    run_session(flags + (["-c"] if resume else []), text, user_home, timeout=None,
+                                idle_timeout=idle_timeout, assembly=session_assembly, env=env),
+                    con, list(leased), token))
+
             started = int(time.time())
-            r = run_coro(run_session(flags, text, user_home, timeout=timeout,
-                                     assembly=session_assembly, env=env))
-            if not r["error"] and not r["timed_out"]:
+            r = turn()
+            failure = _failure(r)
+            if failure and retry_action(classify_agent_error(failure)) != RETRY_NONE:
+                # Hermes ``_run_local_turn``: one policy-gated retry on the same session, and the
+                # retry is never retried. An overflow resumes too: the engine compacts before it asks.
+                r = turn()
+                failure = _failure(r)
+            if failure is None:
                 messages.ack(con, [row["id"] for row in mine], token=token)
                 leased.clear()
                 if r["text"]:
                     messages.return_reply(con, to, r["text"], mine, since=started)
+            else:
+                reason = classify_agent_error(failure)
+                told = messages.report_failure(con, to, failure, reason, mine)
+                # Settled like a Hermes failed receipt: whoever heard decides whether to send again.
+                settled = [row["id"] for row in mine if row["sender_session"] in told or row["id"] == own]
+                messages.ack(con, settled, token=token)
+                leased -= set(settled)
         finally:
             try:
                 messages.unclaim(con, list(leased), token=token)
             finally:
                 con.close()
-    if r["error"]:
-        if automatic:
-            from misaka.core.platform import tasks
-            if tasks.classify_failure(r["error"]) in tasks.TERMINAL_FAILURE_KINDS:
-                raise WakeAbandoned(r["error"])
-        print(f"DM session failed: {r['error']}", file=sys.stderr)
+    if failure:
+        print(f"Delivery to {to} failed [reason: {reason}]: {failure}", file=sys.stderr)
         return 1
-    if r["timed_out"]:
-        print(f"No reply within {timeout}s; the message is queued for another {to} contact turn.",
-              file=sys.stderr)
-        return 2
     if r["text"]:
         print(r["text"])
     return 0
@@ -295,18 +335,17 @@ def _left_to_contact(to, consumed):
     return False
 
 
-def deliver(to, message=None, sender=None, model=None, timeout=600,
+def deliver(to, message=None, sender=None, model=None, idle_timeout=IDLE_TIMEOUT_SECONDS,
             task_id=None, generation=None, summary=None, *, wait_message=None):
-    """Deliver once, or keep an automatic wake alive for one existing durable row.
+    """Deliver once, or run the automatic wake-up for one existing durable row.
 
     An automatic wake never races a running contact turn for its row: while one runs, the
-    wake only watches for the row to be consumed. Contact turns start only with none
-    running, at most ``WAKE_ATTEMPTS`` of them; the row stays queued for the next wake-up
-    either way.
+    wake only watches for the row to be consumed. Otherwise it runs one delivery, whose own
+    retry policy is Hermes' (``_deliver_once``).
     """
     if wait_message is None:
         return _deliver_once(
-            to, message, sender, model, timeout, task_id, generation, summary
+            to, message, sender, model, idle_timeout, task_id, generation, summary
         )
     if message:
         raise ValueError("A message being waited on must already be queued.")
@@ -322,35 +361,18 @@ def deliver(to, message=None, sender=None, model=None, timeout=600,
         finally:
             con.close()
 
-    # One leader retries a recipient at a time. Other per-message wake-ups wait here;
+    # One leader delivers to a recipient at a time. Other per-message wake-ups wait here;
     # after the leader drains their rows they exit without starting another model turn.
     retry_key = (to or "").strip().encode().hex()
     with _serial(f"retry-{retry_key}"):
-        attempts, delay = 0, 1.0
-        while True:
-            try:
-                if consumed() or _left_to_contact(to, consumed):
-                    return 0
-            except Exception as error:  # noqa: BLE001 - a transient mailbox failure is retryable
-                print(f"DM queue check retry: {type(error).__name__}: {error}", file=sys.stderr)
-            if attempts >= WAKE_ATTEMPTS:
-                print(f"No contact turn reached {to} in {attempts} attempts; message "
-                      f"#{wait_message} stays queued for the next wake-up.", file=sys.stderr)
-                return 1
-            attempts += 1
-            try:
-                _deliver_once(to, None, sender, model, timeout, task_id, generation, summary,
-                              automatic=True)
-            except WakeAbandoned as error:
-                print(f"Contact turns for {to} cannot succeed until this is fixed: {error}. "
-                      f"Message #{wait_message} stays queued.", file=sys.stderr)
-                return 1
-            except Exception as error:  # noqa: BLE001 - the detached wake retries infrastructure faults
-                print(f"DM delivery retry: {type(error).__name__}: {error}", file=sys.stderr)
-            try:
-                if consumed():
-                    return 0
-            except Exception as error:  # noqa: BLE001 - a transient mailbox failure is retryable
-                print(f"DM queue check retry: {type(error).__name__}: {error}", file=sys.stderr)
-            time.sleep(delay)
-            delay = min(delay * 2, 30.0)
+        try:
+            if consumed() or _left_to_contact(to, consumed):
+                return 0
+        except Exception as error:  # noqa: BLE001 - a mailbox check that fails leaves the delivery to run
+            print(f"DM queue check failed: {type(error).__name__}: {error}", file=sys.stderr)
+        try:
+            return _deliver_once(to, None, sender, model, idle_timeout, task_id, generation, summary)
+        except Exception as error:  # noqa: BLE001 - Hermes: an outcome nobody knows is not resent
+            print(f"Delivery to {to} could not run: {type(error).__name__}: {error}. "
+                  f"Message #{wait_message} stays queued.", file=sys.stderr)
+            return 1

@@ -3,38 +3,18 @@ import asyncio
 import contextvars
 import os
 import threading
+import time
 from contextlib import asynccontextmanager
 
 from misaka.agent.guards import install_guards
-from misaka.core.platform import owners
-from misaka.core.platform.vocabulary import BOOKKEEPING_MANAGEMENT_TOOLS
+from misaka.core.platform.vocabulary import NO_PROGRESS_VOCABULARY
 from misaka.utils import loop_watchdog
 from misaka.utils.async_lifecycle import settle
 
-# ``NoProgressGuard``'s vocabulary: the tools a session can call all day without the world
-# changing or one new fact arriving. Assembled here because it is a fact about how this
-# process composes a session (see ``misaka.core.wiring`` for who registers what), not
-# about how the guard counts.
-#
-# Everything absent is work and resets the streak -- edit/write/bash, the web and download
-# tools, ``doc_add`` and ``skill_manage`` (both write), ``coverage_scan`` (it queries
-# OpenAlex), ``Agent`` (delegating is work even though the permission layer files it under
-# management), and every MCP or skill tool this list has never heard of. ``AskUserQuestion``
-# is deliberately absent too: it only exists where a person is watching
-# (``misaka.core.ask_user``), and waiting on a human is not idling.
-BOOKKEEPING_TOOLS = frozenset({
-    # Builtins that only look (misaka.core.tools).
-    "read", "grep", "find", "ls",
-    # The card's own paperwork (misaka.core.network.todo.tools_for).
-    "misaka_todo", "misaka_todo_list", "misaka_my_card", "misaka_card_note", "misaka_card_complete",
-    # Corpus and skill inspection (misaka.core.documents.wiring.documents, .skills).
-    "doc_list", "doc_outline", "doc_read", "doc_find", "doc_verify",
-    "skills_list", "skill_view",
-    # Inbox and sub-agent management (misaka.core.network.messages, misaka.core.subagent),
-    # spelled as the management vocabulary minus ``Agent`` so the exclusion noted above is
-    # something this set performs rather than something a comment promises.
-    *BOOKKEEPING_MANAGEMENT_TOOLS,
-})
+# Hermes ``gateway/run.py``: how often ``_watch_gateway_turn_inactivity`` looks, and what it
+# calls a turn it stopped.
+IDLE_POLL_SECONDS = 5.0
+IDLE_TIMEOUT_REASON = "Execution timed out (inactivity)"
 
 
 def run_coro(coro):
@@ -238,8 +218,12 @@ async def settle_after_prompt(session):
 
 
 async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
-                      assembly=None):
+                      assembly=None, idle_timeout=None):
     """Run one prompt in a throwaway session and return its final text, timeout flag, error, and token usage.
+
+    ``timeout`` is a wall clock. ``idle_timeout`` is Hermes' gateway turn timeout instead
+    (``HERMES_AGENT_TIMEOUT``): an inactivity limit, so the turn is stopped only once that many
+    seconds pass without a session event. A timed-out run reports ``timed_out`` either way.
 
     The session's identity (role, profile, workspace, usage lease, MCP config) travels through
     ``os.environ`` because the extensions read it there, so two sessions in one process must not
@@ -247,11 +231,29 @@ async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
     (nodes, cards) are naturally isolated."""
     async with _env_window():
         return await _run_session(flags, prompt, cwd, on_event=on_event, timeout=timeout, env=env,
-                                  assembly=assembly)
+                                  assembly=assembly, idle_timeout=idle_timeout)
+
+
+async def _until_idle(work, activity, idle_timeout):
+    """Hermes ``_watch_gateway_turn_inactivity``: await ``work`` until ``idle_timeout`` seconds
+    pass with no session event (``activity[0]`` is the last one); None or 0 is unlimited."""
+    if not idle_timeout:
+        return await work
+    task = asyncio.ensure_future(work)
+    try:
+        while not task.done():
+            await asyncio.wait({task}, timeout=IDLE_POLL_SECONDS)
+            if not task.done() and time.monotonic() - activity[0] >= idle_timeout:
+                raise TimeoutError(IDLE_TIMEOUT_REASON)
+        return task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
-                       assembly=None):
+                       assembly=None, idle_timeout=None):
     old_env = {}
     for k, v in (env or {}).items():
         old_env[k] = os.environ.get(k)
@@ -267,16 +269,19 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
         # that reader. Every model request is metered where it is sent (metering).
         from misaka.core.platform import metering
         install_guards(session, metering.allowance, wall_seconds=timeout,
-                       bookkeeping_tools=BOOKKEEPING_TOOLS | owners.read_only_tools())
+                       no_progress_vocabulary=NO_PROGRESS_VOCABULARY)
         if on_event:
             session.subscribe(lambda ev: on_event(event_line(ev)))
+        activity = [time.monotonic()]
+        if idle_timeout:
+            session.subscribe(lambda _ev: activity.__setitem__(0, time.monotonic()))
 
         async def prompt_and_settle():
             await session.prompt(prompt)
             await settle_after_prompt(session)
 
         try:
-            await asyncio.wait_for(prompt_and_settle(), timeout)
+            await asyncio.wait_for(_until_idle(prompt_and_settle(), activity, idle_timeout), timeout)
         except TimeoutError:
             timed_out = True
             try:

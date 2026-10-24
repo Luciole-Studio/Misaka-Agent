@@ -189,6 +189,23 @@ def return_reply(con, role, text, rows, *, since):
         send(con, record["inbox"], text, summary=text[:80], sender=role, to_session=session_id)
 
 
+def report_failure(con, role, error, reason, rows):
+    """Hermes' Bot Mode reports a failed delivery to the sender (the delivery process's completion
+    notification, ``bot_mode_dm._wait_reply_main``), in its words: the live windows that wrote
+    ``rows`` are told, as ``return_reply`` would have answered them. Returns their session ids."""
+    from misaka.core import session_catalog
+
+    text = f"Delivery to {role} failed [reason: {reason}]: {error}"
+    told = set()
+    for session_id in dict.fromkeys(row["sender_session"] for row in rows if row["sender_session"]):
+        record = session_catalog.live_session(session_id)
+        if record is None or not record.get("inbox") or record.get("kind") == "dm":
+            continue
+        send(con, record["inbox"], text, summary=text[:80], sender=role, to_session=session_id)
+        told.add(session_id)
+    return told
+
+
 def _idle_card_target(card):
     """A card nobody is running. Not started yet, the row is pinned to its attempt and handed over
     at its first tool boundary (B16, how the daemon mails a first attempt). Finished, she is woken
@@ -432,7 +449,8 @@ def wake_contact(role, message_id, *, sender):
     """Start a detached ``misaka dm`` that delivers ``message_id`` to ``role``'s contact session.
 
     The row is durable before this runs: the wake-up leaves it to a contact turn already live,
-    retries a failed one, and a wake-up that never starts leaves it queued for the next one.
+    retries a transient failure once and reports a final one to the sender (Hermes' policy, see
+    ``misaka.cli.dm``), and a wake-up that never starts leaves it queued for the next one.
     """
     argv = [sys.executable, "-m", "misaka", "dm", "--wait-message", str(message_id),
             "--from", sender, "--", role]
@@ -444,8 +462,12 @@ def wake_contact(role, message_id, *, sender):
         and k not in {"MISAKA_DM_CARD_ALLOWLIST", "MISAKA_NET_PANE", "MISAKA_NET_SPACE", "MISAKA_SKILL_SANDBOX"}
     }
     try:
+        # Hermes runs the turn with stdin=DEVNULL too. Inherited, it is the sender's terminal: once
+        # that window closed, every process the wake-up started died on a bad descriptor at birth
+        # ("init_sys_streams", 2026-10-24).
         subprocess.Popen(
             argv,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,

@@ -290,6 +290,12 @@ and host patches are in `vendor/PROVENANCE.json`; regenerate/check with
 The MISAKA scope, scanner enforcement, transactions and lifecycle adapters
 are not represented as verbatim upstream code.
 
+## Hermes Bot Mode 联系会话
+
+- Hermes 源码：https://github.com/nousresearch/hermes-agent ，MIT，Copyright (c) 2025 Nous Research；许可证文本：`misaka/core/web/LICENSE.hermes-agent`。
+- `misaka/cli/dm.py`：Bot Mode 私信模型的移植（永久 Bot Chat 会话、署名前缀、协议段；2026-08-19 按当时的 `tools/bot_mode_probe.py`）。2026-10-24 按 `bda3a363e9695e3f63fce4a7ca85ba17b5fecb61` 对齐联系轮的语义：网关的无活动超时（`gateway/run_turn.py`、`gateway/run.py` 的 `_watch_gateway_turn_inactivity`）代替 600 秒墙钟，一次按策略的重试，失败回告发信方（`tools/bot_mode_dm.py` 的 `_wait_reply_main` 措辞）。
+- `misaka/core/network/bot_failure_reasons.py`：同一提交的 `tools/bot_failure_reasons.py` 原文节选（原因码、分类器、重试策略）。
+
 ## CCB subagent implementation reference
 
 - Reference: https://github.com/claude-code-best/claude-code
@@ -331,5 +337,6 @@ are not represented as verbatim upstream code.
 - 许可证全文、源文件 SHA256 和改动边界：`misaka/core/tools/_office/LICENSE.frontier-agent`、`PROVENANCE.json`、`ORIGIN.md`。
 - 来源：上游 `_writer_*`、`_reader_*`、`create_file.py`、`read_file.py`；其自身注明功能设计参考 Mercor-Intelligence/archipelago（Apache-2.0），寻址和参数设计由 FrontierAgent 实现。
 - 本地改动包含引用友好的文本渲染、工作区归属、权限和错误信封、线程／写入队列、暂存回滚、独立转换配置、缺陷修正；不包含上游 PDF OCR 服务调用、视觉模型网关和沙箱基础设施。
+- `misaka/agent/guards.py` 的 `NoProgressGuard` 移植自 `workflows/agent_team/observers/no_progress_guard.py`（对照 `e4cb2397109c957a2f99c3a5d850b9fc479dbef6`）：阈值、"连续轮次里至少三次新建子代理"的前提、新鲜实质报告清零、退场式派活加速停止与提示冷却照上游；上游四个工具按 `misaka/core/platform/vocabulary.py` 的 `NO_PROGRESS_VOCABULARY` 对应到 `Agent`/`SendMessage`/`TaskOutput`/`TaskStop`，前台 `Agent` 自带报告；提示与停止语为中文转述。
 - `misaka/core/documents/index.py` 的逐页 OCR 判定（`_route` 及其阈值：无文字、乱码比例、图片覆盖面积）参照上游 `plugins/tools/_reader_pdf.py` 的逐页路由规则重新实现；图片规则收窄为"图片为主且文字稀少"，数学字体与矢量图规则未采用，理由见该段注释。
 - 插图标注（`index.py` 的 `figures`：图片占比、logo 宽度与笔画数阈值）参照上游 `_reader_pdf.py` 的 auto 模式标注；为无视觉模型代读图片时所用的转写提示词（`core/web/vision.py` 的 `TRANSCRIBE`）取自上游 `_reader_core.py` 的 `_VISION_PROMPT`；代读由 MISAKA 的 `vision` 扩展在请求前统一完成。幻灯片的查看沿用上游的路径：`needs_vlm` 标记（上游 "needs VLM"）指出要看的幻灯片，经 LibreOffice 导出 PDF（`soffice.export_pdf`，即上游 `_export_pdf`）再渲染该页。

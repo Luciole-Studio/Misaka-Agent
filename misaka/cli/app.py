@@ -55,7 +55,9 @@ def _parser(extension_commands=None):
     dmp.add_argument("message", nargs="?", help="Message body (omitted: deliver what is already queued)")
     dmp.add_argument("--from", dest="sender", help="Sender role (default: the user)")
     dmp.add_argument("--model", help="Override the recipient's model")
-    dmp.add_argument("--timeout", type=int, default=600, help="Seconds to wait for a reply")
+    dmp.add_argument("--timeout", type=int, default=None,
+                     help="Stop the turn after this many seconds without activity "
+                          "(default 1800, as Hermes; 0: no limit)")
     dmp.add_argument("--summary", help="Short audit-log summary")
     dmp.add_argument("--task-id", dest="dm_task", help=argparse.SUPPRESS)
     dmp.add_argument("--generation", dest="dm_gen", type=int, help=argparse.SUPPRESS)
@@ -365,7 +367,8 @@ def _cmd_remove(args):
 def _cmd_dm(args):
     from misaka.cli import dm as dm_cli
     sys.exit(dm_cli.deliver(args.to, args.message, sender=args.sender,
-                            model=args.model, timeout=args.timeout,
+                            model=args.model, idle_timeout=(dm_cli.IDLE_TIMEOUT_SECONDS
+                                                            if args.timeout is None else args.timeout),
                             task_id=args.dm_task, generation=args.dm_gen,
                             summary=args.summary, wait_message=args.wait_message))
 

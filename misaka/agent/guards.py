@@ -325,77 +325,169 @@ class FinalizationReserve:
 # 4. Turns that spend the allowance without doing any work
 # --------------------------------------------------------------------------
 
-# borrowed from FrontierAgent(workflows/agent_team/observers/no_progress_guard.py), see
-# its comment for the measured basis; revisit with local data.
-NO_PROGRESS_HINT_STREAK = 6
-NO_PROGRESS_STOP_STREAK = 12
+# FrontierAgent e4cb2397109c957a2f99c3a5d850b9fc479dbef6 /
+# workflows/agent_team/observers/no_progress_guard.py (Apache-2.0; THIRD_PARTY_NOTICES.md):
+# its thresholds, gate, resets and nudge, with its four tools named in MISAKA's vocabulary.
+NO_PROGRESS_HINT_STREAK = 6            # soft_streak
+NO_PROGRESS_STOP_STREAK = 12           # hard_streak
+NO_PROGRESS_MIN_REPEATED_CREATES = 3
+NO_PROGRESS_COOLDOWN_TURNS = 3
+# A task prompt shorter than this (after stripping trailing punctuation) is too terse to be a
+# real research instruction -- one of the trivial wind-down markers a spin assigns to
+# throwaway agents ("End.", "OK", "Done", ...).
+_MIN_MEANINGFUL_PROMPT_LEN = 8
+# Trivial task prompts a wind-down spin assigns to throwaway agents. Used only to ACCELERATE
+# the hard stop (strong signal the agent is not doing real work), never as the sole trigger.
+_DEGENERATE_PROMPTS = frozenset({
+    "end", "done", "complete", "completed", "final", "finalize", "finish",
+    "finished", "x", "ok", "okay", "stop", "confirm", "nothing", "na", "n/a",
+})
 
 
 class NoProgressGuard:
-    """Count consecutive turns that touch nothing but bookkeeping tools.
+    """Break a coordinator's create/assign spin (FrontierAgent's ``NoProgressGuard``).
 
-    ``bookkeeping`` is the vocabulary of names a session can call forever without the
-    world changing or one new fact arriving: its own to-do list, its own card, the
-    corpus index, a file it could already see. The caller supplies it -- misaka's tool
-    surface differs per session kind and grows at run time with MCP servers and
-    skills, so the only place that knows the real list is where the session is
-    assembled (:mod:`misaka.core.platform.session`). A list frozen in here would be wrong
-    within a release and unreachable from a test.
+    A turn calling ONLY sub-agent management tools does no first-hand work: it just manages
+    the roster. Everything else -- reading, searching, the board and card tools, writing --
+    is progress and resets the streak, and so does a sub-agent's fresh substantive report.
+    Without REPEATED new-agent creation a management streak is normal fan-out or waiting on
+    running sub-agents, so nothing happens until ``min_repeated_creates`` of its turns have
+    created one. A tool-free turn resets it too: misaka's inner loop ends there.
 
-    A name the vocabulary has never heard of counts as work, and that asymmetry is the
-    whole safety margin: an unknown MCP tool resets the streak instead of being
-    accused of idling.
-
-    One read-only turn is not the pathology and neither is a read-heavy stretch that
-    produces something: a single turn that calls anything real puts the counter back
-    to zero, and only an unbroken run with no work at all in it reaches the
-    thresholds. A tool-free turn resets it too -- misaka's inner loop ends there, so
-    that turn is the model writing rather than looking, and the next request must
-    start clean rather than inherit a streak.
+    ``vocabulary`` names the tools by role -- ``management`` (upstream's four), ``create``
+    (``create_subagent``), ``assign`` (``assign_task``) and ``collect`` (``collect_reports``) --
+    and the caller supplies it (:mod:`misaka.core.platform.vocabulary`); without one the
+    guard has no opinion.
     """
 
     def __init__(
         self,
-        bookkeeping: Any = (),
+        vocabulary: Any = None,
         *,
         hint_streak: int = NO_PROGRESS_HINT_STREAK,
         stop_streak: int = NO_PROGRESS_STOP_STREAK,
+        min_repeated_creates: int = NO_PROGRESS_MIN_REPEATED_CREATES,
+        cooldown_turns: int = NO_PROGRESS_COOLDOWN_TURNS,
     ) -> None:
-        self.bookkeeping = frozenset(str(name).casefold() for name in (bookkeeping or ()))
-        # 2 is the floor: hinting at 1 would fire on a session's first status check.
-        self.hint_streak = max(2, int(hint_streak))
-        # Always at least one turn of hint before the stop, so the model gets a chance
-        # to act on the warning.
+        vocabulary = vocabulary or {}
+        self.management, self.create, self.assign, self.collect = (
+            frozenset(str(name).casefold() for name in vocabulary.get(role, ()))
+            for role in ("management", "create", "assign", "collect")
+        )
+        self._delegating = _join_names([*vocabulary.get("create", ()), *vocabulary.get("assign", ())])
+        self.hint_streak = max(1, int(hint_streak))
         self.stop_streak = max(self.hint_streak + 1, int(stop_streak))
-        self._streak = 0
-        self._hinted = False
+        self.min_repeated_creates = max(2, int(min_repeated_creates))
+        self.cooldown_turns = max(1, int(cooldown_turns))
+        self._turn = 0
+        self._last_hint_turn = -(10**9)
+        # Agents whose most recent assignment was a trivial wind-down prompt. A report from one
+        # of these is completion of the spin itself, not evidence that substantive work happened.
+        self._degenerate_agents: set[str] = set()
+        self._reset()
 
-    def observe(self, tool_names: Any) -> GuardDecision:
-        """``tool_names``: the names this turn called, in any iterable."""
-        names = [str(name or "") for name in tool_names]
-        idle = bool(names) and all(name.casefold() in self.bookkeeping for name in names)
-        if not idle:
-            self._streak = 0
-            self._hinted = False
+    def _reset(self) -> None:
+        self._streak = 0
+        self._creates = 0
+        self._degenerate = 0
+
+    def observe(self, tool_calls: Any, tool_results: Any = ()) -> GuardDecision:
+        """``tool_calls`` and ``tool_results``: this turn's batch and what it returned."""
+        self._turn += 1
+        calls = list(tool_calls or ())
+        results = list(tool_results or ())
+        # Which agents were assigned substantive vs. trivial work, before reading reports:
+        # a turn can both assign and collect (and a foreground Agent does both in one call).
+        self._record_assignment_quality(calls, results)
+        reports = self._report_agents(results)
+        fresh_report = any(agent not in self._degenerate_agents for agent in reports)
+        self._degenerate_agents.difference_update(reports)
+        if fresh_report:
+            self._reset()
+            return _NONE
+
+        names = {str(read_field(call, "name", "") or "").casefold() for call in calls}
+        # Empty turn, or any non-management tool: real work or a different mode.
+        if not names or not names <= self.management:
+            self._reset()
             return _NONE
 
         self._streak += 1
-        if self._streak >= self.stop_streak:
+        if names & self.create:
+            self._creates += 1
+        if names & self.assign and self._assign_is_degenerate(calls):
+            self._degenerate += 1
+        # Not the pathology yet: without REPEATED new-agent creation this is just normal
+        # fan-out / waiting on running sub-agents.
+        if self._creates < self.min_repeated_creates:
+            return _NONE
+
+        degenerate = self._degenerate >= 2
+        if self._streak >= self.stop_streak or (degenerate and self._streak >= self.hint_streak + 2):
             return GuardDecision(
                 "stop",
-                f"你已经连续 {self._streak} 轮没有任何实质产出,只在记录和查看"
-                f"({_join_names(names)})。现在停止调用工具,"
-                "把手上已有的结论和产出物写成完整的交付。",
+                f"你已经连续 {self._streak} 轮只在新建、派活和收取子代理,没有拿到任何新信息。"
+                "现在停止调用工具,把子代理已交回的报告综合成完整的最终答复。",
             )
-        if self._streak >= self.hint_streak and not self._hinted:
-            self._hinted = True
+        if self._streak >= self.hint_streak and self._turn - self._last_hint_turn >= self.cooldown_turns:
+            self._last_hint_turn = self._turn
             return GuardDecision(
                 "hint",
-                f"你已经连续 {self._streak} 轮只在记录和查看({_join_names(names)}),"
-                "没有产出任何实质结果。请开始真正的动作:改文件、跑命令、查资料、交出产出物;"
-                "如果该做的已经做完,就直接收尾。",
+                "你一再新建子代理、给它们派活,却没有拿到任何新信息——子代理已经交回了覆盖这个问题的"
+                f"完整报告。停止委派:不要再调用 {self._delegating}。把已有的全部内容综合起来,"
+                "现在就以纯文本给出完整的最终答复(不调用工具)。",
             )
         return _NONE
+
+    def _record_assignment_quality(self, calls: list[Any], results: list[Any]) -> None:
+        """Track whether each agent's latest assignment is substantive."""
+        created = {str(read_field(result, "toolCallId", "")): read_field(read_field(result, "details", {}) or {},
+                                                                        "agentId")
+                   for result in results}
+        for call in calls:
+            if str(read_field(call, "name", "") or "").casefold() not in self.assign:
+                continue
+            args = read_field(call, "arguments", {}) or {}
+            agent = read_field(args, "to") or created.get(str(read_field(call, "id", "")))
+            if not agent:
+                continue
+            if self._is_degenerate(_assignment(args)):
+                self._degenerate_agents.add(str(agent))
+            else:
+                self._degenerate_agents.discard(str(agent))
+
+    def _assign_is_degenerate(self, calls: list[Any]) -> bool:
+        """True when an assignment's prompt is trivial wind-down text."""
+        return any(self._is_degenerate(_assignment(read_field(call, "arguments", {}) or {}))
+                   for call in calls if str(read_field(call, "name", "") or "").casefold() in self.assign)
+
+    def _report_agents(self, results: list[Any]) -> set[str]:
+        """The agents whose report came back this turn: a foreground ``Agent`` that completed,
+        or a ``TaskOutput`` that retrieved a finished task. Status-only answers are not reports."""
+        agents = set()
+        for result in results:
+            if read_field(result, "isError", False):
+                continue
+            if str(read_field(result, "toolName", "") or "").casefold() not in self.collect:
+                continue
+            details = read_field(result, "details", {}) or {}
+            if read_field(details, "status") == "completed" and read_field(details, "agentId"):
+                agents.add(str(read_field(details, "agentId")))
+            elif read_field(details, "retrieval_status") == "success":
+                task = read_field(details, "task", {}) or {}
+                if read_field(task, "task_id"):
+                    agents.add(str(read_field(task, "task_id")))
+        return agents
+
+    @staticmethod
+    def _is_degenerate(prompt: str) -> bool:
+        s = prompt.strip().lower().strip(".!?。！ ")
+        return len(s) < _MIN_MEANINGFUL_PROMPT_LEN or s in _DEGENERATE_PROMPTS
+
+
+def _assignment(args: Any) -> str:
+    """The work an assignment hands over: ``Agent``'s prompt or ``SendMessage``'s message."""
+    return str(read_field(args, "prompt", "") or read_field(args, "message", "") or "")
 
 
 class _SessionGuards:
@@ -416,7 +508,7 @@ class _SessionGuards:
         session: Any,
         allowance: Any = None,
         wall_seconds: float | None = None,
-        bookkeeping_tools: Any = (),
+        no_progress_vocabulary: Any = None,
     ):
         self._session = session
         self._allowance = allowance
@@ -427,7 +519,7 @@ class _SessionGuards:
         self._wall_start = time.monotonic() if self._wall_total > 0 else 0.0
         self.repeated = RepeatedToolCallGuard()
         self.text = TextRepetitionGuard()
-        self.no_progress = NoProgressGuard(bookkeeping_tools)
+        self.no_progress = NoProgressGuard(no_progress_vocabulary)
         self.reserve = FinalizationReserve()
         self.stopped: str = ""
         self._forcing = False
@@ -452,8 +544,8 @@ class _SessionGuards:
         ``decisions[1]`` is the text guard's, by the order ``after_turn`` builds the list.
 
         ``RepeatedToolCallGuard`` stops on proof of a loop: the same call, byte for byte.
-        ``NoProgressGuard`` stops on proof of its own: a whole run of turns in which
-        nothing the session did could change anything. ``TextRepetitionGuard`` has no such
+        ``NoProgressGuard`` stops on proof of its own: a whole run of turns that only created,
+        assigned and collected sub-agents without one fresh report. ``TextRepetitionGuard`` has no such
         proof -- a model that narrates each step with
         the same sentence and a different filename measures 0.879 similar while doing
         genuinely different work, and CJK per-character bigrams sit higher again. A
@@ -526,7 +618,7 @@ class _SessionGuards:
         decisions = [
             self.repeated.observe(tool_calls),
             self.text.observe(text),  # index 1: _resolve downgrades this one
-            self.no_progress.observe(_call_names(tool_calls)),
+            self.no_progress.observe(tool_calls, read_field(context, "toolResults", []) or []),
         ]
         allowance = self._scarcest_allowance()
         if allowance is not None:
@@ -581,16 +673,16 @@ def install_guards(
     session: Any,
     allowance: Any = None,
     wall_seconds: float | None = None,
-    bookkeeping_tools: Any = (),
+    no_progress_vocabulary: Any = None,
 ) -> _SessionGuards | None:
     """Install one idempotent set of pathology guards on an engine session.
 
     Composed onto whatever ``finishTurn`` the session already carries, never replacing it:
     a guard stop and a caller stop are independent reasons to end a run.
 
-    ``bookkeeping_tools`` is ``NoProgressGuard``'s vocabulary, empty by default: a caller
-    that cannot say which of its tools are paperwork gets no opinion about idling rather
-    than a guess. ``misaka.core.platform.session`` passes the real list.
+    ``no_progress_vocabulary`` is ``NoProgressGuard``'s, empty by default: a caller that cannot
+    name its sub-agent tools gets no opinion about a spin rather than a guess.
+    ``misaka.core.platform.session`` passes the real one.
     """
 
     agent = getattr(session, "agent", None)
@@ -600,7 +692,7 @@ def install_guards(
     if isinstance(existing_guards, _SessionGuards):
         return existing_guards
 
-    guards = _SessionGuards(session, allowance, wall_seconds, bookkeeping_tools)
+    guards = _SessionGuards(session, allowance, wall_seconds, no_progress_vocabulary)
     original_prepare = getattr(agent, "prepareNextTurn", None)
     original_prepare_with_context = getattr(agent, "prepareNextTurnWithContext", None)
     finish_turn = finish_turn_from_stop_predicate(guards.after_turn, getattr(agent, "finishTurn", None))

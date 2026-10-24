@@ -195,10 +195,10 @@ class WindowLO:
             if self.headless and not hasattr(session.agent, "_misaka_guards"):
                 from misaka.agent.guards import install_guards
                 from misaka.core.platform import metering
-                from misaka.core.platform.session import BOOKKEEPING_TOOLS
+                from misaka.core.platform.vocabulary import NO_PROGRESS_VOCABULARY
 
                 guard_hooks = (session.agent.finishTurn, session.agent.prepareNextTurnWithContext)
-                install_guards(session, metering.allowance, bookkeeping_tools=BOOKKEEPING_TOOLS)
+                install_guards(session, metering.allowance, no_progress_vocabulary=NO_PROGRESS_VOCABULARY)
             # Direct await enters the session's active-run guard before yielding. A
             # queued notification cannot take the window between idle and this turn.
             # The turn's model requests -- the phase's own, compaction, the vision bridge --

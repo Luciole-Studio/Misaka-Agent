@@ -624,6 +624,139 @@ def test_the_contact_delivery_hands_her_answer_back(world, monkeypatch):
     assert _replies(world, window) == ["10032 standing by"]
 
 
+def _contact_turns(monkeypatch, *results):
+    """`misaka dm` with its model turns scripted: each call takes the next result, and records the
+    keyword arguments it was given."""
+    from misaka.core.platform import session as platform_session
+
+    calls = []
+
+    async def turn(flags, text, cwd, **kw):
+        calls.append({"flags": flags, **kw})
+        folder = flags[flags.index("--session-dir") + 1]
+        Path(folder, "contact.jsonl").touch()     # a turn leaves its session behind, failed or not
+        error = results[len(calls) - 1]
+        return {"text": None if error else "10032 standing by", "error": error, "timed_out": False}
+
+    monkeypatch.setattr(platform_session, "run_session", turn)
+    return calls
+
+
+def _delivered(world, mid):
+    return world.mail.execute("SELECT delivered_at FROM messages WHERE id=?", (mid,)).fetchone()[0] is not None
+
+
+def test_a_contact_turn_runs_under_hermes_inactivity_timeout_not_a_wall_clock(world, monkeypatch):
+    """2026-10-24: 10032 reviewing a 36-card plan thought for eight minutes and was cut at the
+    600 s wall clock twice, losing the review each time. Hermes runs a Bot Chat turn with no wall
+    clock; its gateway stops a turn only after HERMES_AGENT_TIMEOUT (1800 s) without activity."""
+    from misaka.cli import dm
+
+    calls = _contact_turns(monkeypatch, None)
+    window = _live(world, _sid(), role="last-order", space=SPACE_T1)
+    mid = messages.send(world.mail, "10032", "review the plan", summary="r", sender="last-order",
+                        sender_session=window)
+    assert dm.deliver("10032", sender="last-order", wait_message=mid) == 0
+    assert [(call["timeout"], call["idle_timeout"]) for call in calls] == [(None, 1800)]
+
+
+def test_a_transient_contact_failure_is_retried_once_on_the_same_session(world, monkeypatch):
+    """Hermes `_run_local_turn`: one policy-gated retry, which resumes the session; the old wake-up
+    started up to five whole turns for any failure, a timeout included."""
+    from misaka.cli import dm
+
+    calls = _contact_turns(monkeypatch, "Error code: 529 overloaded_error", None)
+    window = _live(world, _sid(), role="last-order", space=SPACE_T1)
+    mid = messages.send(world.mail, "10032", "hello there", summary="hi", sender="last-order",
+                        sender_session=window)
+    assert dm.deliver("10032", sender="last-order", wait_message=mid) == 0
+    assert len(calls) == 2 and "-c" in calls[1]["flags"]
+    assert _replies(world, window) == ["10032 standing by"]
+
+
+def test_a_failure_the_retry_cannot_fix_reaches_the_sender_and_settles(world, monkeypatch):
+    """The old wake-up gave up in silence: the row stayed queued and the window that wrote was told
+    she was "being woken". Hermes answers a failed delivery to its sender, with the reason."""
+    from misaka.cli import dm
+
+    for error, reason, turns in (("Error code: 401 authentication_error", "provider_auth_or_access", 1),
+                                 ("Error code: 529 overloaded_error", "provider_server_error", 2)):
+        calls = _contact_turns(monkeypatch, error, error)
+        window = _live(world, _sid(), role="last-order", space=SPACE_T1)
+        mid = messages.send(world.mail, "10032", "hello there", summary="hi", sender="last-order",
+                            sender_session=window)
+        assert dm.deliver("10032", sender="last-order", wait_message=mid) == 1
+        assert len(calls) == turns
+        assert _replies(world, window) == [f"Delivery to 10032 failed [reason: {reason}]: {error}"]
+        assert _delivered(world, mid)
+
+
+def test_a_failure_nobody_could_be_told_of_stays_queued(world, monkeypatch):
+    from misaka.cli import dm
+
+    _contact_turns(monkeypatch, "Error code: 401 authentication_error")
+    gone = _live(world, _sid(), role="last-order", space=SPACE_T1, alive=False)
+    mid = messages.send(world.mail, "10032", "hello there", summary="hi", sender="last-order",
+                        sender_session=gone)
+    assert dm.deliver("10032", sender="last-order", wait_message=mid) == 1
+    assert not _delivered(world, mid)
+
+
+def test_the_wake_up_does_not_hold_the_senders_terminal(monkeypatch):
+    """2026-10-24: the panel closed while 10032's wake-up was retrying; its stdin was that window's
+    terminal, and every turn after died at birth on a bad descriptor (`init_sys_streams`)."""
+    spawned = []
+    monkeypatch.setattr(messages.subprocess, "Popen", lambda argv, **kw: spawned.append(kw))
+    messages.wake_contact("10032", 7, sender="last-order")
+    assert spawned and spawned[0]["stdin"] is messages.subprocess.DEVNULL
+    assert spawned[0]["start_new_session"] is True
+
+
+def test_the_inactivity_timeout_counts_from_the_last_session_event(monkeypatch):
+    """Hermes `_watch_gateway_turn_inactivity`: a turn that keeps producing events runs past the
+    limit; one that goes quiet is stopped, in Hermes' words."""
+    from misaka.core.platform import session as platform_session
+
+    monkeypatch.setattr(platform_session, "IDLE_POLL_SECONDS", 0.01)
+
+    async def busy(activity):
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            activity[0] = time.monotonic()
+        return "done"
+
+    async def run():
+        activity = [time.monotonic()]
+        assert await platform_session._until_idle(busy(activity), activity, 0.05) == "done"
+        with pytest.raises(TimeoutError, match=r"^Execution timed out \(inactivity\)$"):
+            await platform_session._until_idle(asyncio.sleep(5), [time.monotonic()], 0.05)
+
+    asyncio.run(run())
+
+
+def test_a_long_contact_turn_keeps_its_rows_leased(world, monkeypatch):
+    """With no wall clock a fixed lease would lapse under a long turn and hand its rows to another
+    reader; the turn renews them as the inbox pump renews its own."""
+    from misaka.cli import dm
+
+    monkeypatch.setattr(messages, "DELIVERY_RENEW_SECONDS", 0.02)
+    mid = messages.send(world.mail, "10032", "hello there", summary="hi", sender="last-order")
+    token = messages.new_lease_token()
+    assert messages.claim(world.mail, [mid], ttl_seconds=1, token=token) == {mid}
+
+    def expires():
+        return world.mail.execute("SELECT lease_expires FROM messages WHERE id=?", (mid,)).fetchone()[0]
+
+    claimed = expires()
+
+    async def turn():
+        await asyncio.sleep(0.1)
+        return "answered"
+
+    assert asyncio.run(dm._leased(turn(), world.mail, [mid], token)) == "answered"
+    assert expires() >= claimed + messages.DELIVERY_LEASE_SECONDS - 2
+
+
 def _run(world, *, origin_session=None):
     from misaka.core.research import runs
     runs.init(world.board)
