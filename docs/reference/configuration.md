@@ -318,7 +318,7 @@ private, such as a Windows drive opened from WSL, keeps it in
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `lcm.context_threshold` | `0.35` | share of the context window at which a session compacts; a research run can set its own |
+| `lcm.context_threshold` | `0.5` | share of the context window at which a session compacts; a research run can set its own. Unset, it is `compression.threshold`, whose default is Hermes' `0.5` (with `"compression": {"enabled": false}`, LCM's own `0.35`) |
 | `auxiliary.compression` | the session's model | which provider and model write the summaries |
 
 `/lcm-settings` in chat turns automatic recall from earlier conversations on or off. Recall

@@ -117,6 +117,22 @@ def _ctx(session_id):
     return SimpleNamespace(sessionManager=SimpleNamespace(getSessionId=lambda: session_id), cwd="/tmp")
 
 
+@pytest.mark.parametrize("document,threshold,source", [
+    ({}, 0.5, "config_yaml:compression.threshold"),                      # Hermes' default, as in Hermes
+    ({"compression": {"threshold": 0.75}}, 0.75, "config_yaml:compression.threshold"),
+    ({"compression": {"enabled": False}}, 0.35, "default"),            # upstream: a disabled one is not inherited
+    ({"lcm": {"context_threshold": 0.6}}, 0.6, "config_yaml:lcm.context_threshold"),
+])
+def test_lcm_inherits_hermes_compression_threshold(monkeypatch, document, threshold, source):
+    """F16 (2026-10-24): upstream inherits Hermes' compression.threshold, 0.50 by default, before
+    its own 0.35; settings.json carried none, so a 1M-window Last Order compacted at 350k, not 500k."""
+    config_bridge = pytest.importorskip("misaka.extensions.misaka_lcm.host.config_bridge")   # a plugin
+    monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
+    _settings(document)
+    config = config_bridge.load_config(ctx=_ctx("plain"))
+    assert (config.context_threshold, config.config_sources["context_threshold"]) == (threshold, source)
+
+
 def test_lcm_reads_the_session_threshold_through_its_own_config_channel(monkeypatch):
     config_bridge = pytest.importorskip("misaka.extensions.misaka_lcm.host.config_bridge")   # a plugin
     monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
