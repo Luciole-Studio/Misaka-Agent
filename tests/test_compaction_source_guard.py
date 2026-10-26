@@ -120,6 +120,18 @@ def _change(session, kind):
         raise AssertionError(kind)
 
 
+def test_a_cache_warm_during_a_slow_summary_does_not_void_it():
+    """pi 1.3.0's cache warmer appends a ``usage`` entry on its interval; a summary that outlasts it
+    used to be thrown away as "branch, entries" changed (R10, 2026-10-26)."""
+    session = _session()
+    manager = session.sessionManager
+    result, source = _result(session), session._compactionSource()
+    warmed = manager.appendUsage("cache_warm", "fixture", "fixture",
+                                 {"input": 1, "output": 1, "cacheRead": 10, "cacheWrite": 0, "totalTokens": 12})
+    saved = session._publishCompaction(result, False, source)
+    assert saved["parentId"] == warmed["id"]
+
+
 @pytest.mark.parametrize("kind", [
     "message", "custom message", "thinking", "model entry", "model", "model in place", "settings",
     "branch", "branch metadata", "branch away and back", "new session", "fork", "session file",

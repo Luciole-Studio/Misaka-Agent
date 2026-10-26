@@ -2032,9 +2032,11 @@ class AgentSession:
         # Bookkeeping may arrive while a context engine or summarizer is awaiting.
         # Only accept a contiguous append to the original leaf, not a new branch,
         # message (including custom_message), model/thinking change or compaction.
+        # ``usage`` is pi 1.3.0's cache warmer: a slow summary outlasts its interval
+        # (Last Order's 500k-token compaction, 2026-10-26; R10).
         if (current[4] == source[4] + len(appended)
                 and current[3] == (*source[3], *(entry.get("id") for entry in appended))
-                and all(entry.get("type") in {"custom", "label", "session_info"} for entry in appended)):
+                and all(entry.get("type") in {"custom", "label", "session_info", "usage"} for entry in appended)):
             changed = [name for name in changed if name not in {"branch", "entries"}]
         if changed:
             raise RuntimeError("Session, branch, model or settings changed during compaction "
