@@ -200,6 +200,76 @@ def test_full_checkpoint_rebuild_and_fork_preserve_session_bytes(tmp_path):
     assert built.get_runtime_identity()["plugin_name"] == "misaka-lcm"
 
 
+def failed_attempt(ctx, tick, *, retried):
+    """A provider error's empty assistant row; a retry drops it before the next request."""
+    entry_id = ctx.sessionManager.appendMessage({
+        "role": "assistant", "content": [], "api": "a", "provider": "p", "model": "m",
+        "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+                  "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}},
+        "stopReason": "error", "errorMessage": "Error code: 503", "timestamp": 1789460420000 + tick})
+    if retried:
+        ctx.sessionManager.appendContextEdit(entry_id, None)
+    return entry_id
+
+
+def unowned_frontier_sources(built, snapshot):
+    _, stored = ce._archive_map(built, snapshot)
+    source_entries = {source for sources in stored.values() for source in sources}
+    foreign = set(carry.sources(built, snapshot).values())
+    with ce._summary_scope(built, transcript=snapshot):
+        return [source for node in built._summary_frontier_nodes() for source in carry.source_ids(built, node)
+                if source not in source_entries and source not in foreign]
+
+
+def test_a_retried_attempt_after_a_checkpoint_leaves_its_frontier_owned(tmp_path):
+    """2026-10-26: a checkpoint held a stored empty assistant row; later 503 retries appended
+    identical rows that a context edit dropped before any ingest. Counting those in the archive
+    let upstream's surplus-skip matcher hand the checkpoint's row to nobody, and compaction
+    raised "frontier contains sources outside the transcript archive" in Last Order's turn."""
+    ctx = session(tmp_path / "project")
+    failed_attempt(ctx, 0, retried=False)                    # retries exhausted: it stays, and is stored
+    summary(ctx)
+    say(ctx, "after the checkpoint", tick=1)
+    ce.sync(ctx)
+    for tick in range(2, 5):
+        failed_attempt(ctx, tick, retried=True)
+    say(ctx, "after the retries", tick=5)
+    ce.sync(ctx)
+    built, snapshot = ce.bound_engine(ctx), ce.snapshot(ctx)
+    assert unowned_frontier_sources(built, snapshot) == []
+    native = ctx.sessionManager.buildSessionContext().messages
+    ce.compact(ce.prepare({"reason": "manual", "messages": native}, ctx))
+
+
+def test_a_rebind_does_not_ingest_the_attempts_a_retry_dropped(tmp_path):
+    ctx = session(tmp_path / "project")
+    say(ctx, "question")
+    ce.sync(ctx)
+    dropped = [failed_attempt(ctx, tick, retried=True) for tick in range(3)]
+    say(ctx, "answer", tick=3)
+    ce.sync(ctx)
+    built = ce.bound_engine(ctx)
+    stored = count(built)
+    ce.start(ctx)                                            # session_compact_failed, a tree switch, a restart
+    ce.sync(ctx)
+    assert count(built) == stored == 2
+    _, rows = ce._archive_map(built, ce.snapshot(ctx))
+    assert all(not rows[entry] for entry in dropped)
+
+
+def test_an_unowned_frontier_skips_the_compaction_instead_of_failing_the_turn(tmp_path, monkeypatch):
+    ctx = session(tmp_path / "project")
+    summary(ctx)
+    say(ctx, "next", tick=1)
+    ce.sync(ctx)
+    monkeypatch.setattr(ce, "_archive_sources", lambda *_: ({}, {}))
+    native = ctx.sessionManager.buildSessionContext().messages
+    prepared = ce.prepare({"reason": "manual", "messages": native}, ctx)
+    calls = []
+    monkeypatch.setattr(prepared.built, "compress", lambda *a, **k: calls.append(a))
+    assert ce.compact(prepared) is None and calls == []
+
+
 def carried(ctx):
     ce.bound_engine(ctx)._config.new_session_retain_depth = -1
     target = SessionManager.create(ctx.cwd, ctx.sessionManager.getSessionDir())

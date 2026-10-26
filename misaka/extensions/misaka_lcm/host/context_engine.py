@@ -281,10 +281,45 @@ def freeze_context(ctx, transcript):
         model=copy.deepcopy(read_field(ctx, "model")), modelRegistry=read_field(ctx, "modelRegistry"))
 
 
-def _session_originals(transcript):
-    from misaka.core.session_manager import sessionEntryToContextMessages
+# Entries that open no ingest: a tool result, an edit, a usage receipt or a non-message custom
+# entry is appended with no model request, run start or compaction in between.
+_NO_INGEST = frozenset({'context_edit', 'usage', 'custom', 'label', 'session_info'})
 
-    return {item["id"]: ingest.upstream_messages(sessionEntryToContextMessages(item))
+
+def _edits_before_ingest(entries):
+    """The context edits each entry already carried when live ingest first stored it.
+
+    Ingest stores what ``buildSessionContext`` showed at a model request, a run's start or end, or
+    a compaction, and upstream never re-reads a row it has passed. An edit appended before any of
+    those (a retry dropping the attempt it failed, ``_omitRecoveryAttempt``) means the entry never
+    reached the store; one appended later (a boundary draft) left its original there. Applying
+    every edit, or none, gives the archive a different multiset of identical rows than the store,
+    and upstream's surplus-skip matcher then re-deals them: a retried 503's empty assistant row
+    left a checkpoint's frontier with a source no entry owned (2026-10-26, Last Order's
+    cards_failed turn). Only an edit on the target's own branch counts, as in
+    ``buildSessionProjection``; the last one wins, as there."""
+    by_id = {entry['id']: entry for entry in entries}
+    edits = {}
+    for entry in entries:
+        if entry['type'] != 'context_edit':
+            continue
+        target, parent = str(entry.get('targetId')), entry.get('parentId')
+        while parent is not None and parent != target:
+            between = by_id.get(parent)
+            if between is None or not (between['type'] in _NO_INGEST or (
+                    between['type'] == 'message' and read_field(between.get('message'), 'role') == 'toolResult')):
+                break
+            parent = between.get('parentId')
+        if parent == target:
+            edits[target] = entry
+    return edits
+
+
+def _session_originals(transcript):
+    from misaka.core.session_manager import projectContextEntry
+
+    edits = _edits_before_ingest(transcript.entries)
+    return {item["id"]: ingest.upstream_messages(projectContextEntry(item, edits.get(item["id"])))
             for item in transcript.entries if item["type"] != "compaction"}
 
 
@@ -303,6 +338,14 @@ def _archive_map(built, transcript, *, through=None):
         built._last_compacted_store_id, built.active_store_ids = watermark, scope
     return projected, {entry: [stored[id(message)] for message in group if id(message) in stored]
                        for entry, group in projected.items()}
+
+
+def _archive_sources(built, transcript):
+    """Each stored row's owning entry, and each carried row's receipt key."""
+    from . import carry
+    _, stored = _archive_map(built, transcript)
+    return ({source: entry for entry, sources in stored.items() for source in sources},
+            {row: key for key, row in carry.sources(built, transcript).items()})
 
 
 def _checkpoint_nodes(built, entry, transcript):
@@ -736,6 +779,19 @@ def compact(prepared):
     built = prepared.built
     with _summary_scope(built, transcript=prepared.transcript):
         from ..native.support import AuxiliaryExplicitCancellation
+        from . import carry
+        if not prepared.replay_changed:
+            # The check below, before the engine commits anything: a frontier the archive cannot
+            # account for skips this round and the context goes out uncompacted. Raising instead
+            # failed the turn, and its session_compact_failed rebind re-ingests the whole archive
+            # as duplicate rows. After compress() the engine has published nodes and moved its
+            # cursor, so a refusal there still raises.
+            source_entries, foreign = _archive_sources(built, prepared.transcript)
+            if any(source not in source_entries and source not in foreign
+                   for node in built._summary_frontier_nodes() for source in carry.source_ids(built, node)):
+                logger.warning('LCM frontier of %s has sources outside the transcript archive; '
+                               'skipping this compaction.', built.current_session_id)
+                return None
         try:
             compressed = (built.compress(prepared.messages, current_tokens=prepared.tokens,
                                          focus_topic=prepared.focus, force=prepared.reason == 'manual')
@@ -745,11 +801,8 @@ def compact(prepared):
         if prepared.replay.unchanged(compressed) and not prepared.replay_changed:
             return None
         frontier = built._summary_frontier_nodes()
-        _, stored = _archive_map(built, prepared.transcript)
-        source_entries = {source: entry for entry, sources in stored.items() for source in sources}
+        source_entries, foreign = _archive_sources(built, prepared.transcript)
         records = []
-        from . import carry
-        foreign = {row: key for key, row in carry.sources(built, prepared.transcript).items()}
         for node in frontier:
             sources = carry.source_ids(built, node)
             if any(source not in source_entries and source not in foreign for source in sources):
