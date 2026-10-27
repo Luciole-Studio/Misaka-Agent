@@ -966,7 +966,16 @@ def reopen_cards(con, run_id, node_id=None):
     """Send the run's (or one node's) stopped, failed and unusable cards back to their Sisters.
     A failed card is retried like a stopped one: without this the node it killed replays the
     identical failure on every resume, and the only way out is editing this database by hand.
-    A card its node went on without stays as it is."""
+    A card its node went on without stays as it is.
+
+    The cards' files are read first. A stop lands in the file before the index commits, so a
+    process that died between the two (2026-10-25, R31) left a card stopped in its file and
+    todo here: deciding on the index alone skipped it, and the next dispatch tick put the
+    file's stop back after this resume had passed it."""
+    from misaka.core.platform import cards as card_files
+    for row in tasks(con, run_id, node_id=node_id):
+        if row["workspace"]:
+            card_files.reconcile_one(con, row["workspace"], row["id"])
     given_up = given_up_cards(con, run_id, node_id)
     for row in tasks(con, run_id, node_id=node_id):
         if row["id"] in given_up:
