@@ -155,6 +155,7 @@ class _PendingMessageQueue:
     def __init__(self, mode: QueueMode) -> None:
         self._messages: list[AgentMessage] = []
         self.mode = mode
+        self.together: Callable[[AgentMessage], bool] | None = None  # MISAKA fork: Agent.deliverTogether
 
     def enqueue(self, message: AgentMessage) -> None:
         self._messages.append(message)
@@ -170,6 +171,8 @@ class _PendingMessageQueue:
 
     def drain(self) -> list[AgentMessage]:
         drained = self.peek()
+        if drained and self.together is not None and self.together(drained[0]):
+            return self.take(self.together)
         self._messages = self._messages[len(drained) :]
         return drained
 
@@ -277,6 +280,18 @@ class Agent:
     @followUpMode.setter
     def followUpMode(self, mode: QueueMode) -> None:
         self._followUpQueue.mode = mode
+
+    @property
+    def deliverTogether(self) -> Callable[[AgentMessage], bool] | None:
+        """MISAKA fork: when the next queued message is one this selects, every queued message it
+        selects leaves the queue with it, whatever the queue's mode -- CCB's queue processor
+        drains every queued command of the head's mode at once. The session selects
+        background-task notifications, which one at a time each opened a turn of their own."""
+        return self._followUpQueue.together
+
+    @deliverTogether.setter
+    def deliverTogether(self, predicate: Callable[[AgentMessage], bool] | None) -> None:
+        self._steeringQueue.together = self._followUpQueue.together = predicate
 
     def steer(self, message: AgentMessage) -> None:
         """Queue a message to be injected after the current assistant turn finishes."""

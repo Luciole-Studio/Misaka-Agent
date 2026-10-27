@@ -194,7 +194,7 @@ class ShellTask:
                 session.moments.send_message(
                     {'customType': 'task-notification', 'content': text, 'display': True,
                      'details': {'task_id': self.id, 'task_type': 'local_bash', 'progress': True}},
-                    {'deliverAs': 'followUp', 'triggerTurn': True, '_deliveryId': 'shell-stall:' + self.notification_id})
+                    {'deliverAs': 'steer', 'triggerTurn': True, '_deliveryId': 'shell-stall:' + self.notification_id})
             return
 
     async def run(self) -> None:
@@ -249,9 +249,13 @@ class ShellTask:
                 ('task-id', self.id), ('output-file', data['outputFile'] or ''),
                 ('status', self.status), ('summary', summary), ('trust', 'untrusted-data'))) + '\n</task-notification>'
         def ack(): self.notified = True
+        # At the next turn boundary, as CCB's LocalShellTask queues it (priority 'next' with
+        # MONITOR_TOOL on) and query.ts drains it after each tool round. As a follow-up it waited
+        # for the whole run to end: a card working for hours got its commands' results five to
+        # eight hours late (2026-10-25, R28). The stall notice above goes the same way.
         session.moments.send_message(
             {'customType': 'task-notification', 'content': content, 'display': True, 'details': data},
-            {'deliverAs': 'followUp', 'triggerTurn': True, '_deliveryId': 'shell:' + self.notification_id,
+            {'deliverAs': 'steer', 'triggerTurn': True, '_deliveryId': 'shell:' + self.notification_id,
              '_onPersist': ack})
 
     async def stop(self) -> dict:

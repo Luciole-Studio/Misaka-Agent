@@ -355,6 +355,8 @@ class AgentSession:
     def __init__(self, config: AgentSessionConfig | dict[str, Any]) -> None:
         resolved = config if isinstance(config, AgentSessionConfig) else AgentSessionConfig(**config)
         self.agent = resolved.agent
+        # MISAKA fork: queued background-task notifications go in together, in one turn (R28).
+        self.agent.deliverTogether = _is_task_notification
         self.sessionManager = resolved.sessionManager
         self.settingsManager = resolved.settingsManager
         self._cwd = resolved.cwd
@@ -4916,6 +4918,11 @@ def _result_flag(result: Any, name: str, default: Any = None) -> Any:
 def _message_role(message: Any) -> str | None:
     role = read_field(message, "role")
     return role if isinstance(role, str) else None
+
+
+def _is_task_notification(message: Any) -> bool:
+    """A sub-agent's or background shell's notice (``<task-notification>``), as both send it."""
+    return _message_role(message) == "custom" and read_field(message, "customType") == "task-notification"
 
 
 def _message_content(message: Any) -> Any:
