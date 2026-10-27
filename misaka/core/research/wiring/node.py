@@ -50,6 +50,15 @@ class NodePart:
             self.routine.cancel()
             await asyncio.gather(self.routine, return_exceptions=True)
 
+    async def context(self, event, _ctx):
+        """Notes announcing work this node's next phase hands its Last Order stay out of what the
+        model sees (``workflow.ANNOUNCES_PHASE``, R60); they still show, and the rest is untouched."""
+        from misaka.core.research import workflow
+
+        messages = event["messages"]
+        kept = [message for message in messages if not workflow.announces_phase_of(message, {self.node_id})]
+        return {"messages": kept} if len(kept) != len(messages) else None
+
     def show(self, content, details=None):
         self.session.moments.send_message(
             {"customType": "research-progress", "display": True, "content": content,

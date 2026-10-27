@@ -36,6 +36,7 @@ from misaka.core.research import context as context_packet
 from misaka.utils.async_lifecycle import run_in_thread, settle, settle_thread_call
 from misaka.utils.markdown import atx_headings
 from misaka.utils.paths import posix_relpath
+from misaka.utils.values import read_field
 
 POLL_SECONDS = 2.0
 WARMUP_CAP_SECONDS = 300
@@ -92,6 +93,21 @@ async def _progress(callback, stage, message, run=None, **details):
     result = callback(payload)
     if hasattr(result, "__await__"):
         await result
+
+
+# A progress note that announces work the next phase hands its Last Order with that phase's own
+# tool: a review back with issues to dispose of or gaps to fill, cards that failed for good. The
+# window of that Last Order keeps it out of what the model sees, and still shows it. A turn the
+# red-team Sister's mail had started read it, called the phase's tool before the phase gave it,
+# and got "not found" (2026-10-27, R60); the phase's prompt carries the same review and the tool.
+ANNOUNCES_PHASE = "announces_phase"
+
+
+def announces_phase_of(message, nodes):
+    """Whether ``message`` is such a note about one of ``nodes``."""
+    details = read_field(message, "details")
+    return (read_field(message, "role") == "custom" and read_field(message, "customType") == "research-progress"
+            and isinstance(details, dict) and details.get(ANNOUNCES_PHASE) is True and details.get("node") in nodes)
 
 
 # How often a driver looks for Sisters added to or removed from the roster while the run goes on.
@@ -1381,7 +1397,8 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
             if outcome != "failed" or not lost:
                 return outcome
             await _progress(progress, "cards_failed", f"{_label(node)}: {len(lost)} card(s) failed; its Last Order "
-                            "decides whether to retry them, go on without them, or fail.", run, node=nid)
+                            "decides whether to retry them, go on without them, or fail.", run, node=nid,
+                            **{ANNOUNCES_PHASE: True})
             try:
                 decision = await asyncio.to_thread(planner.cards_failed, con, run, cfg, worker, node,
                                                    kind=kind, lost=lost)
@@ -1677,7 +1694,7 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
             revisions_left = runs.current_limits(con, run)["max_revisions"] - _revisions(con, run, node, before=version)
             await _progress(progress, "review_returned",
                             f"The red-team review of {_label(node)} is back with its Last Order: "
-                            f"{len(issues)} material issue(s) to answer.", run)
+                            f"{len(issues)} material issue(s) to answer.", run, node=nid, **{ANNOUNCES_PHASE: True})
             dispositions = await asyncio.to_thread(planner.dispose, con, run, cfg, worker, node, red, issues,
                                                    round=version, revisions_left=revisions_left)
             with runs.owned_txn(con, owner_run, owner_node):
@@ -1772,7 +1789,7 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
             revisions_left = runs.current_limits(con, run)["max_revisions"] - _revisions(con, run, node, before=version, loop="gaps")
             await _progress(progress, "review_returned",
                             f"The divergence review of {_label(node)} is back with its Last Order: "
-                            f"{len(gaps)} gap(s) to fill or answer.", run)
+                            f"{len(gaps)} gap(s) to fill or answer.", run, node=nid, **{ANNOUNCES_PHASE: True})
             dispositions = await asyncio.to_thread(planner.fill_gaps, con, run, cfg, worker, node, card, gaps,
                                                    version=version, round=_divergence_request(con, card, version)["round"],
                                                    revisions_left=revisions_left)

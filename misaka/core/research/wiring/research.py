@@ -728,15 +728,20 @@ class ResearchPart:
         status ticks of every node and card (still displayed) and the completion notices of
         research cards the phases already consumed are left out -- a run of a dozen nodes puts
         hundreds of them in the root window, and they were the bulk of what compaction ate --
-        a delivered final report archives its superseded drafts, and while a run of this
+        and so are the notes announcing work the root node's next phase hands this Last Order
+        (``workflow.ANNOUNCES_PHASE``; another node's stay, they are news here), a delivered
+        final report archives its superseded drafts, and while a run of this
         conversation is open its rules stand at the head of the request, rebuilt each time from
         the board rather than remembered from the transcript."""
         messages = event["messages"]
         session_id = getattr(getattr(ctx, "sessionManager", None), "sessionId", None)
         try:
-            own_runs = runs.for_session(_con(), session_id)
+            con = _con()
+            own_runs = runs.for_session(con, session_id)
+            own_roots = {root["id"] for run in own_runs if run["status"] in runs.ACTIVE
+                         and (root := runs.root(con, run["id"])) is not None}
         except Exception:  # noqa: BLE001 - the board is not this hook's to fail the request over
-            own_runs = []
+            own_runs, own_roots = [], set()
         notice = mode_notice(own_runs)
         active = {run["id"] for run in own_runs if run["status"] in runs.ACTIVE}
         delivered = {read_field(message, "details", {}).get("run_id") for message in messages
@@ -748,7 +753,8 @@ class ResearchPart:
                         "content": notice, "timestamp": int(time.time() * 1000)})
         for message in messages:
             role, kind = read_field(message, "role"), read_field(message, "customType")
-            if role == "custom" and _feed_noise(kind, read_field(message, "details") or {}, active):
+            if role == "custom" and (_feed_noise(kind, read_field(message, "details") or {}, active)
+                                     or workflow.announces_phase_of(message, own_roots)):
                 changed = True
                 continue
             if kind == "research-phase" and delivered:
