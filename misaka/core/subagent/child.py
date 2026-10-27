@@ -26,29 +26,6 @@ from misaka.utils.values import read_field
 PROTOCOL_VERSION = 2
 PROCESS_GROUP_IDENTITY = "process-group|"
 
-_SMALL_FAST_DEFAULTS: dict[str, tuple[str, ...]] = {
-    "anthropic": (
-        "claude-haiku-4-5",
-        "claude-haiku-4-5-20251001",
-        "claude-3-5-haiku-latest",
-    ),
-    "openai": ("gpt-5.4-mini", "gpt-5-mini", "gpt-4.1-mini"),
-    "openai-codex": ("gpt-5.4-mini",),
-    "azure": ("gpt-5.4-mini", "gpt-5-mini"),
-    "google": (
-        "gemini-flash-latest",
-        "gemini-3.5-flash",
-        "gemini-3.1-flash-lite",
-        "gemini-3-flash-preview",
-    ),
-    "google-vertex": (
-        "gemini-3-flash-preview",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-    ),
-}
-
-
 def _disallowed_tool_names(raw: str | None) -> list[str]:
     """Decode frontmatter ``disallowedTools`` passed by the parent."""
 
@@ -123,7 +100,8 @@ def _hook_tools(kind: str, tools: list[Any]) -> list[Any]:
 
 
 def _small_fast_hook_model(parent: Any, available: list[Any]) -> Any:
-    """Resolve the configured small-fast tier within the active provider."""
+    """Resolve the configured small-fast tier within the active provider: the configured model, else
+    the newest of the provider's small-fast family (``haiku``, ``mini``, ``flash``...) it lists."""
 
     parent_provider = str(read_field(parent, "provider", ""))
     provider_models = [
@@ -152,25 +130,24 @@ def _small_fast_hook_model(parent: Any, available: list[Any]) -> Any:
     if override and override.casefold() in by_id:
         return by_id[override.casefold()]
 
-    for model_id in _SMALL_FAST_DEFAULTS.get(parent_provider, ()):
-        if model_id.casefold() in by_id:
-            return by_id[model_id.casefold()]
+    from misaka.core.subagent.model import bedrock_region_prefix, newest_in_family
 
+    # The newest of the tier's family in this provider's catalog, by the rule a sub-agent's
+    # "haiku" resolves with (R19). A pinned list chose claude-haiku-4-5 and
+    # gemini-3-flash-preview where newer were configured, and ranking any "*-latest" ID first
+    # chose old aliases (2026-10-28). A keyword is a whole word of the ID ("mini" is not in
+    # "gemini"); on Bedrock the parent's inference-profile region is kept when the catalog has it.
+    ids = [str(read_field(model, "id", "")) for model in provider_models]
+    region = bedrock_region_prefix(str(read_field(parent, "id", "")))
     for keyword in keywords:
-        candidates = [
-            model
-            for model in provider_models
-            if keyword in str(read_field(model, "id", "")).casefold()
-        ]
+        word = re.compile(rf"(?<![a-z]){keyword}(?![a-z])")
+        candidates = [model_id for model_id in ids if word.search(model_id.casefold())]
         if not candidates:
             continue
-
-        def freshness(model: Any) -> tuple[int, tuple[int, ...], str]:
-            model_id = str(read_field(model, "id", "")).casefold()
-            numbers = tuple(int(value) for value in re.findall(r"\d+", model_id))
-            return (1 if "latest" in model_id else 0, numbers, model_id)
-
-        return max(candidates, key=freshness)
+        same_region = [model_id for model_id in candidates if bedrock_region_prefix(model_id) == region]
+        _provider, model_id = newest_in_family([(parent_provider, model_id) for model_id in same_region or candidates],
+                                               keyword)
+        return by_id[model_id.casefold()]
     # Third-party providers should retain their configured primary model rather
     # than silently crossing credentials into another provider.
     return parent
