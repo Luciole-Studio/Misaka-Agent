@@ -46,6 +46,24 @@ def split_deliverable(value):
     return name, "\n".join(([detail] if detail else []) + rest).strip()
 
 
+# A file extension where a name ends: a dot and a letter, not followed by more of a filename.
+# `v1.2 计划.md` and `archive.tar.gz` have one; `credential-sim.md 与 credential-sim.py` has two.
+_EXTENSION = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,15}(?![A-Za-z0-9_.-])")
+
+
+def one_file(name):
+    """Refuse a deliverable name that names several files. ``split_deliverable`` takes a backticked
+    line whole, so `credential-sim.md 与 credential-sim.py` was one name no file could match, and
+    eleven cards could never complete (2026-10-24, R52). Checked where a contract is written, not
+    where it is read: a finished card woken by a message completes again under the contract it
+    already has."""
+    if len(_EXTENSION.findall(name)) > 1:
+        raise ValueError(f"Invalid deliverable: {name[:80]!r} names more than one file. A card delivers one file: "
+                         "put its name on the first line, and the other files it writes (a script, data) on the "
+                         "lines after it.")
+    return name
+
+
 def format_deliverable(value):
     """Canonical card form: an explicit filename line, then unchanged requirements."""
     name, detail = split_deliverable(value)

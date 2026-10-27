@@ -13,7 +13,7 @@ from test_agent_model_runtime import (
 from test_subagent_native_startup import isolated as isolated  # noqa: PLC0414
 
 from misaka.config import home
-from misaka.core.network import sister_runtime, worker
+from misaka.core.network import sister_runtime, validate, worker
 from misaka.core.research import planner, report
 from misaka.core.subagent.agents import AgentDefinition
 from misaka.core.subagent.runtime import SubagentManager
@@ -103,6 +103,52 @@ def test_a_described_deliverable_is_told_to_lead_with_a_filename_and_names_its_t
     assert "方法论备忘录" in str(caught.value) and "directory" not in str(caught.value)
     with pytest.raises(ValueError, match="not a directory or absolute path"):
         planner._validate_task({**task, "deliverable": "notes/memo.md"}, ["10032"], 1)
+
+
+# R52 (2026-10-24): eleven plan cards named a report and its script in one line, all in the first
+# shape; the completion check then looked for one file called the whole line.
+SEVERAL_FILES = ["`credential-sim.md 与 credential-sim.py`", "credential-sim.md 与 credential-sim.py",
+                 "`a.md 与 b.py`：要求", "a.md、b.py", "a.md与b.py", "a.md + b.py", "a.md and b.py"]
+ONE_FILE = ["`研究 报告.md`", "v1.2 计划.md", "archive.tar.gz", "report.final.md", "中国与日本.md",
+            "c6_italy_germany.md：①制度编年；②文本锚点"]
+
+
+def _board_card(deliverable):
+    body = f"## goal\nFixture.\n\n## deliverable\n{deliverable}\n\n## acceptance criteria\n- It exists.\n"
+    return validate.validate_cards([{"title": "Fixture", "body": body, "assignee": "10032"}], ["10032"])[1]
+
+
+@pytest.mark.parametrize("deliverable", SEVERAL_FILES)
+def test_a_contract_naming_several_files_is_refused_where_it_is_written(deliverable):
+    task = {"local_id": "T7", "title": "One", "question": "Question", "rationale": "Rationale",
+            "deliverable": deliverable, "assignee": "10032"}
+    with pytest.raises(ValueError, match=r"^Task T7: Invalid deliverable: .* names more than one file"):
+        planner._validate_task(task, ["10032"], 1)
+    errors = _board_card(deliverable)
+    assert len(errors) == 1 and "names more than one file" in errors[0]
+
+
+@pytest.mark.parametrize("deliverable", ONE_FILE)
+def test_dots_and_joiners_inside_one_name_are_still_one_file(deliverable):
+    task = {"local_id": "T7", "title": "One", "question": "Question", "rationale": "Rationale",
+            "deliverable": deliverable, "assignee": "10032"}
+    planner._validate_task(task, ["10032"], 1)
+    assert _board_card(deliverable) == []
+
+
+def test_a_card_contract_without_a_deliverable_stays_valid():
+    body = "## goal\nFixture.\n\n## acceptance criteria\n- Done.\n"
+    assert validate.validate_cards([{"title": "Fixture", "body": body, "assignee": "10032"}], ["10032"])[1] == []
+
+
+def test_a_card_given_a_several_file_contract_before_r52_still_completes_under_it(tmp_path):
+    """The check is where contracts are written. A finished card is woken by a message and told to
+    complete again: read strictly, the contract it already holds would keep it from ever completing."""
+    name = "credential-sim.md 与 credential-sim.py"
+    task = {"body": f"## deliverable\n`{name}`\n", "output_dir": str(tmp_path)}
+    assert worker.contract_deliverable(task) == name
+    (tmp_path / name).write_text("Fixture evidence.", encoding="utf-8")
+    assert worker.missing_deliverable(task) is None
 
 
 def card_flags(root, monkeypatch, model=None):

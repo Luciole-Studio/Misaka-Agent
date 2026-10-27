@@ -21,7 +21,8 @@ class Task(Params):
     question: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
     deliverable: str = Field(min_length=1, description=(
-        "The file's name on the first line, such as `naval-balance.md`; what it must contain on the lines after it."))
+        "The file's name on the first line, such as `naval-balance.md`; what it must contain on the lines after it. "
+        "One file per card: other files it writes (a script, data) are named on those lines too."))
     assignee: str = Field(min_length=1)
     assignee_reason: str = Field(min_length=1)
     method: str = ""

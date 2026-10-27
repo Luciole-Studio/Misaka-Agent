@@ -12,7 +12,7 @@ from pathlib import Path
 
 from misaka.ai.utils._output_limit import hit_output_limit
 from misaka.config import home
-from misaka.core.network.card_contract import format_deliverable, split_deliverable
+from misaka.core.network.card_contract import format_deliverable, one_file, split_deliverable
 from misaka.core.platform import prompt_guard
 from misaka.core.platform import tasks as task_store
 from misaka.core.research import commands, ledger, runs
@@ -638,7 +638,7 @@ def _validate_task(raw, roster, index):
             raise ValueError(f"Task {index} is missing {key!r}.")
         task[key] = task[key].strip()
     try:
-        split_deliverable(task["deliverable"])  # validate the artifact gate before any cards are created
+        one_file(split_deliverable(task["deliverable"])[0])  # validate the artifact gate before any cards are created
     except ValueError as error:
         raise ValueError(f"Task {task['local_id']}: {error}") from error
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", task["local_id"]):
@@ -831,7 +831,8 @@ def plan(run, cfg, worker, node, *, con, context_path=None):
     prompt = ROOT_CONTRACT + "\n# Artifact layout\nWithin the current workspace, every node's files live under " \
         "nodes/<node>/ and each of its cards under nodes/<node>/cards/<card>/; run-level products go to final/. " \
         "The runtime assigns these paths. Put one deliverable filename on the first line, not a directory; " \
-        "use backticks for spaces. Put requirements on following lines.\n" \
+        "use backticks for spaces. Put requirements on following lines; a card delivers one file, so other files " \
+        "it writes (a script, data) go there too.\n" \
         + f"\n# Current node depth\n{node['depth']} (root = 0; max_depth = {runs.current_limits(con, run)['max_depth']})" \
         + ("" if forks else " -- this node cannot fork: no `decisions` here.") + "\n"
     if runs.is_root(node):
