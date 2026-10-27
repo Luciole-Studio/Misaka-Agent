@@ -25,7 +25,7 @@ def _createLazyLoadErrorImages(model: ImageModel, error: Any) -> AssistantImages
         model=model.id,
         output=[],
         stopReason="error",
-        errorMessage=str(error) if isinstance(error, BaseException) else jsString(error),
+        errorMessage=(str(error) or type(error).__name__) if isinstance(error, BaseException) else jsString(error),
         timestamp=time.time_ns() // 1_000_000,
     )
 

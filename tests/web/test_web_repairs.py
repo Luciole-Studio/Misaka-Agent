@@ -342,3 +342,14 @@ async def test_outer_extract_cancellation_does_not_start_rescue(scope, monkeypat
     with pytest.raises(asyncio.CancelledError):
         await task
     assert cleaned.is_set()
+
+async def test_a_browser_failure_with_no_message_still_names_itself(scope, tmp_path, monkeypatch):
+    """A timeout can carry no message at all (asyncio's, httpx's read timeout): the tool said
+    nothing about what went wrong (R8)."""
+    from misaka.core.web.browser import tools
+    async def perform(*args):
+        raise TimeoutError()
+    monkeypatch.setattr(tools, 'current_runtime', lambda: SimpleNamespace(browser=SimpleNamespace(perform=perform)))
+    harness = Harness(); tools.register(harness, str(tmp_path))
+    result = await harness.tools['browser_snapshot'].execute('id', {}, None, None, None)
+    assert result['isError'] and 'TimeoutError' in result['content'][0]['text'], result

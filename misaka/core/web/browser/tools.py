@@ -143,7 +143,7 @@ def register(harn, cwd):
                 return {'content': [{'type': 'text', 'text': untrusted('browser', rendered)}, *extra],
                         'details': {'saved_paths': saved_paths}, 'isError': result.get('success') is False}
             except Exception as error:  # noqa: BLE001 - tool or transport boundary reports the failure
-                message = str(error)
+                message = str(error) or type(error).__name__  # a timeout can carry no message at all (R8)
                 if name == 'browser_type' and args.get('text'):
                     message = message.replace(args['text'], '<typed>')
                 return {'content': [{'type': 'text', 'text': untrusted('browser-error', config.redact_secrets(message)[:2048])}], 'details': {}, 'isError': True}

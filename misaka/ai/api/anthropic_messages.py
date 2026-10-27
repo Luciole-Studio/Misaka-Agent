@@ -90,6 +90,7 @@ from misaka.ai.utils.diagnostics import (
     AssistantMessageDiagnostic,
     DiagnosticErrorInfo,
     appendAssistantMessageDiagnostic,
+    formatThrownValue,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headersToRecord
@@ -925,7 +926,9 @@ def stream(
             if federation is not None and created is not None and provider_error_status(error) == 401:
                 _anthropic_sdk._invalidate_federation_token(created.client)
             output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
-            output.errorMessage = str(error) if isinstance(error, Exception) else jsonStringify(error)
+            # Its name when it says nothing: a read timeout mid-stream raises with no message, and a
+            # card's turn ended in an empty error after six minutes (2026-10-25, R8).
+            output.errorMessage = formatThrownValue(error) if isinstance(error, Exception) else jsonStringify(error)
             stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
             stream.end()
         finally:

@@ -61,7 +61,7 @@ def imageErrorResult(model: ImageModel, error: Any, aborted: bool = False) -> As
         model=model.id,
         output=[],
         stopReason="aborted" if aborted else "error",
-        errorMessage=str(error) if isinstance(error, BaseException) else jsString(error),
+        errorMessage=(str(error) or type(error).__name__) if isinstance(error, BaseException) else jsString(error),
         timestamp=int(time.time() * 1000),
     )
 
@@ -73,7 +73,7 @@ def classifierErrorResult(model: ClassifierModel, error: Any, aborted: bool = Fa
         model=model.id,
         answers={},
         stopReason="aborted" if aborted else "error",
-        errorMessage=str(error) if isinstance(error, BaseException) else jsString(error),
+        errorMessage=(str(error) or type(error).__name__) if isinstance(error, BaseException) else jsString(error),
         timestamp=int(time.time() * 1000),
     )
 

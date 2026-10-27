@@ -62,6 +62,7 @@ from misaka.ai.utils.diagnostics import (
     AssistantMessageDiagnostic,
     appendAssistantMessageDiagnostic,
     createAssistantMessageDiagnostic,
+    formatThrownValue,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.ai.utils.headers import headersToRecord, providerHeadersToRecord
@@ -414,7 +415,7 @@ def _createErrorEvent(model: Model, error: Any, aborted: bool) -> ErrorEvent:
         model=model.id,
         usage=_createEmptyUsage(),
         stopReason=reason,
-        errorMessage=str(error) if isinstance(error, Exception) else jsString(error),
+        errorMessage=formatThrownValue(error) if isinstance(error, Exception) else jsString(error),
         timestamp=time.time_ns() // 1_000_000,
     )
 

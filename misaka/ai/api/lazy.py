@@ -22,6 +22,7 @@ from misaka.ai.types import (
     Model,
     ProviderStreams,
 )
+from misaka.ai.utils.diagnostics import formatThrownValue
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.utils.js import UNDEFINED, jsString
 
@@ -42,7 +43,7 @@ def _createSetupErrorMessage(model: Model, error: Any, timestamp: int) -> Assist
             "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
         },
         stopReason="error",
-        errorMessage=str(error) if isinstance(error, Exception) else jsString(error),
+        errorMessage=formatThrownValue(error) if isinstance(error, Exception) else jsString(error),
         timestamp=timestamp,
     )
 
