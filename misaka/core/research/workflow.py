@@ -33,7 +33,7 @@ from misaka.core.platform import cards as card_files
 from misaka.core.platform import tasks as task_store
 from misaka.core.research import bundle, commands, ledger, planner, report, runs, views
 from misaka.core.research import context as context_packet
-from misaka.utils.async_lifecycle import settle, settle_thread_call
+from misaka.utils.async_lifecycle import run_in_thread, settle, settle_thread_call
 from misaka.utils.markdown import atx_headings
 from misaka.utils.paths import posix_relpath
 
@@ -143,14 +143,14 @@ async def _views(con, run, *, final=False):
     await asyncio.to_thread(views.write_views, con, run, final=final)
 
 
-def _bundle(con, run, *, task=None, node=None):
+def _bundle(con, run, *, task=None, node=None, index=None):
     """Gather sources beside a settled card, a closed node, or the run's delivered document.
     A bundle is derived from what the ledger and the project already hold, so its failure is
     recorded (an event on the card, a log line otherwise) and the workflow carries on: no card,
     node or run state depends on it."""
     try:
         if task is not None:
-            bundle.card_bundle(con, run, task)
+            bundle.card_bundle(con, run, task, index=index)
         elif node is not None:
             bundle.node_bundle(con, run, node)
         else:
@@ -899,8 +899,13 @@ def settle_done_tasks(con, *, run_id, reopen_drift=True):
 
     A card whose accepted files changed after submission is recorded (``research_artifact_drift``)
     and, with ``reopen_drift``, sent back to its Sister as a new attempt; a halt path passes False
-    and leaves the reopening to ``runs.resume``, which reads the same event."""
+    and leaves the reopening to ``runs.resume``, which reads the same event.
+
+    Blocking: it hashes every declared file and bundles from the whole corpus, so the driver
+    runs it with ``run_in_thread``. On the event loop it froze the window driving the run for
+    five minutes and more (2026-10-25/26, R45)."""
     run = runs.get(con, run_id)
+    index = None                                      # read once for every card this pass bundles
     for task in runs.tasks(con, run_id):
         if task["status"] != "done":
             continue
@@ -936,7 +941,20 @@ def settle_done_tasks(con, *, run_id, reopen_drift=True):
             )
             settled = True
         if settled:                                   # once per generation, after the ledger has its findings
-            _bundle(con, run, task=task)
+            if index is None:
+                index = _project_index(run)
+            _bundle(con, run, task=task, index=index)
+
+
+def _project_index(run):
+    """The project index a settle's card bundles share. Each card read its own until 2026-10-27,
+    and on a 33,308-document project every read took 27 s (R45). A settle adds nothing to the
+    corpus, so one read serves the pass. A read that fails gives None: each card then reads its
+    own, and a failure is recorded on the card as before."""
+    try:
+        return bundle.project_index(run["workspace"])
+    except Exception:  # noqa: BLE001 - the card's own read records it
+        return None
 
 
 def _done(con, run, node, kind):
@@ -1096,7 +1114,8 @@ async def _return_review(con, run, node, red, issues, reason, *, round, session=
 
 def _close(con, run, node, status):
     """End the node's own work. Its pending options are the level reconciliation's, and its children
-    run on their own: neither holds the node open. Artifacts are already in the project; nothing moves."""
+    run on their own: neither holds the node open. Artifacts are already in the project; nothing moves.
+    Blocking like ``settle_done_tasks`` (a bundle and an index), and run off the event loop the same way."""
     runs.check_owner(con, run, node)
     if status == "failed" and not runs.node(con, node["id"])["last_error"]:
         details = []
@@ -1268,14 +1287,14 @@ def _red_team_brief(con, run, node, version, assignee):
         rereview=rereview, deliverable=runs.versioned("critique.md", version))
 
 
-def _after_review(con, run, node, set_node):
+async def _after_review(con, run, node, set_node):
     """Where a node goes once its red-team loop is over: to the divergence review when it can still
     fork -- the gaps it left are filled first, its possibilities not taken become its decision --
     else it has finished its own work."""
     if node["depth"] < runs.current_limits(con, run)["max_depth"]:
         set_node(status="diverging")
         return None
-    return _close(con, run, node, "closed")
+    return await run_in_thread(_close, con, run, node, "closed")
 
 
 async def _expand(con, cfg, runner, worker, run, node, *, context, tool_call_id, poll_seconds, progress, session=None):
@@ -1378,12 +1397,12 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
                 with runs.owned_txn(con, owner_run, owner_node):
                     runs.reopen_cards(con, run["id"], nid)
 
-    def fail(card, reason):
+    async def fail(card, reason):
         task_store.add_event(con, card["id"], "research_review_missing", {"reason": reason})
         with runs.owned_txn(con, owner_run, owner_node):
             con.execute("UPDATE research_execution SET last_error=? WHERE id=?", (reason, nid))
             runs.set_state(con, run["id"], error=f"node {nid}: {reason}")
-        return _close(con, run, node, "failed")
+        return await run_in_thread(_close, con, run, node, "failed")
 
     while True:
         await _wait_unpaused(con, run["id"], session)
@@ -1461,13 +1480,13 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
                 # level's reconciliation.
                 await _progress(progress, "branch_point",
                                 f"{_label(node)} is a branch point: its options open when the level is reconciled.", run)
-                return _close(con, run, node, "closed")
+                return await run_in_thread(_close, con, run, node, "closed")
             if not plan["tasks"]:
                 # Every card of the round cancelled while they ran: closed as a branch point, the
                 # node had no conclusion. A follow-up round is withdrawn and the node concludes on
                 # what it has; a first round has nothing to conclude on.
                 if not _done(con, run, node, "research"):
-                    return _close(con, run, node, "failed")
+                    return await run_in_thread(_close, con, run, node, "failed")
                 _withdraw_emptied_round(con, run, node, round)
                 set_node(status="synthesizing")
                 continue
@@ -1480,11 +1499,11 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
         elif status == "executing":
             outcome = await drive("research")
             if outcome == "failed":
-                return _close(con, run, node, "failed")
+                return await run_in_thread(_close, con, run, node, "failed")
             if outcome != "done":
                 return outcome
             check()
-            settle_done_tasks(con, run_id=run["id"])
+            await run_in_thread(settle_done_tasks, con, run_id=run["id"])
             reopened = _cards_reopened(con, run, node)
             if reopened:
                 await _progress(progress, "resubmitting",
@@ -1492,7 +1511,7 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
                                 "to declare again.", run, task_ids=reopened)
                 continue
             if not _done(con, run, node, "research"):
-                return _close(con, run, node, "failed")
+                return await run_in_thread(_close, con, run, node, "failed")
             set_node(status="synthesizing")
 
         elif status == "synthesizing":
@@ -1511,7 +1530,7 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
                 continue
             if any(row["status"] == "done" and _consulted_since_settle(con, row["id"], int(row["generation"]))
                    for row in cards_here):
-                settle_done_tasks(con, run_id=run["id"])
+                await run_in_thread(settle_done_tasks, con, run_id=run["id"])
                 if _cards_reopened(con, run, node):
                     set_node(status="executing")    # a declaration that no longer matches its files
                     continue
@@ -1616,14 +1635,14 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
             # Terminal, as in the executing phase: a node left non-terminal by a process that has
             # already exited is what the driver turns into a dead run.
             if outcome == "failed":
-                return _close(con, run, node, "failed")
+                return await run_in_thread(_close, con, run, node, "failed")
             if outcome != "done":
                 return outcome
             check()
-            settle_done_tasks(con, run_id=run["id"])
+            await run_in_thread(settle_done_tasks, con, run_id=run["id"])
             red = _red_team_card(con, run, node)
             if red is None:
-                return _close(con, run, node, "failed")
+                return await run_in_thread(_close, con, run, node, "failed")
             if not _reviewed(con, red, version):
                 await asyncio.sleep(poll_seconds)      # the continuation has not taken the card yet
                 continue
@@ -1632,10 +1651,10 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
                 # in the message that continued the card, so it is checked here, not by her gate.
                 critique = Path(red["output_dir"], runs.versioned("critique.md", version))
                 if not critique.is_file() or critique.stat().st_size == 0:
-                    return fail(red, f"Red-team card {red['id']} did not deliver {critique.name} for version {version}.")
+                    return await fail(red, f"Red-team card {red['id']} did not deliver {critique.name} for version {version}.")
             unusable = _receive_critique(con, run, node, red, version)
             if unusable:
-                return fail(red, unusable)
+                return await fail(red, unusable)
             if runs.issues(con, run["id"], node_id=nid, round=version, origin="critique"):
                 set_node(status="disposing")
                 continue
@@ -1645,7 +1664,7 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
             except InterruptedError:
                 return "stopped"
             await _progress(progress, "review_returned", f"{_label(node)}: {reason}", run)
-            closed = _after_review(con, run, node, set_node)
+            closed = await _after_review(con, run, node, set_node)
             if closed is not None:
                 return closed
 
@@ -1675,7 +1694,7 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
             if counts.get("revise"):
                 set_node(status="synthesizing")
                 continue
-            closed = _after_review(con, run, node, set_node)
+            closed = await _after_review(con, run, node, set_node)
             if closed is not None:
                 return closed
 
@@ -1721,11 +1740,11 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
                     continue
             outcome = await drive("divergence")
             if outcome == "failed":
-                return _close(con, run, node, "failed")
+                return await run_in_thread(_close, con, run, node, "failed")
             if outcome != "done":
                 return outcome
             check()
-            settle_done_tasks(con, run_id=run["id"])
+            await run_in_thread(settle_done_tasks, con, run_id=run["id"])
             card = _divergence_card(con, run, node)
             if not _divergence_reviewed(con, card, version):
                 await asyncio.sleep(poll_seconds)      # the continuation has not taken the card yet
@@ -1735,10 +1754,10 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
                 # As with the red team: a later round's file is named in the message that continued her.
                 review = Path(card["output_dir"], runs.versioned("divergence.md", request["round"]))
                 if not review.is_file() or review.stat().st_size == 0:
-                    return fail(card, f"Divergence card {card['id']} did not deliver {review.name} for version {version}.")
+                    return await fail(card, f"Divergence card {card['id']} did not deliver {review.name} for version {version}.")
             unusable = _receive_divergence(con, run, node, card, version)
             if unusable:
-                return fail(card, unusable)
+                return await fail(card, unusable)
             if _gaps(con, run, node, version):
                 set_node(status="filling_gaps")
                 continue
@@ -1775,7 +1794,7 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
             branches = [row for row in runs.issues(con, run["id"], node_id=nid)
                         if row["origin"] in ("critique", "gap") and row["disposition"] == "branch"]
             if review is None:
-                return _close(con, run, node, "failed")
+                return await run_in_thread(_close, con, run, node, "failed")
             divergence = [{"path": runs.artifact_path(row), "content": runs.artifact_text(row)}
                           for row in runs.artifacts(con, run["id"], kind="divergence", task_id=review["id"])
                           if os.path.splitext(row["path"])[1].lower() == ".md"]
@@ -1786,7 +1805,7 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
             _apply_decisions(con, owner_run, owner_node, node, payload)
             await _progress(progress, "decided", f"{_label(node)}: {len(payload['decisions'])} decision(s), "
                             f"{len(payload['declined'])} proposal(s) declined.", run)
-            return _close(con, run, node, "closed")
+            return await run_in_thread(_close, con, run, node, "closed")
 
         else:
             raise RuntimeError(f"Node {nid} is in an unknown state: {status}")
@@ -2051,7 +2070,8 @@ def _partial_result(con, run, reason, *, status="stopped", driver_lock=None):
     Assembled with no model call at all, because the halt this most often answers is the token
     budget: at that moment there is nothing left to spend, and everything the document needs is
     already on disk. Each node's conclusion as that node wrote it, the ledger's count of what the
-    run recorded, and the issues it never settled.
+    run recorded, and the issues it never settled. Blocking (the workspace index and the run's
+    bundle read the whole project), so a halt runs it off the event loop.
     """
     findings = len(ledger.findings(con, run["id"]))
     lines = ['# Incomplete research run', "", f"- Run: `{run['id']}`",
@@ -2573,17 +2593,17 @@ async def run(con, cfg, spawner, *, run_id, poll_seconds=POLL_SECONDS, progress=
         if not allow_stop and current["stop_requested"]:
             raise InterruptedError("The user requested a stop.")
 
-    def partial(reason, *, status="stopped"):
+    async def partial(reason, *, status="stopped"):
         check_active(allow_stop=True)
         # Every halt lands here, the cancel and interrupt paths included: what the Sisters
         # finished is registered, ingested and bundled before the partial report is written,
         # so the report and a later resume see it (2026-09-23: a driver crash left 39 done
         # cards unregistered for five hours). A settle failure must not cost the report.
         try:
-            settle_done_tasks(con, run_id=run_id, reopen_drift=False)
+            await run_in_thread(settle_done_tasks, con, run_id=run_id, reopen_drift=False)
         except Exception:  # noqa: BLE001 - the partial report is what a halt owes the user
             _LOG.exception("Research %s: settling finished cards before the partial report failed", run_id)
-        return _partial_result(con, run, reason, status=status, driver_lock=driver_lock)
+        return await run_in_thread(_partial_result, con, run, reason, status=status, driver_lock=driver_lock)
 
     try:
         # Stop shallower writers before refreshing the child inventory: one may have
@@ -2615,9 +2635,9 @@ async def run(con, cfg, spawner, *, run_id, poll_seconds=POLL_SECONDS, progress=
         runs.ensure_layout(run)
         if runs.stop_requested(con, run_id):
             await _settle_stopped_tasks(con, cfg, run_id)
-            return partial(halts["stopped"])
+            return await partial(halts["stopped"])
         if budget.exhausted(con, task_id=run_id):
-            return partial(halts["budget"])
+            return await partial(halts["budget"])
         from misaka.core.research.node import HeadlessRunner, PaneRunner
         from misaka.core.research.window import WindowLO, node_description, node_session
         root = runs.root(con, run_id)
@@ -2652,7 +2672,7 @@ async def run(con, cfg, spawner, *, run_id, poll_seconds=POLL_SECONDS, progress=
             result = await _reconcile(con, cfg, runs.get(con, run_id), window, poll_seconds=poll_seconds,
                                       progress=progress, check_active=check_active)
             if result is not None:
-                return partial(halts[result]) if result in halts else result
+                return (await partial(halts[result])) if result in halts else result
             await asyncio.to_thread(_prepare_sessions, con, run)
             await _views(con, run)
             level = runs.next_level(con, run_id)
@@ -2675,16 +2695,16 @@ async def run(con, cfg, spawner, *, run_id, poll_seconds=POLL_SECONDS, progress=
                     result["run"] = runs.summary(con, run_id)
                 return result
             if result in halts:
-                return partial(halts[result])
+                return await partial(halts[result])
         check_active()
         unfinished = _unfinished_reason(con, run_id)
         if unfinished:
             await _progress(progress, "unfinished", f"The run cannot be adjudicated: {unfinished}", run)
-            return partial(unfinished, status="failed")
+            return await partial(unfinished, status="failed")
         halted = await _await_consent(con, cfg, runs.get(con, run_id), window, poll_seconds=poll_seconds,
                                       progress=progress, check_active=check_active)
         if halted:
-            return partial(halts[halted])
+            return await partial(halts[halted])
         runs.set_state(con, run_id, phase="finalizing", driver_lock=driver_lock)
         await _progress(progress, "finalizing", "Every node is closed; Last Order is drafting the report for independent red-team review.", run)
         draft = await asyncio.to_thread(report.prepare, con, runs.get(con, run_id), cfg, window,
@@ -2709,16 +2729,16 @@ async def run(con, cfg, spawner, *, run_id, poll_seconds=POLL_SECONDS, progress=
                                      progress=progress, check_active=lambda: check_active(allow_stop=True), session=session,
                                      owner=(run, None))
         check_active(allow_stop=True)
-        settle_done_tasks(con, run_id=run_id)
+        await run_in_thread(settle_done_tasks, con, run_id=run_id)
         if outcome in halts:
-            return partial(halts[outcome])
+            return await partial(halts[outcome])
         if outcome != "done":
-            return partial("Final-report red-team review failed.", status="failed")
+            return await partial("Final-report red-team review failed.", status="failed")
         try:
             report.review_receipt(con, run, draft, review_id)
         except (OSError, TypeError, ValueError) as error:
             task_store.add_event(con, review_id, "research_review_missing", {"reason": str(error)})
-            return partial(str(error), status="failed")
+            return await partial(str(error), status="failed")
         check_active()
         await _progress(progress, "adjudicating", "Last Order is weighing the final red team's objections; objections are not automatic verdicts.", run)
         result = await asyncio.to_thread(report.finalize, con, runs.get(con, run_id), cfg, window,
@@ -2726,8 +2746,8 @@ async def run(con, cfg, spawner, *, run_id, poll_seconds=POLL_SECONDS, progress=
         check_active()
         runs.set_state(con, run_id, phase="done", status="done", final_artifact=result["artifact"],
                        driver_lock=driver_lock)
-        _try_refresh_workspace_index(con, runs.get(con, run_id))
-        _bundle(con, run)
+        await run_in_thread(_try_refresh_workspace_index, con, runs.get(con, run_id))
+        await run_in_thread(_bundle, con, run)
         await _views(con, run, final=True)
         return {"reason": "done", "final": result, "run": runs.summary(con, run_id)}
     except asyncio.CancelledError:
@@ -2735,10 +2755,10 @@ async def run(con, cfg, spawner, *, run_id, poll_seconds=POLL_SECONDS, progress=
         if current["driver_lock"] == driver_lock:
             runs.request_stop(con, run_id)
             await _settle_stopped_tasks(con, cfg, run_id)
-            partial(halts["stopped"])
+            await partial(halts["stopped"])
         raise
     except InterruptedError:
-        return partial(halts["stopped"])
+        return await partial(halts["stopped"])
     except Exception as error:
         current = runs.get(con, run_id)
         if current["status"] == "done":
@@ -2746,7 +2766,7 @@ async def run(con, cfg, spawner, *, run_id, poll_seconds=POLL_SECONDS, progress=
         if budget.exhausted(con, task_id=run_id):
             # A phase stopped because the run reached research.token_cap: a halt, resumable.
             await _settle_stopped_tasks(con, cfg, run_id)
-            return partial(halts["budget"])
+            return await partial(halts["budget"])
         if current["driver_lock"] == driver_lock:
             runs.set_state(con, run_id, status="failed", error=f"{type(error).__name__}: {error}"[:500],
                            driver_lock=driver_lock)

@@ -84,8 +84,8 @@ def _find(query, doc_id, ctx, limit=10):
 # blank one, and a page whose text changed under a recorded quotation looked like any other.
 
 def _row(doc_id, root):
-    """The listing row for one document under ``root``, or ``{}`` -- ``docs`` reads meta.json."""
-    return next((r for r in corpus.docs(workspace=root) if r["doc_id"] == doc_id), None) or {}
+    """The listing row for one document under ``root`` (its meta.json, as ``docs`` lists it), or ``{}``."""
+    return corpus.doc_row(doc_id, workspace=root) or {}
 
 
 def _unread(row, textless=False):

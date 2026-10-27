@@ -13,7 +13,11 @@ _OUTLINE_MAX_TITLE_CHARS = 200
 
 
 def _doc_node(m, workspace=None):
-    """Build a workspace-tree node for an indexed document."""
+    """Build a workspace-tree node for an indexed document: its PageIndex structure when it has
+    one. A document without one is a leaf; ``doc_outline`` lists its pages. Listing each page's
+    first line here read every page of every document on each call -- 140,000 nodes on a
+    33,308-document project, a 21 MB index the view cut at 200 KB before the task board
+    (2026-10-27, R33)."""
     did = m["doc_id"]
     node = {"node_id": f"doc:{did}", "title": m["title"],
             "summary": f"{m['pages']} pages", "nodes": []}
@@ -21,10 +25,6 @@ def _doc_node(m, workspace=None):
     if tree:
         node["nodes"] = tree
         node["summary"] += " (PageIndex structure)"
-        return node
-    node["nodes"] = [{"node_id": f"doc:{did}#p{h['page']}", "title": f"p{h['page']}",
-                      "summary": h["head"].replace("\n", " ")}
-                     for h in corpus.page_heads(did, workspace=workspace)]
     return node
 
 
@@ -207,14 +207,20 @@ def outline(bcon, task_id=None, *, workspace=None, run_id=None, research_store=N
             "nodes": top_nodes}
 
 
-def render(tree, depth=0, out=None):
+def render(tree):
     """Render a workspace tree as indented text."""
-    out = [] if out is None else out
+    out = []
+    _render_lines(tree, 0, out)
+    return "\n".join(out)
+
+
+def _render_lines(tree, depth, out):
+    # Joined once by ``render``: a join at every level copied the whole text per node, which on
+    # a 214,587-node project took 746 s against 0.07 s (2026-10-27, R33).
     pad = "  " * depth
     s = tree.get("summary")
     out.append(f"{pad}{tree.get('title','')}  [{tree.get('node_id','')}]" + (f"  — {s}" if s else ""))
     if tree.get("path"):
         out.append(f"{pad}  Path: {tree['path']}")
     for kid in tree.get("nodes") or []:
-        render(kid, depth + 1, out)
-    return "\n".join(out)
+        _render_lines(kid, depth + 1, out)

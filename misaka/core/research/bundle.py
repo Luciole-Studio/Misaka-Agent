@@ -136,7 +136,7 @@ class _Index:
         self.pages = {}            # citable URL -> real path of the saved page
         self.docs = {}             # doc id -> real path of the original file
         self.titles = {}           # real path -> (title, url)
-        self.digests = {}          # real path -> sha256 already on record (corpus, registered artifacts)
+        self.digests = {}          # real path -> sha256 the corpus has on record
         self.consulted = {}        # task id -> real paths its corpus documents point at
         pages = os.path.join(self.workspace, DOWNLOAD_DIR_NAME, "pages")
         for name in (sorted(os.listdir(pages)) if os.path.isdir(pages) else []):
@@ -185,15 +185,6 @@ class _Index:
             return None
         return real
 
-    def checked_digest(self, real):
-        if self.file_inside(real) != real:
-            raise ValueError("source is missing or outside the readable project material")
-        actual = corpus.sha256_file(real)
-        expected = self.digests.get(real)
-        if expected and actual != expected:
-            raise ValueError("source changed since its registered sha256; original evidence is unresolved")
-        return actual
-
     def dir_inside(self, path):
         try:
             real = os.path.realpath(path)
@@ -227,10 +218,23 @@ class _Collector:
         for task in runs.tasks(con, run["id"]):
             if task["output_dir"]:
                 self.cards[os.path.realpath(task["output_dir"])] = task
+        # The registry as it stands now, over the index's corpus digests. Kept here, not added to
+        # the index: one index serves every card a settle bundles, and a card settled again
+        # registers its files under new digests the previous card's collector never saw.
+        self.digests = dict(index.digests)
         for row in runs.artifacts(con, run["id"]):
-            index.digests.setdefault(os.path.realpath(row["path"]), row["sha256"])
+            self.digests.setdefault(os.path.realpath(row["path"]), row["sha256"])
         for node in runs.nodes(con, run["id"]):
             self.nodes[os.path.realpath(os.path.join(index.workspace, runs.node_dir(node["id"])))] = node
+
+    def checked_digest(self, real):
+        if self.index.file_inside(real) != real:
+            raise ValueError("source is missing or outside the readable project material")
+        actual = corpus.sha256_file(real)
+        expected = self.digests.get(real)
+        if expected and actual != expected:
+            raise ValueError("source changed since its registered sha256; original evidence is unresolved")
+        return actual
 
     def cite(self, locator, by, bases, *, origin=None):
         real, reason = self._resolve(locator, bases)
@@ -283,7 +287,7 @@ class _Collector:
         if not real or not real.lower().endswith(_SCAN_SUFFIXES):
             return
         try:
-            self.index.checked_digest(real)
+            self.checked_digest(real)
             if os.path.getsize(real) > _SCAN_LIMIT:
                 return
             with open(real, encoding="utf-8", errors="replace") as handle:
@@ -453,7 +457,7 @@ def _build(collector, *, folder, manifest, sources_dir, title, products, cards=(
         try:
             if corpus.under(source.real, sources_dir):
                 raise ValueError("disposable bundle source; cite the original project file instead")
-            source.digest = index.checked_digest(source.real)
+            source.digest = collector.checked_digest(source.real)
             valid.append(source)
         except (OSError, ValueError) as error:
             collector.unresolved.append((source.relative, str(error), ""))
@@ -532,11 +536,19 @@ def _build(collector, *, folder, manifest, sources_dir, title, products, cards=(
     return manifest
 
 
-def card_bundle(con, run, task):
-    """Beside one card's outputs: the sources its declared findings rest on and what its files cite."""
+def project_index(workspace):
+    """What the project holds, read once for several card bundles built back to back. Reading it
+    walks the whole corpus: 27 s on a 33,308-document project (2026-10-27, R45)."""
+    return _Index(workspace)
+
+
+def card_bundle(con, run, task, index=None):
+    """Beside one card's outputs: the sources its declared findings rest on and what its files cite.
+    ``index`` is a ``project_index`` shared by the cards of one settle; without it one is read."""
     if not task["output_dir"]:
         return None
-    index = _Index(run["workspace"])
+    if index is None:
+        index = _Index(run["workspace"])
     folder = index.dir_inside(task["output_dir"])
     if folder is None:
         return None
