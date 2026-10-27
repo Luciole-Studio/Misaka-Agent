@@ -35,13 +35,18 @@ def occupied(con):
     """Cards consuming a host slot, including accepted headless workers still settling.
 
     The current attempt already records its process identity. Inspect only that
-    attempt, not historical runs; permanent interactive card panes are not tails.
+    attempt, not historical runs; permanent interactive card panes are not tails. A
+    running consultation of a finished card holds a slot for its turn.
     """
     from misaka.core.platform import processes
     from misaka.core.subagent.child import PROCESS_GROUP_IDENTITY
 
     taken = dict(con.execute(
         "SELECT id,assignee FROM tasks WHERE status='running' AND claim_lock IS NOT NULL"))
+    # A finished card answering a message runs a model turn too (tasks.start_consultation); it
+    # is running only for that turn, so it never holds a slot past it.
+    taken.update(con.execute(
+        "SELECT task_id,assignee FROM task_runs WHERE phase='consult' AND status='running'"))
     rows = con.execute(
         "SELECT t.id,t.assignee,r.pid,r.process_identity FROM tasks t "
         "JOIN task_runs r ON r.id=t.current_run_id AND r.generation=t.generation "

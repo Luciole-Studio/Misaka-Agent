@@ -206,8 +206,9 @@ Last Order answers every serious objection of the red team, one answer each:
 
 A node settles its own objections and gaps: what it cannot fill, it concedes or parks on the
 record. Before she answers an objection about material a card delivered, Last Order can put it to
-that card's Sister: a finished card is woken in her own session, and Last Order waits for her
-answer before deciding.
+that card's Sister: a finished card answers in her own session without becoming unfinished, and
+Last Order waits for her answer before deciding. The node also waits for such answers before it
+writes its conclusion.
 
 While something is revised and revisions remain, Last Order writes the next version
 (`synthesis-2.md`, …) and the same red-team Sister reviews it in her own conversation, with Last

@@ -680,6 +680,7 @@ def test_panel_stop_rejects_successor_identity(state, generation, claim):
         card=tid,
         generation=generation,
         claim_lock=claim,
+        consult=None,
         proc=SimpleNamespace(pid=-1),
     )
     daemon = Daemon.__new__(Daemon)
@@ -876,7 +877,7 @@ def test_panel_stop_checks_driver_at_receipt_not_just_sender(state):
     con, run, root = state
     tid = cards.create(con, run["workspace"], "card", "body", "fixture")
     con.execute("UPDATE tasks SET claim_lock='claim' WHERE id=?", (tid,))
-    pane = SimpleNamespace(id="fixture", card=tid, generation=1, claim_lock="claim")
+    pane = SimpleNamespace(id="fixture", card=tid, generation=1, claim_lock="claim", consult=None)
     daemon = Daemon.__new__(Daemon)
     daemon.panes = {pane.id: pane}
     daemon._board = lambda: con

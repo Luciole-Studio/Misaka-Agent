@@ -156,7 +156,7 @@ async def test_a_last_order_message_to_a_closed_card_continues_her_session(world
     from misaka.ui.panel import client as net
     calls = []
     monkeypatch.setattr(net, "request", lambda method, params=None, **kw: calls.append((method, params))
-                        or {"pane_id": "p7"})
+                        or {"pane_id": "p7", "run_id": "tr_0000000001"})
     monkeypatch.setattr(net, "ensure", lambda *a, **kw: None)
     monkeypatch.setenv("MISAKA_NET_PANE", "p1")
     done = _finished(world, generation=3)
@@ -164,12 +164,15 @@ async def test_a_last_order_message_to_a_closed_card_continues_her_session(world
     out = await _part(lo, sender="last-order")._send(
         "fixture", {"to": done, "message": "dig into the 1803 budget", "summary": "more"},
         None, None, SimpleNamespace())
-    assert calls == [("pane.continue_card", {"task_id": done,
-                                             "say": "[Message from last-order · session " + lo + ". If it asks you something, answer with SendMessage; a note that asks nothing needs no reply. Then complete the card again with misaka_card_complete -- your deliverable stands unless you change it.]\ndig into the 1803 budget",
-                                             "expected_generation": 3, "consult": True,
-                                             "place": {"grid": "p1"}})]
+    # R40: a finished card answers as a consultation; she is not asked to complete again.
+    assert calls == [("pane.consult_card", {"task_id": done,
+                                            "say": "[Message from last-order · session " + lo + ". If it asks you something, answer with SendMessage; a note that asks nothing needs no reply. Your card stays finished: files you change and findings you note are declared again when this turn ends.]\ndig into the 1803 budget",
+                                            "expected_generation": 3, "place": {"grid": "p1"},
+                                            "asker": {"sender": "last-order", "sender_task": None,
+                                                      "sender_session": lo}})]
     assert out["details"]["woken"] and out["details"]["pane_id"] == "p7"
-    assert "woken in her own session" in out["content"][0]["text"]
+    assert out["details"]["consultation"] == "tr_0000000001"
+    assert "stays as it was" in out["content"][0]["text"]
     # B111: she can hear the answer inside the phase turn that has to end in its command.
     assert f"misaka_sister_output (task_id={done}, block=true)" in out["content"][0]["text"]
     assert messages.pending(world.mail, "10032", task_id=done) == []   # nothing queued for nobody

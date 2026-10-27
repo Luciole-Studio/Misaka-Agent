@@ -536,7 +536,7 @@ def _needs(card):
     return list(dict.fromkeys(raw))
 
 
-def dispatchable(con, workspace, task_id, *, require_parents=True):
+def dispatchable(con, workspace, task_id):
     """Whether this one card may be claimed -- without walking the whole project.
 
     A parent releases its child only by reaching ``done``, and a card reaches ``done``
@@ -545,10 +545,6 @@ def dispatchable(con, workspace, task_id, *, require_parents=True):
     ``needs`` fixed point that :func:`reconcile` computes is index-rebuild work, not
     per-claim work: doing it inside every claim made one dispatch tick read every card
     file once per claim.
-
-    ``require_parents=False`` is for a finished card woken to answer a message: she
-    starts no work built on her parents, so a parent being consulted at that moment
-    does not keep her from answering it (2026-10-01).
     """
     workspace = tasks.canonical_workspace(workspace)
     card = reconcile_one(con, workspace, task_id)
@@ -557,7 +553,7 @@ def dispatchable(con, workspace, task_id, *, require_parents=True):
     needs = _needs(card)
     if needs is None or task_id in needs:
         return False
-    for parent in needs if require_parents else ():
+    for parent in needs:
         row = con.execute("SELECT status,workspace FROM tasks WHERE id=?", (parent,)).fetchone()
         if row is None or row["status"] != "done":
             return False

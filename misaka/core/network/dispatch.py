@@ -127,6 +127,10 @@ def reconcile(con, cfg, *, task_ids=None, workspace=None):
 
     wanted = set(task_ids) if task_ids is not None else None
     now = int(_time.time())
+    # A consultation whose process went with its daemon: settled, and its sender told.
+    from misaka.core.network import messages
+    for run in db.abandon_consultations(con, now=now):
+        messages.tell_asker(con, run, run["summary"])
     for t in db.by_status(con, "running", workspace=workspace):
         if wanted is not None and t["id"] not in wanted:
             continue
@@ -434,6 +438,42 @@ def accept(con, t, submission, *, generation, claim_lock):
     ):
         return False
     accept_side_effects(con, t, submission, generation=generation)
+    return True
+
+
+def redeclare(con, row):
+    """Declare a finished card's outputs again, as a newer ``submitted`` row of its generation.
+
+    Completion does not end a card's session: a note from Last Order that crossed the
+    completion, or a message she answers in a consultation, starts more turns in it, and the
+    deliverables they change stayed declared under the old digests. The run's settle then saw
+    bytes that did not match the declaration and, until 2026-09-24, failed the whole run (18
+    changed paths on 6 cards). The declaration follows the work instead: the same submission
+    the completion built, rebuilt from the output folder and the findings recorded in the
+    generation, and indexed again. No model turn is spent on it. Blocking; a Sister's session
+    and an ally's runner both call it. True when a newer declaration was recorded."""
+    generation = int(row["generation"])
+    try:
+        last = json.loads(db.latest_payload(con, row["id"], "submitted", generation=generation) or "{}")
+    except (TypeError, ValueError):
+        last = {}
+    if not isinstance(last, dict):
+        last = {}
+    try:
+        submission = worker.build_submission(con, row, str(last.get("summary") or ""))
+        prepared = prepare_submission(row, submission)
+    except Exception as error:  # noqa: BLE001 - a declaration that cannot be rebuilt is noted, not fatal
+        db.add_event(con, row["id"], "redeclare_failed", {"reason": str(error)[:200]}, generation=generation)
+        return False
+    payload = prepared.payload
+    # Findings recorded after the completion change the declaration as much as a file does.
+    if all(payload.get(key) == last.get(key) for key in ("artifact_digests", "artifacts", "findings", "uncertain")):
+        return False
+    with db.write_txn(con):
+        db.add_event(con, row["id"], "submitted", payload, generation=generation)
+        db.add_event(con, row["id"], "redeclared", {"artifacts": len(payload.get("artifacts") or [])},
+                     generation=generation)
+    accept_side_effects(con, row, submission, generation=generation)
     return True
 
 

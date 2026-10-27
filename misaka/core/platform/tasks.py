@@ -429,13 +429,13 @@ def workspace_for(task):
     return canonical_workspace(task["workspace"])
 
 
-def _card_dispatchable(con, task_id, *, require_parents=True):
+def _card_dispatchable(con, task_id):
     """One card's file-side gate, checked per claim; the project-wide pass is per tick."""
     row = con.execute("SELECT workspace FROM tasks WHERE id=?", (task_id,)).fetchone()
     if row is None:
         return False
     from misaka.core.platform import cards
-    return cards.dispatchable(con, row["workspace"], task_id, require_parents=require_parents)
+    return cards.dispatchable(con, row["workspace"], task_id)
 
 
 @_serialized
@@ -695,6 +695,10 @@ def claim(
             "SELECT generation,assignee,next_attempt_at FROM tasks WHERE id=?", (task_id,)
         ).fetchone()
         if row is None or (generation is not None and int(row["generation"]) != int(generation)):
+            return False
+        if _consulting(con, task_id):
+            _note_refusal(task_id, f"Card {task_id} is answering a message in her session; its "
+                                   "attempt starts once she has")
             return False
         if row["next_attempt_at"] is not None and int(row["next_attempt_at"]) > now:
             _note_refusal(task_id, f"Card {task_id} is waiting out a retry backoff for another "
@@ -1727,34 +1731,30 @@ def claim_resume(
     expected_generation=None,
     host_cap=None,
     assignee_cap=None,
-    consult=False,
 ) -> bool:
     """Atomically reopen a finished card as a new generation and claim it for continuation.
 
-    By default this is rework: the cards built on the old answer go back to todo, and the
-    card needs its parents done as any start does. ``consult`` is a card woken only to answer
-    a message: nothing built on her is sent back (2026-10-01: Last Order's note to a finished
-    card sent its finished dependent back to redo its whole job), and a parent being consulted
-    at that moment does not keep her from answering (2026-10-01: card A, woken by card B's
-    question, could not wake B to give the answer, since B's parent A was running)."""
+    This is rework: the cards built on the old answer go back to todo, and the card needs its
+    parents done as any start does. A message to a finished card is not this: it is a
+    consultation (``start_consultation``), which leaves the card as it is."""
     now = int(time.time())
-    if not _card_dispatchable(con, task_id, require_parents=not consult):
+    if not _card_dispatchable(con, task_id):
         return False
     generation_clause = (
         " AND generation=?" if expected_generation is not None else ""
     )
     with _write_txn(con):
         current = con.execute("SELECT assignee FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if current is None:
+        if current is None or _consulting(con, task_id):
             return False
         if host_cap is not None and con.execute(
             "SELECT COUNT(*) FROM tasks WHERE status='running' AND claim_lock IS NOT NULL"
-        ).fetchone()[0] >= max(0, int(host_cap)):
+        ).fetchone()[0] + _consultations_running(con) >= max(0, int(host_cap)):
             return False
         if assignee_cap is not None and con.execute(
             "SELECT COUNT(*) FROM tasks WHERE status='running' AND claim_lock IS NOT NULL "
             "AND assignee=?", (current["assignee"],)
-        ).fetchone()[0] >= max(0, int(assignee_cap)):
+        ).fetchone()[0] + _consultations_running(con, current["assignee"]) >= max(0, int(assignee_cap)):
             return False
         row = con.execute(
             "UPDATE tasks SET status='running',review_rounds=0,"
@@ -1771,8 +1771,7 @@ def claim_resume(
         ).fetchone()
         if row is None:
             return False
-        if not consult:
-            _invalidate_descendants(con, task_id)     # work built on the old answer goes back to todo
+        _invalidate_descendants(con, task_id)     # work built on the old answer goes back to todo
         _start_run(con, task_id, int(row["generation"]), "worker", lock, pid, worker_identity)
         # Publish the new generation under the card lock before its worker can run.
         # Submission's Git tail holds that lock without a SQLite transaction, so an
@@ -1781,6 +1780,160 @@ def claim_resume(
         workspace = get(con, task_id)["workspace"]
         cards.set_fields(workspace, task_id, generation=int(row["generation"]))
     return True
+
+
+# ── Consultations ──
+#
+# A message to a finished card is a consultation: her session answers it, and the card stays
+# what it was. It is a run of the card (``task_runs``, phase ``consult``), never its attempt:
+# the card's status and generation do not move, ``current_run_id`` stays the delivering run,
+# and ending it -- answered, stopped, crashed -- settles only the consultation. pi's durable
+# harness keeps a terminal task's receipt immutable and runs the questions put to a finished
+# subagent as new work of its conversation; CCB's runtime task state is apart from its task
+# list. A consultation used to be a new generation under a claim, so a window closed on it
+# stopped a delivered card and its workflow then stopped the cards built on her
+# (2026-10-25, R40). The sender waits on the consultation (B121), not on the card.
+
+CONSULT = "consult"                  # the task_runs phase of a consultation
+CONSULTABLE = ("done", "failed", "stopped")
+CONSULTATION_STALE_SECONDS = 300     # an unbound or silent one older than this is abandoned
+
+
+def _consulting(con, task_id):
+    return con.execute(
+        "SELECT 1 FROM task_runs WHERE task_id=? AND phase=? AND status='running' LIMIT 1",
+        (task_id, CONSULT)).fetchone() is not None
+
+
+def _consultations_running(con, assignee=None):
+    sql = "SELECT COUNT(*) FROM task_runs WHERE phase=? AND status='running'"
+    return con.execute(sql + (" AND assignee=?" if assignee is not None else ""),
+                       (CONSULT, assignee) if assignee is not None else (CONSULT,)).fetchone()[0]
+
+
+@_serialized
+def live_consultation(con, task_id):
+    """The card's running consultation, or None. A card has at most one."""
+    return con.execute(
+        "SELECT * FROM task_runs WHERE task_id=? AND phase=? AND status='running' "
+        "ORDER BY started_at DESC LIMIT 1", (task_id, CONSULT)).fetchone()
+
+
+@_serialized
+def latest_consultation(con, task_id, generation=None):
+    clause = " AND generation=?" if generation is not None else ""
+    return con.execute(
+        "SELECT * FROM task_runs WHERE task_id=? AND phase=?" + clause
+        + " ORDER BY started_at DESC, attempt DESC LIMIT 1",
+        (task_id, CONSULT, *([int(generation)] if generation is not None else []))).fetchone()
+
+
+@_serialized
+def get_run(con, run_id):
+    return con.execute("SELECT * FROM task_runs WHERE id=?", (run_id,)).fetchone()
+
+
+@_serialized
+def start_consultation(con, task_id, *, generation, lock, pid=None, identity=None,
+                       asker=None, reason=None):
+    """Open a consultation of a finished card at its current generation; returns its run row.
+
+    A card already being consulted answers with that consultation (one session, one writer: a
+    second message goes into the same session). None when the card is not finished at
+    ``generation``. ``asker`` is who to tell if it ends unanswered."""
+    with _write_txn(con):
+        row = get(con, task_id)
+        if row is None or row["status"] not in CONSULTABLE or int(row["generation"]) != int(generation):
+            return None
+        live = live_consultation(con, task_id)
+        if live is not None:
+            if int(live["generation"]) == int(generation):
+                return live
+            end_consultation(con, live["id"], live["claim_lock"], "stopped",
+                             reason="superseded by a newer attempt")
+        attempt = int(con.execute(
+            "SELECT COALESCE(MAX(attempt),0)+1 FROM task_runs WHERE task_id=? AND generation=?",
+            (task_id, int(generation))).fetchone()[0])
+        run_id = "tr_" + secrets.token_hex(5)
+        now = int(time.time())
+        con.execute(
+            "INSERT INTO task_runs (id,task_id,generation,attempt,phase,assignee,status,claim_lock,"
+            "pid,process_identity,workspace,session_file,started_at,heartbeat_at) "
+            "VALUES(?,?,?,?,?,?,'running',?,?,?,?,?,?,?)",
+            (run_id, task_id, int(generation), attempt, CONSULT, row["assignee"], lock, pid, identity,
+             row["workspace"], home.stored(row["session_file"]) if row["session_file"] else None,
+             now, now))
+        add_event(con, task_id, "consultation_started",
+                  {"run_id": run_id, "asker": asker, "reason": reason},
+                  generation=int(generation), run_id=run_id)
+        return get_run(con, run_id)
+
+
+@_serialized
+def bind_consultation(con, run_id, lock, pid, identity=None):
+    """Record the process answering a consultation (the daemon's pane, or the session itself)."""
+    with _write_txn(con):
+        return con.execute(
+            "UPDATE task_runs SET pid=?,process_identity=?,heartbeat_at=? "
+            "WHERE id=? AND phase=? AND status='running' AND claim_lock=?",
+            (pid, identity, int(time.time()), run_id, CONSULT, lock)).rowcount == 1
+
+
+@_serialized
+def heartbeat_consultation(con, run_id, lock):
+    with _write_txn(con):
+        return con.execute(
+            "UPDATE task_runs SET heartbeat_at=? WHERE id=? AND phase=? AND status='running' "
+            "AND claim_lock=?", (int(time.time()), run_id, CONSULT, lock)).rowcount == 1
+
+
+@_serialized
+def end_consultation(con, run_id, lock, status, *, reason=None, exit_code=None):
+    """Settle a running consultation as ``done``, ``stopped`` or ``failed``; the card is not
+    touched. Returns the ended run row, or None when it was not running under ``lock``."""
+    if status not in ("done", "stopped", "failed"):
+        raise ValueError(f"A consultation ends done, stopped or failed, not {status!r}.")
+    with _write_txn(con):
+        cur = con.execute(
+            "UPDATE task_runs SET status=?,completed_at=?,summary=?,exit_code=COALESCE(?,exit_code),"
+            "failure_kind=? WHERE id=? AND phase=? AND status='running' AND claim_lock=?",
+            (status, int(time.time()), redact(reason) if reason else None, exit_code,
+             "consultation" if status == "failed" else None, run_id, CONSULT, lock))
+        if cur.rowcount != 1:
+            return None
+        run = get_run(con, run_id)
+        add_event(con, run["task_id"], "consultation_ended",
+                  {"run_id": run_id, "status": status, "reason": reason},
+                  generation=int(run["generation"]), run_id=run_id)
+        return run
+
+
+@_serialized
+def abandon_consultations(con, *, now=None):
+    """End the consultations whose process is gone -- a daemon that died with its panes -- or that
+    never got one. Returns the ended runs, so their senders can be told."""
+    import psutil
+
+    from misaka.core.platform import processes
+    from misaka.core.subagent.child import PROCESS_GROUP_IDENTITY
+
+    now = int(time.time()) if now is None else int(now)
+    ended = []
+    for run in con.execute("SELECT * FROM task_runs WHERE phase=? AND status='running'",
+                           (CONSULT,)).fetchall():
+        silent = now - int(run["heartbeat_at"] or run["started_at"]) >= CONSULTATION_STALE_SECONDS
+        if run["pid"] is None:
+            gone = silent
+        else:
+            identity = str(run["process_identity"] or "")
+            identity = identity.removeprefix(PROCESS_GROUP_IDENTITY)
+            # Without an identity a live pid may be a reused one: then only silence tells.
+            gone = (not processes.identity_is_alive(int(run["pid"]), identity) if identity
+                    else not psutil.pid_exists(int(run["pid"])) or silent)
+        if gone and (row := end_consultation(con, run["id"], run["claim_lock"], "stopped",
+                                             reason="abandoned: her process is gone")):
+            ended.append(row)
+    return ended
 
 
 @_serialized

@@ -1,6 +1,5 @@
 """Per-card tools: nested, durable to-do items, and a line in the card's log."""
 import asyncio
-import json
 import os
 import secrets
 import time
@@ -178,6 +177,8 @@ def _review_record(submission):
 class TodoPart:
     """The ``misaka_todo`` tools and reminder nudges for one task card."""
 
+    _consultation = None                  # (run_id, lock) while a finished card answers in this session
+
     def __init__(self, task_id, sender):
         from typing import Literal
 
@@ -302,6 +303,12 @@ class TodoPart:
 
             def record(kind, payload):
                 generation, claim_lock = self._ownership()
+                if generation is not None and claim_lock is None:
+                    # A review's issues or alternatives are its round's answer; changing them
+                    # after the card finished is a re-review, which Last Order asks for.
+                    raise ValueError("This card is finished: its review is not revised in an answer to a "
+                                     "message. Say what you would change with SendMessage; Last Order "
+                                     "asks for a re-review if it should be recorded.")
                 return generation is not None and bdb.add_event(
                     c, task_id, kind, {**payload, "claim_lock": claim_lock},
                     generation=generation, claim_lock=claim_lock)
@@ -345,6 +352,10 @@ class TodoPart:
             from misaka.core.network import worker
             p = raw if isinstance(raw, CompleteParams) else CompleteParams(**(raw or {}))
             row = self._owned_row()
+            if row is None and (self._consultation is not None or worker.consult_env(task_id)[1] is not None):
+                return _text("This card is already finished and stays so: there is nothing to complete. "
+                             "Files you changed and findings you noted are declared again when this turn "
+                             "ends; answer the message with SendMessage.")
             if row is None:
                 raise ValueError("This card is not running under this session; nothing to complete.")
             missing = worker.missing_deliverable(row)
@@ -434,7 +445,7 @@ class TodoPart:
 
     def _ownership(self):
         from misaka.core.network import worker
-        return worker.claim_env(self.task_id)
+        return worker.attempt_env(self.task_id)
 
     def _owned_row(self):
         from misaka.core.network import worker
@@ -461,54 +472,26 @@ class TodoPart:
         return row
 
     async def _redeclare_if_done(self):
-        """A finished card whose session went on working declares its outputs again.
-
-        Completion does not end the session: a note from Last Order that crossed the
-        completion, or a Sister's DM, starts more turns in it, and the deliverables they
-        change stayed declared under the old digests. The run's settle then saw bytes that
-        did not match the declaration and, until 2026-09-24, failed the whole run (18 changed
-        paths on 6 cards). The declaration follows the work instead: the same submission the
-        completion built, rebuilt from the output folder and the findings recorded since, as a
-        newer ``submitted`` row for this generation, and indexed again. No model turn is spent on it."""
+        """A finished card whose session went on working declares its outputs again
+        (``dispatch.redeclare``)."""
         row = self._completed_row()
         if row is None:
             return False
-        from misaka.core.network import dispatch, worker
-        con = self.con()
-        generation = int(row["generation"])
-        try:
-            last = json.loads(self._bdb.latest_payload(con, self.task_id, "submitted", generation=generation) or "{}")
-        except (TypeError, ValueError):
-            last = {}
-        if not isinstance(last, dict):
-            last = {}
-        try:
-            submission = worker.build_submission(con, row, str(last.get("summary") or ""))
-            prepared = await asyncio.to_thread(dispatch.prepare_submission, row, submission)
-        except Exception as error:  # noqa: BLE001 - a declaration that cannot be rebuilt is noted, not fatal
-            self._bdb.add_event(con, self.task_id, "redeclare_failed", {"reason": str(error)[:200]},
-                                generation=generation)
-            return False
-        payload = prepared.payload
-        # Findings recorded after the completion change the declaration as much as a file does.
-        if all(payload.get(key) == last.get(key)
-               for key in ("artifact_digests", "artifacts", "findings", "uncertain")):
-            return False
-        with self._bdb.write_txn(con):
-            self._bdb.add_event(con, self.task_id, "submitted", payload, generation=generation)
-            self._bdb.add_event(con, self.task_id, "redeclared",
-                                {"artifacts": len(payload.get("artifacts") or [])}, generation=generation)
-        await asyncio.to_thread(dispatch.accept_side_effects, con, row, submission, generation=generation)
-        return True
+        from misaka.core.network import dispatch
+        return await asyncio.to_thread(dispatch.redeclare, self.con(), row)
 
     def get_permission_settings(self):
-        """Delegate only this live card's output writes, never a workspace-wide grant."""
+        """Delegate only this live card's output writes, never a workspace-wide grant. A finished
+        card answering a consultation in this session keeps her own folder."""
         generation, claim_lock = self._ownership()
         if generation is None or self.session is None:
             return {}
         row = self._bdb.get(self.con(), self.task_id)
-        if (row is None or row["status"] != "running" or int(row["generation"]) != generation
-                or row["claim_lock"] != claim_lock or not row["output_dir"]):
+        if row is None or int(row["generation"]) != generation or not row["output_dir"]:
+            return {}
+        running = row["status"] == "running" and row["claim_lock"] == claim_lock
+        consulting = self._consultation is not None and row["status"] in self._bdb.CONSULTABLE
+        if not (running or consulting):
             return {}
         workspace = Path(self._bdb.workspace_for(row)).resolve()
         output = Path(row["output_dir"]).resolve()
@@ -527,6 +510,58 @@ class TodoPart:
             from misaka.core.network import worker
 
             worker.record_output_baseline(self.con(), row)
+        else:
+            self._begin_consultation()
+
+    def _begin_consultation(self):
+        """A finished card's session starting a turn is answering a consultation: the one the
+        daemon opened for the message that woke her (``pane.consult_card``), or -- a person
+        typing in her window -- one of her own, so that what she changes is checked and
+        declared like any answer. The card itself is not touched (``tasks.start_consultation``)."""
+        if self._consultation is not None:
+            run = self._bdb.get_run(self.con(), self._consultation[0])
+            if run is not None and run["status"] == "running":
+                return
+            self._consultation = None
+        generation, _claim = self._ownership()
+        if generation is None:
+            return
+        con = self.con()
+        row = self._bdb.get(con, self.task_id)
+        if row is None or row["status"] not in self._bdb.CONSULTABLE or int(row["generation"]) != generation:
+            return
+        import socket
+
+        from misaka.core.network import worker
+        from misaka.core.platform import processes
+        pid = os.getpid()
+        _gen, run_id, lock = worker.consult_env(self.task_id)
+        if run_id is not None:
+            run = self._bdb.get_run(con, run_id)
+            if run is not None and run["status"] == "running" and run["claim_lock"] == lock:
+                self._consultation = (run_id, lock)
+                return
+        live = self._bdb.live_consultation(con, self.task_id)
+        if live is not None:
+            # The daemon opens the consultation for a message to her open window before the
+            # message reaches this session; the pane's process is this one.
+            if int(live["generation"]) == generation and live["pid"] in (None, pid):
+                if live["pid"] is None:
+                    self._bdb.bind_consultation(con, live["id"], live["claim_lock"], pid,
+                                                processes.identity(pid))
+                self._consultation = (live["id"], live["claim_lock"])
+            return
+        lock = f"consult:{socket.gethostname()}:{pid}:{secrets.token_hex(4)}"
+        run = self._bdb.start_consultation(con, self.task_id, generation=generation, lock=lock, pid=pid,
+                                           identity=processes.identity(pid), reason="typed in her window")
+        if run is not None and run["claim_lock"] == lock:
+            self._consultation = (run["id"], lock)
+
+    def _end_consultation(self, status, reason=None):
+        consultation, self._consultation = self._consultation, None
+        if consultation is not None:
+            from misaka.core.network import messages
+            messages.settle_consultation(self.con(), *consultation, status, reason=reason)
 
     async def agent_end(self, event, ctx=None):
         reason, text = _assistant_end(event)
@@ -553,6 +588,10 @@ class TodoPart:
             if self._turn_clean and not self._declared():
                 self._hold_if_running()
                 await self._redeclare_if_done()
+            if self._consultation is not None:
+                # Esc in her window is the only unclean end that is not a failure (_turn_failure).
+                await asyncio.to_thread(self._end_consultation, *(
+                    ("done",) if self._turn_clean else ("stopped", "interrupted in her window")))
             return
         from misaka.core.subagent import extension as subagent
 
@@ -626,6 +665,12 @@ class TodoPart:
         failure model decides the rest: a backoff and a retry, or a card that stays failed."""
         row = self._owned_row()
         if row is None:
+            if self._consultation is not None:
+                from misaka.core.network import worker
+                if worker.stopped_at_cap(reason):
+                    self._end_consultation("stopped", "the run's token budget is spent")
+                else:
+                    self._end_consultation("failed", reason)
             return
         generation = int(row["generation"])
         from misaka.core.network import worker
@@ -787,6 +832,8 @@ class TodoPart:
 
     async def session_shutdown(self, event=None, ctx=None):
         self._calls_settled()
+        if self._consultation is not None:
+            self._end_consultation("stopped", "her session ended before she answered")
         if self._con is not None:
             self._con.close()
             self._con = None

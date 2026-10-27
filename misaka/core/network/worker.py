@@ -106,6 +106,33 @@ def claim_env(task_id):
         return None, None
 
 
+CONSULT_RUN_ENV, CONSULT_LOCK_ENV = "MISAKA_CONSULT_RUN", "MISAKA_CONSULT_LOCK"
+
+
+def consult_env(task_id):
+    """``(generation, run_id, lock)`` of the consultation this process was started to answer
+    (``tasks.start_consultation``), or ``(None, None, None)``. The daemon hands it over as it
+    hands a claim; the card's generation is the one being consulted, and stays."""
+    owner = os.environ.get("MISAKA_USAGE_TASK_ID")
+    generation = os.environ.get("MISAKA_USAGE_GENERATION")
+    run_id, lock = os.environ.get(CONSULT_RUN_ENV), os.environ.get(CONSULT_LOCK_ENV)
+    if owner != task_id or not generation or not run_id or not lock:
+        return None, None, None
+    try:
+        return int(generation), run_id, lock
+    except ValueError:
+        return None, None, None
+
+
+def attempt_env(task_id):
+    """``(generation, claim_lock)`` this process works ``task_id`` under: its claim, or for a
+    consultation the consulted generation with no claim (``claim_lock`` None)."""
+    generation, claim_lock = claim_env(task_id)
+    if generation is not None:
+        return generation, claim_lock
+    return consult_env(task_id)[0], None
+
+
 def owned_card(con, task_id, generation, claim_lock):
     """The running card this attempt still owns, its lease renewed; None once it is not."""
     row = task_store.get(con, task_id)

@@ -5,6 +5,7 @@ again on the same card, continued in her own conversation; the review loop ends 
 alternatives on a card of their own, and the node's decision turns proposals into options, which
 open as nodes only when the root reconciles the level. The model turns are scripted; everything
 the driver records is real."""
+import asyncio
 import hashlib
 import json
 import re
@@ -282,22 +283,45 @@ async def test_an_issue_the_red_team_raises_again_word_for_word_is_answered_agai
 
 async def test_a_conclusion_waits_for_a_card_woken_to_answer_a_message(lab):
     """2026-10-01: Last Order woke card B to ask about her material, disposed without waiting, and
-    version 2 was written while B answered -- B was missing from its material map."""
+    version 2 was written while B answered -- B was missing from its material map. Since R40 her
+    answer is a consultation and B stays done: the node waits for the consultation instead."""
     con, run, root = lab.con, lab.run, lab.root
+    asked = {}
 
     def dispositions(con_, key):
         [card] = runs.tasks(con, run["id"], kind="research", node_id=root["id"])
-        # A SendMessage to the finished card: a consultation, its own new attempt.
-        assert tasks.claim_resume(con, card["id"], "consult", 1, expected_generation=card["generation"],
-                                  consult=True)
+        if not asked:
+            # A SendMessage to the finished card: a consultation, not an attempt.
+            consultation = tasks.start_consultation(con, card["id"], generation=card["generation"],
+                                                    lock="consult:test", asker={"sender": "last-order"})
+            asked.update(card=card["id"], run=consultation["id"])
         [issue] = runs.issues(con, run["id"], node_id=root["id"], round=int(key.split(":")[1]), origin="critique")
         return {"dispositions": [{"issue_id": issue["id"], "disposition": "revise", "reason": "r"}]}
 
     _script(lab, reviews={1: [_issue("Dates?")], 2: []}, alternatives=[], dispositions=dispositions,
             decide=lambda con_: {"decisions": [], "declined": []})
+    written_while_answering = []
+    scripted = planner.synthesize
+
+    def synthesize(con_, *args, **kwargs):
+        written_while_answering.append(bool(asked) and tasks.live_consultation(con, asked["card"]) is not None)
+        return scripted(con_, *args, **kwargs)
+
+    lab.monkeypatch.setattr(planner, "synthesize", synthesize)
+    real_sleep, polls = asyncio.sleep, []
+
+    async def answering(seconds):
+        if asked and tasks.live_consultation(con, asked["card"]) is not None:
+            polls.append(seconds)
+            if len(polls) == 3:                   # she answers while the node waits
+                tasks.end_consultation(con, asked["run"], "consult:test", "done")
+        await real_sleep(0)
+
+    lab.monkeypatch.setattr(workflow.asyncio, "sleep", answering)
     assert await _expand(lab, _Runner(con)) == "closed"
     [card] = runs.tasks(con, run["id"], kind="research", node_id=root["id"])
-    assert card["generation"] == 2 and card["status"] == "done"
+    assert (card["generation"], card["status"]) == (1, "done")
+    assert len(polls) == 3 and written_while_answering == [False, False]
     assert lab.material == [[card["id"]], [card["id"]]]      # version 2 was written from the card too
 
 

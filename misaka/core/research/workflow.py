@@ -442,12 +442,29 @@ async def _stop_active(runner, task_ids, context, *, captured=None, owner=None):
         raise ExceptionGroup("Research card stop failed", errors)
 
 
+async def _stop_consultations(con, task_ids):
+    """A halted scope's finished cards stop answering too. Their consultations run in the panel
+    daemon's panes whichever runner the scope used; without a daemon there is none left to stop,
+    and ``dispatch.reconcile`` settles what a dead one left behind."""
+    from misaka.ui.panel import client as net
+    for task_id in task_ids:
+        run = task_store.live_consultation(con, task_id)
+        if run is None:
+            continue
+        try:
+            await asyncio.to_thread(net.request, "card.stop", {
+                "task_id": task_id, "consultation": run["id"], "reason": "the research run was stopped"})
+        except (RuntimeError, OSError):
+            pass
+
+
 async def _halt_scope(con, cfg, runner, captured, context, *, owner=None):
     from misaka.core.network import dispatch
     active = {tid for tid, row in captured.items() if row["status"] in ACTIVE_TASKS}
     try:
         await _stop_active(runner, active, context, captured=captured, owner=owner)
     finally:
+        await _stop_consultations(con, captured)
         await asyncio.to_thread(dispatch.reconcile, con, cfg)
         await asyncio.to_thread(_stop_pending, con, list(captured.values()), owner=owner)
 
@@ -850,18 +867,31 @@ def _submitted_event_id(con, task_id, generation):
     return int(row["id"]) if row else None
 
 
+def _consulted_since_settle(con, task_id, generation):
+    """Whether a consultation of this card ended after its latest settle (or before any)."""
+    ended = con.execute("SELECT max(id) FROM events WHERE task_id=? AND kind='consultation_ended' "
+                        "AND generation=?", (task_id, generation)).fetchone()[0]
+    settled = con.execute("SELECT max(id) FROM events WHERE task_id=? AND kind='research_v2_settled' "
+                          "AND generation=?", (task_id, generation)).fetchone()[0]
+    return ended is not None and (settled is None or ended > settled)
+
+
 def _settled_current(con, task_id, generation):
     """Whether this generation's latest settle covered its latest submission. A finished card
     declares again when its session keeps working after completion (todo._redeclare_if_done),
-    and that newer declaration is registered like the first."""
-    payload = task_store.latest_payload(con, task_id, "research_v2_settled", generation=generation)
-    if not payload:
+    and that newer declaration is registered like the first. A consultation that ended since
+    the settle -- stopped half way through an edit, say -- may have changed her files without
+    declaring them: the settle runs again, and its digest check finds that as drift."""
+    settled = con.execute("SELECT id,payload FROM events WHERE task_id=? AND kind='research_v2_settled' "
+                          "AND generation=? ORDER BY id DESC LIMIT 1", (task_id, generation)).fetchone()
+    if settled is None:
         return False
     try:
-        seen = json.loads(payload).get("submitted_event")
+        seen = json.loads(settled["payload"]).get("submitted_event")
     except (AttributeError, TypeError, ValueError):
         seen = None
-    return seen == _submitted_event_id(con, task_id, generation)
+    return seen == _submitted_event_id(con, task_id, generation) and not _consulted_since_settle(
+        con, task_id, generation)
 
 
 def settle_done_tasks(con, *, run_id, reopen_drift=True):
@@ -1466,14 +1496,25 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
             set_node(status="synthesizing")
 
         elif status == "synthesizing":
-            # A card woken by a message -- a Sister's question, Last Order's consultation -- runs a new
-            # attempt; the conclusion is written from every card, so the node waits for her as it
-            # waits for any card (2026-10-01: version 2 was written while card B answered, and B was
-            # missing from its material map).
-            if any(row["status"] in ("running", "review")
-                   for row in runs.tasks(con, run["id"], kind="research", node_id=nid)):
+            # The conclusion is written from every card, so the node waits for each to settle
+            # (2026-10-01: version 2 was written while card B answered, and B was missing from
+            # its material map). A finished card answering a message -- a Sister's question,
+            # Last Order's consultation -- stays done (R40); her answer's changes are declared
+            # when her turn ends, so the node waits for the consultation and settles again.
+            cards_here = runs.tasks(con, run["id"], kind="research", node_id=nid)
+            if any(row["status"] in ("running", "review") for row in cards_here):
                 set_node(status="executing")
                 continue
+            if any(task_store.live_consultation(con, row["id"]) is not None for row in cards_here):
+                check()
+                await asyncio.sleep(poll_seconds)
+                continue
+            if any(row["status"] == "done" and _consulted_since_settle(con, row["id"], int(row["generation"]))
+                   for row in cards_here):
+                settle_done_tasks(con, run_id=run["id"])
+                if _cards_reopened(con, run, node):
+                    set_node(status="executing")    # a declaration that no longer matches its files
+                    continue
             done = _done(con, run, node, "research")
             # The round whose cards she is reading is the latest one that has cards, not the
             # latest plan: a follow-up plan recorded just before a crash has no cards yet. A

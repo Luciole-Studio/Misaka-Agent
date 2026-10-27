@@ -514,9 +514,10 @@ def _install(harn, runtime):
         block: bool = Field(False, description=(
             "Leave false to inspect the task's current state and return immediately. "
             "Set true only when the user asked to wait for the result, or when you asked its "
-            "Sister something you must hear before going on (a finished card woken by your "
-            "SendMessage answers and completes again): the call then holds until the task "
-            "reaches an accepted, failed, or stopped state."
+            "Sister something you must hear before going on (a finished card your SendMessage "
+            "reached answers it and stays finished): the call then holds until the task reaches "
+            "an accepted, failed, or stopped state, and until a message it is answering is "
+            "answered (its `consultation` says how that ended)."
         ))
         timeout: int = Field(30_000, ge=0, le=600_000, description=(
             "Maximum wait in milliseconds; applies only when block is true."

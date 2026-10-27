@@ -48,7 +48,7 @@ else:
 # Wire protocol version (strict equality, as in herdr). Bump it whenever *server
 # behaviour* changes, not only method/event shapes: an unbumped behaviour change
 # once let a stale daemon slip through the version gate.
-PROTOCOL = 54   # 54: pane.continue_card takes {"consult": true}: a message wakes a finished card without sending its dependents back to todo; 53: panes.list takes {"tab_of": pane_id}, the panes of that pane's tab (Last Order's pane tools); 52: spaces have durable ids (state/spaces.json), a pane's program carries MISAKA_NET_SPACE, place {"space": id} reopens a remembered space, layout.get lists dormant spaces; 51: screen frames carry the program's content revision, a pane's OSC 52 copy reaches the panel, idle scrollback is compressed; 50: one home, one layout table -- a daemon from before it serves the old paths; 49: panes.list says which pane holds a card's claim, and a card is continued in the pane it already has; 48: pane.send/pane.input drain through a per-pane write queue and wait for delivery; 47: drag resizes are fire-and-forget (id=None, no reply) and the layout is persisted at drag end, so the divider never blocks on a busy daemon; 46: a drag resizes the program as fast as it repaints; 44: reflow held until repaint; 43: libghostty-vt; 42: panes.resize acknowledged first; 40: shown frame in a sync block; 38: input state, extract, kitty
+PROTOCOL = 55   # 55: pane.consult_card -- a message to a finished card is a consultation (a run, not an attempt: the card stays as it is; R40), pane.continue_card drops "consult", panes.list says "consulting"; 54: pane.continue_card takes {"consult": true}: a message wakes a finished card without sending its dependents back to todo; 53: panes.list takes {"tab_of": pane_id}, the panes of that pane's tab (Last Order's pane tools); 52: spaces have durable ids (state/spaces.json), a pane's program carries MISAKA_NET_SPACE, place {"space": id} reopens a remembered space, layout.get lists dormant spaces; 51: screen frames carry the program's content revision, a pane's OSC 52 copy reaches the panel, idle scrollback is compressed; 50: one home, one layout table -- a daemon from before it serves the old paths; 49: panes.list says which pane holds a card's claim, and a card is continued in the pane it already has; 48: pane.send/pane.input drain through a per-pane write queue and wait for delivery; 47: drag resizes are fire-and-forget (id=None, no reply) and the layout is persisted at drag end, so the divider never blocks on a busy daemon; 46: a drag resizes the program as fast as it repaints; 44: reflow held until repaint; 43: libghostty-vt; 42: panes.resize acknowledged first; 40: shown frame in a sync block; 38: input state, extract, kitty
 RING_CAP = 256 * 1024          # output tail kept per pane
 SEND_TIMEOUT = 8.0             # pane.send: how long a message may take to enter the pane before it counts as undelivered (under the client's 10 s request timeout)
 INPUT_TIMEOUT = 1.0            # pane.input: keystrokes and pastes wait this long, then stay queued (typing must not block the panel)
@@ -182,13 +182,15 @@ def ally_commands():
     return frozenset(presets.names())
 
 
-def card_program(row, say=None):
+def card_program(row, say=None, *, consult=False):
     """The program that runs an attempt at this card: an ally's ACP runner for an ally, a Sister's
-    session otherwise. ``say`` continues the card with a message as the attempt's first turn."""
+    session otherwise. ``say`` continues the card with a message as the attempt's first turn;
+    with ``consult`` it is a finished card answering it (no claim, the card stays as it is)."""
     from misaka.core.network.ally import presets
+    mode = ["--consult"] if consult else []
     if row["assignee"] in presets.names():
-        return [*ALLY_CARD, row["id"], *(["--say", say] if say is not None else [])]
-    return [*CARD_SHELL, row["id"], *(["--resume", "--say", say] if say is not None else [])]
+        return [*ALLY_CARD, row["id"], *mode, *(["--say", say] if say is not None else [])]
+    return [*CARD_SHELL, row["id"], *(["--resume", *mode, "--say", say] if say is not None else [])]
 
 
 def _terminate(proc):
@@ -748,6 +750,7 @@ class Pane:
         "clipboard_writes",
         "compression",
         "console",
+        "consult",
         "content_rev",
         "cwd",
         "decscusr",
@@ -786,6 +789,7 @@ class Pane:
         self.id, self.title, self.argv, self.cwd, self.card = pane_id, title, argv, cwd, card
         self.reported = None          # the session's own word: {"state", "message", "seq"} (herdr hook authority); None = guess from the screen
         self.claim_lock = self.generation = None
+        self.consult = None           # (run_id, lock): a finished card answering a message here (tasks.start_consultation)
         self.proc = self.fd = self.exit_code = None
         self.console = None           # Windows: the ConPTY pseudo console (conpty.PseudoConsole)
         self.buf = bytearray()
@@ -1532,11 +1536,13 @@ class Daemon:
                 f"expected generation {int(expected_generation)}."
             )
 
-    def close(self, pane_id, *, expected_generation=None):
+    def close(self, pane_id, *, expected_generation=None, reason="her window was closed"):
         pane = self.panes.get(pane_id)
         if pane is None:
             raise ValueError(f"Pane not found: {pane_id}")
         self._check_generation(pane, expected_generation)
+        # A consultation ends with its window; the finished card it consulted does not.
+        self._settle_pane_consultation(pane, reason)
         if pane.card and pane.claim_lock:
             # Explicit close (including daemon shutdown) must not orphan the claim.
             # Natural card exits stay in the pane registry for _watch_cards to settle.
@@ -1704,12 +1710,27 @@ class Daemon:
         leaving = []
         for pane in [p for p in self.panes.values() if p.card == row["id"] and p is not keep]:
             leaving.append(pane.proc)
-            self.close(pane.id)          # SIGTERM now; `_reap` escalates off the request
+            self.close(pane.id, reason="superseded by a new attempt")   # SIGTERM now; `_reap` escalates
         if keep is not None:
+            self._settle_pane_consultation(keep, "superseded by a new attempt")
             await self._stop_program(keep)
         for proc in leaving:
             if not await self._await_exit(proc):
                 raise ValueError(f"Card {row['id']}: a pane of an earlier attempt will not exit; try again.")
+
+    def _settle_pane_consultation(self, pane, reason, status="stopped", exit_code=None):
+        if pane.consult is not None:
+            from misaka.core.network import messages
+            consultation, pane.consult = pane.consult, None
+            messages.settle_consultation(self._board(), *consultation, status, reason=reason,
+                                         exit_code=exit_code)
+
+    async def _end_consultations(self, task_id, reason):
+        """A new attempt at a card takes over from a consultation running in her window: the board
+        grants no claim while one runs (one session, one writer), so it ends first."""
+        for pane in [p for p in self.panes.values() if p.card == task_id and p.consult is not None]:
+            self._settle_pane_consultation(pane, reason)
+            await self._stop_program(pane)
 
     def _verify_previous_dead(self, con, row):
         """Prove the recorded process of this generation gone before a blocked card is taken
@@ -1740,19 +1761,97 @@ class Daemon:
                 f"Card {row['id']}'s previous process is still running; try again."
             )
 
-    async def continue_card(self, task_id, say, place=None, *, expected_generation=None, consult=False) -> Pane:
+    async def continue_card(self, task_id, say, place=None, *, expected_generation=None) -> Pane:
         """Continue a settled card with a new model turn: the same ``claim_resume`` as the
         in-process Sister runtime (a new generation under our lock), after which the
-        session lifecycle settles the card exactly like a first run. ``consult``: she is woken to
-        answer a message, so the cards built on her answer stay as they are."""
+        session lifecycle settles the card exactly like a first run. This is rework; a message
+        that only asks her something is ``consult_card``."""
         from misaka.core.platform import admission
         from misaka.core.platform import tasks as db
         async with self._card_lock(task_id):
             return await self._continue_card(task_id, say, place, expected_generation,
-                                             admission=admission, db=db, consult=consult)
+                                             admission=admission, db=db)
 
-    async def _continue_card(self, task_id, say, place, expected_generation, *, admission, db,
-                             consult=False) -> Pane:
+    async def consult_card(self, task_id, say, place=None, *, expected_generation=None, asker=None):
+        """A message to a finished card: she answers it in her own session and the card stays as
+        it is (``tasks.start_consultation``; R40). Her open window takes it through her inbox, as
+        any message to a live session; a closed one is reopened on her session with the message
+        as its turn. Returns ``(pane, run_id)``; the sender waits on the run (B121)."""
+        from misaka.core.platform import tasks as db
+        async with self._card_lock(task_id):
+            return await self._consult_card(task_id, say, place, expected_generation, asker, db=db)
+
+    async def _consult_card(self, task_id, say, place, expected_generation, asker, *, db):
+        from misaka.core.network import messages, worker
+        from misaka.core.platform import admission
+        from misaka.core.session_manager import findMostRecentSession
+        con = self._board()
+        row = db.get(con, task_id)
+        if row is None:
+            raise ValueError(f"Card not found: {task_id}")
+        generation = int(row["generation"])
+        if expected_generation is not None and generation != int(expected_generation):
+            raise ValueError(f"Card {task_id} is generation {generation}; "
+                             f"expected generation {int(expected_generation)}.")
+        if row["status"] not in db.CONSULTABLE:
+            raise ValueError(f"Card {task_id} is {row['status']}, not finished; a message reaches it "
+                             "through its inbox.")
+        # Her session, still open after its turn: a card-shell, not a read-only look at it.
+        # A finished card holds no claim, so a pane still showing one has only not been told yet
+        # (she completed since the watcher's last look): that window is hers all the same.
+        live = next((p for p in self.panes.values()
+                     if p.card == task_id and p.alive() and p.generation == generation
+                     and p.argv[:len(CARD_SHELL)] == CARD_SHELL), None)
+        if live is not None:
+            live.claim_lock = None
+        transcript = findMostRecentSession(session_roots.card_session_dir(row))
+        from misaka.core.network.ally import presets
+        ally = row["assignee"] in presets.names()
+        if transcript is None and live is None and not ally:
+            raise ValueError(f"Card {task_id} stopped before it ran, so she has nothing to answer "
+                             "from; to have the card do its work, retry it.")
+        running = db.live_consultation(con, task_id)
+        if running is None or int(running["generation"]) != generation:
+            if worker.over_cap(_expand(CFG["db"]), task_id, CFG["token_cap"]):
+                raise ValueError(f"Card {task_id} was not asked: {worker.budget_cap_reason()}.")
+            host_cap, assignee_cap = admission.limits()
+            taken = admission.occupied(con)
+            if len(taken) >= host_cap or sum(a == row["assignee"] for a in taken.values()) >= assignee_cap:
+                raise ValueError(f"Card {task_id} was not asked: the host is at capacity; send it again "
+                                 "when a card finishes.")
+        lock = f"consult:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
+        if live is not None and not ally:
+            from misaka.core.platform import processes as process_tree
+            pid = live.proc.pid if live.proc else None
+            identity = process_tree.identity(pid) if pid else None
+            run = db.start_consultation(con, task_id, generation=generation, lock=lock, pid=pid,
+                                        identity=f"process-group|{identity}" if identity else None, asker=asker)
+            if run is None:
+                raise ValueError(f"Card {task_id} changed underneath; send it again.")
+            if run["claim_lock"] == lock:
+                live.consult = (run["id"], lock)
+                db.add_event(con, task_id, "consulted", {"run_id": run["id"], "pane": live.id},
+                             generation=generation, run_id=run["id"])
+            messages.send(self._mailbox(), row["assignee"], say, summary=say[:80].strip() or "message",
+                          sender=(asker or {}).get("sender") or "last-order", to_task=task_id,
+                          generation=generation, sender_task=(asker or {}).get("sender_task"),
+                          sender_session=(asker or {}).get("sender_session"))
+            return live, run["id"]
+        if running is not None and int(running["generation"]) == generation:
+            raise ValueError(f"Card {task_id} is answering another message outside this panel; "
+                             "send it again when she is done.")
+        run = db.start_consultation(con, task_id, generation=generation, lock=lock, asker=asker)
+        if run is None:
+            raise ValueError(f"Card {task_id} changed underneath; send it again.")
+        reuse = self._card_pane_to_reuse(task_id)
+        pane = await self._host_card(
+            con, row, lock, generation, card_program(row, say, consult=True), place,
+            undo=lambda: messages.settle_consultation(con, run["id"], lock, "failed",
+                                                      reason="her window could not be started"),
+            event="consulted", reuse=reuse, consult=run["id"])
+        return pane, run["id"]
+
+    async def _continue_card(self, task_id, say, place, expected_generation, *, admission, db) -> Pane:
         row, transcript = self._settled_card_with_session(task_id, require_session=False)
         generation = int(row["generation"])
         if expected_generation is not None and generation != int(expected_generation):
@@ -1761,6 +1860,7 @@ class Daemon:
                 f"expected generation {int(expected_generation)}."
             )
         con = self._board()
+        await self._end_consultations(task_id, "superseded by a new attempt")
         reuse = self._card_pane_to_reuse(task_id)
         if row["status"] in {"blocked", "triage"}:
             self._verify_previous_dead(con, row)
@@ -1768,10 +1868,11 @@ class Daemon:
         host_cap, assignee_cap = admission.limits()
         if not db.claim_resume(con, task_id, lock, os.getpid(),
                                expected_generation=generation,
-                               host_cap=host_cap, assignee_cap=assignee_cap,
-                               consult=consult):
+                               host_cap=host_cap, assignee_cap=assignee_cap):
+            why = (" she is answering a message outside this panel," if db.live_consultation(con, task_id)
+                   else "")
             raise ValueError(f"Card {task_id} could not be claimed for continuation; it changed "
-                             "underneath, or the host is at capacity.")
+                             f"underneath,{why} or the host is at capacity.")
         row = db.get(con, task_id)
         generation = int(row["generation"])
         if transcript is None:
@@ -1829,6 +1930,7 @@ class Daemon:
                                    failure_kind="configuration", reason=reason)
                 raise ValueError(reason)
         generation = int(row["generation"])
+        await self._end_consultations(task_id, "superseded by a new attempt")
         lock = f"net:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
         host_cap, assignee_cap = admission.limits()
         if not db.claim(con, task_id, lock,
@@ -1840,8 +1942,10 @@ class Daemon:
                                      undo=undo, reuse=reuse)
 
     async def _host_card(self, con, row, lock, generation, argv, place, *, undo,
-                         event="claimed", reuse=None):
-        """Host a claimed card in a pane; ``undo`` releases its claim if no pane starts."""
+                         event="claimed", reuse=None, consult=None):
+        """Host a claimed card in a pane; ``undo`` releases its claim if no pane starts. With
+        ``consult`` (its run id) the pane answers a consultation instead: no claim is handed
+        over, and ``lock`` is the consultation's."""
         from misaka.core.platform import processes as process_tree
         from misaka.core.platform import tasks as db
         task_id = row["id"]
@@ -1856,12 +1960,14 @@ class Daemon:
             await self._vacate_card_panes(con, row, keep=reuse)
             workspace = self._card_workspace(row)
             title = f"{row['assignee']}·{task_id}"
+            from misaka.core.network import worker
             hosting = {**self._card_env(row),
                        "MISAKA_USAGE_DB": _expand(CFG["db"]),
                        "MISAKA_USAGE_TASK_ID": task_id,
                        "MISAKA_USAGE_GENERATION": str(generation),
-                       "MISAKA_USAGE_CLAIM_LOCK": lock,
-                       "MISAKA_USAGE_TOKEN_CAP": ""}          # settings.json, read at each request
+                       "MISAKA_USAGE_TOKEN_CAP": "",          # settings.json, read at each request
+                       **({worker.CONSULT_RUN_ENV: consult, worker.CONSULT_LOCK_ENV: lock}
+                          if consult is not None else {"MISAKA_USAGE_CLAIM_LOCK": lock})}
             if reuse is not None and self.panes.get(reuse.id) is reuse:
                 pane = reuse
                 await self._replace_program(pane, argv, cwd=workspace, env=hosting, title=title)
@@ -1874,20 +1980,27 @@ class Daemon:
             else:
                 pane = self.create(argv, workspace, title=title, card=task_id,
                                    env=hosting, place=place)
-            pane.claim_lock, pane.generation = lock, generation
+            pane.generation = generation
             pane.started = time.time()
             # Owner = the pane's process group: if the daemon dies, reconcile reclaims by group identity (same marker as child.py).
             identity = process_tree.identity(pane.proc.pid)
-            db.set_pid(con, task_id, pane.proc.pid,
-                       worker_identity=f"process-group|{identity}" if identity else None,
-                       generation=generation, claim_lock=lock)
-            db.add_event(con, task_id, event,
-                         {"lock": lock, "workspace": workspace, "pane": pane.id},
-                         generation=generation)
+            owner = f"process-group|{identity}" if identity else None
+            if consult is not None:
+                pane.consult = (consult, lock)
+                db.bind_consultation(con, consult, lock, pane.proc.pid, owner)
+                db.add_event(con, task_id, event, {"run_id": consult, "workspace": workspace, "pane": pane.id},
+                             generation=generation, run_id=consult)
+            else:
+                pane.claim_lock = lock
+                db.set_pid(con, task_id, pane.proc.pid, worker_identity=owner,
+                           generation=generation, claim_lock=lock)
+                db.add_event(con, task_id, event,
+                             {"lock": lock, "workspace": workspace, "pane": pane.id},
+                             generation=generation)
             self._save_snapshot()
         except BaseException:
             if pane is not None:
-                pane.card = pane.claim_lock = None   # the watcher must not read this as a crash
+                pane.card = pane.claim_lock = pane.consult = None   # the watcher must not read this as a crash
                 try:
                     self.close(pane.id)
                 except Exception:  # noqa: BLE001, S110 - the claim must go back even if the pane will not close
@@ -1984,10 +2097,35 @@ class Daemon:
                         generation=pane.generation, progress=False,
                     ):
                         pane.last_heartbeat = time.time()
+            self._watch_consultations(db)
             try:
                 await asyncio.wait_for(self._stopping.wait(), CARD_POLL_SECONDS)
             except TimeoutError:
                 pass
+
+    def _watch_consultations(self, db):
+        """A consultation's window, kept as a card's: its run renewed while her process lives,
+        ended by her session when she answers, settled here when the process goes first."""
+        for pane in [p for p in self.panes.values() if p.consult is not None]:
+            run_id, lock = pane.consult
+            run = db.get_run(self._board(), run_id)
+            if run is None or run["status"] != "running" or run["claim_lock"] != lock:
+                pane.consult = None               # her session settled it: nothing of ours left
+                continue
+            if not pane.alive():
+                exit_code = pane.exit_code if pane.exit_code is not None else pane.proc.poll()
+                if exit_code:
+                    from misaka.utils import loop_watchdog
+                    reason = f"her session exited with code {exit_code}"
+                    stall = loop_watchdog.report(f"card-{pane.card}", since=pane.started or pane.started_at)
+                    if stall:
+                        reason += f"; {stall}"
+                    self._settle_pane_consultation(pane, reason, "failed", exit_code)
+                else:
+                    self._settle_pane_consultation(pane, "her session ended before she answered")
+            elif time.time() - pane.last_heartbeat >= 60 and db.heartbeat_consultation(
+                    self._board(), run_id, lock):
+                pane.last_heartbeat = time.time()
 
     # ── Snapshot (shape only: argv, cwd, card -- never process state) ──
 
@@ -2065,6 +2203,8 @@ class Daemon:
                         # Holding the card's claim: the attempt itself, as opposed to a pane
                         # that is only showing the card's session.
                         "claimed": bool(p.claim_lock),
+                        # Answering a message as a finished card (a consultation's window).
+                        "consulting": p.consult is not None,
                         "status": status.get(p.card),
                         "busy": _pane_busy(p, ally_state=state),
                         "foreground": _foreground(p),   # what runs in the foreground (for Last Order)
@@ -2171,9 +2311,20 @@ class Daemon:
                 pane.seen_status = row["status"] if row else None
             return {"seen": True}
         if method == "card.stop":
-            # The pane holding the claim is the attempt; another one is only showing the card.
+            if params.get("consultation"):
+                # One consultation, by its run: a halted research run ends what its finished
+                # cards were still answering, and nothing else of theirs.
+                pane = next((p for p in self.panes.values()
+                             if p.consult is not None and p.consult[0] == params["consultation"]), None)
+                if pane is None:
+                    return {"stopped": False, "missing": True}
+                self.close(pane.id, reason=params.get("reason") or "stopped")
+                return {"stopped": True}
+            # The pane holding the claim is the attempt; a consultation's is her answering a
+            # message; another one is only showing the card.
             hosting = [p for p in self.panes.values() if p.card == params["task_id"]]
-            pane = next((p for p in hosting if p.claim_lock), hosting[0] if hosting else None)
+            pane = next((p for p in hosting if p.claim_lock),
+                        next((p for p in hosting if p.consult is not None), hosting[0] if hosting else None))
             if pane is None:
                 if "expected_generation" in params:
                     return {"stopped": False, "missing": True}
@@ -2202,7 +2353,8 @@ class Daemon:
                 # the attempt that was starting finds its pane gone and puts the claim back.
                 pid = pane.proc.pid if pane.proc else None
                 identity = processes.identity(pid) if pid else None
-                self.close(pane.id, expected_generation=params.get("expected_generation"))
+                self.close(pane.id, expected_generation=params.get("expected_generation"),
+                           reason=params.get("reason") or "stopped")
                 return {"stopped": True, "pid": pid, "identity": identity}
         if method == "layout.get":       # the daemon owns the layout (herdr server model)
             open_ids = {space["id"] for space in self.spaces}
@@ -2226,8 +2378,14 @@ class Daemon:
             return self._hosted(self.continue_card(
                 params["task_id"], params["say"], place=params.get("place"),
                 expected_generation=params.get("expected_generation"),
-                consult=bool(params.get("consult")),
             ))
+        if method == "pane.consult_card":
+            async def consulted():
+                pane, run_id = await self.consult_card(
+                    params["task_id"], params["say"], place=params.get("place"),
+                    expected_generation=params.get("expected_generation"), asker=params.get("asker"))
+                return {**self._pane_reply(pane), "run_id": run_id}
+            return consulted()
         if method == "pane.read":
             pane = self.panes.get(params["id"])
             if pane is None:
@@ -2491,7 +2649,7 @@ class Daemon:
         await asyncio.gather(watcher, return_exceptions=True)
         for pane_id in list(self.panes):
             try:
-                self.close(pane_id)
+                self.close(pane_id, reason="the panel shut down")
             except ValueError:
                 pass
         if self._reapers:      # all grace periods run in parallel; worst case ~2.5s, not 4s x panes

@@ -206,15 +206,58 @@ def report_failure(con, role, error, reason, rows):
     return told
 
 
+def settle_consultation(board, run_id, lock, status, *, reason=None, exit_code=None):
+    """End a consultation (``tasks.end_consultation``). One that ends unanswered is reported to
+    whoever asked, as Hermes' Bot Mode reports a failed delivery (``report_failure``): the card
+    itself stays as it was, so nothing else would tell them. Returns the ended run or None."""
+    from misaka.core.platform import tasks
+
+    run = tasks.end_consultation(board, run_id, lock, status, reason=reason, exit_code=exit_code)
+    if run is not None and status != "done":
+        try:
+            tell_asker(board, run, reason or status)
+        except Exception:  # the consultation is settled; a lost notice is only logged
+            logger.warning("Could not tell the sender that consultation %s ended", run_id, exc_info=True)
+    return run
+
+
+def tell_asker(board, run, reason):
+    """Tell whoever sent the message a consultation answered that it ended unanswered."""
+    from misaka.core import session_catalog
+    from misaka.core.platform import tasks
+
+    started = board.execute("SELECT payload FROM events WHERE task_id=? AND kind='consultation_started' "
+                            "AND run_id=? ORDER BY id DESC LIMIT 1", (run["task_id"], run["id"])).fetchone()
+    asker = (json.loads(started["payload"] or "{}") if started else {}).get("asker") or {}
+    if not asker:
+        return                                   # typed in her window: the person saw it end
+    text = (f"Card {run['task_id']} ({run['assignee']}) did not answer your message: {reason}. "
+            "Her delivered work stands; send it again, or have the card reworked.")
+    con = connect()
+    try:
+        session_id = asker.get("sender_session")
+        record = session_catalog.live_session(session_id) if session_id else None
+        if record is not None and record.get("inbox"):
+            send(con, record["inbox"], text, summary=text[:80], sender=run["assignee"], to_session=session_id)
+            return
+        card = tasks.get(board, asker["sender_task"]) if asker.get("sender_task") else None
+        if card is not None:
+            send(con, card["assignee"], text, summary=text[:80], sender=run["assignee"],
+                 to_task=card["id"], generation=int(card["generation"]))
+    finally:
+        con.close()
+
+
 def _idle_card_target(card):
     """A card nobody is running. Not started yet, the row is pinned to its attempt and handed over
-    at its first tool boundary (B16, how the daemon mails a first attempt). Finished, she is woken
+    at its first tool boundary (B16, how the daemon mails a first attempt). Otherwise she is woken
     in her own session: CCB's SendMessage resumes a stopped agent from its transcript with the
-    message (resumeAgentBackground), Hermes' Bot Mode runs the turn in the recipient's own session,
-    and here that is the card's ``pane.continue_card``, what misaka_sister_message makes. Her window
-    may still be open; the wake takes it over all the same, because her answer is then a new
-    attempt the sender can wait for (misaka_sister_output, block) -- a message put into that open
-    session left Last Order nothing to wait on, and she decided without the answer (B121)."""
+    message (resumeAgentBackground), Hermes' Bot Mode runs the turn in the recipient's own session.
+    A finished card (``consult``) answers it as a consultation, which leaves the card as it is --
+    her open window takes it through her inbox, a closed one is reopened -- and the sender waits
+    on that consultation (misaka_sister_output, block): a message once put into an open window
+    left Last Order nothing to wait on, and she decided without the answer (B121). A card parked
+    with its window closed is continued, as misaka_sister_message would."""
     from misaka.core.network.sister_runtime import TERMINAL_BOARD_STATUSES
 
     if card["status"] == "review":
@@ -223,6 +266,7 @@ def _idle_card_target(card):
         return {**_card_target(card, None), "not_started": True}
     return {"to_addr": card["assignee"], "to_task": card["id"], "to_session": None,
             "generation": int(card["generation"]), "after_turn": False, "wake_card": True,
+            "consult": card["status"] in FINISHED,
             "workspace": card["workspace"],
             "label": f"card {card['id']} ({card['assignee']}: {card['title']})"}
 
@@ -290,18 +334,21 @@ def _run_cards(role, *, sender_task, sender_session):
         board.close()
 
 
-def wake_card(target, message):
-    """Continue a closed card with ``message`` as her next turn, in her own session. Blocking."""
+def wake_card(target, message, *, asker=None):
+    """Put ``message`` to a card nobody is running, as her next turn in her own session. A
+    finished card answers it as a consultation (``pane.consult_card``: the card stays as it is,
+    the reply carries the run the sender can wait on); a parked one is continued. Blocking."""
     from misaka.ui.panel import client as net
 
     pane = os.environ.get("MISAKA_NET_PANE")
     if not pane:
         net.ensure()
-    # Consulted, not reworked: the cards built on her answer are not sent back to todo.
     request = {"task_id": target["to_task"], "say": message,
-               "expected_generation": target["generation"], "consult": True}
+               "expected_generation": target["generation"]}
     if pane:
         request["place"] = {"grid": pane}
+    if target.get("consult"):
+        return net.request("pane.consult_card", {**request, "asker": asker})
     return net.request("pane.continue_card", request)
 
 
@@ -511,23 +558,33 @@ def send_as(sender, addr, message, summary, *, request_input=False, card_task=No
                        f" · session {sender_session}" if sender_session else ""))
         # A note that asks nothing gets no reply: a reply to a finished card wakes her in turn,
         # and two finished cards thanking each other would wake each other for ever.
-        out = wake_card(target, f"[Message from {who}. If it asks you something, answer with SendMessage; "
-                                f"a note that asks nothing needs no reply. Then complete the card again "
-                                f"with misaka_card_complete -- your deliverable stands unless you change "
-                                f"it.]\n{message}")
+        consult = bool(target.get("consult"))
+        if consult:
+            header = (f"[Message from {who}. If it asks you something, answer with SendMessage; a note that "
+                      f"asks nothing needs no reply. Your card stays finished: files you change and findings "
+                      f"you note are declared again when this turn ends.]")
+        else:
+            header = (f"[Message from {who}. If it asks you something, answer with SendMessage; then carry "
+                      f"on with your card.]")
+        out = wake_card(target, f"{header}\n{message}", asker={
+            "sender": sender, "sender_task": card_task, "sender_session": sender_session})
         from misaka.core.platform import cards
         try:
-            cards.append_log(target["workspace"], target["to_task"], sender, f"[message] {message}")
+            # [consult] and [message] (a continuation) read alike otherwise in her log.
+            cards.append_log(target["workspace"], target["to_task"], sender,
+                             f"[{'consult' if consult else 'message'}] {message}")
         except OSError:
             pass
+        what = ("had finished, so she is answering your message in her own session; the card stays "
+                "as it was" if consult else "was woken in her own session with your message as her next turn")
         return {"content": [{"type": "text", "text": (
-            f"{target['label']} had finished, so she was woken in her own session with your "
-            f"message as her next turn (pane {out['pane_id']}). A reply comes back as a message"
+            f"{target['label']} {what} (pane {out['pane_id']}). A reply comes back as a message"
             + ("; to hear it before you go on, wait for her with misaka_sister_output "
                f"(task_id={target['to_task']}, block=true)." if sender == "last-order"
                else "; continue working without waiting for it."))}],
             "details": {"to": target["to_addr"], "to_task": target["to_task"], "to_session": None,
-                        "pane_id": out["pane_id"], "woken": True}}
+                        "pane_id": out["pane_id"], "woken": True,
+                        **({"consultation": out.get("run_id")} if consult else {})}}
     if request_input:
         mid = request_help(target, body, message, summary, sender=sender, card_task=card_task,
                            sender_session=sender_session)
@@ -558,8 +615,13 @@ def request_help(target, body, message, summary, *, sender, card_task, sender_se
     """The card help protocol: the row is held out of every inbox until this attempt is parked
     for it. If the mailbox write fails the live card is untouched; if parking loses its
     ownership race the held row is deleted."""
+    from misaka.core.network import worker
     from misaka.core.platform import tasks
 
+    if card_task and worker.claim_env(card_task)[0] is None and worker.attempt_env(card_task)[0] is not None:
+        # A finished card answering a consultation has no attempt to park.
+        raise ValueError("This card is finished and is answering a message; it cannot wait for input. "
+                         "Ask with SendMessage (request_input=false) and answer with what you have.")
     raw_generation = (os.environ.get("MISAKA_SISTER_OWNER_GENERATION")
                       or os.environ.get("MISAKA_USAGE_GENERATION", ""))
     generation = int(raw_generation) if raw_generation.isdigit() else None
@@ -775,8 +837,8 @@ class SendMessageParams(BaseModel):
 
     to: str = Field(description=(
         "A card id (t_xxxxxx) reaches the session running that card; a session id reaches that one "
-        "conversation. A finished card, or its closed session, is woken in her own session with this "
-        "message as her next turn; a card that has not started gets it when it does. Inside a workflow's "
+        "conversation. A finished card answers it in her own session (her window, open or reopened) and "
+        "stays finished; a card that has not started gets it when it does. Inside a workflow's "
         "run a name means that role's card in the run; otherwise a name (last-order, or a Sister id such "
         "as 10032) reaches "
         "the one session of that role in your space, or her contact session when none is there; "

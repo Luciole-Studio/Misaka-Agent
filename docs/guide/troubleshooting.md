@@ -167,8 +167,8 @@ Her turn has no time limit of its own: it is stopped only after 30 minutes witho
 (`misaka dm --timeout`), or once every window that wrote has closed -- closing the panel stops it
 -- and then the message stays queued for her next turn. One sent to a card that has not started waits for
 it to start; one sent to a running card or a live session arrives at its next tool boundary, which
-can take a while if it is in the middle of a long step. A finished card is woken by the message,
-so its answer comes after a new turn of hers.
+can take a while if it is in the middle of a long step. A finished card answers the message in a
+new turn of hers and stays finished; if that turn is stopped, the sender is told it went unanswered.
 
 **`Unknown recipient ...`, or `... is N live sessions in this space`**
 Address a Sister by her number (`10032`). If several of her sessions are open, name one by its

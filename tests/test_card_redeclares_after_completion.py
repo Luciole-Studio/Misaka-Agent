@@ -165,3 +165,101 @@ async def test_a_red_team_revising_its_critique_after_completion_redeclares_it(c
     await _end_turn(part, "revised as asked")
     assert len(_submissions(con, tid)) == 2
     assert tasks.latest_payload(con, tid, "redeclare_failed", generation=1) is None
+
+
+# ── consultations (R40): a finished card's later turns are runs of the card, not attempts ──
+
+def _consultation(con, tid):
+    return con.execute("SELECT * FROM task_runs WHERE task_id=? AND phase='consult' ORDER BY started_at DESC, "
+                       "attempt DESC LIMIT 1", (tid,)).fetchone()
+
+
+async def test_a_turn_typed_in_her_finished_window_is_a_consultation(card):
+    con, tid, out, part = card
+    await _complete(con, tid, out, part)
+
+    await part.agent_start()
+    run = _consultation(con, tid)
+    assert (run["status"], run["pid"], run["generation"]) == ("running", os.getpid(), 1)
+    assert tasks.get(con, tid)["status"] == "done"
+    (out / "report.md").write_bytes(b"corrected while answering\n")
+    await _end_turn(part, "answered")
+
+    assert _consultation(con, tid)["status"] == "done"
+    assert len(_submissions(con, tid)) == 2, "what the answer changed is declared again"
+    row = tasks.get(con, tid)
+    assert (row["status"], row["generation"]) == ("done", 1)
+
+
+async def test_the_consultation_opened_for_her_window_is_the_one_she_answers(card):
+    con, tid, out, part = card
+    await _complete(con, tid, out, part)
+    opened = tasks.start_consultation(con, tid, generation=1, lock="consult:daemon", pid=os.getpid(),
+                                      asker={"sender": "last-order"})
+    await part.agent_start()
+    await _end_turn(part, "answered")
+    assert tasks.get_run(con, opened["id"])["status"] == "done"
+    assert con.execute("SELECT COUNT(*) FROM task_runs WHERE phase='consult'").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(("reason", "status", "why"), [
+    ("aborted", "stopped", "interrupted in her window"),
+    ("error", "failed", "request error"),
+])
+async def test_a_consultation_that_does_not_end_cleanly_is_settled_as_such(card, reason, status, why):
+    con, tid, out, part = card
+    await _complete(con, tid, out, part)
+    await part.agent_start()
+    await _end_turn(part, "", reason=reason)
+    run = _consultation(con, tid)
+    assert (run["status"], run["summary"]) == (status, why)
+    assert tasks.get(con, tid)["status"] == "done"
+
+
+async def test_her_session_closing_mid_answer_settles_the_consultation(card):
+    con, tid, out, part = card
+    await _complete(con, tid, out, part)
+    await part.agent_start()
+    part._con = tasks.connect(os.path.join(tasks.get(con, tid)["workspace"], "board.db"))   # hers to close
+    await part.session_shutdown()
+    assert _consultation(con, tid)["summary"] == "her session ended before she answered"
+
+
+async def test_completing_while_answering_is_explained_not_refused(card):
+    con, tid, out, part = card
+    await _complete(con, tid, out, part)
+    await part.agent_start()
+    tool = next(t for t in part.tools if t.name == "misaka_card_complete")
+    result = await tool.execute("fixture", {"summary": "again"}, None, None, None)
+    assert "already finished and stays so" in result["content"][0]["text"]
+
+
+async def test_a_consultation_started_by_the_daemon_records_findings_and_declares_them(card, monkeypatch):
+    """The pane the daemon opens for a closed window carries the consultation, not a claim."""
+    con, tid, out, part = card
+    await _complete(con, tid, out, part)
+    opened = tasks.start_consultation(con, tid, generation=1, lock="consult:pane")
+    monkeypatch.delenv("MISAKA_USAGE_CLAIM_LOCK")
+    monkeypatch.setenv("MISAKA_CONSULT_RUN", opened["id"])
+    monkeypatch.setenv("MISAKA_CONSULT_LOCK", "consult:pane")
+    await part.agent_start()
+    await _note(part, findings=[{"text": "the decree is No. 226", "claim_type": "fact", "source_file": "report.md"}])
+    await _end_turn(part, "answered")
+    assert tasks.get_run(con, opened["id"])["status"] == "done"
+    assert [f["text"] for f in _submissions(con, tid)[-1]["findings"]] == ["the decree is No. 226"]
+
+
+async def test_a_review_is_not_revised_in_an_answer(card, monkeypatch):
+    """A red team's issues are its round's answer; revising them is a re-review (rework)."""
+    from misaka.core.research import runs
+    con, tid, out, part = card
+    await _complete(con, tid, out, part)
+    run = runs.create(con, workspace=tasks.get(con, tid)["workspace"], question="Why?")
+    runs.link_task(con, run["id"], tid, kind="red_team", node=runs.root(con, run["id"]))
+    con.commit()
+    opened = tasks.start_consultation(con, tid, generation=1, lock="consult:pane")
+    monkeypatch.delenv("MISAKA_USAGE_CLAIM_LOCK")
+    monkeypatch.setenv("MISAKA_CONSULT_RUN", opened["id"])
+    monkeypatch.setenv("MISAKA_CONSULT_LOCK", "consult:pane")
+    with pytest.raises(ValueError, match="re-review"):
+        await _note(part, issues=[])

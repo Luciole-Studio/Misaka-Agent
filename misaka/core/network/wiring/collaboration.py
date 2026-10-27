@@ -9,8 +9,8 @@ SISTER_TOOLS = {
                     "A name reaches the one session of that role in your space; with several there, address one "
                     "by its card or session id. To go back to the Sister who did a piece of work, address "
                     "her card or session id, never her name: a name may reach her contact session, which "
-                    "holds none of that work. A finished card or its closed session is woken in her own "
-                    "conversation by your message; a card that has not started gets it when it does. "
+                    "holds none of that work. A finished card answers your message in her own conversation "
+                    "and stays finished; a card that has not started gets it when it does. "
                     "Delivery is asynchronous and may wake a contact session. "
                     "Owned sub-agent IDs/names are resolved before those names. "
                     "Ordinary messages do not create, start, complete or park a card."),

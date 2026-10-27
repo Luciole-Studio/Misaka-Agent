@@ -25,11 +25,13 @@ def contract_flags(text):
     return ["--", text]
 
 
-def launch(task_id, resume_only=False, say=None):
+def launch(task_id, resume_only=False, say=None, consult=False):
     """``resume_only`` reopens the saved session without resending the contract. ``say`` (with
     it) is delivered as the first turn of a new attempt: the daemon claimed the card
-    (``pane.continue_card``) and this process settles it like a first run. Without a claim a
-    reopened session is only for looking."""
+    (``pane.continue_card``) and this process settles it like a first run. With ``consult`` it is
+    a finished card's answer to a message instead (``pane.consult_card``): no claim, the card
+    stays as it is, and the consultation the daemon opened is what this process settles. Without
+    a claim or a consultation a reopened session is only for looking."""
     # Read the card and let go: the session below runs for as long as a person keeps it open.
     with contextlib.closing(db.connect(CFG["db"])) as con:
         row = db.get(con, task_id)
@@ -43,7 +45,15 @@ def launch(task_id, resume_only=False, say=None):
     task.update(extras)
     lock = os.environ.get("MISAKA_USAGE_CLAIM_LOCK")
     generation = os.environ.get("MISAKA_USAGE_GENERATION")
-    if lock and generation:
+    if consult:
+        consulted, run_id, _consult_lock = worker.consult_env(task_id)
+        with contextlib.closing(db.connect(CFG["db"])) as con:
+            run = db.get_run(con, run_id) if run_id else None
+        if (not say or run is None or run["status"] != "running" or consulted != int(task["generation"])
+                or task["status"] not in db.CONSULTABLE):
+            sys.exit(f"Card {task_id}: no consultation of this finished card is open for this pane.")
+        resume_only = True
+    elif lock and generation:
         if task["claim_lock"] != lock or int(task["generation"]) != int(generation):
             sys.exit(f"Card {task_id} is not claimed by this pane; the daemon owns the claim.")
     elif say:
@@ -98,6 +108,6 @@ def launch(task_id, resume_only=False, say=None):
     from misaka.utils import loop_watchdog
     # A claimed card is the daemon's to reclaim when its process ends; a session reopened
     # without a claim is only for a person to read, and stays open.
-    loop_watchdog.configure(f"card-{task_id}", exit_on_stall=bool(lock and generation))
+    loop_watchdog.configure(f"card-{task_id}", exit_on_stall=bool(lock and generation) or consult)
     code = asyncio.run(loop_watchdog.watched(engine_main(flags, assembly.engine_options())))
     sys.exit(code)

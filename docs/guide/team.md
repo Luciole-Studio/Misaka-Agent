@@ -129,14 +129,17 @@ Agents message each other with the `SendMessage` tool, one recipient per message
   session in the sender's panel space, or her contact session when she has none open there. If
   several are open, the sender is shown them and picks one;
 - **a card ID** (`t_3cfb45`) reaches the session working that card. A card that has not started
-  gets the message when it does. A finished card is woken: the message is her next turn in her
-  own conversation (in her window, if it is still open), she answers, and completes again. Waking
-  her does not send the cards built on her work back to be redone;
-- **a session ID** reaches that live session; a finished card's session, open or closed, wakes
-  its card.
+  gets the message when it does. A finished card answers it in her own conversation -- through
+  her window if it is still open, in a reopened one if not -- and stays finished: this is a
+  consultation, not a new attempt. What she changes while answering is declared again when her
+  turn ends, the cards built on her work are left as they are, and closing her window or a crash
+  ends only the consultation (the sender is told it went unanswered);
+- **a session ID** reaches that live session; a finished card's session, open or closed, reaches
+  its card the same way.
 
 A contact session's answer goes back to the window that wrote to it. Last Order can wait for a
-woken Sister's answer with `misaka_sister_output` (`block: true`) before she goes on.
+finished Sister's answer with `misaka_sister_output` (`block: true`) before she goes on: it holds
+until the consultation ends, and says how it ended.
 
 A Sister who needs a decision she can't make herself asks Last Order this way, and her card waits
 for the answer. Last Order brings the question to you when it is yours to decide.

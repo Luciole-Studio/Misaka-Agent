@@ -104,9 +104,13 @@ def _parser(extension_commands=None):
                     help="Resume the card's existing session")
     cs.add_argument("--say", metavar="TEXT",
                     help="With --resume: deliver this message as the first turn")
+    cs.add_argument("--consult", action="store_true",
+                    help="With --say: a finished card answering a message (no claim; the card stays)")
     ac = sub.add_parser("ally-card", help="Internal: run an ally's card over ACP inside a pane")
     ac.add_argument("task_id")
     ac.add_argument("--say", metavar="TEXT", help="Continue the card with this message as the first turn")
+    ac.add_argument("--consult", action="store_true",
+                    help="With --say: a finished card answering a message (no claim; the card stays)")
     sub.add_parser("ally-bridge", help="Internal: the MCP server lending an ally its card's tools")
 
     sub.add_parser("panel", help="Open the Misaka Network panel (default in a terminal)")
@@ -280,12 +284,12 @@ def _cmd_net_daemon(args):
 
 def _cmd_card_shell(args):
     from misaka.cli import card_shell
-    card_shell.launch(args.task_id, resume_only=args.resume, say=args.say)
+    card_shell.launch(args.task_id, resume_only=args.resume, say=args.say, consult=args.consult)
 
 
 def _cmd_ally_card(args):
     from misaka.core.network.ally import card
-    card.launch(args.task_id, say=args.say)
+    card.launch(args.task_id, say=args.say, consult=args.consult)
 
 
 def _cmd_ally_bridge(args):

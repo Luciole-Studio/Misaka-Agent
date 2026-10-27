@@ -1297,6 +1297,12 @@ class SisterRuntime:
             "agent_id": row["agent_id"],
             "session_file": row["session_file"],
         }
+        consultation = db.latest_consultation(self.con, task_id, generation=row["generation"])
+        if consultation is not None:
+            # Her answer to a message comes back as a message; this says how that turn ended.
+            data["consultation"] = {"status": consultation["status"], "reason": consultation["summary"] or "",
+                                    "started_at": consultation["started_at"],
+                                    "ended_at": consultation["completed_at"]}
         owner, context = owners.card(self.con, task_id)
         if owner is not None:
             data[owner.name] = {key: value for key, value in context.items() if key != "scope"}
@@ -1350,13 +1356,19 @@ class SisterRuntime:
             raise ValueError(f"Card not found: {task_id}")
         if bool(getattr(signal, "aborted", False)):
             raise asyncio.CancelledError
-        if row["status"] not in TERMINAL_BOARD_STATUSES and block:
+
+        def settled(row):
+            # A finished card answering a message stays finished: waiting for her answer is
+            # waiting for the consultation (B121; tasks.start_consultation).
+            return row["status"] in TERMINAL_BOARD_STATUSES and db.live_consultation(self.con, task_id) is None
+
+        if not settled(row) and block:
             loop = asyncio.get_running_loop()
             deadline = loop.time() + timeout_ms / 1000
             signal_wait = getattr(signal, "wait", None)
             aborted = asyncio.create_task(signal_wait()) if callable(signal_wait) else None
             try:
-                while row["status"] not in TERMINAL_BOARD_STATUSES:
+                while not await asyncio.to_thread(settled, row):
                     remaining = deadline - loop.time()
                     if remaining <= 0:
                         break
@@ -1389,7 +1401,7 @@ class SisterRuntime:
                 if aborted:
                     aborted.cancel()
 
-        terminal = row["status"] in TERMINAL_BOARD_STATUSES
+        terminal = await asyncio.to_thread(settled, row)
         retrieval = "success" if terminal else "timeout" if block else "not_ready"
         data = self._snapshot_row(row)
         return {"retrieval_status": retrieval, "task": data}
