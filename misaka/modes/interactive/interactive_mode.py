@@ -1439,22 +1439,23 @@ class InteractiveMode:
         return await self._shutdownFuture
 
     async def _promptInitialMessages(self) -> None:
-        """MISAKA fork: pi sends these bare, and nothing else starts a turn during its startup. Here the network wiring
-        flushes inbox deliveries with ``triggerTurn`` at bind, so a ``card-shell --resume --say`` note could arrive
-        mid-turn; ``prompt()`` then refused it ("Agent is already processing") and the note was lost. ``followUp``
-        queues it behind that turn; an idle session is unchanged."""
+        """MISAKA fork: pi sends these bare, and nothing else starts a turn during its startup. Here a session's
+        inbox may start one with ``triggerTurn`` at bind (a card's waits for this message), so a message could arrive
+        mid-turn; ``prompt()`` then refused it ("Agent is already processing") and it was lost (2026-09-23).
+        ``steer`` puts it in at that run's next tool boundary. ``followUp`` held it until the whole run was over,
+        which for a card was after she had submitted (2026-10-24, R14). An idle session is unchanged."""
         initialMessage = self.options.initialMessage
         if initialMessage:
             try:
                 await self.session.prompt(
-                    initialMessage, {"images": self.options.initialImages, "streamingBehavior": "followUp"}
+                    initialMessage, {"images": self.options.initialImages, "streamingBehavior": "steer"}
                 )
             except Exception as error:  # noqa: BLE001 - upstream `catch (error)` shows any failure
                 self.showError(errorMessage(error))
 
         for message in self.options.initialMessages or []:
             try:
-                await self.session.prompt(message, {"streamingBehavior": "followUp"})
+                await self.session.prompt(message, {"streamingBehavior": "steer"})
             except Exception as error:  # noqa: BLE001 - upstream `catch (error)` shows any failure
                 self.showError(errorMessage(error))
 

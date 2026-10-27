@@ -9,6 +9,7 @@ woken by the first one waited for that run to end as well.
 Only the model is scripted: the session, its inbox pump, the mailbox and the tool loop are real.
 """
 import asyncio
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -44,10 +45,14 @@ async def _until(check, seconds=3.0):
     return True
 
 
-@pytest.fixture
-async def world(tmp_path, monkeypatch):
+@contextlib.asynccontextmanager
+async def _world(tmp_path, monkeypatch, *, card_task=None, waiting=()):
+    """A session with its inbox; ``card_task`` makes it that card's session, and ``waiting`` are
+    notes queued for it before it starts."""
     for key in ("MISAKA_NET_SPACE", "MISAKA_USAGE_GENERATION", "MISAKA_SISTER_OWNER_GENERATION"):
         monkeypatch.delenv(key, raising=False)
+    if card_task:
+        monkeypatch.setenv("MISAKA_USAGE_GENERATION", "1")
 
     refuse_network(monkeypatch, "the offline mail test attempted a network connection")
     monkeypatch.setattr(messages, "POLL_SECONDS", 0.02)
@@ -60,7 +65,7 @@ async def world(tmp_path, monkeypatch):
 
     work = ToolDefinition(name="work", label="Work", description="Do one step of the card.",
                           parameters={"type": "object", "properties": {}}, execute=execute)
-    inbox = messages.MessagesPart(sender="10032", receive=True)
+    inbox = messages.MessagesPart(sender="10032", receive=True, card_task=card_task)
     loader = DefaultResourceLoader({"cwd": str(tmp_path), "agentDir": str(tmp_path / "agent"),
                                     "noExtensions": True, "noPromptTemplates": True, "noThemes": True})
     await loader.reload()
@@ -88,16 +93,20 @@ async def world(tmp_path, monkeypatch):
     mail = messages.connect()
 
     def post(body):
+        if card_task:
+            return messages.send(mail, "10032", body, summary=body[:20], sender="last-order",
+                                 to_task=card_task, generation=1)
         return messages.send(mail, "10032", body, summary=body[:20], sender="last-order",
                              to_session=session.sessionManager.getSessionId())
 
     def delivered(mid):
         return mail.execute("SELECT delivered_at FROM messages WHERE id=?", (mid,)).fetchone()[0] is not None
 
+    queued = [post(body) for body in waiting]
     await session.bindExtensions({})          # starts the parts, the inbox pump among them, as a mode does
     try:
         yield SimpleNamespace(session=session, calls=calls, script=script, tool_bodies=tool_bodies,
-                              post=post, delivered=delivered,
+                              post=post, delivered=delivered, inbox=inbox, waiting=queued,
                               tool_call=lambda: _reply(model, [ToolCall(id="call-1", name="work", arguments={})],
                                                        "toolUse"),
                               stop=lambda text: _reply(model, [{"type": "text", "text": text}], "stop"))
@@ -106,6 +115,20 @@ async def world(tmp_path, monkeypatch):
         await session.waitForIdle()
         session.dispose()
         mail.close()
+
+
+@pytest.fixture
+async def world(tmp_path, monkeypatch):
+    async with _world(tmp_path, monkeypatch) as world:
+        yield world
+
+
+@pytest.fixture
+async def card_world(tmp_path, monkeypatch):
+    """A card's session started with a note from Last Order already in her inbox."""
+    async with _world(tmp_path, monkeypatch, card_task="t_0000c4",
+                      waiting=["check the 1982 edition before you conclude"]) as world:
+        yield world
 
 
 async def test_mail_to_a_working_session_is_read_at_its_next_tool_boundary(world):
@@ -154,3 +177,33 @@ async def test_the_inbox_keeps_reading_after_a_reload(world):
     assert await _until(lambda: world.delivered(note)), "the inbox stopped for good at the reload"
     await world.session.waitForIdle()
     assert "a note sent after /reload" in world.calls[0]
+
+
+async def test_a_card_reads_her_contract_before_the_mail_that_was_waiting_for_her(card_world):
+    """2026-10-24 (R14): a card whose inbox already held notes when she started got a note as her
+    first message, not her contract. The waiting mail started a run of its own; the contract, sent
+    a moment later, queued behind that whole run and reached fourteen cards after they had
+    submitted -- each then did the card again, and a blind card read its materials before the
+    rules that blinded her. The mail now goes in at the contract run's first tool boundary (B16)."""
+    world = card_world
+
+    async def work():
+        await _until(world.session.agent.hasQueuedMessages)
+
+    world.tool_bodies["work"] = work
+    world.script += [world.tool_call(), world.stop("card submitted")]
+    assert not await _until(lambda: world.calls, 0.2), "the waiting note must not start a run of its own"
+    # As the pane sends it (`InteractiveMode._promptInitialMessages`).
+    await world.session.prompt("the card contract", {"streamingBehavior": "steer"})
+    assert "the card contract" in world.calls[0]
+    assert "check the 1982 edition" not in world.calls[0], "the contract comes first, alone"
+    assert "check the 1982 edition" in world.calls[1], "the note is read at the contract run's first tool boundary"
+    assert len(world.calls) == 2
+    assert await _until(lambda: world.delivered(world.waiting[0]))
+
+
+async def test_a_card_that_never_ran_still_shuts_its_inbox_down(card_world):
+    """Her inbox waits for her first run; a session closed before it must not hang on the wait."""
+    await asyncio.wait_for(card_world.inbox.session_shutdown({"type": "session_shutdown"}, None), 2)
+    assert card_world.calls == []
+    assert not card_world.delivered(card_world.waiting[0]), "the note stays queued for her attempt"

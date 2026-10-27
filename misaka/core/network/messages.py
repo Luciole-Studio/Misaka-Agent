@@ -814,6 +814,9 @@ class MessagesPart:
         self.card_task = card_task
         self.contact = contact
         self._stop = asyncio.Event()
+        self._opened = asyncio.Event()  # a card's first run has started (_pump waits for it)
+        if not card_task:
+            self._opened.set()
         self._job = None
         self._handovers = set()     # sendCustomMessage calls still running (a turn mail started)
         self.commands = []
@@ -883,7 +886,25 @@ class MessagesPart:
         raw = os.environ.get("MISAKA_SISTER_OWNER_GENERATION") or os.environ.get("MISAKA_USAGE_GENERATION", "")
         return int(raw) if raw.isdigit() else None
 
+    async def _until_opened(self):
+        """Whether the session's first run started before it stopped.
+
+        A card session opens with its contract (or a wake's note), and mail pinned to her goes in
+        at that run's first tool boundary (B16), as CCB drains a sub-agent's pending messages only
+        after its tool results. Polling from session start instead, mail already waiting started
+        a run of its own before the contract was sent; the contract then queued behind that whole
+        run and reached the card after she had submitted (2026-10-24, R14: 14 cards)."""
+        waits = [asyncio.ensure_future(self._opened.wait()), asyncio.ensure_future(self._stop.wait())]
+        try:
+            await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for wait in waits:
+                wait.cancel()
+        return not self._stop.is_set()
+
     async def _pump(self):
+        if not await self._until_opened():
+            return
         # `connect` opens the file, runs the schema script and sweeps delivered rows: all
         # blocking, all on this session's loop unless it is handed to a thread.
         con, cancelled = await settle_thread_call(connect)
@@ -1061,6 +1082,9 @@ class MessagesPart:
         self._stop = asyncio.Event()
         self._job = asyncio.ensure_future(self._pump())
         self._job.add_done_callback(self._report)
+
+    async def agent_start(self, event, ctx):
+        self._opened.set()
 
     async def session_shutdown(self, event, ctx):
         if not self.receive:
