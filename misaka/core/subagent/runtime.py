@@ -2946,31 +2946,65 @@ class SubagentManager:
 
         task._receipt_job = self._schedule_callback(persist_receipt())
 
-    async def _notify_task(self, task: AgentTask) -> None:
+    async def _notify_task(self, task: AgentTask, *, recovered: bool = False) -> None:
         async with self._notification_lock:
             if task.notified:
                 return
             notification_id = task.notification_id
             details = task.notification_data()
+            message = {
+                "customType": "task-notification",
+                "content": build_task_notification(details),
+                "display": True,
+                "details": details,
+            }
+            receipt = {
+                "_deliveryId": f"subagent:{task.parent_session_id}:{task.id}:{notification_id}",
+                "_onPersist": lambda: self._acknowledge_task(task, notification_id),
+            }
             try:
-                self.session.moments.send_message(
-                    {
-                        "customType": "task-notification",
-                        "content": build_task_notification(details),
-                        "display": True,
-                        "details": details,
-                    },
-                    {
-                        "deliverAs": "followUp",
-                        "triggerTurn": True,
-                        "_deliveryId": f"subagent:{task.parent_session_id}:{task.id}:{notification_id}",
-                        "_onPersist": lambda: self._acknowledge_task(task, notification_id),
-                    },
-                )
+                if recovered:
+                    # Awaited, not scheduled: it must be queued before the session's first run
+                    # prepares its opening messages (``recover_notices``).
+                    await self.session.sendCustomMessage(message, {"deliverAs": "nextTurn", **receipt})
+                else:
+                    self.session.moments.send_message(message, {"deliverAs": "followUp", "triggerTurn": True, **receipt})
             except RuntimeError:
                 # Enqueueing is not delivery. Leave the receipt pending when
                 # the parent is gone, and let its durable delivery ID deduplicate retries.
                 return
+
+    async def recover_notices(self, context: Any) -> int:
+        """Tell a reopened session about its background agents whose ends it never heard; returns how many.
+
+        A notice waits in the process's own queue until it lands in the transcript, and only then
+        does its receipt mark the agent ``notified``. pi's loop ends a run on an error reply without
+        taking follow-ups, so card M2, failing on 503s while its agents failed too, still held
+        their notices when it was stopped, and twelve of fourteen agents were never reported
+        (2026-10-25, R34). Their metadata said so, but was read only when an agent was looked up.
+
+        Each background agent that ended unreported is reported with the notice and delivery id it
+        would have had (one that did land, its receipt lost, is acknowledged and not repeated), and
+        so is each that was still running: its child fences itself within a second of its parent
+        dying, and the transcript lets SendMessage resume it. The notice joins the next run's
+        opening messages rather than starting one, so a resumed card reads it with its contract.
+        """
+        from misaka.config.sessions import subagent_session_dir
+
+        owner = context.sessionManager
+        parent_id = _safe_component(str(owner.getSessionId()))
+        if not Path(subagent_session_dir(parent_id, owner.getSessionFile())).is_dir():
+            return 0
+        self._session_dir(context)
+        nobody = "\0"                                          # no agent's name or id: read them all
+        loaded = await asyncio.to_thread(self._scan_metadata, nobody, nobody)
+        self._adopt_scanned(nobody, nobody, loaded)
+        unreported = sorted((task for task in loaded if task.background and not task.notified
+                             and self._tasks.get(task.id) is task),
+                            key=lambda task: (task.end_time_ms or task.start_time_ms, task.id))
+        for task in unreported:
+            await self._notify_task(task, recovered=True)
+        return len(unreported)
 
     def start_shell(self, command: str, *, context: Any, spawn_context: Any = None,
                     operations: Any = None, timeout: float | None = None,

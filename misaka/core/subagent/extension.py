@@ -579,6 +579,15 @@ class SubagentPart:
         self._loop = asyncio.get_running_loop()
         _ACTIVE_MANAGERS.setdefault(self._loop, set()).add(manager)
         await self._refresh_roster(ctx)
+        if owner is not None:
+            # The ends a previous process of this session never got to report (R34).
+            try:
+                await manager.recover_notices(ctx)
+            except Exception as error:  # noqa: BLE001 - an unreadable record must not keep the session from opening
+                from misaka.core.subagent.runtime import _log_warning
+
+                await asyncio.to_thread(_log_warning, "Sub-agent notices from before this session reopened "
+                                                      f"could not be recovered: {error}")
 
     async def _refresh_roster(self, ctx: Any) -> dict[str, agent_roster.AgentDefinition]:
         manager = self.manager
