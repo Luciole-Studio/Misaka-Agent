@@ -5,6 +5,7 @@ loop, every card's bundle read the whole corpus again (27 s each), and the works
 each page of each document and rendered it with a join per node -- 214,587 nodes in 746 s (R33).
 """
 import hashlib
+import os
 import threading
 import time
 from contextlib import closing
@@ -44,8 +45,8 @@ def board(tmp_path, monkeypatch):
 
 def test_a_document_without_structure_is_a_leaf(board, monkeypatch):
     con, run, _root = board
-    docs = [{"doc_id": "flat", "title": "One page of OCR", "pages": 1},
-            {"doc_id": "book", "title": "A structured book", "pages": 300}]
+    docs = [{"doc_id": "flat", "title": "One page of OCR", "pages": 1, "orig_path": "/w/ocr/p1.txt"},
+            {"doc_id": "book", "title": "A structured book", "pages": 300, "orig_path": "/w/book.pdf"}]
     monkeypatch.setattr(workspace.corpus, "docs", lambda **k: docs)
     monkeypatch.setattr(workspace.corpus, "_tree",
                         lambda did, **k: [{"node_id": "0001", "title": "Chapter 1"}] if did == "book" else None)
@@ -57,9 +58,93 @@ def test_a_document_without_structure_is_a_leaf(board, monkeypatch):
     tree = workspace.outline(con, workspace=run["workspace"], run_id=run["id"], research_store=runs)
     materials = next(n for n in tree["nodes"] if n["node_id"] == "materials")["nodes"]
     flat, book = materials
-    assert flat == {"node_id": "doc:flat", "title": "One page of OCR", "summary": "1 pages", "nodes": []}
+    assert flat == {"node_id": "doc:flat", "title": "One page of OCR", "summary": "1 pages",
+                    "source": "/w/ocr/p1.txt", "nodes": []}
     assert book["nodes"] == [{"node_id": "0001", "title": "Chapter 1"}]
     assert book["summary"] == "300 pages (PageIndex structure)"
+
+
+def test_the_task_board_comes_before_the_runs(board, monkeypatch):
+    con, run, _root = board
+    monkeypatch.setattr(workspace.corpus, "docs", lambda **k: [])
+    tree = workspace.outline(con, workspace=run["workspace"], run_id=run["id"], research_store=runs)
+    assert [n["node_id"] for n in tree["nodes"]] == ["board", "materials", "runs", "ledger"]
+
+
+def _files(prefix, kind, folder, count):
+    if kind == "doc":
+        return [{"node_id": f"doc:{prefix}{i}", "title": f"page {i}", "summary": "1 pages",
+                 "source": os.path.join(folder, f"{prefix}{i}.txt"), "nodes": []} for i in range(count)]
+    return [{"node_id": f"artifact:{prefix}{i}", "title": f"file {i}", "summary": "task_output",
+             "path": os.path.join(folder, f"{prefix}{i}.txt"), "nodes": []} for i in range(count)]
+
+
+def _accounted(text, files):
+    """Each file is listed, or counted on the line of the folder it is in; nothing else."""
+    kind = "indexed documents" if files[0]["node_id"].startswith("doc:") else "registered files"
+    folded = {}
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if "not listed here" in stripped and kind in stripped:
+            folder, rest = stripped.split("  — ", 1)
+            assert folder not in folded
+            folded[folder] = int(rest.split()[0])
+    listed = [f for f in files if f"[{f['node_id']}]" in text]
+    counted = {}
+    for f in files:
+        if f not in listed:
+            where = os.path.join(os.path.dirname(f.get("path") or f["source"]), "")
+            counted[where] = counted.get(where, 0) + 1
+    return listed, folded, counted
+
+
+def test_a_large_file_list_is_listed_by_folder_and_no_file_goes_missing():
+    root, deep, other = (os.path.join(os.sep, "w", *parts) for parts in
+                         (("cards", "t_1"), ("cards", "t_1", "work", "ocr"), ("cards", "t_1", "raw")))
+    docs = _files("r", "doc", root, 5) + _files("o", "doc", deep, 140) + _files("w", "doc", other, 11)
+    artifacts = _files("a", "artifact", root, 8) + _files("b", "artifact", deep, 112)
+    card = {"node_id": "task:t_1", "title": "[t_1] card", "summary": "done",
+            "nodes": [{"node_id": "task:t_1#contract", "title": "Task contract"}, *docs]}
+    branch = {"node_id": "branch:b_1", "title": "Node b_1", "nodes": artifacts}
+    text = workspace.render({"node_id": "ws", "title": "Workspace", "nodes": [card, branch]})
+    for files in (docs, artifacts):
+        listed, folded, counted = _accounted(text, files)
+        assert folded == counted and len(listed) + sum(folded.values()) == len(files)
+    assert "[task:t_1#contract]" in text
+    assert {f["node_id"] for f in _accounted(text, docs)[0]} == {f"doc:r{i}" for i in range(5)}
+    assert f"{os.path.join(deep, '')}  — 140 indexed documents, not listed here; doc_list with this folder" in text
+    assert f"{os.path.join(other, '')}  — 11 indexed documents" in text
+    assert f"{os.path.join(deep, '')}  — 112 registered files, not listed here; find in this folder" in text
+
+
+def test_a_list_of_a_hundred_files_is_listed_whole():
+    files = _files("o", "doc", os.path.join(os.sep, "w", "ocr"), 100)
+    text = workspace.render({"node_id": "ws", "title": "Workspace", "nodes": files})
+    assert all(f"[{f['node_id']}]" in text for f in files) and "not listed here" not in text
+
+
+async def test_doc_list_finds_a_document_by_any_of_its_source_folders(tmp_path, monkeypatch):
+    """The folder a large card's documents are listed under finds every one of them, though a
+    document's title is the name it was first indexed under."""
+    from types import SimpleNamespace
+
+    from misaka.core.documents.wiring import documents
+    from misaka.core.wiring import ToolCollector
+    first, card = tmp_path / "downloads" / "gaz.pdf", tmp_path / "cards" / "t_1" / "sources" / "gaz.pdf"
+    rows = [{"doc_id": "d1", "title": "gaz.pdf", "pages": 3, "orig_path": str(first), "paths": [str(first), str(card)]},
+            {"doc_id": "d2", "title": "Unrelated", "pages": 1, "orig_path": str(tmp_path / "x.md")}]
+    monkeypatch.setattr(documents.corpus, "docs", lambda **k: rows)
+    collector = ToolCollector()
+    documents.register(collector)
+    doc_list = next(t for t in collector.tools if t.name == "doc_list")
+
+    async def listed(query):
+        result = await doc_list.execute("call", {"query": query}, None, None, SimpleNamespace(cwd=str(tmp_path)))
+        return result["content"][0]["text"]
+
+    assert "d1" in await listed(os.path.join(str(card.parent), "")) and "d2" not in await listed("cards")
+    assert "d1" in await listed("GAZ.PDF")                       # titles match as before
+    assert "No indexed document's title or source path" in await listed("nowhere")
 
 
 def test_one_settle_reads_the_project_index_once(board, monkeypatch):

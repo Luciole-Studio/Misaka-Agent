@@ -408,7 +408,8 @@ def _render_djvu(djvu_path, page, scale):
 
 def register(harn):
     class ListParams(BaseModel):
-        query: str = Field("", description="Optional title filter; omit to list every document.")
+        query: str = Field("", description="Optional filter on a document's title or source file path, "
+                                           "such as a folder the workspace index names; omit to list every document.")
 
     @_register(
         harn, name="doc_list", label="List documents",
@@ -423,9 +424,16 @@ def register(harn):
         if not rows:
             return _text("No documents are indexed in this workspace.")
         if params.query:
-            rows = [r for r in rows if params.query.lower() in (r["title"] or "").lower()]
+            # Source paths too: the workspace index lists a large card's documents by folder, and
+            # a title is the name a document was first indexed under -- a card that indexed its
+            # own folder while working keeps the file name, not the declared path (42 of 33,298
+            # documents on one project, and 450 with more than one source).
+            needle = params.query.lower()
+            rows = [r for r in rows if needle in (r["title"] or "").lower()
+                    or any(needle in str(path).lower() for path in r.get("paths") or [r.get("orig_path") or ""])]
         if not rows:
-            return _text("No indexed document titles match this filter. Omit query to list all documents.")
+            return _text("No indexed document's title or source path matches this filter. "
+                         "Omit query to list all documents.")
         # A title is the document's own words -- an EPUB's dc:title, an HTML <title>, the name a
         # card gave its artifact -- and it used to be the file name, which the workspace chose.
         # doc_outline and doc_find fence theirs; rows read out in the tool's own voice would let
