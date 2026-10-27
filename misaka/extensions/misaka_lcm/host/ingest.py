@@ -240,18 +240,23 @@ NATIVE_METADATA = frozenset({'_compressed_summary', '_compressed_summary_has_use
 
 
 def preserve_sources(before, after):
-    """Ingest preserves ordinal positions, including cached sanitized replacements."""
+    """Ingest preserves ordinal positions, including cached sanitized replacements, and each
+    row's entry binding (``entry_rows.KEY``): a cached replay remembered from a tagged list must
+    not hand its tags to an untagged one, whose ``Replay.unchanged`` compares whole rows."""
+    from .entry_rows import KEY
+
     if len(before) != len(after):
         raise ValueError('LCM ingest changed message cardinality')
     result = []
     for original, replay in zip(before, after):
-        if original.get(SOURCE) == replay.get(SOURCE):
+        if all(original.get(key) == replay.get(key) for key in (SOURCE, KEY)):
             result.append(replay)
         else:
             replay = dict(replay)
-            replay.pop(SOURCE, None)
-            if SOURCE in original:
-                replay[SOURCE] = original[SOURCE]
+            for key in (SOURCE, KEY):
+                replay.pop(key, None)
+                if key in original:
+                    replay[key] = original[key]
             result.append(replay)
     return result
 

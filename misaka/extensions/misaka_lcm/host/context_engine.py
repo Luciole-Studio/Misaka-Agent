@@ -26,7 +26,7 @@ from misaka.utils.values import read_field, signal_aborted
 
 from ..vendor import aux_session
 from ..vendor.reconcile import _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
-from . import config_bridge, execution, fence, ingest, llm, rollups, storage
+from . import config_bridge, entry_rows, execution, fence, ingest, llm, rollups, storage
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,19 @@ def engine(ctx=None):
             llm.install()
             execution.install_worker_ownership()
             class NativeLCMEngine(LCMEngine):
+                def _bind_storage(self, *args, **kwargs):
+                    super()._bind_storage(*args, **kwargs)
+                    # Upstream discards the ids of the rows it writes; keep each one's entry
+                    # (entry_rows). On the class, so a private import runtime (carry) records too.
+                    store, write = self._store, self._store._append_protected_batch
+
+                    def append_protected_batch(session_id, messages, *args, **kwargs):
+                        ids = write(session_id, messages, *args, **kwargs)
+                        entry_rows.record(store, ids, messages)
+                        return ids
+
+                    store._append_protected_batch = append_protected_batch
+
                 def handle_tool_call(self, *args, **kwargs):
                     with execution.worker_owner(self):
                         return super().handle_tool_call(*args, **kwargs)
@@ -184,6 +197,7 @@ def _shutdown(built, timeout=25):
         if thread.is_alive():
             raise TimeoutError("MISAKA LCM FTS workers are still active; retaining the cache")
     built.shutdown()
+    entry_rows.forget(built._store)               # reopened on next use; the cache directory may go now
 
 
 def release_project(ctx=None):
@@ -319,7 +333,7 @@ def _session_originals(transcript):
     from misaka.core.session_manager import projectContextEntry
 
     edits = _edits_before_ingest(transcript.entries)
-    return {item["id"]: ingest.upstream_messages(projectContextEntry(item, edits.get(item["id"])))
+    return {item["id"]: entry_rows.tag(item["id"], ingest.upstream_messages(projectContextEntry(item, edits.get(item["id"]))))
             for item in transcript.entries if item["type"] != "compaction"}
 
 
@@ -329,15 +343,28 @@ def _archive_map(built, transcript, *, through=None):
         transcript = Transcript(transcript.entries[:end], transcript.branch, transcript.session_id,
                                 transcript.session_file, transcript.project)
     projected = _session_originals(transcript)
-    originals = [message for group in projected.values() for message in group]
-    watermark, scope = built._last_compacted_store_id, built.active_store_ids
-    try:
-        built._last_compacted_store_id, built.active_store_ids = 0, None
-        stored = built._get_store_id_map_for_messages(originals)
-    finally:
-        built._last_compacted_store_id, built.active_store_ids = watermark, scope
-    return projected, {entry: [stored[id(message)] for message in group if id(message) in stored]
-                       for entry, group in projected.items()}
+    # Each entry's rows by the binding recorded when they were written (entry_rows), not by
+    # content; only entries no row is bound to are matched by content, among unbound rows.
+    rows = [row[0] for row in built._store._conn.execute(
+        "SELECT store_id FROM messages WHERE session_id = ?", (built._session_id,))]
+    bound, taken = entry_rows.bound(built._store, rows)
+    # Only the positions the archive still projects: a reply a retry dropped after agent_end
+    # stored it stays as unowned as content matching left it.
+    result = {entry: [positions[index] for index in range(len(projected[entry])) if index in positions]
+              for entry, positions in bound.items() if projected.get(entry)}
+    unbound = [entry for entry in projected if entry not in result]
+    if unbound:
+        originals = [message for entry in unbound for message in projected[entry]]
+        watermark, scope = built._last_compacted_store_id, built.active_store_ids
+        try:
+            built._last_compacted_store_id = 0
+            built.active_store_ids = {row for row in rows if row not in taken} if taken else None
+            stored = built._get_store_id_map_for_messages(originals)
+        finally:
+            built._last_compacted_store_id, built.active_store_ids = watermark, scope
+        result.update({entry: [stored[id(message)] for message in projected[entry] if id(message) in stored]
+                       for entry in unbound})
+    return projected, {entry: result[entry] for entry in projected}
 
 
 def _archive_sources(built, transcript):
@@ -445,10 +472,14 @@ def turn_key(transcript):
                                            else entry.get('message'))), None)
 
 def _messages(transcript, built):
-    from misaka.core.session_manager import buildSessionContext
+    from misaka.core.session_manager import buildSessionProjection
 
-    native = buildSessionContext(transcript.branch).messages
-    messages = ingest.upstream_messages(native)
+    # buildSessionContext's messages, entry by entry, each row carrying the entry it came from
+    # (entry_rows). A compaction's own rows -- its summary scaffold and the copies it retains --
+    # are no entry's source and carry none.
+    messages = [row for item in buildSessionProjection(transcript.branch).entries
+                for row in (ingest.upstream_messages(item.messages) if item.sourceEntry["type"] == "compaction"
+                            else entry_rows.tag(item.sourceEntry["id"], ingest.upstream_messages(item.messages)))]
     if built._bypasses_lcm_context_management():
         return messages
     entry = _checkpoint(transcript)
