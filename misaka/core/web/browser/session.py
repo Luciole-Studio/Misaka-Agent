@@ -276,7 +276,9 @@ class BrowserSession:
                 try:
                     response = await self.rest('POST', f'/tabs/{self.camofox_tab}/navigate', {'url': args['url']})
                 except httpx.HTTPStatusError as error:
-                    if error.response.status_code != 404:
+                    # 410 Gone is a tab the server already let go of, as 404 is (the close path
+                    # treats both alike): keeping it left every later call failing (R9).
+                    if error.response.status_code not in {404, 410}:
                         raise
                     self.camofox_tab = None
                     return await self._camofox(name, args)  # Explicitly missing tab; no uncertain action replay.

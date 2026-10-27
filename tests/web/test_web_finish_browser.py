@@ -561,3 +561,43 @@ async def test_lightpanda_does_not_silently_ignore_network_routes(monkeypatch, i
     session = BrowserSession(str(isolated), {'lightpanda_path': '/fixture/lightpanda'}, 'local')
     with pytest.raises(ValueError, match='one all-request proxy'):
         await launch(session)
+
+
+@pytest.mark.parametrize('gone', [404, 410])
+async def test_a_camofox_tab_the_server_let_go_is_reopened(monkeypatch, isolated, gone):
+    """410 Gone is a tab the server already let go of, as 404 is: navigating on it kept the dead
+    tab and every later browser call failed (R9)."""
+    monkeypatch.setenv('CAMOFOX_URL', 'https://camofox.test')
+    monkeypatch.setattr('misaka.core.web.browser.session.check_url', async_identity)
+
+    def reply(r):
+        if r.url.path == '/tabs/old/navigate':
+            return httpx.Response(gone, json={'error': 'tab gone'})
+        if r.url.path == '/tabs' and r.method == 'POST':
+            return httpx.Response(200, json={'tabId': 'fresh', 'url': 'https://page.test/'})
+        if r.url.path.endswith('/snapshot'):
+            return httpx.Response(200, json={'snapshot': 'page', 'url': 'https://page.test/', 'refsCount': 0})
+        return httpx.Response(200, json={'success': True})
+
+    fake_network(monkeypatch, reply)
+    session = BrowserSession(str(isolated), {'camofox_managed_persistence': True}, 'camofox')
+    session.camofox_tab = 'old'
+    try:
+        result = await session._camofox('browser_navigate', {'url': 'https://page.test/'})
+        assert result['success'] and session.camofox_tab == 'fresh'
+    finally:
+        await session.close()
+
+
+async def test_a_camofox_server_error_on_navigate_still_fails(monkeypatch, isolated):
+    monkeypatch.setenv('CAMOFOX_URL', 'https://camofox.test')
+    monkeypatch.setattr('misaka.core.web.browser.session.check_url', async_identity)
+    fake_network(monkeypatch, lambda r: httpx.Response(500, json={'error': 'boom'}))
+    session = BrowserSession(str(isolated), {'camofox_managed_persistence': True}, 'camofox')
+    session.camofox_tab = 'old'
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await session._camofox('browser_navigate', {'url': 'https://page.test/'})
+        assert session.camofox_tab == 'old'
+    finally:
+        await session.close()
