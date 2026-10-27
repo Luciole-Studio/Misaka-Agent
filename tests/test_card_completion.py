@@ -6,6 +6,7 @@ rework", a side errand -- ended a turn and the turn ended the card, even one who
 said "not submitting yet". Ten of ten submissions that day answered a message, never the
 contract. Now completion is explicit, gated on the contract deliverable, and a turn without
 it leaves the card running."""
+import asyncio
 import os
 import time
 
@@ -32,6 +33,8 @@ class _Agent:
 
 
 class _Session:
+    isStreaming = False
+
     def __init__(self):
         self.moments = _Moments()
         self.agent = _Agent()
@@ -226,3 +229,72 @@ async def test_an_earlier_attempts_declaration_does_not_submit_the_next(tmp_path
     await _end_turn(rework, "Read the feedback; I will rewrite section 2 next.")
     assert tasks.get(con, tid)["status"] == "running"
     assert con.execute("SELECT COUNT(*) FROM events WHERE task_id=? AND kind='submitted'", (tid,)).fetchone()[0] == 1
+
+
+REFUSED = ("Cannot complete: the contract deliverable `choson-tusol-genealogy.md` is not under the output "
+           "directory yet. Write it, then call misaka_card_complete again.")
+
+
+async def _refused(part):
+    await part.tool_result({"toolName": "misaka_card_complete", "isError": True, "input": {}, "details": {},
+                            "content": [{"type": "text", "text": REFUSED}]})
+
+
+async def test_a_card_left_idle_after_the_notice_ends_its_attempt_unsettled(tmp_path, monkeypatch, request):
+    """2026-10-27: a card whose completion was refused ended its turns without the call; after the one
+    notice nothing would wake it again, and it sat running. Its attempt now ends as a card process
+    that exits without settling does: one failure, and the next attempt is told why."""
+    con, tid, _out = _board(tmp_path, request)
+    monkeypatch.setattr(todo, "UNSETTLED_GRACE_SECONDS", 0)
+    part = _part(monkeypatch, con, tid)
+    await _refused(part)
+    await _end_turn(part, "I could not complete it.")              # the notice
+    assert part._idle_watch is None
+    await _end_turn(part, "Waiting.")                              # nothing after it
+    await part._idle_watch
+    row = tasks.get(con, tid)
+    assert row["status"] == "ready" and row["claim_lock"] is None and row["consecutive_failures"] == 1
+    assert "nothing was left to wake the session" in row["last_failure_error"]
+    assert "choson-tusol-genealogy.md" in row["last_failure_error"]
+    assert "Cannot complete" in row["last_failure_error"]          # what the refusal said
+    assert '"failure_kind": "protocol_violation"' in tasks.latest_payload(con, tid, "retry_scheduled")
+    assert "## Previous attempt" in worker.card_prompt({**dict(row), "_handoffs": [], **worker.card_extras(con, row)})
+
+
+async def test_a_turn_that_starts_keeps_the_card_running(tmp_path, monkeypatch, request):
+    con, tid, _out = _board(tmp_path, request)
+    monkeypatch.setattr(todo, "UNSETTLED_GRACE_SECONDS", 0)
+    part = _part(monkeypatch, con, tid)
+    await _end_turn(part)
+    await _end_turn(part)
+    watch = part._idle_watch
+    await part.agent_start()                                       # a message woke her
+    await asyncio.gather(watch, return_exceptions=True)
+    assert watch.cancelled() and tasks.get(con, tid)["status"] == "running"
+
+
+async def test_a_session_already_running_again_keeps_the_card_running(tmp_path, monkeypatch, request):
+    con, tid, _out = _board(tmp_path, request)
+    monkeypatch.setattr(todo, "UNSETTLED_GRACE_SECONDS", 0)
+    part = _part(monkeypatch, con, tid)
+    await _end_turn(part)
+    await _end_turn(part)
+    part.session.isStreaming = True
+    await part._idle_watch
+    assert tasks.get(con, tid)["status"] == "running"
+
+
+async def test_a_background_agent_still_out_keeps_the_card_running(tmp_path, monkeypatch, request):
+    """Its notice starts her next turn."""
+    from misaka.core.subagent import extension as subagent
+
+    con, tid, _out = _board(tmp_path, request)
+    monkeypatch.setattr(todo, "UNSETTLED_GRACE_SECONDS", 0)
+    monkeypatch.setattr(subagent, "has_background_tasks", lambda: True)
+    part = _part(monkeypatch, con, tid)
+    await _end_turn(part)
+    await _end_turn(part)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not part._idle_watch.done() and tasks.get(con, tid)["status"] == "running"
+    await part.session_shutdown()

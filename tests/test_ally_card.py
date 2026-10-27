@@ -167,6 +167,20 @@ async def test_a_cut_reply_gets_one_more_turn(make):
     assert ally.row["status"] == "done"
 
 
+async def test_in_a_pane_a_card_left_idle_after_the_notice_ends_its_attempt_unsettled(make, monkeypatch):
+    """In process the dispatcher settles what is left (``dispatch._run_ally``); a pane waited for a
+    typed line or mail for good."""
+    monkeypatch.setattr(ally_card, "UNSETTLED_GRACE_SECONDS", 0)
+    ally = make()
+    ally.play([{"say": "Tried."}], [{"say": "Still working."}])
+    await asyncio.wait_for(ally.claim(out=io.StringIO()).run(), 60)
+    row = ally.row
+    assert ally.prompts()[1].startswith("[Card still running]")
+    assert row["status"] == "ready" and row["consecutive_failures"] == 1
+    assert "nothing was left to wake the session" in row["last_failure_error"] and "report.md" in row["last_failure_error"]
+    assert '"failure_kind": "protocol_violation"' in tasks.latest_payload(ally.con, ally.tid, "retry_scheduled")
+
+
 async def test_mail_waits_for_the_running_turn_and_mail_to_an_idle_ally_starts_one(make):
     ally = make()
     ally.play([{"say": "On it."}, {"sleep": 3}], [{"say": "Noted."}], [{"say": "Waiting."}], ally.finish())

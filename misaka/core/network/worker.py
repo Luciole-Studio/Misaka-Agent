@@ -192,6 +192,19 @@ def missing_deliverable(task):
     return None if name is None or deliverable_path(task, name) else name
 
 
+def unsettled_reason(task, refused=None):
+    """Why an attempt told once that its card is still running ended unsettled when it went idle
+    again (a Sister's ``todo.TodoPart._watch_idle``, an ally's ``Attempt.idle``). The next
+    attempt reads it in its contract (``card_prompt``)."""
+    reason = ("the turn after the notice that the card was still running ended again without "
+              "`misaka_card_complete`, and nothing was left to wake the session")
+    if missing := missing_deliverable(task):
+        reason += f"; the deliverable `{missing}` is not under `{task['output_dir']}`"
+    if refused:
+        reason += f"; `misaka_card_complete` last answered: {refused}"
+    return reason
+
+
 def deliverable_path(task, name):
     """The delivered file for contract name ``name`` under the card's output directory, or None.
     The Sister's file may differ from the contract name in a character or two: Last Order's

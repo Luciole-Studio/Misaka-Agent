@@ -49,6 +49,7 @@ from misaka.core.network.ally.transcript import Transcript
 from misaka.core.platform import tasks as db
 
 PROGRESS_SECONDS = 60       # how often a busy ally stamps progress on its card (as a Sister does)
+UNSETTLED_GRACE_SECONDS = 30   # how long a card told it is still running may wait with nothing typed or mailed
 CANCEL_SECONDS = 10         # how long a cancelled turn has to end before its agent is stopped
 PREVIEW_CHARS = 160
 
@@ -106,6 +107,7 @@ class Attempt:
         self._progressed = False        # an update came since the last progress stamp
         self._midline = False
         self._held = self._nudged = self._continued = False
+        self._idle_ends = False         # the wait after this turn ends the attempt unsettled (``idle``)
 
     # -- the pane --
 
@@ -362,7 +364,7 @@ class Attempt:
         """One ACP turn; returns ``(stopReason, error)``."""
         self.transcript.user(text)
         self._print(f"› {_preview(text)}")
-        self.busy, self._progressed = True, True
+        self.busy, self._progressed, self._idle_ends = True, True, False
         await self._announce("agent_start")
         stamper = asyncio.create_task(self._stamp())
         error = None
@@ -427,6 +429,7 @@ class Attempt:
             self._print(f"[card {self.task_id} submitted]")
             raise _Over
         if self._held:
+            self._idle_ends = True
             return None
         self._held = True
         missing = worker.missing_deliverable(row)
@@ -441,14 +444,24 @@ class Attempt:
         return text or None
 
     async def idle(self):
-        """Wait for the next turn's text: a typed line or mail. None ends the attempt."""
+        """Wait for the next turn's text: a typed line or mail. None ends the attempt. After the
+        card's one notice that it is still running, a wait that brings neither for
+        ``UNSETTLED_GRACE_SECONDS`` ends the attempt unsettled, as in process (``dispatch._run_ally``)
+        and as a Sister's pane does (``todo.TodoPart._watch_idle``)."""
         if self.out is None:
             return await asyncio.to_thread(self._take_mail)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + UNSETTLED_GRACE_SECONDS if self._idle_ends else None
         while not self.stopping:
             if text := self._typed() or await asyncio.to_thread(self._take_mail):
                 return text
             if not await asyncio.to_thread(self._still_mine):
                 return None
+            if deadline is not None and loop.time() >= deadline:
+                row = await asyncio.to_thread(self._owned)
+                if row is None:
+                    return None
+                raise _Failed(worker.unsettled_reason(row), "protocol_violation")
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.wake.wait(), messages.POLL_SECONDS)
         return None

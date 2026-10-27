@@ -1,5 +1,6 @@
 """Per-card tools: nested, durable to-do items, and a line in the card's log."""
 import asyncio
+import logging
 import os
 import secrets
 import time
@@ -158,6 +159,7 @@ def _turn_failure(event):
 
 
 PROGRESS_SECONDS = 60     # how often a busy Sister stamps progress on its card
+UNSETTLED_GRACE_SECONDS = 30   # how long a card told it is still running may sit with nothing to wake it
 
 
 def _review_record(submission):
@@ -206,6 +208,8 @@ class TodoPart:
         self._turn_clean = False          # the last agent_end was a plain stop (not error/aborted/length)
         self._failure = None              # (stop, reason) when the last agent_end was an error or a cut reply
         self._continued_generation = None # the generation already given its one turn after a cut reply
+        self._idle_watch = None           # the wait that ends an attempt left idle after that notice
+        self._refusal = None              # what misaka_card_complete last refused with
         self._touched = 0.0
         self._in_flight = 0               # tool calls started and not yet answered
         self._stamper = None              # the task that stamps progress while one is
@@ -503,6 +507,7 @@ class TodoPart:
         return {"writeDirectories": {name: [str(output)] for name in ("write", "edit") if name in tools}}
 
     async def agent_start(self, event=None, ctx=None):
+        self._cancel_idle_watch()
         self._summary = None
         self._summary_token = None
         row = self._owned_row()
@@ -697,9 +702,13 @@ class TodoPart:
         supposed to end this way -- and said once per attempt so a long card is not nagged
         on every turn. The notice starts one more turn: a card nobody will write to again
         would otherwise wait for ever (2026-09-27: a red team wrote its critique, ended the turn
-        without ``misaka_card_complete``, and its node waited forty minutes)."""
+        without ``misaka_card_complete``, and its node waited forty minutes). After it, the
+        same end is watched (``_watch_idle``)."""
         row = self._owned_row()
-        if row is None or self._held_generation == int(row["generation"]):
+        if row is None:
+            return
+        if self._held_generation == int(row["generation"]):
+            self._watch_idle(int(row["generation"]))
             return
         from misaka.core.network import worker
         self._held_generation = int(row["generation"])
@@ -708,6 +717,40 @@ class TodoPart:
                   if missing else "the turn ended without `misaka_card_complete`")
         self._hold(f"The card is still running: {detail}. Call `misaka_card_complete` when the work "
                    "is done; if this turn only answered a message, keep working.")
+
+    def _watch_idle(self, generation):
+        """A clean end without ``misaka_card_complete`` after the notice: only a message would
+        ever wake the card again, and a card whose completion was refused sat running for good
+        (2026-10-27). If nothing does within ``UNSETTLED_GRACE_SECONDS`` -- no turn starts, and
+        no background agent or shell is left to report back -- the attempt ends unsettled, as
+        when a card's process exits without settling (the daemon's ``mark_unsettled``): one
+        failure, the next attempt goes on in this conversation told why, and the last one
+        leaves the card failed for Last Order to decide."""
+        self._cancel_idle_watch()
+        self._idle_watch = asyncio.ensure_future(self._unsettle_if_idle(generation))
+
+    def _cancel_idle_watch(self):
+        if self._idle_watch is not None:
+            self._idle_watch.cancel()
+            self._idle_watch = None
+
+    async def _unsettle_if_idle(self, generation):
+        from misaka.core.network import worker
+        from misaka.core.subagent import extension as subagent
+
+        await asyncio.sleep(UNSETTLED_GRACE_SECONDS)
+        while subagent.has_background_tasks() or subagent.has_async_hooks():
+            await asyncio.sleep(UNSETTLED_GRACE_SECONDS)     # their notices start her next turn
+        if self.session.isStreaming:
+            return
+        try:
+            row = self._owned_row()
+            if row is None or int(row["generation"]) != generation:
+                return
+            self._bdb.mark_unsettled(self.con(), self.task_id, generation=generation, claim_lock=row["claim_lock"],
+                                     reason=worker.unsettled_reason(row, self._refusal))
+        except Exception:  # logged; the card stays running, as it did before this watch
+            logging.getLogger(__name__).warning("Could not end idle card %s unsettled", self.task_id, exc_info=True)
 
     def _record_artifact(self, value):
         row = self._owned_row()
@@ -797,6 +840,10 @@ class TodoPart:
         self._in_flight = max(0, self._in_flight - 1)
         self._touch()
         name = str(_field(event, "toolName", "") or "")
+        if name == "misaka_card_complete":      # what a refusal said, for the reason an idle attempt ends on
+            said = " ".join(str(_field(block, "text", "")) for block in (_field(event, "content", []) or [])
+                            if _field(block, "type") == "text")
+            self._refusal = _flat(said, 300) if _field(event, "isError", False) else None
         if not _field(event, "isError", False):
             raw = _field(event, "input", {}) or {}
             details = _field(event, "details", {}) or {}
@@ -832,6 +879,7 @@ class TodoPart:
 
     async def session_shutdown(self, event=None, ctx=None):
         self._calls_settled()
+        self._cancel_idle_watch()
         if self._consultation is not None:
             self._end_consultation("stopped", "her session ended before she answered")
         if self._con is not None:
