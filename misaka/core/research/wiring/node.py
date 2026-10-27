@@ -17,6 +17,7 @@ import os
 from misaka.config import CFG, current_config
 from misaka.core.platform import tasks as task_store
 from misaka.core.research import runs
+from misaka.utils.values import read_field
 
 SESSION_KINDS = {"foreground"}
 ROLES = {"last_order"}
@@ -51,12 +52,20 @@ class NodePart:
             await asyncio.gather(self.routine, return_exceptions=True)
 
     async def context(self, event, _ctx):
-        """Notes announcing work this node's next phase hands its Last Order stay out of what the
-        model sees (``workflow.ANNOUNCES_PHASE``, R60); they still show, and the rest is untouched."""
+        """What this node's model sees of the run, as the root window's does (``ResearchPart.context``):
+        status ticks, and completion notices of cards whose results the node's phases read while its
+        routine runs, are left out -- three in four of a node window's research notes were ticks --
+        and so are notes announcing work its next phase hands its Last Order (``workflow.ANNOUNCES_PHASE``,
+        R60). They all still show; the transcript is untouched."""
         from misaka.core.research import workflow
+        from misaka.core.research.wiring.research import _feed_noise
 
+        driven = {self.run_id} if self.routine is not None and not self.routine.done() else set()
         messages = event["messages"]
-        kept = [message for message in messages if not workflow.announces_phase_of(message, {self.node_id})]
+        kept = [message for message in messages
+                if not (read_field(message, "role") == "custom"
+                        and _feed_noise(read_field(message, "customType"), read_field(message, "details") or {}, driven))
+                and not workflow.announces_phase_of(message, {self.node_id})]
         return {"messages": kept} if len(kept) != len(messages) else None
 
     def show(self, content, details=None):
