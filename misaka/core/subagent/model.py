@@ -30,6 +30,27 @@ def apply_bedrock_region_prefix(model_id: str, prefix: str) -> str:
     return f"{prefix}.{model_id}" if model_id.startswith("anthropic.") else model_id
 
 
+_VERSION_PART = r"(\d{1,2})(?!\d)"
+
+
+def _family_version(model_id: str, family: str) -> tuple[int, int]:
+    """``(major, minor)`` of ``family`` in a model ID -- ``claude-sonnet-4-5``, ``claude-opus-5.5``,
+    the older ``claude-3-7-sonnet`` -- else ``(-1, -1)``. A date is never a version."""
+    lowered = model_id.lower()
+    match = (re.search(rf"{family}[-.]{_VERSION_PART}(?:[-.]{_VERSION_PART})?", lowered)
+             or re.search(rf"(?<![\d.]){_VERSION_PART}(?:[-.]{_VERSION_PART})?[-.]{family}", lowered))
+    return (int(match[1]), int(match[2] or 0)) if match else (-1, -1)
+
+
+def newest_in_family(pairs: Sequence[tuple[str, str]], family: str) -> tuple[str, str]:
+    """The newest ``(provider, id)`` of ``family``. At one version an undated ID first (pi's
+    ``isAlias``, which ``--model`` prefers too), then the shortest: a ``:batch`` or regional
+    variant of the same model is not the model."""
+    from misaka.core.model_resolver import isAlias
+
+    return max(pairs, key=lambda pair: (_family_version(pair[1], family), isAlias(pair[1]), -len(pair[1])))
+
+
 def _model_pair(model: Any) -> tuple[str, str] | None:
     provider, model_id = read_field(model, "provider"), read_field(model, "id")
     return (str(provider), str(model_id)) if provider and model_id else None
@@ -39,7 +60,8 @@ def resolve_model_spec(
     env: Mapping[str, str], call_model: str | None, definition_model: str | None,
     parent_model: Any, available_models: Sequence[Any], *, permission_mode: str | None = None,
 ) -> tuple[str, str]:
-    """CCB env > tool > definition > inherit; host registry resolves tier IDs."""
+    """CCB env > tool > definition > inherit; a family alias resolves to the newest of the family in
+    the parent provider's catalog (``newest_in_family``), not to CCB's pinned tier versions."""
     parent = _model_pair(parent_model)
     if parent is None:
         raise ValueError("The parent session has no model")
@@ -65,11 +87,11 @@ def resolve_model_spec(
             if parent[0] not in {"anthropic", "amazon-bedrock", "bedrock"}:
                 return parent[0], parent[1] + ("[1m]" if lowered.endswith("[1m]") and lowered != "best[1m]" else "")
             raise ValueError(f"No available model for provider {parent[0]} matches alias: {spec}")
-        # CCB's pinned tier defaults, if present in the host registry. Do not
-        # invent a model absent from a custom MISAKA provider's configuration.
-        version = {"opus": "4-7", "sonnet": "4-6" if parent[0] == "anthropic" else "4-5", "haiku": "4-5"}[family]
-        pool = same_provider
-        resolved = next((pair for pair in pool if f"{family}-{version}" in pair[1]), pool[0])
+        # The newest of the family in this provider's catalog -- MISAKA's own: models.json,
+        # refreshed provider catalogs, the built-ins a release brings -- never a model it does
+        # not list. CCB pins its tier versions, and on a provider that also listed 5.5 they
+        # chose claude-opus-4-7 and dated 4-5 Sonnet and Haiku (2026-10-25, R19).
+        resolved = newest_in_family(same_provider, family)
         if lowered.endswith("[1m]") and lowered != "best[1m]":
             resolved = resolved[0], resolved[1] + "[1m]"
     else:
