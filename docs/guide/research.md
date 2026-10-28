@@ -377,9 +377,15 @@ explains the tabs, panes and keys.
 | see how a run is doing | `/research status [RUN_ID]` | `misaka board` (its cards) |
 | stop a run and get a partial report | `/research stop [RUN_ID]` | Ctrl+C in the running command |
 | resume a stopped or failed run | `/research resume [RUN_ID] [ANSWER]` | `misaka research --resume RUN_ID` |
+| end research mode in this conversation, leaving its stopped or failed run as it is | `/research close [RUN_ID]` | |
 | resume in a different window | `/research resume RUN_ID --here` | |
 | say something to a running node's Last Order (the root's by default) | `/research tell [RUN_ID] [--to NODE_ID] MESSAGE` | `misaka research --tell RUN_ID [--to NODE_ID] "MESSAGE"` |
 | change a running run's limits | `/research limits [RUN_ID] --sister-parallel 2 …` | `misaka research --limits RUN_ID --sister-parallel 2 …` |
+
+A stopped or failed run keeps the research rules standing in the conversation that started it,
+so its Last Order does not answer the unfinished question in the run's place. `/research close`
+lifts them; `/research resume` takes the run up again. A run whose window closed before its stop
+had finished settles the next time that conversation opens.
 
 Resume a run in the Last Order conversation that started it; from any other window,
 `/research resume` names the conversation to open (the sidebar lists it under sessions).

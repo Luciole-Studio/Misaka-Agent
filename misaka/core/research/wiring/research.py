@@ -93,6 +93,8 @@ USAGE = (
     f"       --max-nodes N: how many nodes the research graph may hold, the root included (1-{runs.MAX_NODES_CEILING}).\n"
     "       /research status [RUN_ID]          show the latest run of this folder, or the run you name\n"
     "       /research stop [RUN_ID]            ask the latest active run (or RUN_ID) to stop\n"
+    "       /research close [RUN_ID]           take this conversation's stopped or failed runs (or RUN_ID) out of\n"
+    "                                          it: their rules no longer apply here; /research resume takes one up again\n"
     "       /research tell [RUN_ID] [--to NODE_ID] MESSAGE  say MESSAGE to a running node's Last Order (the root's\n"
     "                                          when no node is named), as if typed in her window\n"
     "       /research limits [RUN_ID] --sister-parallel N ...  change a running run's limits (the options above);\n"
@@ -156,7 +158,7 @@ def parse_command(raw):
         return {"action": "resume", "run_id": run_id, "clarification": rest, "here": here}
     if head == "tell":
         return _parse_tell(line[len("tell"):].strip())
-    if head in {"help", "-h", "--help", "status", "stop", "limits"}:
+    if head in {"help", "-h", "--help", "status", "stop", "close", "limits"}:
         try:
             tokens = shlex.split(line)
         except ValueError:
@@ -173,6 +175,10 @@ def parse_command(raw):
         if len(tokens) > 2:
             raise ValueError(USAGE)
         return {"action": "stop", "run_id": tokens[1] if len(tokens) == 2 else None}
+    if tokens and tokens[0] == "close":
+        if len(tokens) > 2:
+            raise ValueError(USAGE)
+        return {"action": "close", "run_id": tokens[1] if len(tokens) == 2 else None}
     if tokens and tokens[0] == "limits":
         return _parse_limits(tokens[1:])
     # Activation: [start] [DEPTH (alone or before an option)] [--depth N] [--parallel N] [--sister-parallel N] [QUESTION...]. Use the raw
@@ -226,7 +232,7 @@ def _parse_tell(rest):
 
 def _fits_subcommand(tokens):
     """Whether these words are the subcommand their first word names, not a question that starts
-    with it: help alone; status, stop and limits alone or naming a run (a run id is ``r_...``;
+    with it: help alone; status, stop, close and limits alone or naming a run (a run id is ``r_...``;
     words after it are a mistake USAGE answers); limits with its options. 0.18.7 took
     "/research limits of state capacity in Qing China" for a limits change and refused it."""
     if not tokens:
@@ -234,7 +240,7 @@ def _fits_subcommand(tokens):
     head, rest = tokens[0], tokens[1:]
     if head in {"help", "-h", "--help"}:
         return not rest
-    if head in {"status", "stop"}:
+    if head in {"status", "stop", "close"}:
         return not rest or rest[0].startswith("r_")
     return not rest or rest[0].startswith(("r_", "--"))
 
@@ -322,7 +328,7 @@ class ResearchPart:
                 {"deliverAs": "followUp", "triggerTurn": failed},
             )
 
-        async def drive(run_id, ctx, *, resume=False, clarification=""):
+        async def drive(run_id, ctx, *, resume=False, clarification="", settling=False):
             # While the run works in this window, the window's session runs with the run's own
             # compaction threshold and output limit; a paused or finished run gives them back.
             release = session_overrides.apply(self.session, runs.session_overrides(runs.get(con, run_id)))
@@ -354,6 +360,18 @@ class ResearchPart:
                     final = result.get("final") or {}
                     content = final.get("content") or f"Research run `{run_id}` finished: {result['reason']}."
                     final_artifact = final.get("artifact") if result["reason"] == "done" else None
+                    if not final_artifact and final.get("path"):
+                        # A halted run's report quotes every node's conclusion whole: r_77d38618b4's came
+                        # to 3.4 MB, and as this message it put the window at 1.42M tokens (2026-10-26,
+                        # R44). The window is told where the report is, not handed it.
+                        value = result.get("run") or {}
+                        content = (f"Research run `{run_id}` {result['reason']}: {final.get('reason')}\n"
+                                   f"Its incomplete report is `{final['path']}` "
+                                   f"({len(final.get('content') or ''):,} characters): each node's conclusion "
+                                   "as that node wrote it, the issues left unsettled and the saved artifacts, "
+                                   "with no final adjudication. Read it from that file; it is not repeated here.\n"
+                                   f"Nodes {value.get('nodes')} | tasks {value.get('tasks')} | "
+                                   f"undisposed issues {value.get('undisposed_issues')}")
                     if final_artifact:
                         content = (f"# Delivered final report — `{run_id}`\n\n"
                                    "This is the authoritative version; it supersedes this run's working drafts.\n"
@@ -370,6 +388,11 @@ class ResearchPart:
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - infrastructure failures stay visible, and the run stays resumable
+                if settling and not runs.driverless(runs.get(con, run_id)):
+                    # Two windows of one conversation opening together both try to settle its
+                    # stopped run: the one whose driver found the lease taken leaves the report
+                    # to the window that took it.
+                    return
                 self.session.moments.send_message(
                     {"customType": "research-error", "display": True,
                      "content": f"Research run `{run_id}` paused: {type(error).__name__}: {error}\n"
@@ -381,12 +404,25 @@ class ResearchPart:
                 release()
                 drivers.pop(run_id, None)
 
-        def launch(run_id, ctx, *, resume=False, clarification=""):
+        def launch(run_id, ctx, *, resume=False, clarification="", settling=False):
             existing = drivers.get(run_id)
             if existing and not existing.done():
                 return False
-            drivers[run_id] = asyncio.create_task(drive(run_id, ctx, resume=resume, clarification=clarification))
+            drivers[run_id] = asyncio.create_task(drive(run_id, ctx, resume=resume, clarification=clarification,
+                                                        settling=settling))
             return True
+
+        def settle_orphans(ctx):
+            """Finish the stop of this conversation's runs whose driver died stopping them. Closing a
+            window gives its process two seconds and a large run's settle takes forty; a killed or
+            crashed one gets none. The run stayed ``stopping`` under a dead holder's lease, and the
+            workflow's rules stood in this conversation from then on (2026-10-26/27, R61)."""
+            session_id = getattr(getattr(ctx, "sessionManager", None), "sessionId", None)
+            for row in runs.for_session(con, session_id):
+                if row["status"] == "stopping" and runs.driverless(runs.get(con, row["id"])):
+                    launch(row["id"], ctx, settling=True)
+
+        self._settle_orphans = settle_orphans
 
         # What bare /research chose while it waits for the question: None, or the run's scheduling
         # limits, its approval policy, its own session settings and the project folder.
@@ -489,13 +525,38 @@ class ResearchPart:
                                       "info")
                         return
                     runs.request_stop(con, run["id"])
-                    # A waiting-input run has no driver left to observe this request.
-                    if not run["driver_lock"]:
-                        launch(run["id"], ctx)
+                    # Nothing else observes this request without a live driver: a waiting-input
+                    # run's driver has returned, and a run whose driver died stopping it still names
+                    # that driver's lease -- the stop only rewrote updated_at (2026-10-28, R61).
+                    if runs.driverless(run):
+                        launch(run["id"], ctx, settling=True)
                     ctx.ui.notify(
                         f"Stop request recorded for {run['id']}. Running tasks will stop or drain.",
                         "info",
                     )
+                    return
+                if spec["action"] == "close":
+                    session_id = getattr(getattr(ctx, "sessionManager", None), "sessionId", None)
+                    mine = [row for row in runs.for_session(con, session_id)
+                            if spec["run_id"] in (None, row["id"])]
+                    still_open = [row for row in mine if row["status"] in runs.ACTIVE]
+                    if still_open:
+                        ctx.ui.notify(f"Research run {still_open[0]['id']} is {still_open[0]['status']}; "
+                                      "stop it first (/research stop), then close it.", "error")
+                        return
+                    closed = [row["id"] for row in mine
+                              if row["status"] in PAUSED_STATUSES and runs.close(con, row["id"], session_id)]
+                    had_choice, pending["choice"] = pending["choice"] is not None, None
+                    if closed:
+                        ctx.ui.notify(f"Research mode closed: run {', '.join(closed)} no longer belongs to this "
+                                      "conversation, and its rules no longer apply here. "
+                                      "`/research resume RUN_ID` takes a run up again.", "info")
+                    elif had_choice:
+                        ctx.ui.notify("Research mode closed.", "info")
+                    else:
+                        ctx.ui.notify(f"Research run {spec['run_id']} is not a stopped or failed run of this "
+                                      "conversation." if spec["run_id"] else
+                                      "No stopped or failed research run of this conversation to close.", "info")
                     return
                 if spec["action"] == "tell":
                     run = _find_run(con, spec["run_id"], _workspace(ctx), active=True)
@@ -694,7 +755,7 @@ class ResearchPart:
                 ctx.ui.notify(str(error), "error")
 
         self.commands.append(CoreCommand(
-            "research", "Start a persistent Research Workflow run, or check, stop, or resume one.", command))
+            "research", "Start a persistent Research Workflow run, or check, stop, close, or resume one.", command))
 
         async def cleanup(_event, _ctx):
             startup_tasks = list(starts)
@@ -719,6 +780,9 @@ class ResearchPart:
 
     def attach(self, session):
         self.session = session
+
+    async def session_start(self, event, ctx):
+        self._settle_orphans(ctx)
 
     async def input(self, event, ctx):
         return await self._capture_question(event, ctx)

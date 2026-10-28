@@ -439,6 +439,13 @@ def acquire_driver(con, run_id, lock, ttl_seconds=DRIVER_TTL_SECONDS):
     return lease.acquired
 
 
+def driverless(run):
+    """Whether no live driver holds ``run`` (as ``get`` reads it): nobody took its lease, the lease
+    ran out, or its holder's process is gone -- the lease ``acquire_driver`` would take over now."""
+    lock, expires = run["driver_lock"], run["driver_expires"]
+    return not lock or expires is None or expires < int(time.time()) or _lease_holder_is_dead(lock)
+
+
 def heartbeat_driver(con, run_id, lock, ttl_seconds=DRIVER_TTL_SECONDS):
     return graph.renew(con, run_id, lock, ttl=int(ttl_seconds))
 
@@ -900,6 +907,18 @@ def request_stop(con, run_id):
         "WHERE id=? AND status IN ('active','waiting_input','stopping')",
         (int(time.time()), run_id),
     )
+
+
+def close(con, run_id, session_id):
+    """Take a stopped or failed run out of the conversation that started it: ``for_session`` no
+    longer returns it, so its notice stops standing there, and its cards' notices stop going there.
+    A resume binds the resuming window again (``workflow.run``). False when it was not that
+    conversation's paused run."""
+    return con.execute(
+        "UPDATE research_runs SET origin_session=NULL,updated_at=? "
+        "WHERE id=? AND origin_session=? AND status IN ('stopped','failed')",
+        (int(time.time()), run_id, session_id),
+    ).rowcount == 1
 
 
 def resume(con, run_id, *, driver_lock=None, clarification=""):

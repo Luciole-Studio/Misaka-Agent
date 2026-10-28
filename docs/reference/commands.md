@@ -132,6 +132,7 @@ Available in Last Order's window.
 | `/research status [RUN_ID]` | the state of the latest run in this folder, or the one you name |
 | `/research stop [RUN_ID]` | stop a run; it writes a partial report |
 | `/research resume [RUN_ID] [ANSWER]` | resume a paused run, answering its questions if it asked any |
+| `/research close [RUN_ID]` | end research mode in this conversation; a stopped or failed run stays as it is |
 | `/research tell [RUN_ID] [--to NODE_ID] MESSAGE` | say something to a running node's Last Order, the root's by default |
 | `/research limits [RUN_ID] --sister-parallel 2 …` | change a running run's limits |
 | `/research resume RUN_ID --here` | continue the run in this window (this Last Order will not remember the run's earlier conversation) |

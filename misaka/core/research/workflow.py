@@ -77,7 +77,8 @@ answer to the research question to the user; internal working conclusions and dr
 
 RESEARCH_PAUSED = """[Research Workflow paused]
 Research run {run_ids} of this conversation is paused ({statuses}); its driver is not running. Only the user can
-continue it, with `/research resume <run id>` in this window. Until then: do not continue, restart or rework its
+continue it, with `/research resume <run id>` in this window, or take it out of this conversation with
+`/research close`, after which these rules no longer apply here. Until then: do not continue, restart or rework its
 research cards yourself, do not change the board or its files by hand, and do not stand in for the driver.
 You may report status, explain the plan or pause, and discuss other topics. Do not deliver an answer to the unfinished
 research question or resume its investigation. Wait for the user.
@@ -2115,7 +2116,7 @@ def _partial_result(con, run, reason, *, status="stopped", driver_lock=None):
     _try_refresh_workspace_index(con, runs.get(con, run["id"]))
     _bundle(con, run)
     views.write_views(con, run, final=True)
-    return {"reason": status, "final": {"artifact": aid, "path": path,
+    return {"reason": status, "final": {"artifact": aid, "path": path, "reason": reason,
             "content": Path(path).read_text(encoding="utf-8")},
             "run": runs.summary(con, run["id"])}
 
