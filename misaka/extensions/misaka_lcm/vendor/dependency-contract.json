@@ -140,6 +140,9 @@
       "imported_api": [
         "misaka.extensions.misaka_lcm.host.config_bridge.load_config",
         "misaka.extensions.misaka_lcm.host.context_engine_abc",
+        "misaka.extensions.misaka_lcm.native.image_token_cost.current_image_token_cost",
+        "misaka.extensions.misaka_lcm.native.model_metadata._count_image_tokens",
+        "misaka.extensions.misaka_lcm.native.model_metadata._wire_message_shadow",
         "misaka.extensions.misaka_lcm.vendor.command._VOYAGE_USD_PER_MILLION_TOKENS",
         "misaka.extensions.misaka_lcm.vendor.config.LCMConfig",
         "misaka.extensions.misaka_lcm.vendor.dag.build_nodes_fts_spec",
