@@ -120,7 +120,10 @@ local models and thinking levels.
   folder: `-c` continues the latest, `--pick` chooses one.
 - `misaka dm 10032 "MESSAGE"` delivers a message to her **contact session**, a standing
   conversation for messages, and runs one turn there. Without a message it delivers what is
-  already waiting for her.
+  already waiting for her. The contact session is the conversation named "Bot Chat" in her
+  `dm` folder, as in Hermes: it cannot be renamed, and to start it afresh you delete it (the
+  "All" tab of `/resume` or `misaka chat --pick`, Ctrl+D); her next message begins a new one.
+  A conversation with a turn running or mail waiting is not deleted.
 
 Agents message each other with the `SendMessage` tool, one recipient per message:
 

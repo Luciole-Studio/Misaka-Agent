@@ -32,6 +32,46 @@ def dm_dir(role: str) -> str:
     return os.path.join(role_dir(role), "dm")
 
 
+# A role's contact session is the one in her dm folder named this: Hermes' canonical Bot Chat, which
+# Bot Mode finds by its exact title (hermes_state.py CANONICAL_BOT_CHAT_TITLE, ``get_session_by_title``).
+CONTACT_TITLE = "Bot Chat"
+
+
+def contact_role(session_file: str | None) -> str | None:
+    """The role whose dm folder holds ``session_file`` itself (not a child session below it), else None."""
+    if not session_file:
+        return None
+    folder = os.path.dirname(os.path.realpath(os.path.expanduser(session_file)))
+    role_folder = os.path.dirname(folder)
+    if os.path.basename(folder) != "dm" or os.path.dirname(role_folder) != os.path.realpath(sessions_root()):
+        return None
+    return os.path.basename(role_folder)
+
+
+def canonical_contact(session_file: str | None, name: str | None, parent_session: str | None) -> str | None:
+    """The role whose canonical Bot Chat this session is, else None.
+
+    Hermes' guard covers the canonical chat and not "a visible session merely named 'Bot Chat'"
+    (hermes_state_titles.py); here that is a session in a role's dm folder holding the title. A branch
+    of it (``/fork``, ``/clone``) copies the title but names its parent: like Hermes' "Bot Chat #N"
+    sibling, it is never the Bot Chat."""
+    role = contact_role(session_file)
+    return role if role and name == CONTACT_TITLE and not parent_session else None
+
+
+def contact_rename_refusal(role: str) -> str:
+    """Hermes' refusal, verbatim up to its last sentence: Hermes says to create a new bot, and MISAKA
+    starts a role's Bot Chat afresh when the old one is deleted (``session_catalog.deletable``)."""
+    return (f"This is {role}'s canonical Bot Chat — its name is its identity, and renaming it would orphan "
+            f"the conversation. To start fresh, delete it: the next message to {role} starts a new one.")
+
+
+def contact_lock_path(role: str) -> str:
+    """The lock a delivery to ``role``'s contact session holds from claiming its mail to settling it
+    (``misaka.cli.dm``); deleting the Bot Chat takes it too."""
+    return str(home.path("locks") / f"dm-{role}.lock")
+
+
 def card_session_dir(task) -> str:
     """One immutable storage address per card; resetting its runtime does not reset this.
 
@@ -51,5 +91,5 @@ def subagent_session_dir(parent_id: str, parent_file: str | None = None) -> str:
     return os.path.join(sessions_root(), "subagents", parent_id)
 
 
-__all__ = ["COORDINATOR", "card_session_dir", "chat_dir", "dm_dir", "role_dir",
-           "sessions_root", "subagent_session_dir"]
+__all__ = ["CONTACT_TITLE", "COORDINATOR", "canonical_contact", "card_session_dir", "chat_dir", "contact_lock_path",
+           "contact_rename_refusal", "contact_role", "dm_dir", "role_dir", "sessions_root", "subagent_session_dir"]

@@ -1066,8 +1066,8 @@ class AgentSession:
                 "Use prompt() or execute the command when not streaming."
             )
 
-    def setSessionName(self, name: str) -> None:
-        self.sessionManager.appendSessionInfo(name)
+    def setSessionName(self, name: str, *, is_user: bool = True) -> None:
+        self.sessionManager.appendSessionInfo(name, is_user=is_user)
         event = {"type": "session_info_changed", "name": self.sessionManager.getSessionName()}
         self._emit(event)
         # pi agent-session.ts:3063-3068 sends the same event to the extension runner as well;
@@ -2977,7 +2977,8 @@ class AgentSession:
                 "sendMessage": _send_message_from_runtime,
                 "sendUserMessage": _send_user_message_from_runtime,
                 "appendEntry": _append_entry_from_runtime,
-                "setSessionName": self.setSessionName,
+                # An extension's name is an automatic title, as Hermes' auto-titler is (``is_user=False``).
+                "setSessionName": lambda name: self.setSessionName(name, is_user=False),
                 "getSessionName": self.sessionManager.getSessionName,
                 "setLabel": lambda entryId, label: self.sessionManager.appendLabelChange(entryId, label),
                 "getActiveTools": self.getActiveToolNames,

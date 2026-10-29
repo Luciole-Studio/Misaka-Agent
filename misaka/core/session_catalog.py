@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from misaka.ai.session_resources import registerSessionResourceCleanup
@@ -21,7 +22,7 @@ from misaka.config import get_sessions_dir, home, sessions
 from misaka.core.platform import owners, processes
 from misaka.core.session_manager import iter_session_files, readSessionHeader
 from misaka.core.wiring import KINDS, sender_address
-from misaka.utils import atomic, local_socket
+from misaka.utils import atomic, file_lock, local_socket
 
 SESSION_KINDS = KINDS
 
@@ -56,6 +57,51 @@ def _index_dir():
 def owner_record(path):
     key = os.path.realpath(path)
     return _object(_index_dir() / (hashlib.sha256(key.encode()).hexdigest() + ".json"))
+
+
+@contextmanager
+def deletable(path):
+    """Hermes deletes no session with a queued or running turn (``require_idle``,
+    hermes_state_mutation_guards.py): ``hermes sessions delete`` names it and deletes nothing. Yields
+    that refusal, or None while the file may go.
+
+    Running is a live owner of the file: a window, a card, a contact turn. A role's contact session is
+    also queued while a delivery holds its lock (``misaka.cli.dm``) or mail addressed to it waits, and
+    it is deleted under that lock, so no delivery starts until the file is gone: the next one begins a
+    new Bot Chat, and a writer still holding the old file cannot put it back."""
+    session_id = readSessionHeader(path).get("id") or os.path.basename(path)
+    refusal = (f"Cannot delete session '{session_id}': it has a queued or running turn. "
+               "Wait for it to finish (or stop it), then retry.")
+    role = sessions.contact_role(path)
+    fd = None
+    try:
+        if role is not None:
+            lock = sessions.contact_lock_path(role)
+            os.makedirs(os.path.dirname(lock), exist_ok=True)
+            fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+            if not file_lock.lock_fd(fd, blocking=False):
+                yield refusal
+                return
+        owner = owner_record(path)
+        if owner.get("state") != "saved" and processes.identity_is_alive(owner.get("pid"), owner.get("identity")):
+            yield refusal
+            return
+        if role is not None:
+            from misaka.core.network import messages
+
+            con = messages.connect()
+            try:
+                waiting = con.execute("SELECT 1 FROM messages WHERE to_session=? AND delivered_at IS NULL LIMIT 1",
+                                      (session_id,)).fetchone()
+            finally:
+                con.close()
+            if waiting:
+                yield refusal
+                return
+        yield None
+    finally:
+        if fd is not None:
+            os.close(fd)   # Closing releases the lock.
 
 
 # Where SessionControl puts its socket directory (a short path: macOS sockaddr_un is 104 bytes).

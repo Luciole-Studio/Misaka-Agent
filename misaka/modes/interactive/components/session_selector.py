@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, TypedDict
 
+from misaka.config import sessions as session_paths
 from misaka.core.keybindings import KeybindingsManager
 from misaka.core.session_manager import SessionInfo, SessionListProgress
 from misaka.modes.interactive.components.footer import formatCwdForFooter
@@ -604,6 +605,13 @@ class SessionList:
         if kb.matches(keyData, "app.session.rename"):
             selected = jsIndex(self.filteredSessions, self.selectedIndex)
             if selected and self.onRenameSession:
+                # MISAKA: Hermes offers no Rename on a bot's canonical Bot Chat (session-actions-menu).
+                info = selected.session
+                role = session_paths.canonical_contact(info.path, info.name, info.parentSessionPath)
+                if role is not None:
+                    if self.onError:
+                        self.onError(session_paths.contact_rename_refusal(role))
+                    return
                 self.onRenameSession(selected.session.path)
             return
 
@@ -866,7 +874,14 @@ class SessionSelectorComponent(Container):
 
         # Handle session deletion
         async def onDeleteSession(sessionPath: str) -> None:
-            result = await deleteSessionFile(sessionPath)
+            from misaka.core import session_catalog
+
+            with session_catalog.deletable(sessionPath) as refusal:
+                if refusal is not None:
+                    self.header.setStatusMessage({"type": "error", "message": refusal}, 3000)
+                    self.requestRender()
+                    return
+                result = await deleteSessionFile(sessionPath)
 
             if result.get("ok"):
                 if self.currentSessions is not None:
@@ -954,6 +969,8 @@ class SessionSelectorComponent(Container):
         try:
             await renameSession(target, next)
             await self.refreshSessionsAfterMutation()
+        except ValueError as refusal:   # MISAKA: a role's canonical Bot Chat keeps its name
+            self.header.setStatusMessage({"type": "error", "message": str(refusal)}, 3000)
         finally:
             self.exitRenameMode()
 

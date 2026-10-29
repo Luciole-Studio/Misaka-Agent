@@ -25,6 +25,7 @@ from misaka.config import CFG, home
 from misaka.core import session_catalog
 from misaka.core.network import messages
 from misaka.core.platform import cards, processes, tasks
+from misaka.core.session_manager import SessionManager
 
 BODY = "## deliverable\nnotes.md\n"
 SPACE_T1 = "w1111aaaa"      # the research run's space
@@ -636,10 +637,16 @@ def _contact_turns(monkeypatch, *results):
 
     async def turn(flags, text, cwd, **kw):
         calls.append({"flags": flags, **kw})
-        folder = flags[flags.index("--session-dir") + 1]
-        Path(folder, "contact.jsonl").touch()     # a turn leaves its session behind, failed or not
+        if "--session" in flags:
+            path = flags[flags.index("--session") + 1]
+        else:    # a turn leaves its session behind, failed or not: a new Bot Chat, named
+            manager = SessionManager.create(cwd, flags[flags.index("--session-dir") + 1])
+            manager.appendSessionInfo(flags[flags.index("--name") + 1])
+            manager.appendMessage({"role": "user", "content": text, "timestamp": 0})
+            path = manager.getSessionFile()
         error = results[len(calls) - 1]
-        return {"text": None if error else "10032 standing by", "error": error, "timed_out": False}
+        return {"text": None if error else "10032 standing by", "error": error, "timed_out": False,
+                "session_file": path}
 
     monkeypatch.setattr(platform_session, "run_session", turn)
     return calls
@@ -673,7 +680,9 @@ def test_a_transient_contact_failure_is_retried_once_on_the_same_session(world, 
     mid = messages.send(world.mail, "10032", "hello there", summary="hi", sender="last-order",
                         sender_session=window)
     assert dm.deliver("10032", sender="last-order", wait_message=mid) == 0
-    assert len(calls) == 2 and "-c" in calls[1]["flags"]
+    first, retry = (call["flags"] for call in calls)
+    assert first[first.index("--name") + 1] == "Bot Chat"
+    assert retry[retry.index("--session") + 1] == dm.contact_session("10032")
     assert _replies(world, window) == ["10032 standing by"]
 
 

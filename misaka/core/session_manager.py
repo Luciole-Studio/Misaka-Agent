@@ -955,8 +955,20 @@ class SessionManager:
         self._appendEntry(entry)
         return str(entry["id"])
 
-    def appendSessionInfo(self, name: str) -> str:
+    def appendSessionInfo(self, name: str, *, is_user: bool = True) -> str:
         sanitizedName = jsTrim(re.sub(r"[\r\n]+", " ", name))
+        # MISAKA fork: Hermes' canonical Bot Chat guard (``SessionDB.set_session_title``,
+        # hermes_state_titles.py). A role's contact session is found by this name, so renaming it
+        # orphans the conversation: a person is refused, an automatic name changes nothing, and
+        # setting the name it already has is no change either.
+        from misaka.config import sessions
+
+        header = self.getHeader() or {}
+        role = sessions.canonical_contact(self.sessionFile, self.getSessionName(), header.get("parentSession"))
+        if role is not None:
+            if sanitizedName != sessions.CONTACT_TITLE and is_user:
+                raise ValueError(sessions.contact_rename_refusal(role))
+            return ""
         entry: SessionEntry = {
             "type": "session_info",
             "id": generateId(self.byId),

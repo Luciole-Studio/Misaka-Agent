@@ -8,9 +8,10 @@ turn's own answer goes back to a live window that wrote (Hermes: the delivery's 
 notification); the protocol forbids waiting in place for an answer.
 
 Differences from Hermes are structural, not semantic:
-- Sessions are located by directory, not title: ``~/.misaka/sessions/<role>/dm/``
-  is the canonical session. The "Bot Chat" title is kept in MISAKA_APP_TITLE as
-  the gate that enables protocol injection.
+- Sessions are located by directory and title: the canonical session is the one in
+  ``~/.misaka/state/sessions/<role>/dm/`` titled "Bot Chat" (Hermes finds it by the title alone).
+  As in Hermes, deleting it is how a role's contact session starts afresh
+  (``session_catalog.deletable``) and it cannot be renamed (``SessionManager.appendSessionInfo``).
 - There is no resident gateway queue; concurrent deliveries to one recipient are
   serialized with a per-recipient flock, and the rows of a turn stay leased while it runs.
 - A contact session reads only the mail no live session of its role was found
@@ -33,10 +34,10 @@ import sys
 import time
 from contextlib import contextmanager
 
-from misaka.config import CFG, current_config, home
+from misaka.config import CFG, current_config, home, sessions
 from misaka.utils import file_lock
 
-DM_TITLE = "Bot Chat"   # Hermes BOT_CHAT_TITLE verbatim; the injection gate keys on it.
+DM_TITLE = sessions.CONTACT_TITLE   # Hermes' canonical title verbatim: the contact session is the one holding it
 IDLE_TIMEOUT_SECONDS = 1800  # Hermes HERMES_AGENT_TIMEOUT default: inactivity, not a wall clock
 LIVE_WAIT_SECONDS = 600    # how long a wake-up watches a live session before leaving the row to it
 LIVE_POLL_SECONDS = 2.0
@@ -96,15 +97,37 @@ def protocol_file():
 
 
 def dm_session_dir(to):
-    from misaka.config import sessions
-
     return sessions.dm_dir(to)
+
+
+def contact_session(to):
+    """``to``'s Bot Chat: the session in her dm folder holding the title, as Hermes finds a bot's by
+    its exact title (``session_bot._target``), or None -- never started, or deleted, and the next
+    turn starts one. A file there without the title is not it: a branch of it, a conversation opened
+    from it, or one written before contact sessions were named. Should two hold the title (a copy
+    brought in with ``/import``), the first by file name, which begins with its creation time, keeps it."""
+    from misaka.core.platform.session import run_coro
+    from misaka.core.session_manager import buildSessionInfo
+
+    folder = dm_session_dir(to)
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return None
+    for name in names:
+        path = os.path.join(folder, name)
+        if not name.endswith(".jsonl") or not os.path.isfile(path):
+            continue
+        info = run_coro(buildSessionInfo(path))
+        if info is not None and sessions.canonical_contact(path, info.name, info.parentSessionPath) == to:
+            return path
+    return None
 
 
 @contextmanager
 def _serial(to):
     """Serialize deliveries per recipient: a blocking flock stands in for a queue."""
-    path = str(home.path("locks") / f"dm-{to}.lock")
+    path = sessions.contact_lock_path(to)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -294,12 +317,11 @@ def _deliver_once(to, message=None, sender=None, model=None, idle_timeout=IDLE_T
             }
             from misaka.core.wiring import SessionSpec, assemble
 
-            def turn():
-                # Check for an existing session only after taking the lock.
-                try:
-                    resume = any(n.endswith(".jsonl") for n in os.listdir(sess_dir))
-                except OSError:
-                    resume = False
+            def turn(pinned=None):
+                # The Bot Chat is looked up only after taking the lock; a new one is named as
+                # Hermes titles the one it creates (``title_new_session(..., 'Bot Chat')``).
+                current = pinned or contact_session(to)
+                where = ["--session", current] if current else ["--name", DM_TITLE]
                 session_assembly = assemble(SessionSpec(
                     profile_dir=prof,
                     role=role,
@@ -310,7 +332,7 @@ def _deliver_once(to, message=None, sender=None, model=None, idle_timeout=IDLE_T
                     receive_messages=True,
                 ))
                 return run_coro(_leased(
-                    run_session(flags + (["-c"] if resume else []), text, user_home, timeout=None,
+                    run_session(flags + where, text, user_home, timeout=None,
                                 idle_timeout=idle_timeout, assembly=session_assembly, env=env),
                     con, list(leased), token, mine))
 
@@ -320,8 +342,16 @@ def _deliver_once(to, message=None, sender=None, model=None, idle_timeout=IDLE_T
             if failure and retry_action(classify_agent_error(failure)) != RETRY_NONE and not _abandoned(mine):
                 # Hermes ``_run_local_turn``: one policy-gated retry on the same session, and the
                 # retry is never retried. An overflow resumes too: the engine compacts before it asks.
-                r = turn()
-                failure = _failure(r) if r is not None else None
+                # Hermes' retry may not create a Bot Chat (``session_bot._maybe_retry``): when the
+                # one the first attempt ran in is gone or no longer the Bot Chat, it is refused and
+                # the first failure stands.
+                pinned = r.get("session_file")
+                current = contact_session(to)
+                if pinned is None or (current and os.path.realpath(current) == os.path.realpath(pinned)):
+                    r = turn(pinned)
+                    failure = _failure(r) if r is not None else None
+                else:
+                    print(f"The retry of this delivery to {to} was refused: its Bot Chat is gone.", file=sys.stderr)
             if r is None:
                 print(f"Everyone who wrote to {to} has gone; the turn stopped and the messages stay queued.",
                       file=sys.stderr)

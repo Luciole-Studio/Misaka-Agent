@@ -6722,7 +6722,11 @@ class InteractiveMode:
             self.ui.requestRender()
             return
 
-        self.session.setSessionName(name)
+        try:
+            self.session.setSessionName(name)
+        except ValueError as refusal:   # a role's canonical Bot Chat keeps its name (Hermes `/title`)
+            self.showError(str(refusal))
+            return
         sessionName = self.sessionManager.getSessionName()
         if sessionName != name:
             self.showWarning(f"Session name was normalized from {jsonStringify(name)} to {jsonStringify(sessionName)}")

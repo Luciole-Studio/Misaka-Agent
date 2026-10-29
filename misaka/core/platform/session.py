@@ -103,6 +103,17 @@ async def open_session(flags, cwd, assembly=None):
         sm = SessionManager.continueRecent(cwd, session_dir)
     else:
         sm = SessionManager.create(cwd, session_dir)
+    if parsed.name is not None:
+        # ``--name`` names the session it opens, as pi's main.ts and ``cli.engine`` do.
+        from misaka.cli.args import normalizeSessionName
+
+        name = normalizeSessionName(parsed.name)
+        if name is None:
+            return None, None, "--name requires a non-empty value"
+        try:
+            sm.appendSessionInfo(name)
+        except ValueError as refusal:   # a role's canonical Bot Chat keeps its name
+            return None, None, str(refusal)
     runtime = await createAgentSessionRuntime(
         createRuntimeFactory(
             parsed,
@@ -219,7 +230,7 @@ async def settle_after_prompt(session):
 
 async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
                       assembly=None, idle_timeout=None):
-    """Run one prompt in a throwaway session and return its final text, timeout flag, error, and token usage.
+    """Run one prompt in a throwaway session and return its final text, timeout flag, error, token usage and session file.
 
     ``timeout`` is a wall clock. ``idle_timeout`` is Hermes' gateway turn timeout instead
     (``HERMES_AGENT_TIMEOUT``): an inactivity limit, so the turn is stopped only once that many
@@ -260,10 +271,13 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
         os.environ[k] = v
     runtime = None
     timed_out = False
+    session_file = None
     try:
         runtime, session, err = await open_session(flags, cwd, assembly)
+        if session is not None:
+            session_file = session.sessionManager.getSessionFile()
         if err:
-            return {"text": None, "timed_out": False, "error": err}
+            return {"text": None, "timed_out": False, "error": err, "session_file": session_file}
         # Headless sessions have nobody watching them repeat themselves into their
         # whole budget, or spend it entirely on their own to-do list; the guards are
         # that reader. Every model request is metered where it is sent (metering).
@@ -311,12 +325,14 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
             "text": text,
             "timed_out": timed_out,
             "error": err,
+            "session_file": session_file,
         }
     except Exception as e:  # noqa: BLE001
         return {
             "text": None,
             "timed_out": timed_out,
             "error": f"{type(e).__name__}: {e}",
+            "session_file": session_file,
         }
     finally:
         try:

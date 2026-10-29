@@ -848,7 +848,11 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
                 if name is None:
                     print(chalk.red("Error: --name requires a non-empty value"), file=sys.stderr)
                     return 1
-                sessionManager.appendSessionInfo(name)
+                try:
+                    sessionManager.appendSessionInfo(name)
+                except ValueError as refusal:   # a role's canonical Bot Chat keeps its name
+                    print(chalk.red(f"Error: {refusal}"), file=sys.stderr)
+                    return 1
         except SystemExit as exitSignal:
             return int(exitSignal.code) if isinstance(exitSignal.code, int) else 1
         time("createSessionManager")
