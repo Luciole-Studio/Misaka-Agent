@@ -455,6 +455,9 @@ def list_entries(con, *, extra_paths=()):
             roots.add(directory)
             cards[directory] = dict(row)
 
+    card_keys = list(cards)
+    card_order = {directory: index for index, directory in enumerate(card_keys)}
+
     records, ephemeral = {}, []
     alive = {}
     for file in _index_dir().glob("*.json"):
@@ -500,7 +503,11 @@ def list_entries(con, *, extra_paths=()):
         if len(parts) > 1 and parts[0] not in own_dirs:
             row["role"] = record.get("role", _role(parts[0]))
             row["kind"] = "dm" if parts[1] == "dm" else record.get("kind", "foreground")
-        card = next((r for directory, r in cards.items() if _relative(path, directory)), None)
+        # The first card (in table order) whose session directory holds the file. Looked up through the file's own
+        # parents: trying every card's directory on every file was 515 x 298 `relative_to` calls, 2.3 s at each
+        # panel poll (2026-10-29).
+        holders = [card_order[str(parent)] for parent in Path(path).parents if str(parent) in card_order]
+        card = cards[card_keys[min(holders)]] if holders else None
         run, node = None, None
         if card:
             if not os.path.isdir(card["workspace"] or ""):
