@@ -374,6 +374,27 @@ def test_a_role_session_writes_its_own_keys_to_its_file_and_everything_else_glob
     assert {"defaultProvider", "defaultModel", "defaultThinkingLevel", "web"} == set(ROLE_KEYS)
 
 
+def test_a_new_home_gives_last_order_a_soul_she_can_go_without(tmp_path, monkeypatch):
+    """Hermes seeds SOUL.md into a new home and ``misaka create`` writes a Sister's; Last Order's
+    comes with her folder. Taken out afterwards, it stays out, and her charter holds either way."""
+    from misaka.config import identity, layout
+
+    monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
+    role = home.path("roles_root") / "last_order"
+    layout.ensure()
+    soul = role / "SOUL.md"
+    assert soul.read_text(encoding="utf-8") == layout.LAST_ORDER_SOUL
+    assert identity.prompt_sections(str(role), "last_order") == [
+        layout.LAST_ORDER_SOUL.strip(), identity.COMMON_CHARTER, identity.COORDINATOR_ROLE]
+    soul.write_text("Answer with the conclusion first.", encoding="utf-8")
+    layout.ensure()
+    assert soul.read_text(encoding="utf-8") == "Answer with the conclusion first."    # never overwritten
+    soul.unlink()
+    layout.ensure()
+    assert not soul.exists()                                                      # taken out on purpose
+    assert identity.prompt_sections(str(role), "last_order") == [identity.COMMON_CHARTER, identity.COORDINATOR_ROLE]
+
+
 def test_the_role_scope_survives_the_manager_and_the_home_alike(tmp_path, monkeypatch):
     from misaka.config import profiles
     from misaka.core.settings_manager import SettingsManager

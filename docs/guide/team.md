@@ -42,7 +42,7 @@ each Sister.
 | File | What it does |
 |---|---|
 | `DESCRIBE.md` | Her specialty. Last Order reads it to decide who gets what. |
-| `SOUL.md` | Her personality and voice, optional. It shapes how she talks and thinks; her duties stay the same. |
+| `SOUL.md` | Her personality and voice, optional. It shapes how she talks and thinks; her duties stay the same. Last Order's is written on the first start, a Sister's when she is created; delete or empty it to go without. |
 | `settings.json` | What is hers alone: her model (`defaultProvider` / `defaultModel`), `defaultThinkingLevel` and `web` overrides. |
 | `mcp.json` | Her MCP servers. No other role connects them. |
 | `credentials/mcp-auth.json` | Her MCP sign-ins (`/mcp` in her window). |

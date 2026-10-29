@@ -412,7 +412,7 @@ class Wizard:
                       f"  {ui.tilde(profiles.shared_soul())}",
                       "      the shared identity every role loads first",
                       f"  {ui.tilde(os.path.join(roles_root, 'last_order'))}/",
-                      "      Last Order, the coordinator: settings.json for her model, mcp.json for her MCP servers, skills/ for her skills",
+                      "      Last Order, the coordinator: SOUL.md is her voice, settings.json her model, mcp.json her MCP servers, skills/ her skills",
                       f"  {ui.tilde(os.path.join(roles_root, 'sisters'))}/<id>/",
                       "      one folder per Sister: DESCRIBE.md routes work to her, SOUL.md is her voice", "")
         existing = roster.roster_names()

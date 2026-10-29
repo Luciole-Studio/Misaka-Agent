@@ -47,7 +47,7 @@ def resolve_pin(model, runtime):
 
 SOUL_TEMPLATE = """# Misaka {sid}
 
-You are Sister {sid} of the MISAKA Network. Describe her personality and voice here.
+You are Sister {sid} of the MISAKA Network.
 """
 
 DESCRIBE_TEMPLATE = """---

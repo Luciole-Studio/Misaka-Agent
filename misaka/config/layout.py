@@ -15,10 +15,14 @@ feature they cannot find.
 idempotent, it never overwrites, and it never raises: a read-only home is a reason to run
 with less, not a reason not to start.
 
+Last Order's ``SOUL.md`` is written once, with her folder, the way ``roster.create_sister``
+writes a Sister's and Hermes seeds ``SOUL.md`` into a new home: a file a user can see is a
+voice they can find. It stays optional: shared and role duties are assembled without it
+(``config.identity``), so a user who deletes it or empties it runs Last Order without one, and
+a later start does not put it back.
+
 What is deliberately NOT created:
 
-* ``SOUL.md`` for any role. It is an optional personality slot. Shared and role duties
-  are assembled separately (``config.identity``); the README explains customisation.
 * ``models.json``. pi does not create it either, and an empty ``providers`` map is
   not more useful than its absence; the README says what it is for.
 """
@@ -59,6 +63,11 @@ layer is a `skills/` folder in whatever directory MISAKA runs in.
 Providers and credentials are shared by every role too: `/login` writes
 `../credentials/auth.json`, `/model` writes `../settings.json`, and `../models.json` is where you
 declare a provider the built-in catalog does not carry (a local proxy, a private gateway).
+"""
+
+LAST_ORDER_SOUL = """# Last Order
+
+You are Last Order of the MISAKA Network.
 """
 
 SHARED_README = """# shared
@@ -126,7 +135,9 @@ def ensure():
         _seed(str(roles / "README.md"), README, made)
         _mkdir(str(home.path("profiles_root")), made)
         last_order = roles / "last_order"
-        _mkdir(str(last_order), made)
+        if _mkdir(str(last_order), made):
+            # Only with her folder: a SOUL.md she is missing afterwards was taken out on purpose.
+            _seed(str(last_order / "SOUL.md"), LAST_ORDER_SOUL, made)
         if _mkdir(str(last_order / "skills"), made):
             _seed(str(last_order / "skills" / "README.md"), SKILLS_README.format(who="Last Order only"), made)
     except OSError:
