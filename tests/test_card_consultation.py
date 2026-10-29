@@ -115,6 +115,32 @@ async def test_closing_her_window_ends_the_consultation_not_the_card(panel, home
     assert tasks.dependency_state(con, x)[0] == "waiting", "not failed: her delivery stands"
 
 
+async def test_a_reopened_window_reads_the_question_from_its_file(panel, home):  # noqa: F811
+    """Her closed window is reopened on her session with the question as its turn; the question
+    goes in a file, as every message a pane's program starts with does (issue #13)."""
+    from misaka.utils.prompt_file import readPromptFile
+    _con, a, _x = _parent_and_child(panel, home)
+    question = "which statute? " * 4000                  # past a Windows command line (32,767)
+    pane, _run_id = await panel.consult_card(a, question, asker={"sender": "last-order"})
+    assert pane.argv[-4:-1] == ["--resume", "--consult", "--say-file"]
+    assert readPromptFile(pane.argv[-1]) == question
+    panel.close(pane.id)
+    assert not os.path.exists(pane.argv[-1])
+
+
+async def test_a_question_that_cannot_be_written_opens_no_consultation(panel, home, monkeypatch):  # noqa: F811
+    con, a, _x = _parent_and_child(panel, home)
+
+    def full(*_args):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(d, "writePromptToTempFile", full)
+    with pytest.raises(OSError):
+        await panel.consult_card(a, "a question", asker={"sender": "last-order"})
+    assert tasks.live_consultation(con, a) is None
+    assert (tasks.get(con, a)["status"], tasks.get(con, a)["generation"]) == ("done", 1)
+
+
 async def test_a_card_asking_is_told_when_the_answer_never_comes(panel, home):  # noqa: F811
     _con, a, _x = _parent_and_child(panel, home)
     asker, _ = _card(panel, home, title="K1a asking", status="running")

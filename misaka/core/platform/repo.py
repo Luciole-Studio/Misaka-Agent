@@ -18,7 +18,7 @@ def _git(cwd, *args):
     fails and the caller stops."""
     for attempt in range(5):
         done = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8",
-                              check=False)
+                              errors="replace", check=False)
         if done.returncode == 0 or "index.lock" not in done.stderr or attempt == 4:
             return done
         time.sleep(0.2 * (attempt + 1))

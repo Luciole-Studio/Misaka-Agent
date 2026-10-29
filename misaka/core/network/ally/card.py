@@ -496,7 +496,7 @@ class Attempt:
 
 
 def _first_prompt(task, *, loaded, say, earlier):
-    """A message to a session that has the card goes in alone, as ``card-shell --resume --say``
+    """A message to a session that has the card goes in alone, as ``card-shell --resume --say-file``
     sends it; otherwise the contract, after the conversation the agent does not have, if any."""
     if loaded and say is not None:
         return say

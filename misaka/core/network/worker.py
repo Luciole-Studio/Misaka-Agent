@@ -648,7 +648,7 @@ def run_card(
     )
     if task.get("_say") is not None:
         # A settled card continued with a message (``dispatch.run_task(say=...)``): the turn goes on
-        # in her own conversation and is the message alone, as ``card-shell --resume --say`` is in
+        # in her own conversation and is the message alone, as ``card-shell --resume --say-file`` is in
         # a pane -- the contract she already worked from is not sent again.
         from misaka.config import sessions as session_roots
         flags += continue_flags(task.get("session_file"), session_roots.card_session_dir(task)) or []

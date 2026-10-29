@@ -125,7 +125,7 @@ def _pdf_text_layer(p):
     # -- her session, her card -- down with SIGABRT.
     try:
         out = subprocess.run([sys.executable, "-c", _PDFIUM_TEXT_CHILD, p], capture_output=True,
-                             text=True, encoding="utf-8", timeout=300, check=False)
+                             text=True, encoding="utf-8", errors="replace", timeout=300, check=False)
         if out.returncode == 0 and out.stdout.strip():
             pages = json.loads(out.stdout)
             if isinstance(pages, list) and all(isinstance(page, str) for page in pages):
@@ -332,7 +332,8 @@ def _pdf_visuals(p, numbers):
     (the box round the drawing), with the page's ``size`` and ``rotation``."""
     try:
         out = subprocess.run([sys.executable, "-c", _PDFIUM_VISUALS_CHILD, p, json.dumps(numbers)],
-                             capture_output=True, text=True, encoding="utf-8", timeout=300, check=False)
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+                             check=False)
         if out.returncode == 0:
             return {int(number): signals for number, signals in json.loads(out.stdout).items()}
     except (OSError, subprocess.SubprocessError, ValueError, TypeError):
@@ -578,7 +579,7 @@ def _pdf_page_labels(p):
     """A PDF's own page labels, one per page (``""`` for an unlabelled one), or None."""
     try:
         out = subprocess.run([sys.executable, "-c", _PDFIUM_LABELS_CHILD, p], capture_output=True,
-                             text=True, encoding="utf-8", timeout=120, check=False)
+                             text=True, encoding="utf-8", errors="replace", timeout=120, check=False)
         labels = json.loads(out.stdout) if out.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, ValueError):
         return None

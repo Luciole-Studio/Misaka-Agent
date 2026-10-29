@@ -209,6 +209,7 @@ def executeWithDefaultShell(command: str) -> str | None:
             command,
             check=False,
             encoding="utf-8",
+            errors="replace",  # pi's execSync decodes with Node's lenient UTF-8
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

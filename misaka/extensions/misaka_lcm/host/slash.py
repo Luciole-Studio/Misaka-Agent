@@ -17,7 +17,7 @@ def run(argv: str | list[str], ctx=None) -> str:
         # sys.stdout in a worker thread shared with other sessions.
         with subprocess.Popen([sys.executable, "-m", operators.__name__, *args],
                               cwd=str(storage.project(ctx)),
-                              text=True, encoding="utf-8", stdout=subprocess.PIPE,
+                              text=True, encoding="utf-8", errors="replace", stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE) as process:
             try:
                 while True:

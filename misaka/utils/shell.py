@@ -44,11 +44,15 @@ def normalize_command_for_stdin(command: str) -> str:
 def findExecutableOnPath(executable: str) -> str | None:
     if os.name == "nt":
         try:
+            # pi decodes with Node's lenient UTF-8. `where` prints its "not found" notice in the
+            # console code page -- GBK "信息:" is 0xD0 0xC5 -- and a strict decode killed the
+            # reader thread with UnicodeDecodeError on Chinese Windows (issue #13, B2).
             result = subprocess.run(
                 ["where", executable],
                 capture_output=True,
                 check=False,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
             )
         except (OSError, subprocess.SubprocessError):

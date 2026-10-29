@@ -102,15 +102,16 @@ def _parser(extension_commands=None):
     cs.add_argument("task_id")
     cs.add_argument("--resume", action="store_true",
                     help="Resume the card's existing session")
-    cs.add_argument("--say", metavar="TEXT",
-                    help="With --resume: deliver this message as the first turn")
+    cs.add_argument("--say-file", metavar="PATH",
+                    help="With --resume: deliver the message in this file as the first turn")
     cs.add_argument("--consult", action="store_true",
-                    help="With --say: a finished card answering a message (no claim; the card stays)")
+                    help="With --say-file: a finished card answering a message (no claim; the card stays)")
     ac = sub.add_parser("ally-card", help="Internal: run an ally's card over ACP inside a pane")
     ac.add_argument("task_id")
-    ac.add_argument("--say", metavar="TEXT", help="Continue the card with this message as the first turn")
+    ac.add_argument("--say-file", metavar="PATH",
+                    help="Continue the card with the message in this file as the first turn")
     ac.add_argument("--consult", action="store_true",
-                    help="With --say: a finished card answering a message (no claim; the card stays)")
+                    help="With --say-file: a finished card answering a message (no claim; the card stays)")
     sub.add_parser("ally-bridge", help="Internal: the MCP server lending an ally its card's tools")
 
     sub.add_parser("panel", help="Open the Misaka Network panel (default in a terminal)")
@@ -282,14 +283,23 @@ def _cmd_net_daemon(args):
     daemon.main()
 
 
+def _said(args):
+    """The message a pane's card is continued with: the daemon writes it to a file, since a whole
+    review brief does not fit on a command line (``misaka.utils.prompt_file``)."""
+    if args.say_file is None:
+        return None
+    from misaka.utils.prompt_file import readPromptFile
+    return readPromptFile(args.say_file)
+
+
 def _cmd_card_shell(args):
     from misaka.cli import card_shell
-    card_shell.launch(args.task_id, resume_only=args.resume, say=args.say, consult=args.consult)
+    card_shell.launch(args.task_id, resume_only=args.resume, say=_said(args), consult=args.consult)
 
 
 def _cmd_ally_card(args):
     from misaka.core.network.ally import card
-    card.launch(args.task_id, say=args.say, consult=args.consult)
+    card.launch(args.task_id, say=_said(args), consult=args.consult)
 
 
 def _cmd_ally_bridge(args):

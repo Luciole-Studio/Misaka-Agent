@@ -24,6 +24,7 @@ from misaka.core.research import (
     workflow,
 )
 from misaka.core.session_manager import SessionManager
+from misaka.utils.prompt_file import readPromptFile
 
 
 @pytest.fixture
@@ -228,11 +229,70 @@ async def test_the_runners_continue_a_card_the_way_the_sister_tools_do(lab):
     assert sent == [("pane.continue_card", {"task_id": "t_1", "say": "go on", "expected_generation": 3,
                                             "place": {"grid": "p1"}})]
     headless = node_module.HeadlessRunner(lab.con, {})
+    spawned, exited = [], []
+    lab.monkeypatch.setattr(headless._processes, "spawn", lambda argv, **k: spawned.append(argv) or SimpleNamespace(
+        poll=lambda: 0 if exited else None, pid=1))
+    await headless.continue_card("t_1", "go on", expected_generation=3)
+    # The message travels in a file, never on the command line (issue #13: WinError 206).
+    [argv] = spawned
+    assert argv[:-1] == [*node_module.CARD_ARGV, "t_1", "--say-file"] and "t_1" in headless.flying
+    assert readPromptFile(argv[-1]) == "go on"
+    exited.append(True)
+    headless._reap()
+    assert "t_1" not in headless.flying and not os.path.exists(argv[-1])
+    assert not os.path.exists(os.path.dirname(argv[-1]))
+
+
+async def test_a_review_brief_too_long_for_a_command_line_reaches_the_card_whole(lab, tmp_path):
+    """Issue #13: a red-team brief carries the node's whole evidence ledger -- 20,000 to 460,000
+    characters measured on real runs -- and Windows refuses a command line past 32,767
+    (WinError 206). The child reads it from the file, every character of it."""
+    from misaka.cli import research_node
+    from misaka.core.research import node as node_module
+    brief = ("证据 " + "x" * 97 + "\r\n") * 5000 + "\ufeff-- end"
+    headless = node_module.HeadlessRunner(lab.con, {})
     spawned = []
     lab.monkeypatch.setattr(headless._processes, "spawn", lambda argv, **k: spawned.append(argv) or SimpleNamespace(
         poll=lambda: None, pid=1))
-    await headless.continue_card("t_1", "go on", expected_generation=3)
-    assert spawned == [[*node_module.CARD_ARGV, "t_1", "--say", "go on"]] and "t_1" in headless.flying
+    await headless.continue_card("t_1", brief, expected_generation=1)
+    [argv] = spawned
+    assert sum(len(arg) for arg in argv) < 1000
+    seen = []
+    from misaka.config import env as env_file
+    from misaka.utils import loop_watchdog
+    for owner, name in ((research_node, "setupCli"), (research_node.bootstrap, "install"),
+                        (loop_watchdog, "configure"), (env_file, "load")):
+        lab.monkeypatch.setattr(owner, name, lambda *a, **k: None)   # process-wide entry wiring
+    lab.monkeypatch.setattr(research_node.node, "main_card", lambda task_id, *, say: seen.append((task_id, say)) or 0)
+    assert research_node.main(argv[3:]) == 0
+    assert seen == [("t_1", brief)]
+
+
+async def test_a_card_child_that_will_not_start_ends_the_node_at_the_failure_limit(lab):
+    """Hermes' dispatcher counts a worker that will not start against the card's failure limit
+    (outcome "spawn_failed") and parks it there; the drive loop's retry used to ask again every
+    poll for as long as the run lived (issue #13: tens of thousands of retries)."""
+    from misaka.core.platform import tasks as task_store
+    from misaka.core.research import node as node_module
+    headless = node_module.HeadlessRunner(lab.con, {})
+    files = []
+
+    def refuse(argv, **_kwargs):
+        files.append(argv[-1])
+        raise OSError(206, "The filename or extension is too long")
+
+    lab.monkeypatch.setattr(headless._processes, "spawn", refuse)
+    for _ in range(task_store.FAILURE_LIMIT - 1):
+        with pytest.raises(OSError):
+            await headless.continue_card("t_1", "go on", expected_generation=1)
+    with pytest.raises(node_module.CardNotStarted, match="could not be started 3 times in a row") as raised:
+        await headless.continue_card("t_1", "go on", expected_generation=1)
+    assert not isinstance(raised.value, (ValueError, RuntimeError, OSError)), "the drive loop must not retry it"
+    assert not any(os.path.exists(path) for path in files), "no message file outlives a child that never started"
+    # A child that does start begins the count again.
+    lab.monkeypatch.setattr(headless._processes, "spawn", lambda argv, **k: SimpleNamespace(poll=lambda: None, pid=1))
+    await headless.continue_card("t_2", "go on", expected_generation=1)
+    assert headless._spawn_failures == {"t_1": task_store.FAILURE_LIMIT}
 
 
 def test_a_card_goes_on_in_its_newest_own_conversation(tmp_path):

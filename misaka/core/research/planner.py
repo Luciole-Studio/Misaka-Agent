@@ -588,7 +588,8 @@ def _catalog_text(items):
 
 def _call(worker, cfg, prompt, *, cwd, session_dir, continue_session=False,
           profile="last_order", raw=False, task_id=None,
-          model=None, extra_tools=(), con=None, session_file=None, sister_catalog=None):
+          model=None, extra_tools=(), con=None, session_file=None, sister_catalog=None,
+          continue_truncated=False):
     kwargs = {
         "cwd": cwd,
         "timeout": None,
@@ -602,6 +603,9 @@ def _call(worker, cfg, prompt, *, cwd, session_dir, continue_session=False,
         kwargs["extra_tools"] = extra_tools
     if sister_catalog is not None:
         kwargs["sister_catalog"] = sister_catalog
+    if continue_truncated:
+        # The reply is the phase's deliverable: one cut at the output cap is continued (window.py).
+        kwargs["continue_truncated"] = True
     if model:
         kwargs["model"] = model
     # Waiting for room under the cap happens per request, in the meter; a run whose cap is
@@ -1108,6 +1112,7 @@ def synthesize(con, run, cfg, worker, node, task_rows, *, followup=None, round=1
         continue_session=bool(findMostRecentSession(session_dir)), task_id=run["id"], con=con,
         session_file=lo_session_file(run, node),
         extra_tools=tuple(tool for tool in (followup, dissolve, erratum) if tool is not None),
+        continue_truncated=True,
     )
     if followup is not None and runs.plan_round(con, run["id"], node["id"]) > round:
         return ""                                     # she asked for another round instead of concluding
@@ -1446,7 +1451,7 @@ def present_dissolution(con, run, cfg, worker, *, material):
         worker, cfg, DISSOLUTION_CONTRACT + prompt_guard.untrusted("dissolutions", _catalog_text(material)),
         cwd=run["workspace"], session_dir=session_dir, raw=True,
         continue_session=bool(findMostRecentSession(session_dir)), task_id=run["id"], con=con,
-        session_file=run["root_session"])
+        session_file=run["root_session"], continue_truncated=True)
     if err:
         raise RuntimeError(f"Putting the dissolution to the user failed: {err}")
 

@@ -32,6 +32,7 @@ from misaka.ui.panel import (
 )
 from misaka.ui.panel import ghostty as vt
 from misaka.utils import file_lock, local_socket
+from misaka.utils.prompt_file import removePromptFile, writePromptToTempFile
 from misaka.utils.streams import STREAM_LIMIT
 
 # A pane's terminal is a pty on POSIX and a ConPTY pseudo console on Windows (herdr's
@@ -48,7 +49,7 @@ else:
 # Wire protocol version (strict equality, as in herdr). Bump it whenever *server
 # behaviour* changes, not only method/event shapes: an unbumped behaviour change
 # once let a stale daemon slip through the version gate.
-PROTOCOL = 55   # 55: pane.consult_card -- a message to a finished card is a consultation (a run, not an attempt: the card stays as it is; R40), pane.continue_card drops "consult", panes.list says "consulting"; 54: pane.continue_card takes {"consult": true}: a message wakes a finished card without sending its dependents back to todo; 53: panes.list takes {"tab_of": pane_id}, the panes of that pane's tab (Last Order's pane tools); 52: spaces have durable ids (state/spaces.json), a pane's program carries MISAKA_NET_SPACE, place {"space": id} reopens a remembered space, layout.get lists dormant spaces; 51: screen frames carry the program's content revision, a pane's OSC 52 copy reaches the panel, idle scrollback is compressed; 50: one home, one layout table -- a daemon from before it serves the old paths; 49: panes.list says which pane holds a card's claim, and a card is continued in the pane it already has; 48: pane.send/pane.input drain through a per-pane write queue and wait for delivery; 47: drag resizes are fire-and-forget (id=None, no reply) and the layout is persisted at drag end, so the divider never blocks on a busy daemon; 46: a drag resizes the program as fast as it repaints; 44: reflow held until repaint; 43: libghostty-vt; 42: panes.resize acknowledged first; 40: shown frame in a sync block; 38: input state, extract, kitty
+PROTOCOL = 56   # 56: a card's continuation message reaches the program in its pane as a file (`--say-file`), never on its command line -- a daemon from before it starts card-shell/ally-card with a `--say` they no longer take (issue #13); 55: pane.consult_card -- a message to a finished card is a consultation (a run, not an attempt: the card stays as it is; R40), pane.continue_card drops "consult", panes.list says "consulting"; 54: pane.continue_card takes {"consult": true}: a message wakes a finished card without sending its dependents back to todo; 53: panes.list takes {"tab_of": pane_id}, the panes of that pane's tab (Last Order's pane tools); 52: spaces have durable ids (state/spaces.json), a pane's program carries MISAKA_NET_SPACE, place {"space": id} reopens a remembered space, layout.get lists dormant spaces; 51: screen frames carry the program's content revision, a pane's OSC 52 copy reaches the panel, idle scrollback is compressed; 50: one home, one layout table -- a daemon from before it serves the old paths; 49: panes.list says which pane holds a card's claim, and a card is continued in the pane it already has; 48: pane.send/pane.input drain through a per-pane write queue and wait for delivery; 47: drag resizes are fire-and-forget (id=None, no reply) and the layout is persisted at drag end, so the divider never blocks on a busy daemon; 46: a drag resizes the program as fast as it repaints; 44: reflow held until repaint; 43: libghostty-vt; 42: panes.resize acknowledged first; 40: shown frame in a sync block; 38: input state, extract, kitty
 RING_CAP = 256 * 1024          # output tail kept per pane
 SEND_TIMEOUT = 8.0             # pane.send: how long a message may take to enter the pane before it counts as undelivered (under the client's 10 s request timeout)
 INPUT_TIMEOUT = 1.0            # pane.input: keystrokes and pastes wait this long, then stay queued (typing must not block the panel)
@@ -182,15 +183,17 @@ def ally_commands():
     return frozenset(presets.names())
 
 
-def card_program(row, say=None, *, consult=False):
+def card_program(row, say_file=None, *, consult=False):
     """The program that runs an attempt at this card: an ally's ACP runner for an ally, a Sister's
-    session otherwise. ``say`` continues the card with a message as the attempt's first turn;
-    with ``consult`` it is a finished card answering it (no claim, the card stays as it is)."""
+    session otherwise. ``say_file`` -- the path ``writePromptToTempFile`` returned -- continues the
+    card with the message in it as the attempt's first turn; with ``consult`` it is a finished card
+    answering it (no claim, the card stays as it is). The message itself never goes on the command
+    line: a review brief is longer than a Windows command line can be (issue #13)."""
     from misaka.core.network.ally import presets
     mode = ["--consult"] if consult else []
     if row["assignee"] in presets.names():
-        return [*ALLY_CARD, row["id"], *mode, *(["--say", say] if say is not None else [])]
-    return [*CARD_SHELL, row["id"], *(["--resume", *mode, "--say", say] if say is not None else [])]
+        return [*ALLY_CARD, row["id"], *mode, *(["--say-file", say_file] if say_file is not None else [])]
+    return [*CARD_SHELL, row["id"], *(["--resume", *mode, "--say-file", say_file] if say_file is not None else [])]
 
 
 def _terminate(proc):
@@ -765,6 +768,7 @@ class Pane:
         "last_heartbeat",
         "last_output",
         "proc",
+        "prompt_file",
         "render",
         "reported",
         "resize_applied_at",
@@ -790,6 +794,7 @@ class Pane:
         self.reported = None          # the session's own word: {"state", "message", "seq"} (herdr hook authority); None = guess from the screen
         self.claim_lock = self.generation = None
         self.consult = None           # (run_id, lock): a finished card answering a message here (tasks.start_consultation)
+        self.prompt_file = None       # (directory, path): the message file its program was started with, removed when it is gone
         self.proc = self.fd = self.exit_code = None
         self.console = None           # Windows: the ConPTY pseudo console (conpty.PseudoConsole)
         self.buf = bytearray()
@@ -970,6 +975,10 @@ class Daemon:
 
     @staticmethod
     def _release_fd(pane: Pane):
+        # The program is gone, so the message file it was started with goes too (pi's subagent
+        # removes its prompt file once the child has exited).
+        removePromptFile(pane.prompt_file)
+        pane.prompt_file = None
         if pane.fd is not None:
             try:
                 os.close(pane.fd)
@@ -1844,11 +1853,16 @@ class Daemon:
         if run is None:
             raise ValueError(f"Card {task_id} changed underneath; send it again.")
         reuse = self._card_pane_to_reuse(task_id)
+        undo = lambda: messages.settle_consultation(con, run["id"], lock, "failed",
+                                                    reason="her window could not be started")
+        try:
+            prompt_file = writePromptToTempFile(task_id, say)
+        except BaseException:
+            undo()                    # a question that cannot be written down starts no window
+            raise
         pane = await self._host_card(
-            con, row, lock, generation, card_program(row, say, consult=True), place,
-            undo=lambda: messages.settle_consultation(con, run["id"], lock, "failed",
-                                                      reason="her window could not be started"),
-            event="consulted", reuse=reuse, consult=run["id"])
+            con, row, lock, generation, card_program(row, prompt_file[1], consult=True), place,
+            undo=undo, event="consulted", reuse=reuse, consult=run["id"], prompt_file=prompt_file)
         return pane, run["id"]
 
     async def _continue_card(self, task_id, say, place, expected_generation, *, admission, db) -> Pane:
@@ -1875,6 +1889,10 @@ class Daemon:
                              f"underneath,{why} or the host is at capacity.")
         row = db.get(con, task_id)
         generation = int(row["generation"])
+        undo = lambda: db.block_task(con, task_id, "transient",
+                                     "the pane could not be started; continue the card again",
+                                     generation=generation, claim_lock=lock)
+        prompt_file = None
         if transcript is None:
             # Nothing to resume: this is the card's first attempt, run from its contract, and
             # the note travels by mail so the card's own inbox hands it over at the first
@@ -1882,13 +1900,15 @@ class Daemon:
             argv = card_program(row)
             self._mail_card(row, say, generation)
         else:
-            argv = card_program(row, say)
+            try:
+                prompt_file = writePromptToTempFile(task_id, say)
+            except BaseException:
+                undo()                # a message that cannot be written down starts no pane
+                raise
+            argv = card_program(row, prompt_file[1])
         return await self._host_card(
-            con, row, lock, generation, argv, place,
-            undo=lambda: db.block_task(con, task_id, "transient",
-                                       "the pane could not be started; continue the card again",
-                                       generation=generation, claim_lock=lock),
-            event="continued" if transcript else "started", reuse=reuse)
+            con, row, lock, generation, argv, place, undo=undo,
+            event="continued" if transcript else "started", reuse=reuse, prompt_file=prompt_file)
 
     def _mail_card(self, row, text, generation):
         """A note for one attempt at a card, from its Last Order, read by the card's inbox."""
@@ -1942,10 +1962,11 @@ class Daemon:
                                      undo=undo, reuse=reuse)
 
     async def _host_card(self, con, row, lock, generation, argv, place, *, undo,
-                         event="claimed", reuse=None, consult=None):
+                         event="claimed", reuse=None, consult=None, prompt_file=None):
         """Host a claimed card in a pane; ``undo`` releases its claim if no pane starts. With
         ``consult`` (its run id) the pane answers a consultation instead: no claim is handed
-        over, and ``lock`` is the consultation's."""
+        over, and ``lock`` is the consultation's. ``prompt_file`` is the message file ``argv``
+        names: the pane holds it until its program is gone, and it is removed here if none starts."""
         from misaka.core.platform import processes as process_tree
         from misaka.core.platform import tasks as db
         task_id = row["id"]
@@ -1980,6 +2001,7 @@ class Daemon:
             else:
                 pane = self.create(argv, workspace, title=title, card=task_id,
                                    env=hosting, place=place)
+            pane.prompt_file, prompt_file = prompt_file, None
             pane.generation = generation
             pane.started = time.time()
             # Owner = the pane's process group: if the daemon dies, reconcile reclaims by group identity (same marker as child.py).
@@ -1999,6 +2021,7 @@ class Daemon:
                              generation=generation)
             self._save_snapshot()
         except BaseException:
+            removePromptFile(prompt_file)     # no program was started with it
             if pane is not None:
                 pane.card = pane.claim_lock = pane.consult = None   # the watcher must not read this as a crash
                 try:

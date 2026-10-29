@@ -226,7 +226,8 @@ def stop_daemon() -> None:
 
 def _git(path: Path, *args: str, check: bool = True) -> str:
     result = subprocess.run(["git", "-C", str(path), *args],
-                            capture_output=True, text=True, encoding="utf-8", check=False, timeout=60)
+                            capture_output=True, text=True, encoding="utf-8", errors="replace",
+                            check=False, timeout=60)
     if check and result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout).strip() or f"git {' '.join(args)} failed")
     return result.stdout.strip()
@@ -258,7 +259,7 @@ def github_token() -> tuple[str | None, str]:
             return value, name
     try:
         found = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, encoding="utf-8",
-                               timeout=5, check=False)
+                               errors="replace", timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):
         return None, ""
     token = found.stdout.strip()

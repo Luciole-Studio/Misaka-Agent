@@ -1,4 +1,4 @@
-"""A pane started with an initial message (``card-shell --resume --say <note>``) may already
+"""A pane started with an initial message (``card-shell --resume --say-file <note>``) may already
 be in a turn when that message is sent: the network wiring flushes inbox deliveries with
 triggerTurn at bind, which pi's startup never does. Without a streaming behaviour prompt()
 raised "Agent is already processing. Specify streamingBehavior ..." and the note was lost
