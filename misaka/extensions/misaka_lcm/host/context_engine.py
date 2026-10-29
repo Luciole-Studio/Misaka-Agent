@@ -721,6 +721,10 @@ def _aligned(native, original_native):
     return original_native, list(range(len(original_native)))
 
 
+def _custom(message):
+    return read_field(message, 'role') == 'custom'
+
+
 def prepare(event, ctx, *, transcript=None):
     """Original engine policy, without consulting Pi thresholds or cut points."""
     from misaka.core.session_manager import buildSessionContext
@@ -755,14 +759,21 @@ def prepare(event, ctx, *, transcript=None):
             if index in active_positions:
                 replay.messages[active_positions[index]].update(values)
     # Checkpoint rebinding changes generated content only. Keep the live source's
-    # timestamp/tool metadata (custom persistence assigns a separate receipt time).
+    # timestamp/tool metadata -- except a custom message's timestamp, which takes the
+    # transcript's: persistence stamps a custom entry with its own receipt time, and a
+    # message that opened a turn or was steered in keeps its creation time live. The
+    # engine compares this list with the replay it cached from the transcript rows, and
+    # a difference there is a "replay changed" that compacts a leaf at every turn start,
+    # whatever the threshold (2026-10-29, R64).
     if replay_changed:
         if built._consecutive_ingest_failures:
             raise RuntimeError('LCM retry checkpoint originals were not persisted')
         cleaned = built._cached_active_replay_messages(messages)
         if cleaned is None and not built._bypasses_lcm_context_management():
             raise RuntimeError('LCM retry checkpoint has no matching ingest replay')
-    messages = [{**original, 'content': messages[source]['content']}
+    messages = [{**original, 'content': messages[source]['content'],
+                 **({'timestamp': messages[source]['timestamp']}
+                    if _custom(replay.originals[original[ingest.SOURCE]]) and 'timestamp' in messages[source] else {})}
                 for original, source in zip(replay.messages, positions)]
     if replay_changed and cleaned is not None:
         # Hermes' cursor belongs to the current list, not the longer native archive.
