@@ -10,6 +10,7 @@ import errno
 import io
 import os
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -147,7 +148,10 @@ async def test_b04_a_daemon_started_without_a_locale_does_not_hand_its_programs_
     for key in [key for key in os.environ if key == "LANG" or key.startswith("LC_")]:
         monkeypatch.delenv(key)
     monkeypatch.setenv("PI_ENV_FX6_MARK", "1")
-    expected = dict(os.environ)
+    # What a child of this process inherits: the C environment, which can hold more than os.environ (on Linux, GNU
+    # readline imported by an earlier test sets LINES and COLUMNS there).
+    inherited = subprocess.run(["/usr/bin/env"], capture_output=True, text=True, check=True).stdout
+    expected = dict(line.split("=", 1) for line in inherited.split("\n") if "=" in line)
     async with asyncio.timeout(10):
         connection, cwd = connect()
         code, output = await run(connection, {"cwd": cwd, "argv": ["/usr/bin/env"]})

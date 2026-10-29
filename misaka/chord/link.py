@@ -537,7 +537,9 @@ def _errorCode(error: BaseException) -> str:
     if code is not None:
         return str(code)
     if isinstance(error, OSError) and error.errno in errno.errorcode:
-        return errno.errorcode[error.errno]
+        name = errno.errorcode[error.errno]
+        # Windows: a socket error's number is its Winsock one, named WSAECONNRESET; libuv names it ECONNRESET.
+        return name[3:] if name.startswith("WSAE") and hasattr(errno, name[3:]) else name
     return errorMessage(error)
 
 

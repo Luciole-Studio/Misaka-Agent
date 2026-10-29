@@ -1229,7 +1229,8 @@ class _FSEvents:
             pass
 
 
-os.register_at_fork(after_in_child=_FSEvents.afterFork)
+if hasattr(os, "register_at_fork"):     # no fork on Windows (and FSEvents is macOS only)
+    os.register_at_fork(after_in_child=_FSEvents.afterFork)
 
 
 def _fseventsWatch(

@@ -21,7 +21,7 @@ from typing import TypedDict
 from filelock import FileLock, Timeout
 
 from misaka.config import home
-from misaka.utils.paths import canonicalizePath, resolvePath
+from misaka.utils.paths import canonicalizePath, homedir, resolvePath
 from misaka.utils.text import stripBom
 
 type ProjectTrustDecision = bool | None
@@ -187,7 +187,7 @@ def hasTrustRequiringProjectResources(cwd: str) -> bool:
     definitions, and asks "Trust project folder?" in every non-git directory under $HOME -- training users to click
     Trust reflexively. ``home.project_dir`` draws that line too: the home is never a project.
     """
-    homeDir = Path(normalizeCwd(str(Path.home())))
+    homeDir = Path(normalizeCwd(homedir()))
     currentDir = Path(normalizeCwd(cwd))
 
     configDir = home.project_dir(currentDir)

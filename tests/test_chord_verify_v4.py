@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import sys
 import threading
 import weakref
 from pathlib import Path
@@ -607,6 +608,7 @@ async def test_b22_a_facet_directorys_own_init_has_its_file(tmp_path: Path):
     await nodeLoader([str(plugin / "facet.py")])
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a POSIX path spelled into the URL, and a directory symlink")
 async def test_b21_a_facet_is_named_as_path_to_file_url_names_it(tmp_path: Path):
     from misaka.chord.loader import nodeLoader
 

@@ -169,6 +169,7 @@ async def test_makes_the_same_calls_and_output_for_the_same_start_seed_and_resul
     assert random not in zeroResult["value"]
 
 
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="the host's timezone is switched with time.tzset (POSIX)")
 async def test_runs_in_utc_whatever_the_hosts_timezone_and_without_weak_ref_or_finalization_registry(sandboxes, timezone):
     timezone("Asia/Kolkata")
     code = "return [new Date(0).getHours(), new Date(0).getTimezoneOffset(), typeof WeakRef, typeof FinalizationRegistry]"

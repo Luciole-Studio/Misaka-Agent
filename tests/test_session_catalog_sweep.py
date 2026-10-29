@@ -306,3 +306,20 @@ def test_a_symlinked_control_parent_is_not_followed(catalog, tmp_path, monkeypat
     _record(catalog, "n", path=None, control=str(link / "control.sock"))
     session_catalog.sweep_dead()
     assert real.is_dir(), "a symlinked parent must not redirect the removal"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="file symlinks need privileges on Windows")
+def test_a_listener_is_looked_for_under_every_spelling_of_the_parent(control_parent, monkeypatch):
+    """Windows: a session's pipe is named after the temp directory as `tempfile.gettempdir()` spells it, which may be
+    an 8.3 short path (C:\\Users\\RUNNER~1\\...); the sweep listed the parent by its realpath and found nobody."""
+    alias = control_parent.parent / f"{control_parent.name}-short"
+    alias.symlink_to(control_parent)
+    try:
+        monkeypatch.setattr(session_catalog, "_CONTROL_PARENTS", {str(alias), str(control_parent)})
+        directory, _server = _socket_dir(control_parent, "misaka-session-live", listening=False)
+        live = os.path.join(str(alias), "misaka-session-live", "control.sock")
+        monkeypatch.setattr(session_catalog, "_live_socket", lambda path: path == live)
+        assert session_catalog._sweep_orphan_controls(set()) == 0
+        assert directory.exists()
+    finally:
+        alias.unlink()

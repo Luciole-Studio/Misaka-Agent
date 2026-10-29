@@ -8,6 +8,7 @@ Each expected value was recorded by running the same scenario under upstream cho
 from __future__ import annotations
 
 import asyncio
+import errno
 import struct
 import zlib
 from typing import Any
@@ -318,8 +319,9 @@ async def test_b25_an_inflated_payload_with_an_invalid_byte_is_decoded_with_a_re
 
 async def test_b26_an_ipc_send_failure_reports_the_error_code_as_node_does():
     cases = [
-        (ConnectionResetError(54, "Connection reset by peer"), "ipc send failed: ECONNRESET"),
-        (BrokenPipeError(32, "Broken pipe"), "ipc send failed: EPIPE"),
+        # The platform's own numbers: 54 is ECONNRESET on macOS only (EXFULL on Linux).
+        (ConnectionResetError(errno.ECONNRESET, "Connection reset by peer"), "ipc send failed: ECONNRESET"),
+        (BrokenPipeError(errno.EPIPE, "Broken pipe"), "ipc send failed: EPIPE"),
         (Exception("boom"), "ipc send failed: boom"),
     ]
     coded = Exception("ignored")

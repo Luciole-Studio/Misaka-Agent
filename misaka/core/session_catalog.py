@@ -157,7 +157,9 @@ def _sweep_orphan_controls(spoken_for):
                     continue
             except OSError:
                 continue
-            if _live_socket(os.path.join(directory, "control.sock")):
+            # Asked under every spelling of the parent: a Windows pipe answers only to the name it was created under,
+            # and the temp directory a session made it in may be an 8.3 short path that realpath spells out.
+            if any(_live_socket(os.path.join(spelling, name, "control.sock")) for spelling in _CONTROL_PARENTS):
                 continue
             shutil.rmtree(directory, ignore_errors=True)
             removed += 1

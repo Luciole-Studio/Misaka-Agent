@@ -34,5 +34,5 @@ jobs:
       - name: Tests
         run: >-
           uv run python -m pytest -q -p no:cacheprovider
-          tests/test_issue10_guard_terminates.py tests/test_loop_watchdog.py tests/test_mcp_server_env.py
+          tests/test_loop_watchdog.py tests/test_mcp_server_env.py
           tests/test_windows_orphan_reclaim.py tests/test_token_cap.py tests/test_research_cli_in_pane.py

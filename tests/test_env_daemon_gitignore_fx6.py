@@ -20,6 +20,7 @@ def no_global_excludes(tmp_path_factory: pytest.TempPathFactory, monkeypatch: py
     """A home without git configuration, so the runner's own global excludes file stays out of the listings."""
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))    # the home on Windows (Rust's `home_dir`, libuv's `uv_os_homedir`)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(home / "no-system-config"))
@@ -32,7 +33,7 @@ def write(root: Path, path: str, content: str | bytes = "") -> None:
     if isinstance(content, bytes):
         target.write_bytes(content)
     else:
-        target.write_text(content, encoding="utf-8")
+        target.write_bytes(content.encode("utf-8"))      # as written: text mode makes "\n" "\r\n" on Windows
 
 
 def repository(root: Path, path: str = "") -> None:

@@ -155,18 +155,20 @@ def test_dont_ask_again_stays_in_the_session_when_the_project_is_not_trusted(tmp
     assert _bash(part, "npm run test", None) is None
 
 
+# Paths go into the commands with forward slashes: the shell is bash on Windows too (Git Bash), where a backslash is an
+# escape and `C:\Users\x` reads as `C:Usersx`.
 def test_dont_ask_again_for_a_path_outside_grants_its_directory_for_this_session(tmp_path, monkeypatch):
     part, _session, _workspace = _part(tmp_path, monkeypatch, mode="default")
     outside = tmp_path / "skills" / "cnki" / "scripts"
     outside.mkdir(parents=True)
     (outside / "run.py").write_text("print(1)\n", encoding="utf-8")
     ctx, asked = _ui(1)
-    assert _bash(part, f"cat {outside / 'run.py'}", ctx) is None
+    assert _bash(part, f"cat {(outside / 'run.py').as_posix()}", ctx) is None
     assert asked[0][1][1] == "Yes, allow reading from scripts/ from this project"
     assert part.policy.session_rules == [f"Read({outside.as_posix()}/**)"]
-    assert _bash(part, f"cat {outside / 'other.txt'}", None) is None
+    assert _bash(part, f"cat {(outside / 'other.txt').as_posix()}", None) is None
     ctx, asked = _ui(1)                    # the folder is readable now: what still asks is the command itself
-    assert _bash(part, f"python3 {outside / 'run.py'} search x", ctx) is None
+    assert _bash(part, f"python3 {(outside / 'run.py').as_posix()} search x", ctx) is None
     assert asked[0][1][1].startswith("Yes, and don't ask again for similar commands in ")
 
 
@@ -176,9 +178,9 @@ def test_dont_ask_again_for_a_script_outside_grants_its_folder_and_the_command(t
     outside.mkdir(parents=True)
     (outside / "run.py").write_text("print(1)\n", encoding="utf-8")
     ctx, asked = _ui(1)
-    assert _bash(part, f"python3 {outside / 'run.py'} search x", ctx) is None
+    assert _bash(part, f"python3 {(outside / 'run.py').as_posix()} search x", ctx) is None
     assert asked[0][1][1] == "Yes, and allow access to scripts/ and similar commands"
-    assert _bash(part, f"python3 {outside / 'run.py'} search x", None) is None
+    assert _bash(part, f"python3 {(outside / 'run.py').as_posix()} search x", None) is None
     assert configuration.permission_settings(session)[-1]["additionalDirectories"] == [str(outside.resolve())]
 
 

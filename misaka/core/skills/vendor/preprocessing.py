@@ -1,4 +1,4 @@
-# Hermes f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140 / agent/skill_preprocessing.py; see PROVENANCE.json and LICENSE.
+# Hermes f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140 / agent/skill_preprocessing.py, with 1a24b851e5 and 85564321be (Windows bash); see PROVENANCE.json and LICENSE.
 
 """Shared SKILL.md preprocessing helpers: ``${HERMES_*}`` template tokens and
 inline ``!`cmd``` shell expansion."""
@@ -45,8 +45,14 @@ def run_inline_shell(command: str, cwd: Path | None, timeout: int) -> str:
     _popen_kwargs = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {}
     from ..host import delegated_child_subprocess_env
     try:
+        bash = "bash"
+        if IS_WINDOWS:
+            # CreateProcess searches System32 before PATH and may pick WSL's
+            # launcher. Reuse the terminal's native Git Bash resolution.
+            from ..host import _find_bash
+            bash = _find_bash()
         completed = subprocess.run(
-            ["bash", "-c", command],
+            [bash, "-c", command],
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True, encoding='utf-8', errors='replace',
@@ -67,6 +73,10 @@ def run_inline_shell(command: str, cwd: Path | None, timeout: int) -> str:
             return f"[inline-shell timeout after {timeout}s: {command}]"
         return f"[inline-shell error: {exc}]"
     output = (completed.stdout or "").rstrip("\n") or (completed.stderr or "").rstrip("\n")
+    if completed.returncode != 0 and not output:
+        # rc!=0 with no output at all is indistinguishable from a legit empty result; it is the
+        # "interpreter never ran the command" signature (WSL stub without a distro) — say so.
+        return f"[inline-shell exit {completed.returncode} with no output: {command}]"
     if len(output) > _INLINE_SHELL_MAX_OUTPUT:
         output = output[:_INLINE_SHELL_MAX_OUTPUT] + "...[truncated]"
     return output

@@ -57,12 +57,20 @@ def _decode(component: str) -> str:
     return component.replace("%2E", ".").replace("%25", "%")
 
 
+def _components(path: Path) -> list[str]:
+    """An absolute path as dotted-name components: POSIX's root is implied, a Windows drive (``C:\\``) is the first."""
+    return [_encode(part) for part in (path.parts if path.drive else path.parts[1:])]
+
+
 def _moduleName(prefix: str, path: Path) -> str:
-    return ".".join([prefix, *(_encode(part) for part in path.parts[1:])])
+    return ".".join([prefix, *_components(path)])
 
 
 def _pathOf(parts: Sequence[str]) -> Path:
-    return Path(os.sep).joinpath(*(_decode(part) for part in parts))
+    decoded = [_decode(part) for part in parts]
+    if os.name == "nt":
+        return Path(decoded[0]).joinpath(*decoded[1:])
+    return Path(os.sep).joinpath(*decoded)
 
 
 def _underRoot(path: Path) -> bool:
@@ -210,7 +218,7 @@ async def nodeLoader(modules: Sequence[str | PurePath]) -> list[Facet]:
     for path in paths:
         name = pathToFileURL(str(path))
         target = path.with_suffix("") if path.suffix == ".py" else path
-        loaded = importlib.import_module(".".join([_RELOAD, version, *(_encode(part) for part in target.parts[1:])]))
+        loaded = importlib.import_module(".".join([_RELOAD, version, *_components(target)]))
         definition = getattr(loaded, "default", None)
         setup = _property(definition, "setup")
         if definition is None or not callable(setup):

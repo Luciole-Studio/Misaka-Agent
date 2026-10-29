@@ -120,11 +120,13 @@ async def reserveCodemodeWorker(signal: Any, timeoutMs: float) -> Literal["reser
             return False
         if grant in codemodeWorkerWaiters:
             codemodeWorkerWaiters.remove(grant)
+        # Recorded before `finish` is scheduled: from a worker's thread, the loop may run it before this call returns.
+        decided.append(outcome)
         try:
             loop.call_soon_threadsafe(finish)
         except RuntimeError:
+            decided.clear()
             return False            # the waiter's loop is gone: nobody takes the slot
-        decided.append(outcome)
         return True
 
     def finish() -> None:

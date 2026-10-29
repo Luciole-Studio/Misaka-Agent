@@ -187,14 +187,14 @@ def test_a_shared_index_checks_each_card_against_the_registry_as_it_stands(board
     monkeypatch.setattr(bundle.corpus, "docs", lambda **k: [])
     path = Path(run["workspace"], "nodes", "b_1", "notes.md")
     path.parent.mkdir(parents=True)
-    path.write_text("first\n", encoding="utf-8")
+    path.write_bytes(b"first\n")                     # bytes: text mode writes "\r\n" on Windows
     runs.register_file(con, run["id"], "task_output", "notes", str(path),
                        sha256=hashlib.sha256(b"first\n").hexdigest())
     index = bundle.project_index(run["workspace"])
     earlier = bundle._Collector(con, run, index)
     real = str(path.resolve())
     assert earlier.checked_digest(real)
-    path.write_text("second\n", encoding="utf-8")
+    path.write_bytes(b"second\n")
     runs.register_file(con, run["id"], "task_output", "notes", str(path),
                        sha256=hashlib.sha256(b"second\n").hexdigest())
     later = bundle._Collector(con, run, index)

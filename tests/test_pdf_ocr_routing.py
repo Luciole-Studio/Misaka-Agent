@@ -453,6 +453,9 @@ def _put_off_doc(tmp_path, monkeypatch, **meta):
 
 def test_a_reread_put_off_and_then_answered_forgets_the_misses(tmp_path, monkeypatch):
     ddir, source = _put_off_doc(tmp_path, monkeypatch)
+    # With ocrmypdf installed: on a machine without it the scanned pages wait for it, which keeps the put-off.
+    real_which = shutil.which
+    monkeypatch.setattr(corpus.shutil, "which", lambda name: f"/fake/{name}" if name == corpus.OCR_BINARY else real_which(name))
     monkeypatch.setattr(corpus, "_pdf_visuals", lambda p, numbers: None)
     corpus._reread(str(ddir), str(source), 6)
     monkeypatch.setattr(corpus, "_pdf_visuals", lambda p, numbers: {n: {"cover": 1.0, "marked": True} for n in numbers})

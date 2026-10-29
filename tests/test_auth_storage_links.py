@@ -39,7 +39,8 @@ async def test_a_symlinked_store_is_read_and_written_through_the_link(tmp_path):
     assert (await storage.read("anthropic")).key == KEY["key"]
     await _store(storage, "openai", ApiKeyCredential(key="sk-other"))
 
-    assert link.is_symlink() and os.readlink(link) == str(real)
+    # Compared resolved: Windows reports an absolute link's target in its `\\?\` form.
+    assert link.is_symlink() and link.resolve() == real.resolve()
     assert json.loads(real.read_text(encoding="utf-8"))["openai"]["key"] == "sk-other"
     assert (await AuthStorage.create(str(link)).read("openai")).key == "sk-other"
 

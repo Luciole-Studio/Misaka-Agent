@@ -119,6 +119,12 @@ def _fileURLToPath(url: str) -> str:
     return unquote(pathname)
 
 
+def homedir() -> str:
+    """Node's ``os.homedir()`` (libuv ``uv_os_homedir``): ``HOME`` when it is set, on every platform, else the user's
+    profile. ``Path.home()`` differs on Windows, where it ignores ``HOME``."""
+    return os.environ.get("HOME") or str(Path.home())
+
+
 def normalizePath(input: str, options: PathInputOptions | None = None) -> str:
     options = options if options is not None else {}
     normalized = jsTrim(input) if options.get("trim") else input
@@ -130,7 +136,7 @@ def normalizePath(input: str, options: PathInputOptions | None = None) -> str:
         normalized = normalizeWindowsShellPath(normalized)
 
     if options.get("expandTilde", True) is not False:
-        home = options.get("homeDir") if options.get("homeDir") is not None else str(Path.home())
+        home = options.get("homeDir") if options.get("homeDir") is not None else homedir()
         if normalized == "~":
             return home
         if normalized.startswith("~/") or (os.name == "nt" and normalized.startswith("~\\")):

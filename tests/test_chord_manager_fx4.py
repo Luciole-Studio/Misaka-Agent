@@ -231,7 +231,8 @@ def _unnamedSignal() -> int:
     ("returncode", "exit"),
     [
         (-_unnamedSignal(), {"code": 0, "signal": None}),
-        (-signal.SIGKILL, {"code": None, "signal": "SIGKILL"}),
+        pytest.param(-getattr(signal, "SIGKILL", 9), {"code": None, "signal": "SIGKILL"},
+                     marks=pytest.mark.skipif(not hasattr(signal, "SIGKILL"), reason="no SIGKILL on Windows")),
         (3, {"code": 3, "signal": None}),
     ],
 )

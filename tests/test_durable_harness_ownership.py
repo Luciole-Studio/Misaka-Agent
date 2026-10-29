@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import re
@@ -27,7 +28,7 @@ from misaka.durable import (
 )
 from misaka.durable.storage.sqlite.node import openNodeSqliteStorage
 from misaka.utils.js import AbortController
-from tests.chat_support import chatSetup, openChat, waitFor
+from tests.chat_support import chatSetup, openChat
 from tests.durable_support import ControlledStorage, context, toMatchObject
 from tests.harness_support import addTask, addTool
 from tests.task_support import aborted, deferred, openTasks, race, settled
@@ -196,7 +197,18 @@ def gated(message: Any) -> SimpleNamespace:
 
 
 async def waitUntil(check: Callable[[], Any]) -> None:
-    await waitFor(check)
+    """Upstream's: 500 polls 5 ms apart, however long each check and the work between them take (a wall-clock deadline
+    ran out on a slow runner while the 20,000-task chain below was still ending)."""
+    async def holds() -> bool:
+        result = check()
+        return bool(await result if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future) else result)
+
+    for _attempt in range(500):
+        if await holds():
+            return
+        await asyncio.sleep(0.005)
+    if not await holds():
+        raise RuntimeError("Condition was not reached")
 
 
 async def busy(conversation: Any, task: int) -> None:

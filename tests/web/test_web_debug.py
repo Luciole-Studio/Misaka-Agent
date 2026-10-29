@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -440,9 +441,10 @@ async def test_retention_permissions_and_bounded_events_preserve_unrelated_files
     files = [p for p in root.glob("web-debug-*.json") if not p.is_symlink()]
     assert len(files) == 3 and not old.exists()
     assert untouched.read_text(encoding="utf-8") == "keep" and target.read_text(encoding="utf-8") == "keep private"
-    assert root.stat().st_mode & 0o777 == 0o700
+    posix = sys.platform != "win32"            # Windows has no owner-only mode bits; chmod sets read-only at most
+    assert not posix or root.stat().st_mode & 0o777 == 0o700
     for path in files:
-        assert path.stat().st_size <= 2048 and path.stat().st_mode & 0o777 == 0o600
+        assert path.stat().st_size <= 2048 and (not posix or path.stat().st_mode & 0o777 == 0o600)
         row = json.loads(path.read_text(encoding="utf-8"))
         assert row["events_dropped"] + len(row["events"]) == 300
 

@@ -21,6 +21,7 @@ from misaka.core.source_info import BUILTIN_PATH_PREFIX, SourceScope
 from misaka.utils.node_fs import readdirEntries
 from misaka.utils.paths import (
     canonicalizePath,
+    homedir,
     isLocalPath,
     normalizePath,
     resolvePath,
@@ -92,7 +93,7 @@ def toPosixPath(path: str) -> str:
 
 
 def getHomeDir() -> str:
-    return os.environ.get("HOME") or str(Path.home())
+    return os.environ.get("HOME") or homedir()
 
 
 def prefixIgnorePattern(line: str, prefix: str) -> str | None:

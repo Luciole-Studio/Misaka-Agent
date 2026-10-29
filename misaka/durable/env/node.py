@@ -22,7 +22,6 @@ import threading
 import uuid
 from collections import deque
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import unquote, urlparse
 
@@ -38,6 +37,7 @@ from misaka.utils.js import (
     toWellFormed,
 )
 from misaka.utils.node_errors import uvMessage, withSyscall
+from misaka.utils.paths import homedir
 from misaka.utils.shell import killProcessTree as killShellProcessTree
 
 from . import (
@@ -112,9 +112,9 @@ def fileUrlToPath(url: str, windows: bool | None = None) -> str | None:
 def resolvePath(cwd: str, path: str) -> str:
     normalized = path
     if normalized == "~":
-        normalized = str(Path.home())
+        normalized = homedir()
     elif normalized.startswith("~/") or (sys.platform == "win32" and normalized.startswith("~\\")):
-        normalized = os.path.join(str(Path.home()), normalized[2:])
+        normalized = os.path.join(homedir(), normalized[2:])
     elif normalized.startswith("file://"):
         converted = fileUrlToPath(normalized)
         # Keep what cannot be converted as an ordinary path so filesystem methods preserve their non-raising contract.

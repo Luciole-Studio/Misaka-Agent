@@ -15,7 +15,6 @@ import sys
 from collections import abc
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Protocol, TypedDict
 
 from misaka.ui.tui.fuzzy import fuzzyFilter
@@ -25,6 +24,7 @@ from misaka.utils.child_process import spawn_child_process
 from misaka.utils.collation import localeCompare
 from misaka.utils.js import Utf8Decoder, awaitValue, jsIndex, jsTrim, jsTrimStart
 from misaka.utils.js_regexp import RegExp
+from misaka.utils.paths import homedir
 
 PATH_DELIMITERS = {" ", "\t", '"', "'", "="}
 tokenStartRegex = RegExp(f"{autocompleteBoundaryRegex.source}$", "u")
@@ -852,7 +852,7 @@ def _commandName(cmd: SlashCommand | AutocompleteItem) -> str:
 
 def _homedir() -> str:
     """MISAKA fork: ``os.homedir()``."""
-    return str(Path.home())
+    return homedir()
 
 
 def _comparator[T](compare: Callable[[T, T], int]) -> Callable[[T], Any]:

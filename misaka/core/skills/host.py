@@ -3,9 +3,15 @@
 import os
 import subprocess
 
-from misaka.utils.shell import getShellEnv
+from misaka.utils.shell import getShellConfig, getShellEnv
 
 IS_WINDOWS = os.name == "nt"
+
+
+def _find_bash():
+    """Hermes' ``tools.environments.local._find_bash``: the bash the terminal runs commands with (Git Bash first on
+    Windows), raising when there is none."""
+    return getShellConfig().shell
 
 
 def windows_hide_flags():

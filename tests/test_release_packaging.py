@@ -230,6 +230,7 @@ def test_windows_arm64_poppler_tools_skip_git_bundled_xpdf(tmp_path: Path):
     assert build_release.poppler_tool_roots(conda, None) == [conda]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX launcher: #! tools and a symlinked bin/misaka")
 def test_launcher_resolves_a_symlink_and_sets_the_tool_path(tmp_path: Path):
     compiler = shutil.which("cc") or shutil.which("gcc")
     if compiler is None:

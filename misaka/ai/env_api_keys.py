@@ -14,6 +14,7 @@ from pathlib import Path
 
 from misaka.ai.types import ProviderEnv
 from misaka.ai.utils.provider_env import getProviderEnvValue
+from misaka.utils.paths import homedir
 
 ANTHROPIC_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
 ANTHROPIC_OAUTH_TOKEN_ENV = "ANTHROPIC_OAUTH_TOKEN"
@@ -41,7 +42,7 @@ def _hasVertexAdcCredentials(env: ProviderEnv | None = None) -> bool:
             _cachedVertexAdcCredentialsExists = Path(gacPath).exists()
         else:
             # Fall back to default ADC path (lazy evaluation)
-            _cachedVertexAdcCredentialsExists = Path.home().joinpath(
+            _cachedVertexAdcCredentialsExists = Path(homedir()).joinpath(
                 ".config", "gcloud", "application_default_credentials.json"
             ).exists()
     return _cachedVertexAdcCredentialsExists

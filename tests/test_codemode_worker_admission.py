@@ -72,6 +72,9 @@ async def waitFor(check) -> None:
 # #10748: fresh sandboxes must share capacity and retain it until actual worker exit.
 @pytest.mark.parametrize("how", ["timeout", "abort", "success"])
 async def test_bounds_surviving_workers(how, terminations, monkeypatch):
+    # Compiled first: a cold compile slower than the 200 ms script timeout (a Windows runner's) times the script out
+    # before its worker starts, and its result then comes before the worker is asked to end.
+    await codemode_host.loadQuickJSWasm()
     started: list[codemode_worker.Worker] = []
     base = codemode_host.Worker
 
@@ -194,3 +197,18 @@ async def test_ignores_an_invalid_misaka_codemode_max_workers(terminations, monk
     assert len(results) == 2
     await releaseOne(terminations)
     await asyncio.gather(*pending)
+
+
+# MISAKA fork: a worker releases its slot on its own thread, so the waiter's loop may run the delivery before the
+# grant returns. The outcome was recorded after scheduling it, and the waiter then never woke (seen on Windows).
+async def test_a_slot_granted_before_the_grant_returns_still_reaches_its_waiter(monkeypatch):
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(codemode_execute, "activeCodemodeWorkers", codemode_execute.maxCodemodeWorkers())
+    waiting = asyncio.ensure_future(codemode_execute.reserveCodemodeWorker(None, 10_000))
+    await asyncio.sleep(0)
+    assert len(codemode_execute.codemodeWorkerWaiters) == 1
+    monkeypatch.setattr(loop, "call_soon_threadsafe", lambda callback, *args: callback(*args))
+    codemode_execute.releaseCodemodeWorker()
+    assert await asyncio.wait_for(waiting, 5) == "reserved"
+    assert codemode_execute.activeCodemodeWorkers == codemode_execute.maxCodemodeWorkers()
+    assert codemode_execute.codemodeWorkerWaiters == []

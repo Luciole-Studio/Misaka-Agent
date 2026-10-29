@@ -604,7 +604,9 @@ async def test_fails_a_script_whose_output_passes_the_limits_even_if_it_catches_
         assert chars <= MAX_OUTPUT_CHARS
         assert chars > MAX_OUTPUT_CHARS - (2 << 20)
 
-    empty = await sandbox.execute('for (;;) text("");')
+    # MISAKA: 100,000 output items cross the worker one message each, about 5 s here (Node takes milliseconds); the
+    # 10 s default timed out first on a slower runner.
+    empty = await sandbox.execute('for (;;) text("");', {"timeoutMs": 60_000})
     assertMatches(empty, {"ok": False, "error": {"name": "RangeError"}})
     assert len(empty["output"]) == MAX_OUTPUT_ITEMS
 
