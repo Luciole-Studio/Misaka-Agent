@@ -2,9 +2,11 @@
 
 MISAKA fork: TypeBox's ``Compile`` is a jsonschema Draft 2020-12 validator, and a TypeBox schema
 (``Object.getOwnPropertySymbols(...).includes(TYPEBOX_KIND)``) is a pydantic model class, validated with
-``model_validate``. ``Value.Convert``, which upstream runs on every schema first, has no Python counterpart; the
-enum/const rescue in ``_coerceWithJsonSchema`` stands in for the part of it that changes results. Error texts come from
-jsonschema and pydantic, not TypeBox.
+``model_validate``. ``Value.Convert``, which upstream runs on every tool's arguments first, is ported in
+``typebox_convert``: a pydantic tool's arguments go through it, as a TypeBox tool's do upstream. A plain JSON schema
+has no ``~kind``, so upstream's ``Value.Convert`` leaves its arguments as they are and only ``coerceWithJsonSchema``
+changes them; here too. A pydantic tool's converted arguments pass both pydantic and the Draft 2020-12 check of its
+schema, as upstream's pass ``Check``. Error texts come from jsonschema and pydantic, not TypeBox.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from pydantic import ValidationError as PydanticValidationError
 from referencing.exceptions import Unresolvable
 
 from misaka.ai.types import Tool, ToolCall
+from misaka.ai.utils.typebox_convert import Convert
 from misaka.ai.utils.typebox_helpers import typeboxSchema
 from misaka.utils.js import jsIsInteger, jsNumber, jsonStringify, jsString, jsTrim
 
@@ -349,7 +352,9 @@ def _receivedArguments(arguments: Any) -> str:
 def _validatePydanticToolArguments(tool: Tool, toolCall: ToolCall) -> Any:
     """MISAKA fork: the TypeBox branch, for a pydantic model class."""
     args = deepcopy(toolCall.arguments)
-    _normalizeOptionalNulls(args, typeboxSchema(tool.parameters))
+    schema = typeboxSchema(tool.parameters)
+    _normalizeOptionalNulls(args, schema)
+    Convert(schema, args)        # upstream: `Value.Convert(tool.parameters, args)`, which converts `args` in place
     try:
         validated = tool.parameters.model_validate(args)
     except PydanticValidationError as error:
@@ -362,6 +367,15 @@ def _validatePydanticToolArguments(tool: Tool, toolCall: ToolCall) -> Any:
         raise ValueError(
             f'Validation failed for tool "{toolCall.name}":\n{errors}\n\nReceived arguments:\n{_receivedArguments(toolCall.arguments)}'
         ) from error
+    # Upstream accepts only what `validator.Check(args)` accepts. Pydantic's lax mode also takes values TypeBox's Check
+    # refuses ("yes" for a boolean, which `Value.Convert` leaves as it is), so the converted arguments are checked
+    # against the schema too, with the plain JSON schema branch's error texts.
+    errorList = sorted(_getValidator(schema).iter_errors(args), key=lambda error: list(error.absolute_path))
+    if errorList:
+        errors = "\n".join(f"  - {_formatValidationPath(error)}: {error.message}" for error in errorList)
+        raise ValueError(
+            f'Validation failed for tool "{toolCall.name}":\n{errors}\n\nReceived arguments:\n{_receivedArguments(toolCall.arguments)}'
+        )
     return validated.model_dump(mode="python")
 
 

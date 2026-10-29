@@ -78,6 +78,9 @@ def allows_subagents(
 
 
 class _StrictModel(BaseModel):
+    # CCB's strict schemas. A model's tool call is converted first, as every tool's is upstream (pi's `Value.Convert`,
+    # misaka.ai.utils.typebox_convert): "0"/"1" and 0/1 read as booleans and a number as a string where one is
+    # declared; `strict` then refuses whatever is still of the wrong type.
     model_config = ConfigDict(extra="forbid", strict=True)
     _semantic_boolean = field_validator("run_in_background", "block", mode="before", check_fields=False)(semantic_boolean)
 

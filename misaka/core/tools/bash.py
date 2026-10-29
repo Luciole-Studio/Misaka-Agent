@@ -88,7 +88,9 @@ bashToolSystemPromptContribution = {
 # MISAKA fork: the background-capable input misaka's managed bash uses (CCB's run_in_background/description);
 # pi's schema is BashToolInput alone.
 class BackgroundBashToolInput(BashToolInput):
-    # CCB semanticBoolean accepts exactly the two boolean strings, not 0/1/yes.
+    # CCB semanticBoolean accepts exactly the two boolean strings, not 0/1/yes. A model's tool call is converted first,
+    # as every tool's is upstream (pi's `Value.Convert`, misaka.ai.utils.typebox_convert), which also reads "0"/"1"
+    # and 0/1 as booleans; the strings are left to this validator only when the model is validated directly.
     timeout: float | None = Field(default=None, description="Foreground wait in seconds; managed commands default to BASH_DEFAULT_TIMEOUT_MS / 1000 (120 seconds if unset). Eligible commands continue in the background at timeout.")
     run_in_background: bool = Field(default=False, strict=True, description="Run in the background; use TaskOutput or TaskStop with the returned task ID")
     description: str | None = Field(default=None, description="Short description of this command")
