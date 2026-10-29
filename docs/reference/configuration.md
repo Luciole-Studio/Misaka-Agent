@@ -354,6 +354,7 @@ Variables for MISAKA itself:
 | `MISAKA_OAUTH_CALLBACK_HOST` | `127.0.0.1` | the address a browser sign-in returns to, for signing in on a remote machine |
 | `MISAKA_SETUP_PLAIN` | off | `1` makes the setup wizard ask numbered questions instead of drawing menus |
 | `MISAKA_TIMING` | `0` | `1` prints startup timings |
+| `MISAKA_CODEMODE_MAX_WORKERS` | `2` | codemode workers alive at once across all sessions of one MISAKA process (each Sister runs in a process of its own). Each worker's script may use up to 256 MB. Further scripts wait for a free worker |
 | `MISAKA_GHOSTTY_VT` | the bundled library | a terminal library you built yourself, for platforms without a bundled one |
 | `MISAKA_ALLOW_NESTED` | off | `1` lets the panel open inside one of its own panes |
 | `MISAKA_PROGRAM_STATUS` | ask the terminal | `1` always sends program status reports (OSC 7501), `0` never does |

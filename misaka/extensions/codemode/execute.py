@@ -7,6 +7,8 @@ Translated from pi's ``coding-agent/src/extensions/codemode/execute.ts``.
 from __future__ import annotations
 
 import asyncio
+import math
+import os
 import re
 import threading
 import time
@@ -38,10 +40,13 @@ from misaka.utils.js import (
     bufferFromBase64,
     errorMessage,
     jsLength,
+    jsNumber,
     jsonStringify,
+    jsRound,
     jsSlice,
     jsString,
     nullishCoalesce,
+    objectEntries,
     toFixed,
 )
 from misaka.utils.output_files import writeOutputFile
@@ -76,11 +81,107 @@ CODEMODE_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024
 # MISAKA fork: "sessions" are those of one OS process; every Sister card, headless node, and subagent runs in a
 # process of its own, so one Sister's stuck workers never block another's. A worker thread cannot be killed, so a
 # cancelled one counts until its built-in returns.
-MAX_CONCURRENT_CODEMODE_WORKERS = 2
+DEFAULT_MAX_CODEMODE_WORKERS = 2
+
+
+def maxCodemodeWorkers() -> int:
+    """``MISAKA_CODEMODE_MAX_WORKERS`` if it is a positive integer. Read per call so SDK hosts can set it at runtime.
+
+    MISAKA fork: the variable carries MISAKA's prefix where pi reads ``PI_CODEMODE_MAX_WORKERS``."""
+    value = jsNumber(os.environ.get("MISAKA_CODEMODE_MAX_WORKERS", UNDEFINED))
+    return int(value) if isinstance(value, int | float) and math.isfinite(value) and value == int(value) and value > 0 \
+        else DEFAULT_MAX_CODEMODE_WORKERS
+
+
+# How long a script waits for a free worker before failing. Bounds the wait when every worker is
+# held by a script that waits on another script, for example an in-process subagent that uses codemode.
+CODEMODE_WORKER_WAIT_MS = 60_000
 activeCodemodeWorkers = 0
+# Scripts waiting for a worker, in arrival order.
+codemodeWorkerWaiters: list[Callable[[], bool]] = []
 # MISAKA fork: workers are reserved on whichever event loop thread runs the session and released on the worker's own
-# thread as it ends (see `CodemodeSandboxOptions.acquireWorker`), so the counter is guarded.
+# thread as it ends (see `CodemodeSandboxOptions.acquireWorker`), so the counter and the queue are guarded, and a
+# waiter's one outcome -- reserved, aborted or timed out -- is decided under this lock.
 _activeCodemodeWorkersLock = threading.Lock()
+
+
+async def reserveCodemodeWorker(signal: Any, timeoutMs: float) -> Literal["reserved", "aborted", "timeout"]:
+    """Reserve one worker slot, waiting in arrival order while all are taken. Resolves with why it could
+    not reserve one: the signal aborted, or ``timeoutMs`` passed."""
+    if signal is not None and signal.aborted:
+        return "aborted"
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[Literal["reserved", "aborted", "timeout"]] = loop.create_future()
+    decided: list[Literal["reserved", "aborted", "timeout"]] = []
+
+    def settle(outcome: Literal["reserved", "aborted", "timeout"]) -> bool:
+        # With the lock held. The first outcome is the only one; it is delivered on the waiter's own loop.
+        if decided:
+            return False
+        if grant in codemodeWorkerWaiters:
+            codemodeWorkerWaiters.remove(grant)
+        try:
+            loop.call_soon_threadsafe(finish)
+        except RuntimeError:
+            return False            # the waiter's loop is gone: nobody takes the slot
+        decided.append(outcome)
+        return True
+
+    def finish() -> None:
+        timer.cancel()
+        if signal is not None:
+            signal.removeEventListener("abort", onAbort)
+        if not future.done():
+            future.set_result(decided[0])
+
+    def grant() -> bool:
+        return settle("reserved")
+
+    def onAbort() -> None:
+        with _activeCodemodeWorkersLock:
+            settle("aborted")
+
+    def onTimeout() -> None:
+        with _activeCodemodeWorkersLock:
+            settle("timeout")
+
+    timer = loop.call_later(timeoutMs / 1000, onTimeout)
+    with _activeCodemodeWorkersLock:
+        codemodeWorkerWaiters.append(grant)
+    if signal is not None:
+        signal.addEventListener("abort", onAbort, once=True)
+    admitCodemodeWorkers()
+    try:
+        return await future
+    except asyncio.CancelledError:
+        # Python only (a JS promise cannot be cancelled): a slot granted to a cancelled waiter is given back.
+        with _activeCodemodeWorkersLock:
+            granted = decided[:1] == ["reserved"]
+            settle("aborted")
+        if granted:
+            releaseCodemodeWorker()
+        raise
+
+
+def _admitCodemodeWorkersLocked() -> None:
+    global activeCodemodeWorkers
+    while len(codemodeWorkerWaiters) > 0 and activeCodemodeWorkers < maxCodemodeWorkers():
+        activeCodemodeWorkers += 1
+        if not codemodeWorkerWaiters.pop(0)():
+            activeCodemodeWorkers -= 1
+
+
+def admitCodemodeWorkers() -> None:
+    """Give free slots to waiting scripts in arrival order."""
+    with _activeCodemodeWorkersLock:
+        _admitCodemodeWorkersLocked()
+
+
+def releaseCodemodeWorker() -> None:
+    global activeCodemodeWorkers
+    with _activeCodemodeWorkersLock:
+        activeCodemodeWorkers -= 1
+        _admitCodemodeWorkersLocked()
 MODEL_TYPES: frozenset[str] = frozenset({"chat", "image", "classifier"})
 
 
@@ -292,23 +393,35 @@ def createLimiter(limit: int) -> Callable[[Callable[[], Awaitable[Any]]], Awaita
     active = 0
     waiting: list[asyncio.Future[None]] = []
 
+    def wakeNext() -> None:
+        # `waiting.shift()?.()`. Python only: a cancelled waiter has nothing to resume, so the wake-up goes on.
+        while waiting:
+            future = waiting.pop(0)
+            if not future.done():
+                future.set_result(None)
+                return
+
     async def limited(run: Callable[[], Awaitable[Any]]) -> Any:
         nonlocal active
-        # MISAKA fork: a finishing call hands its slot to the next waiting call without giving it up, so a
-        # call that arrives before the waiter resumes cannot take the slot too.
         if active >= limit:
             future = asyncio.get_running_loop().create_future()
             waiting.append(future)
-            await future
-        else:
-            active += 1
+            try:
+                await future
+            except asyncio.CancelledError:
+                # Python only (a JS promise cannot be cancelled): a waiter cancelled in the queue leaves it, and one
+                # cancelled after its wake-up passes the wake-up on.
+                if future in waiting:
+                    waiting.remove(future)
+                elif not future.cancelled():
+                    wakeNext()
+                raise
+        active += 1
         try:
             return await run()
         finally:
-            if waiting:
-                waiting.pop(0).set_result(None)
-            else:
-                active -= 1
+            active -= 1
+            wakeNext()
 
     return limited
 
@@ -328,7 +441,9 @@ def readCodemodeStore(branch: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             continue
         for key in entry["data"]["delete"]:
             store.pop(key, None)
-        for key, value in entry["data"]["set"].items():
+        # `Object.entries(set)`: an array's entries are its indices as strings.
+        set_ = entry["data"]["set"]
+        for key, value in (objectEntries(set_) if isinstance(set_, dict) else [(str(i), v) for i, v in enumerate(set_)]):
             store[key] = value
     return store
 
@@ -597,27 +712,69 @@ async def executeCodemode(
 
     sandboxTools = [sandboxTool(tool) for tool in callable]
 
-    sandbox = CodemodeSandbox({
-        "tools": sandboxTools,
-        "globals": [
-            *createDiscoveryGlobals(callable, samples, options),
-            *(
-                createModelGlobals(ctx.modelRegistry, toolCallId, calls, publish, addModelUsage, addGeneratedImages)
-                if options.models and ctx is not None
-                else []
-            ),
-        ],
-        "timeoutMs": sourceOptions.get("timeoutMs", float("inf")),
-        "memoryLimitBytes": CODEMODE_MEMORY_LIMIT_BYTES,
-        "acquireWorker": acquireCodemodeWorker,
-    })
+    # The wait for a worker counts toward the script's deadline.
+    deadline = sourceOptions.get("timeoutMs", math.inf)
+    waitStartedAt = _now()
+    admission = await reserveCodemodeWorker(signal, min(deadline, CODEMODE_WORKER_WAIT_MS))
+    waitedMs = _now() - waitStartedAt
+    if admission != "reserved":
+        waited = toFixed((_now() - startedAt) / 1000, 1)
+        reason = signal.reason if signal is not None else None
+        if admission == "aborted":
+            error = f"Script aborted: {errorMessage(reason) if isinstance(reason, BaseException) else 'Execution aborted'}"
+        elif deadline <= CODEMODE_WORKER_WAIT_MS:
+            error = (f"Script timed out: Execution timed out after {jsString(deadline)} ms while waiting for a free "
+                     "codemode worker")
+        else:
+            error = (f"No codemode worker became free within {jsString(CODEMODE_WORKER_WAIT_MS / 1000)} seconds. All "
+                     f"{maxCodemodeWorkers()} workers, shared by every session in this process, are held by other "
+                     "scripts. Retry after they finish.")
+        return AgentToolResult(
+            content=[
+                TextContent(text=f"Script failed\nWall time {waited} seconds\nOutput:\n"),
+                TextContent(text=f"Script error:\n{error}\n\nThe script did not start."),
+            ],
+            details=snapshot(),
+            isError=True,
+        )
+    # The reservation covers the one worker this script starts. A launch that resumes after the result
+    # settled finds it released and starts no worker.
+    reserved = True
 
+    def acquireWorker() -> Callable[[], None]:
+        nonlocal reserved
+        if not reserved:
+            raise RuntimeError("The script already settled")
+        # From here the sandbox releases the slot when the worker actually exits.
+        reserved = False
+        return releaseCodemodeWorker
+
+    sandbox: CodemodeSandbox | None = None
     result: CodemodeResult
     try:
+        sandbox = CodemodeSandbox({
+            "tools": sandboxTools,
+            "globals": [
+                *createDiscoveryGlobals(callable, samples, options),
+                *(
+                    createModelGlobals(ctx.modelRegistry, toolCallId, calls, publish, addModelUsage, addGeneratedImages)
+                    if options.models and ctx is not None
+                    else []
+                ),
+            ],
+            # `Math.max(1, Math.round(deadline - waitedMs))`; Python cannot round an unset (infinite) deadline.
+            "timeoutMs": deadline if math.isinf(deadline) else max(1, jsRound(deadline - waitedMs)),
+            "memoryLimitBytes": CODEMODE_MEMORY_LIMIT_BYTES,
+            "acquireWorker": acquireWorker,
+        })
         store = readCodemodeStore(ctx.sessionManager.getBranch()) if ctx is not None else {}
         result = await sandbox.execute(code, {"signal": signal, "store": store})
     finally:
-        await sandbox.close()
+        if sandbox is not None:
+            await sandbox.close()
+        if reserved:
+            reserved = False
+            releaseCodemodeWorker()
     # Calls still marked running were cut off by the script ending, a timeout, or an abort.
     for call in calls:
         if call["status"] == "running":
@@ -657,25 +814,6 @@ async def executeCodemode(
         usage=modelUsage,
         isError=None if result["ok"] else True,
     )
-
-
-def acquireCodemodeWorker() -> Callable[[], None]:
-    """``CodemodeSandboxOptions.acquireWorker`` of every codemode call in this process."""
-    global activeCodemodeWorkers
-    with _activeCodemodeWorkersLock:
-        if activeCodemodeWorkers >= MAX_CONCURRENT_CODEMODE_WORKERS:
-            raise RuntimeError(
-                f"Codemode worker limit reached ({MAX_CONCURRENT_CODEMODE_WORKERS} workers are still running or "
-                "shutting down). Retry after they exit."
-            )
-        activeCodemodeWorkers += 1
-
-    def release() -> None:
-        global activeCodemodeWorkers
-        with _activeCodemodeWorkersLock:
-            activeCodemodeWorkers -= 1
-
-    return release
 
 
 def isNamespaceName(namespace: ToolNamespace, query: str) -> bool:
