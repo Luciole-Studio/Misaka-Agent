@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/Luciole-Studio/Misaka-Agent/v0.19.17/misaka/schemas/theme.schema.json",
+  "$schema": "https://raw.githubusercontent.com/Luciole-Studio/Misaka-Agent/v0.19.18/misaka/schemas/theme.schema.json",
   "name": "dark",
   "appearance": "dark",
   "vars": {
