@@ -72,6 +72,24 @@ lists them all.
 | `misaka web status` | what is configured, without any network call |
 | `misaka web set KEY VALUE` / `unset KEY` | change one web setting |
 
+### Reading
+
+Reading actions work on materials with a question; see the [reading guide](../guide/reading.md).
+The engine has to be built first (`npm --prefix packages/reading run build`), and these commands
+need a text model.
+
+| Command | What it does |
+|---|---|
+| `misaka read open SOURCE... --question Q` | index the materials and create a run; `--intent TEXT` records what you want from it |
+| `misaka read act RUN_ID ACTION --node NODE_ID` | run one of the eight actions on a node (`--focus`, `--lens`, `--context`, `--question`) |
+| `misaka read fork RUN_ID --node NODE_ID --lens "A" --lens "B"` | split a node into independent lines read in parallel |
+| `misaka read compare RUN_ID NODE_ID NODE_ID ... --question Q` | compare two or more nodes in a new node |
+| `misaka read reread RUN_ID --node OLD --using NEW` | reread older material with a newer understanding |
+| `misaka read graph RUN_ID` | the reading map and the node files |
+| `misaka read chat RUN_ID` | talk with the run's leader; Ctrl+C or `/stop` leaves |
+
+`--workspace`, `--runs-dir`, `--json` and `--model provider/id` are accepted where they apply.
+
 ### Skills
 
 | Command | What it does |
@@ -187,6 +205,20 @@ Available in Last Order's window.
 |---|---|
 | `/commit [MESSAGE]` | commit the project to git, after you see the files and confirm |
 | `/trust` | remember whether this project's own settings may be used |
+
+### Reading
+
+Available in Last Order's window. `/read` takes the same subcommands as `misaka read`, and needs
+the engine to be built ([reading guide](../guide/reading.md)).
+
+| Command | What it does |
+|---|---|
+| `/read open SOURCE... --question Q` | start a reading run in this folder |
+| `/read act RUN_ID ACTION --node NODE_ID` | run one action, as in the terminal |
+| `/read fork`, `compare`, `reread`, `graph` | the same operations as `misaka read` |
+| `/read say RUN_ID MESSAGE` | say something to that run's leader |
+| `/read stop` | stop the engine this window started; the run stays on disk |
+| `/read --help` | the full usage |
 
 ### Skills
 

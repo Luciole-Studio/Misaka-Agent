@@ -22,3 +22,10 @@ __pycache__/
 # Development records (plans, audits, ledgers): kept on the developer's machine, not published
 /docs/plans/
 /docs/audits/
+
+# The reading engine is built from source; only sources and the lockfile are published.
+/packages/reading/node_modules/
+/packages/reading/dist/
+
+# A reading run's graph, node bodies and sessions belong to the reader, not the repository.
+/reading/
