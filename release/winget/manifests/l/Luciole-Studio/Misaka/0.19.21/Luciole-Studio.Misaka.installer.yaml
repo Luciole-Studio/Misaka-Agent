@@ -1,23 +1,23 @@
 PackageIdentifier: Luciole-Studio.Misaka
-PackageVersion: 0.19.19
+PackageVersion: 0.19.21
 InstallerType: zip
 NestedInstallerType: portable
 ArchiveBinariesDependOnPath: true
 Installers:
   - Architecture: x64
     MinimumOSVersion: 10.0.17763.0
-    InstallerUrl: https://github.com/Luciole-Studio/Misaka-Agent/releases/download/v0.19.19/misaka-0.19.19-windows-x86_64.zip
+    InstallerUrl: https://github.com/Luciole-Studio/Misaka-Agent/releases/download/v0.19.21/misaka-0.19.21-windows-x86_64.zip
     InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
     NestedInstallerFiles:
-      - RelativeFilePath: misaka-0.19.19-windows-x86_64/bin/misaka.exe
+      - RelativeFilePath: misaka-0.19.21-windows-x86_64/bin/misaka.exe
         PortableCommandAlias: misaka
 
   - Architecture: arm64
     MinimumOSVersion: 10.0.22000.0
-    InstallerUrl: https://github.com/Luciole-Studio/Misaka-Agent/releases/download/v0.19.19/misaka-0.19.19-windows-arm64.zip
+    InstallerUrl: https://github.com/Luciole-Studio/Misaka-Agent/releases/download/v0.19.21/misaka-0.19.21-windows-arm64.zip
     InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
     NestedInstallerFiles:
-      - RelativeFilePath: misaka-0.19.19-windows-arm64/bin/misaka.exe
+      - RelativeFilePath: misaka-0.19.21-windows-arm64/bin/misaka.exe
         PortableCommandAlias: misaka
 
 ManifestType: installer
