@@ -16,6 +16,14 @@ import pytest
 from misaka.core.skills.wiring.skills import SkillsPart
 
 
+async def published(part, base="BASE", ctx=None):
+    """What a part adds to the run's prompt: its sections, as a pi extension adds them, joined as the
+    prompt renders them. A part never returns a whole prompt, which would be forced."""
+    options = {"sections": {}}
+    assert await part.before_agent_start({"systemPrompt": base, "systemPromptOptions": options}, ctx) is None
+    return "\n\n".join(options["sections"].values())
+
+
 @pytest.fixture
 def skills(tmp_path, monkeypatch):
     from misaka.config import CFG
@@ -87,7 +95,7 @@ def test_a_child_preloads_skills_from_where_they_live(skills):
 def test_a_cards_skill_index_no_longer_calls_skills_read_only(skills, kind):
     part = _part(skills, kind)
     try:
-        prompt = asyncio.run(part.before_agent_start({"systemPrompt": "base"}, SimpleNamespace()))["systemPrompt"]
+        prompt = asyncio.run(published(part, "base", SimpleNamespace()))
         assert "runner" in prompt and "Skills are read-only in this session" not in prompt
     finally:
         asyncio.run(part.session_shutdown({}, SimpleNamespace()))

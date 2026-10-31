@@ -66,7 +66,10 @@ class BeforeAgentStart:
     """What the parts did with a turn about to start, folded the way the runner folds it.
 
     `system_prompt_options` is the mutable, normalized options object every part saw; a part
-    that returned `systemPrompt` set `forceSystemPrompt` on it, as an extension would."""
+    that returned `systemPrompt` set `forceSystemPrompt` on it, as an extension would. A part adds
+    to the prompt through its ``sections`` instead, as pi's extensions do: a forced prompt is fixed
+    here, before the extensions run, and the sections they add (MCP's ``mcp_servers``) would never
+    reach the model."""
 
     system_prompt_options: dict[str, Any]
     messages: list[Any] = field(default_factory=list)

@@ -577,3 +577,20 @@ async def test_bundled_extensions_load_as_built_ins_a_setting_turns_off_one_at_a
             paths, tools = loaded(session)
             assert path not in paths and set(own) - {path} <= paths
             assert tool is None or tool not in tools
+
+
+@pytest.mark.parametrize("role,kind", [("last_order", "foreground"), ("sisters/10032", "card")])
+async def test_an_extensions_prompt_section_reaches_the_run_past_the_parts(prompt_home, role, kind):
+    """The parts add their sections as pi's extensions do, and none returns a whole prompt: a forced
+    prompt is fixed before the extensions run, so a section one adds after the parts -- MCP's list of
+    the servers whose tools are not declared -- never reached the model (2026-10-31)."""
+    import json
+
+    servers = {"vault": {"command": "misaka-fixture-absent-server", "description": "A vault of code names."}}
+    (prompt_home / "profiles" / role / "mcp.json").write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+    async with assembled(prompt_home, role, kind) as session:
+        await session.bindExtensions({})
+        prompt = await final_prompt(session)
+        assert session._runSystemPromptOptions.get("forceSystemPrompt") is None
+        assert "- mcp__vault (codemode): A vault of code names." in prompt
+        assert "<sister_capabilities>" in prompt and "<collaboration>" in prompt

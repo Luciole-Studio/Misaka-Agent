@@ -47,22 +47,30 @@ class SisterCapabilitiesPart:
                 self.session.refreshTools()
 
     async def before_agent_start(self, event, ctx):
-        system_prompt = event["systemPrompt"].rstrip()
+        # Sections of the run's prompt, as pi's extensions add theirs: the workflow's context while one
+        # runs, and the routing catalog. Returning a whole prompt instead would force it, and the
+        # sections the extensions add after the parts (MCP's `mcp_servers`) would never reach the model.
+        sections = event["systemPromptOptions"]["sections"]
+        context = []
         if self.workflow_context:
             for owner in owners.registered():
-                common = owner.system_context(self.session, self.session.getActiveToolNames(), system_prompt,
-                                              self.sister_id)
+                common = owner.system_context(self.session, self.session.getActiveToolNames(),
+                                              "\n\n".join([event["systemPrompt"].rstrip(), *context]), self.sister_id)
                 if common:
-                    system_prompt += "\n\n" + common
+                    context.append(common)
+        if context:
+            sections["workflow"] = "\n\n".join(context)
+        else:
+            sections.pop("workflow", None)
         compact = ([coordinator_profile(entry) for entry in self.catalog]
                    if self.catalog is not None else routing_catalog())
         if self.sister_id is not None:
             compact = [entry for entry in compact if entry["id"] != self.sister_id]
-        text = ("\n\n## Sister capability profiles\n"
-                "Choose collaborators by fit. profile_preview contains the first 200 characters of the introduction. "
-                "Query live task state separately; this catalog is not a busy/idle report.\n"
-                + prompt_guard.untrusted("sister-capabilities", json.dumps(compact, ensure_ascii=False)))
-        return {"systemPrompt": system_prompt + text}
+        sections["sister_capabilities"] = (
+            "## Sister capability profiles\n"
+            "Choose collaborators by fit. profile_preview contains the first 200 characters of the introduction. "
+            "Query live task state separately; this catalog is not a busy/idle report.\n"
+            + prompt_guard.untrusted("sister-capabilities", json.dumps(compact, ensure_ascii=False)))
 
 
 ROLES = {"last_order", "sisters"}

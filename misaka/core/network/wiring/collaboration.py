@@ -90,25 +90,18 @@ class CollaborationPart:
         self.tools = []
         self.commands = []
         self.session = None
-        self._published = ""
-        self._input = None
 
     def attach(self, session):
         self.session = session
 
     async def before_agent_start(self, event, _ctx):
-        original = event["systemPrompt"]
-        # A caller may pass our previous output, optionally followed by other parts.
-        # Verify its original prefix and owned position: identical text elsewhere
-        # may belong to a user's persona and must not be removed from a fresh base.
-        previous = self._input + self._published if self._input is not None and self._published else None
-        prompt = (self._input + original[len(previous):]
-                  if previous is not None and original.startswith(previous) else original)
-        self._input = prompt
-        sections = collaboration_sections(self.session.getActiveToolNames())
-        self._published = "\n\n" + "\n\n".join(sections) if sections else ""
-        prompt += self._published
-        return {"systemPrompt": prompt} if prompt != original else None
+        # A section of the run's prompt, as pi's extensions add theirs (see SisterCapabilitiesPart).
+        sections = event["systemPromptOptions"]["sections"]
+        text = "\n\n".join(collaboration_sections(self.session.getActiveToolNames()))
+        if text:
+            sections["collaboration"] = text
+        else:
+            sections.pop("collaboration", None)
 
 
 def part(_spec):

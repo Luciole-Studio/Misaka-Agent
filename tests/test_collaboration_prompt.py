@@ -13,17 +13,24 @@ class CollaborationPromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(part.tools, [])
         return part
 
+    async def publish(self, part, base="BASE", sections=None):
+        """The run's prompt sections after the part: it adds its `collaboration` section as a pi
+        extension adds one, and returns no prompt of its own."""
+        options = {"sections": dict(sections or {})}
+        self.assertIsNone(await part.before_agent_start({"systemPrompt": base, "systemPromptOptions": options}, None))
+        return options["sections"]
+
     async def test_no_capabilities_does_not_claim_collaborators(self):
         for names in ([], ["read"], ["unrelated_extension_tool"]):
             with self.subTest(names=names):
                 part = self.make_part(names)
-                self.assertIsNone(await part.before_agent_start({"systemPrompt": "CUSTOM\n"}, None))
+                self.assertEqual(await self.publish(part, "CUSTOM\n"), {})
 
     async def test_sister_tools_have_own_section_without_ally_capabilities(self):
         names = ["Agent", "TaskOutput", "TaskStop", "SendMessage"]
         part = self.make_part(names)
-        text = (await part.before_agent_start({"systemPrompt": "CUSTOM"}, None))["systemPrompt"]
-        self.assertTrue(text.startswith("CUSTOM\n\n## Last Order / Sister coordination\n"))
+        text = (await self.publish(part, "CUSTOM"))["collaboration"]
+        self.assertTrue(text.startswith("## Last Order / Sister coordination\n"))
         self.assertIn("\n\n## Sub-agents\n", text)
         for name in names:
             self.assertIn(f"`{name}`", text)
@@ -36,7 +43,7 @@ class CollaborationPromptTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_role_messages_do_not_grant_card_management(self):
         part = self.make_part(["SendMessage"])
-        text = (await part.before_agent_start({"systemPrompt": "BASE"}, None))["systemPrompt"]
+        text = (await self.publish(part))["collaboration"]
         self.assertEqual(text.count("## Last Order / Sister coordination"), 1)
         self.assertIn("`last-order` or a registered Sister ID", text)
         self.assertIn("may wake a contact session", text)
@@ -49,7 +56,7 @@ class CollaborationPromptTests(unittest.IsolatedAsyncioTestCase):
     async def test_card_routes_distinguish_creation_start_reply_and_review(self):
         names = [name for name in collaboration.SISTER_TOOLS if not name.startswith("misaka_research_")]
         part = self.make_part(names)
-        text = (await part.before_agent_start({"systemPrompt": "BASE"}, None))["systemPrompt"]
+        text = (await self.publish(part))["collaboration"]
         for phrase in ("creation does not start work", "task ID and current generation", "parked card's help request",
                        "not through SendMessage", "independent reviewer", "real dependency"):
             self.assertIn(phrase, text)
@@ -62,7 +69,7 @@ class CollaborationPromptTests(unittest.IsolatedAsyncioTestCase):
 
         names = list(TOOL_DESCRIPTIONS)
         part = self.make_part(names)
-        text = (await part.before_agent_start({"systemPrompt": "BASE"}, None))["systemPrompt"]
+        text = (await self.publish(part))["collaboration"]
         self.assertIn("driver creates and launches", text)
         self.assertIn("Do not duplicate those assignments", text)
         for name in ("SendMessage", "misaka_card", "misaka_dispatch", "misaka_sister", "Agent"):
@@ -81,52 +88,29 @@ class CollaborationPromptTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_management_only_and_hidden_message_tool(self):
         part = self.make_part(["TaskOutput", "TaskStop"])
-        text = (await part.before_agent_start({"systemPrompt": "BASE"}, None))["systemPrompt"]
+        text = (await self.publish(part))["collaboration"]
         self.assertIn("Only existing-task management", text)
         self.assertNotIn("`Agent`", text)
         self.assertNotIn("subagent_type", text)
         self.assertNotIn("SendMessage", text)
 
-    async def test_idempotent_and_scope_changes_preserve_other_prompt_text(self):
+    async def test_the_part_writes_its_own_section_and_nothing_else(self):
+        """Its section follows the session's tools and goes when they do; the base prompt and the other
+        sections, whatever they say, are never touched."""
         names = ["Agent", "SendMessage"]
         part = self.make_part(names)
-        original = "CUSTOM\n## Sub-agents\nUser-authored section, not ours.\n"
-        first = (await part.before_agent_start({"systemPrompt": original}, None))["systemPrompt"]
-        self.assertIsNone(await part.before_agent_start({"systemPrompt": first}, None))
-        self.assertEqual((await part.before_agent_start({"systemPrompt": original}, None))["systemPrompt"], first)
-        tail = "\n\nAnother part's contribution."
+        others = {"skills": "Another part's section.", "notes": "## Sub-agents\nUser-authored, not ours."}
+        first = await self.publish(part, "CUSTOM\n## Sub-agents\nUser-authored section, not ours.\n", others)
+        self.assertEqual({name: text for name, text in first.items() if name != "collaboration"}, others)
+        self.assertIn("## Sub-agents", first["collaboration"])
+        self.assertEqual(await self.publish(part, sections=first), first)
         names[:] = ["TaskOutput"]
-        changed = (await part.before_agent_start({"systemPrompt": first + tail}, None))["systemPrompt"]
-        self.assertTrue(changed.startswith(original + tail))
-        self.assertNotIn("## Allies", changed)
-        self.assertNotIn("`Agent`", changed)
-        self.assertNotIn("SendMessage", changed)
-        self.assertNotIn("## Last Order / Sister coordination", changed)
-        self.assertIn("User-authored section, not ours.", changed)
+        changed = await self.publish(part, sections=first)
+        self.assertIn("Only existing-task management", changed["collaboration"])
+        for absent in ("`Agent`", "SendMessage", "## Last Order / Sister coordination"):
+            self.assertNotIn(absent, changed["collaboration"])
         names.clear()
-        self.assertEqual((await part.before_agent_start({"systemPrompt": changed}, None))["systemPrompt"], original + tail)
-
-    async def test_fresh_custom_text_matching_entire_publication_is_preserved(self):
-        names = ["Agent", "SendMessage"]
-        publication = "\n\n" + "\n\n".join(collaboration.collaboration_sections(names))
-        original = "User-authored notes" + publication + "\nUSER END"
-        part = self.make_part(names)
-        first = (await part.before_agent_start({"systemPrompt": original}, None))["systemPrompt"]
-        self.assertEqual(first, original + publication)
-        # A fresh base contains matching user text but not our appended copy.
-        names.clear()
-        self.assertIsNone(await part.before_agent_start({"systemPrompt": original}, None))
-
-    async def test_folded_duplicate_removes_only_the_owned_copy(self):
-        names = ["Agent"]
-        publication = "\n\n" + "\n\n".join(collaboration.collaboration_sections(names))
-        original = "User-authored notes" + publication + "\nUSER END"
-        part = self.make_part(names)
-        first = (await part.before_agent_start({"systemPrompt": original}, None))["systemPrompt"]
-        tail = "\n\nDownstream contribution"
-        names.clear()
-        result = await part.before_agent_start({"systemPrompt": first + tail}, None)
-        self.assertEqual(result["systemPrompt"], original + tail)
+        self.assertEqual(await self.publish(part, sections=changed), others)
 
     def test_all_roles_and_kinds_can_publish_but_never_register_tools(self):
         self.assertEqual(wiring.PART_MODULES.count("misaka.core.network.wiring.collaboration"), 1)

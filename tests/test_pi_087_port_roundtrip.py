@@ -151,7 +151,7 @@ async def test_a_pre_port_session_file_gains_one_head_on_its_next_run(prompt_hom
         reply = _reply_stream(["new answer"], seen)
 
         def stream(model, context, options=None):
-            # The run's effective prompt: parts may force extra text for the run's duration.
+            # The run's effective prompt: the parts' sections are the run's own.
             effective.append(session.systemPrompt)
             return reply(model, context, options)
 
@@ -164,9 +164,9 @@ async def test_a_pre_port_session_file_gains_one_head_on_its_next_run(prompt_hom
         assert len(heads) == 1 and heads[0].get("sections") and heads[0].get("toolsAdded")
         sent = seen[0].messages
         assert getCurrentSystemPrompt(sent) == effective[0]
-        # The persisted head carries the structured sections; the forced run-time text is
-        # projected onto the request only.
-        assert getCurrentSystemPrompt(session.sessionManager.buildSessionContext().messages) == session.systemPrompt
+        # The persisted head carries the structured sections the request had, the parts' included:
+        # nothing is forced, so the transcript replays the prompt that was sent.
+        assert getCurrentSystemPrompt(session.sessionManager.buildSessionContext().messages) == effective[0]
         assert {tool.name for tool in getCurrentTools(sent)} == set(session.getActiveToolNames())
 
 

@@ -18,6 +18,14 @@ from misaka.core.platform import cards, owners
 from misaka.core.subagent.runtime import SubagentManager
 
 
+async def published(part, base="BASE", ctx=None):
+    """What a part adds to the run's prompt: its sections, as a pi extension adds them, joined as the
+    prompt renders them. A part never returns a whole prompt, which would be forced."""
+    options = {"sections": {}}
+    assert await part.before_agent_start({"systemPrompt": base, "systemPromptOptions": options}, ctx) is None
+    return "\n\n".join(options["sections"].values())
+
+
 def catalog_payload(text):
     return json.loads(text.split('<<<UNTRUSTED-DATA name="sister-capabilities">>>\n', 1)[1]
                       .split('\n<<<END-UNTRUSTED-DATA>>>', 1)[0])
@@ -50,7 +58,7 @@ class SisterCatalogTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(part is not None, kind in allowed)
                     if part is None:
                         continue
-                    text = (await part.before_agent_start({"systemPrompt": "BASE"}, None))["systemPrompt"]
+                    text = await published(part)
                     data = catalog_payload(text)
                     self.assertEqual([item["id"] for item in data],
                                      ["10032", "10033"] if role == "last_order" else ["10033"])
@@ -65,7 +73,7 @@ class SisterCatalogTests(unittest.IsolatedAsyncioTestCase):
         part = capabilities.SisterCapabilitiesPart("/fixture", [], sister_id="10032", workflow_context=True)
         part.session = SimpleNamespace(getActiveToolNames=list)
         with patch.object(capabilities, "routing_catalog", side_effect=AssertionError("unexpected reload")):
-            text = (await part.before_agent_start({"systemPrompt": "BASE"}, None))["systemPrompt"]
+            text = await published(part)
         from misaka.config.identity import COORDINATOR_APPROVAL, COORDINATOR_ROLE
         from misaka.core.research.planner import RESEARCH_SISTER_DISCIPLINE
         self.assertNotIn(COORDINATOR_ROLE, text)

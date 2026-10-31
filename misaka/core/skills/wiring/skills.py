@@ -205,17 +205,23 @@ class SkillsPart:
 
         # ── the index in the system prompt (hermes build_skills_system_prompt) ──
         async def advertise(event, _ctx):
+            # The prompt's `skills` section, the name pi gives its own skill list. A section rather than
+            # a returned prompt, which would be forced and leave out the sections extensions add later.
+            sections = event["systemPromptOptions"]["sections"]
             active = self._active_tools()
             if active is not None and "skill_view" not in active:
-                return ({"systemPrompt": event["systemPrompt"].rstrip() + "\n\n" + self._startup_prompt}
-                        if self._startup_prompt else None)
-            section = skill_index.render_prompt(prompt_entries(), skill_index.categories(roots),
-                                                compact_skill_categories(workspace, platform=self._platform),
-                                                can_manage=("skill_manage" in active if active is not None
-                                                            else True), available_tools=active)
-            sections = [s for s in (section, self._startup_prompt) if s]
-            if sections:
-                return {"systemPrompt": event["systemPrompt"].rstrip() + "\n\n" + "\n\n".join(sections)}
+                parts = [self._startup_prompt]
+            else:
+                parts = [skill_index.render_prompt(prompt_entries(), skill_index.categories(roots),
+                                                   compact_skill_categories(workspace, platform=self._platform),
+                                                   can_manage=("skill_manage" in active if active is not None
+                                                               else True), available_tools=active),
+                         self._startup_prompt]
+            text = "\n\n".join(part.strip() for part in parts if part and part.strip())
+            if text:
+                sections["skills"] = text
+            else:
+                sections.pop("skills", None)
 
         async def fresh(_event, _ctx):
             skill_index.invalidate()
