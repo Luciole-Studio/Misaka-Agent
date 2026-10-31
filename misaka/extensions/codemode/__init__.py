@@ -32,9 +32,6 @@ EXTENSION_NAME = "codemode"
 BUILTIN = True
 REPLACEABLE = True
 SESSION_KINDS = KINDS
-# MISAKA fork: Sisters only. Last Order coordinates and does not batch work through scripts; her MCP tools
-# are declared to her directly (the MCP glue makes her servers `direct`).
-ROLES = {"sisters"}
 
 
 @dataclass(slots=True)
@@ -91,7 +88,6 @@ __all__ = [
     "BUILTIN",
     "EXTENSION_NAME",
     "REPLACEABLE",
-    "ROLES",
     "SESSION_KINDS",
     "CodemodeExtensionOptions",
     "activate",

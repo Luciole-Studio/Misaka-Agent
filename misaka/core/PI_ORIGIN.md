@@ -109,7 +109,7 @@ Sister 各有一档：
 pi 意义上的**捆绑扩展**——自包含、只靠扩展 API、拔了无残留——按 misaka 原有的三层放：
 
 ```
-extensions/<module>             每个角色：llama/、mcp/、codemode/ 与 tool_search/（pi 自带的四个；后两个 ROLES 只给 Sisters）、misaka_lcm/（LCM 上下文引擎：vendor/ 是 hermes-lcm 上游原样，host/ 是对 pi 事件的适配；关掉它 pi 原生压缩照常）、vision/（给看不见图的模型读图）、coverage/（coverage_scan 工具，并经 resources_discover 自带 coverage-maps 技能）
+extensions/<module>             每个角色：llama/、mcp/、codemode/ 与 tool_search/（pi 自带的四个）、misaka_lcm/（LCM 上下文引擎：vendor/ 是 hermes-lcm 上游原样，host/ 是对 pi 事件的适配；关掉它 pi 原生压缩照常）、vision/（给看不见图的模型读图）、coverage/（coverage_scan 工具，并经 resources_discover 自带 coverage-maps 技能）
 extensions/last_order/<module>  只有 Last Order 的槽位：reading/（阅读模式）
 extensions/sisters/             其他角色的槽位（subagent 是 C 类，在 core/subagent，仅对 Sisters 暴露）
 ```

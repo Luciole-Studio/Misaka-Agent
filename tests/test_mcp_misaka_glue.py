@@ -162,36 +162,36 @@ def test_every_role_keeps_her_mcp_sign_ins_in_her_profile(monkeypatch, tmp_path)
     assert not home.path("mcp_auth").exists()
 
 
-def test_last_order_reaches_every_server_directly_and_a_sisters_keep_pi_s_default(monkeypatch, tmp_path):
-    """MISAKA fork: Last Order has neither codemode nor tool_search, so her servers declare their tools to her
-    directly, as pi does with both off; only `hidden` stands. A Sister's servers keep pi's `codemode` default.
-    Nothing is written to `mcp.json`."""
+def test_every_role_reaches_its_servers_as_its_mcp_json_says(monkeypatch, tmp_path):
+    """As in pi, a server's tools reach the model the way `mcp.json` says -- pi's `codemode` when it says
+    nothing -- for Last Order as for a Sister: pi turns no tool `direct` that the configuration does not, and
+    with codemode and tool_search off it warns that such tools cannot be called. Nothing is written to
+    `mcp.json`."""
     home = Path(os.environ["MISAKA_HOME"])
-    lastOrderConfig = home / "profiles" / "last_order" / "mcp.json"
-    _writeConfig(lastOrderConfig, {
+    servers = {
         "plain": {"command": "a"},
         "scripted": {"command": "b", "exposure": "codemode", "toolExposure": {"x": "deferred", "y": "hidden"}},
         "hidden": {"command": "c", "exposure": "hidden"},
-    })
-    lastOrder = _captureOptions(monkeypatch, types.SimpleNamespace(role=None, profile_dir=None))["loadConfig"](_ctx(tmp_path))
-    configs = {entry["name"]: entry["config"] for entry in lastOrder["servers"]}
-    assert {name: config.get("exposure") for name, config in configs.items()} == {
-        "plain": "direct",
-        "scripted": "direct",
-        "hidden": "hidden",
     }
-    assert configs["scripted"]["toolExposure"] == {"x": "direct", "y": "hidden"}
-    assert "exposure" not in json.loads(lastOrderConfig.read_text(encoding="utf-8"))["mcpServers"]["plain"]
-
     sister = home / "profiles" / "sisters" / "10032"
-    _writeConfig(sister / "mcp.json", {"plain": {"command": "c"}})
-    spec = types.SimpleNamespace(role="sisters/10032", mcp_role="10032", profile_dir=str(sister))
-    hers = _captureOptions(monkeypatch, spec)["loadConfig"](_ctx(tmp_path))
-    assert [entry["config"].get("exposure") for entry in hers["servers"]] == [None]
+    for config, spec in (
+        (home / "profiles" / "last_order" / "mcp.json", types.SimpleNamespace(role=None, profile_dir=None)),
+        (sister / "mcp.json", types.SimpleNamespace(role="sisters/10032", mcp_role="10032", profile_dir=str(sister))),
+    ):
+        _writeConfig(config, servers)
+        loaded = _captureOptions(monkeypatch, spec)["loadConfig"](_ctx(tmp_path))
+        configs = {entry["name"]: entry["config"] for entry in loaded["servers"]}
+        assert {name: entry.get("exposure") for name, entry in configs.items()} == {
+            "plain": None,
+            "scripted": "codemode",
+            "hidden": "hidden",
+        }
+        assert configs["scripted"]["toolExposure"] == {"x": "deferred", "y": "hidden"}
+        assert "exposure" not in json.loads(config.read_text(encoding="utf-8"))["mcpServers"]["plain"]
 
 
-def test_codemode_and_tool_search_load_for_sisters_only(monkeypatch):
-    """The bundled-extension loader honours `ROLES`: Last Order's sessions never load codemode or tool_search."""
+def test_codemode_and_tool_search_load_for_every_role(monkeypatch):
+    """As pi bundles them, codemode and tool_search load in every session that runs tools, Last Order's too."""
     import misaka.extensions as bundled
     from misaka.extensions import codemode, tool_search
 
@@ -200,8 +200,8 @@ def test_codemode_and_tool_search_load_for_sisters_only(monkeypatch):
     for name, module in (("codemode", codemode), ("tool_search", tool_search)):
         monkeypatch.setattr(module, "activate", lambda spec, name=name: activated.append((name, spec.kind)) or (lambda _api: None))
     monkeypatch.setattr(bundled, "_modules", lambda package: iter((codemode, tool_search)) if package == bundled.__name__ else iter(()))
-    for profile, expected in ((home / "profiles" / "last_order", set()), (home / "profiles" / "sisters" / "10032", {"codemode", "tool_search"})):
+    for profile in (home / "profiles" / "last_order", home / "profiles" / "sisters" / "10032"):
         activated.clear()
         for kind in ("foreground", "dm", "card", "child"):
             bundled.discover(types.SimpleNamespace(profile_dir=str(profile), kind=kind, role=None))
-        assert {name for name, _kind in activated} == expected
+        assert {name for name, _kind in activated} == {"codemode", "tool_search"}

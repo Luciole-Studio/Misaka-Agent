@@ -178,7 +178,7 @@ Every extension MISAKA ships is a built-in extension, on by default:
 | Extension | What it adds |
 |---|---|
 | `builtin:mcp` | the MCP servers below |
-| `builtin:codemode`, `builtin:tool-search` | the two tools below, for the Sisters |
+| `builtin:codemode`, `builtin:tool-search` | the two tools below |
 | `builtin:llama.cpp` | the `/llama` command and the llama.cpp provider |
 | `builtin:misaka_lcm` | [LCM](#long-conversations-lcm): compaction of long conversations, and the `lcm_*` tools |
 | `builtin:vision` | images read to a model that cannot see them, by the `vision.model` above |
@@ -236,7 +236,7 @@ servers of the role's own file. They write such an entry, and later changes to t
 |---|---|
 | `command`, `args`, `env`, `cwd` | a server started as a process, speaking on its standard streams; `~` expands, `cwd` is relative to the working directory |
 | `url`, `headers` | a Streamable HTTP server. Without an `Authorization` header it signs in with OAuth when the server asks (`/mcp login`, `misaka mcp login`); `oauth` holds a pre-registered client (`clientId`, `clientSecret`, `callbackUrl`, `callbackPort`, `scope`, `clientName`, `authServerMetadataUrl`); `auth: {"provider": "..."}` sends a `/login` provider's token instead (a role's file only) |
-| `exposure` | how the model reaches the tools: `codemode` (from codemode scripts; the default for a Sister's servers), `deferred` (declared once `tool_search` loads them), `direct` (declared like built-in tools; Last Order's servers are always reached this way) or `hidden` |
+| `exposure` | how the model reaches the tools: `codemode` (from codemode scripts; the default), `deferred` (declared once `tool_search` loads them), `direct` (declared like built-in tools) or `hidden` |
 | `toolExposure` | the exposure of single tools, by name or `*` pattern |
 | `description` | one line about what the server offers; the model sees it |
 | `enabled` | `false` keeps the entry without connecting it |
@@ -253,9 +253,7 @@ Each role keeps her sign-ins in her own folder, in `credentials/mcp-auth.json`. 
 
 With the `codemode` tool the model writes a JavaScript script that calls the other tools, so it can
 run calls in parallel and filter large results before it reads them. MCP tools reach the model this
-way by default. Codemode is a Sister's tool: Last Order coordinates and does not have it, so every tool
-of her MCP servers is declared to her directly, whatever `exposure` says (`hidden` still hides it). For a Sister the tool is off
-until something names it: `defaultTools` (`["+codemode"]`) or an MCP server with `codemode` exposure.
+way by default. The tool is off until something names it: `defaultTools` (`["+codemode"]`) or an MCP server with `codemode` exposure.
 Scripts run in a QuickJS sandbox with no
 file system, network or timers; they call tools through `tools.<name>(args)`. The reference the
 model reads is shipped with MISAKA as `codemode.md`.
@@ -269,7 +267,7 @@ model reads is shipped with MISAKA as `codemode.md`.
 
 The `tool_search` tool lets the model find tools that are not declared to it up front and load the
 ones it needs for its next request. MCP servers with `deferred` exposure reach the model this way,
-and `tool_search` is turned on for them. Like codemode, it is a Sister's tool; Last Order does not have it. Otherwise it is off
+and `tool_search` is turned on for them. Otherwise it is off
 until something names it:
 `defaultTools` (`["+tool_search"]`) or `--tools`. It searches the names and descriptions of the
 deferred tools; a tool it loads is then called like any other.

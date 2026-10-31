@@ -1579,19 +1579,6 @@ def _isMcpTool(pi: Any, name: str) -> tuple[bool, str | None]:
     return False, None
 
 
-def _asDirect(entry: McpServerEntry) -> McpServerEntry:
-    """``entry`` as Last Order reaches it (see ``loadConfig``): every exposure but ``hidden`` is ``direct``, the
-    server's and each tool's, as pi declares MCP tools with codemode and tool_search off."""
-    config: Any = entry["config"]
-
-    def direct(exposure: Any) -> Any:
-        return exposure if exposure == "hidden" else "direct"
-
-    changed = {**config, "exposure": direct(config.get("exposure"))}
-    if isinstance(config.get("toolExposure"), dict):
-        changed["toolExposure"] = {tool: direct(exposure) for tool, exposure in config["toolExposure"].items()}
-    return {**entry, "config": changed}  # type: ignore[typeddict-item]
-
 
 class _PickOptions(TypedDict):
     """``pickServer``'s options: which servers qualify, which one to prefer, and the message when none does."""
@@ -1658,13 +1645,7 @@ def createMisakaMcpExtension(spec: Any) -> ExtensionFactory:
     mcpDir = profiles.mcp_dir(roleDir)
 
     def loadConfig(ctx: Any) -> LoadedMcpConfig:
-        loaded = loadMcpConfig({"agentDir": mcpDir, "cwd": ctx.cwd, "projectTrusted": ctx.isProjectTrusted()})
-        # MISAKA fork: Last Order has neither codemode nor tool_search (they are the Sisters' tools), so her
-        # servers declare their tools to her directly, as pi does with both off; `hidden` stays hidden. This
-        # lives in the loaded copy only; `mcp.json` is edited from the file itself.
-        if not roleDir or profiles.is_last_order(roleDir):
-            loaded = {**loaded, "servers": [_asDirect(entry) for entry in loaded["servers"]]}  # type: ignore[typeddict-item]
-        return loaded
+        return loadMcpConfig({"agentDir": mcpDir, "cwd": ctx.cwd, "projectTrusted": ctx.isProjectTrusted()})
 
     def createTransport(entry: McpServerEntry, cwd: str, authProvider: Any) -> Any:
         from .runtime import createDefaultTransport

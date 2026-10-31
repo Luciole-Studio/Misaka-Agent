@@ -23,9 +23,6 @@ EXTENSION_NAME = "tool-search"
 BUILTIN = True
 REPLACEABLE = True
 SESSION_KINDS = KINDS
-# MISAKA fork: Sisters only. Every MCP tool of Last Order's is declared to her directly (the MCP glue makes her
-# servers `direct`), so she has nothing to search for.
-ROLES = {"sisters"}
 
 
 def createToolSearchExtension() -> ExtensionFactory:
@@ -42,4 +39,4 @@ def activate(_spec: Any):
     return register
 
 
-__all__ = ["BUILTIN", "EXTENSION_NAME", "REPLACEABLE", "ROLES", "SESSION_KINDS", "activate", "createToolSearchExtension", "register"]
+__all__ = ["BUILTIN", "EXTENSION_NAME", "REPLACEABLE", "SESSION_KINDS", "activate", "createToolSearchExtension", "register"]
