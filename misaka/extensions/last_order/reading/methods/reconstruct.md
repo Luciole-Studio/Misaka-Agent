@@ -41,7 +41,10 @@ Write in the order difficulty, choice, advance, but not as a three-line outline:
 
 - Do not pass over a point with "the author holds that …". Be able to say in which paragraph the
   author holds it.
-- Do not complete an argument the author did not write. Where there is a jump, write "from A to B a
-  step is missing" and say which step.
+- Do not complete an argument the author did not write, or make the author more consistent than the
+  text. Where there is a jump, write "from A to B a step is missing" and say which step; a tension
+  the author leaves is a finding.
+- The order in which the text sets things out need not be the order in which the author arrived at
+  them: say which order you are reconstructing.
 - A reconstruction yields an explanation, not a summary; a good one sends the reader back to a
   particular place in the text.

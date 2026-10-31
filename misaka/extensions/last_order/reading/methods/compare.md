@@ -20,6 +20,9 @@ material, the concepts or the question itself.
    things in the two places?
 4. Check what cannot be compared. If the two are not answering the same question at all, say so
    rather than forcing them together.
+5. Check whether one material reads the other. If it does, they are not two parties at one level but
+   a text and a reading of it: ask what the reading takes from the text and what it changes, and
+   check what it says the text says against the text's own pages.
 
 ## What to write
 
@@ -36,4 +39,6 @@ material, the concepts or the question itself.
 - Giving each side the same length is not fairness; the weight belongs where they meet, not in two
   summaries.
 - Do not erase differences for the sake of unity, and do not manufacture oppositions to seem deep.
+- Agreement among lines of reading is weakest where it matches how the text is usually read: the
+  lines share one model's habits. For such agreement, say which pages it rests on.
 - Cite lines of reading by node id, and the text by material and pages or section.

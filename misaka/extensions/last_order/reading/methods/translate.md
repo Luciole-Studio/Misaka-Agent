@@ -39,6 +39,8 @@ the way.
 
 - Beware of "it sounds alike": similar words often carry different premises.
 - Do not let one theory's authority decide a question for another.
+- Whether a concept travels to the target domain is often a question that domain has argued over.
+  If you know of such an argument and the materials do not contain it, say so as memory, unchecked.
 - In a translation across fields (a philosophical concept applied to sociological material, say),
   be explicit about whether an empirical counterpart really exists.
 - Cite places on both sides so the reader can judge for themselves whether the translation is

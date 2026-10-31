@@ -11,13 +11,16 @@ should stand first.
 
 ## What to read
 
-1. The title, the opening and the ending. An opening often **creates the difficulty**; an ending
+1. What kind of text it is and whom it addresses: a lecture, a letter, a treatise, a play; for
+   which audience, on what occasion, as far as the material says. The kind of text decides what
+   counts as its argument.
+2. The title, the opening and the ending. An opening often **creates the difficulty**; an ending
    often **narrows the promise**: how much is the author finally willing to claim? Do the two
    agree?
-2. The outline (`doc_outline`), to judge the construction: a narrative in time, rebuttals set side
+3. The outline (`doc_outline`), to judge the construction: a narrative in time, rebuttals set side
    by side, or one construction tightened step by step? Without an outline, read the first and last
    pages and work out yourself what each group of paragraphs does.
-3. A hinge: the place where the argument or the narrative changes its object, its scale or its
+4. A hinge: the place where the argument or the narrative changes its object, its scale or its
    tone. Give its section or pages.
 
 ## What to write

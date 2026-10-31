@@ -19,6 +19,9 @@ shape?
 3. Find a situation presented as an either-or. What reason rules out a third option, and does that
    reason hold?
 4. See what the author treats as the sign that the problem is solved. For whom does that sign hold?
+5. Look for an answer to a question the text never asks: an answer that fits another question better
+   than the one the text states. Write the question it actually answers. What the author does not
+   see belongs here; what the author sees and leaves unsaid needs evidence that the author saw it.
 
 ## What to write
 

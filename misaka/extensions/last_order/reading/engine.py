@@ -206,9 +206,10 @@ def _submit_tool(sink):
         explanation: str = Field(description="Where exactly the relation lies.")
 
     class Submit(BaseModel):
-        summary: str = Field(description="One sentence: where this action took the understanding.")
-        understanding: str = Field(description="The reading as Markdown a reader can follow on its own; quotations "
-                                               "name their material and section or pages.")
+        summary: str = Field(description="One sentence: where this action took the understanding. No quotations "
+                                         "or headings; the reading itself goes in understanding.")
+        understanding: str = Field(description="The whole reading as Markdown a reader can follow on its own; "
+                                               "quotations name their material and section or pages.")
         concepts: list[Concept] = Field(default_factory=list, description="Concepts this reading turns on; "
                                                                           "no need to be complete.")
         sources: list[Place] = Field(default_factory=list, description="The places in the material the reading "

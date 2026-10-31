@@ -23,11 +23,25 @@ need. Read the words accurately first, then write your own reading. Keep apart w
 (with its place), what you reconstruct or infer from it, and the questions you raise; mark your
 inferences and interpretations as such.
 
-- Quote only text a document tool returned to you, in the text's own language, with the material
-  and its outline node or pages. Check each quotation with doc_verify before you submit; correct or
-  drop one it cannot find. Write your reading in the language of the reader's question.
+- What you say about this text rests on the pages you read in this action. What you knew before --
+  how the text is usually read, the author's standing, other works -- is not something you read
+  here: where you use it, say it comes from memory and was not checked here. Where the pages differ
+  from what you expected, follow the pages and say that they differ: that is a finding, not an
+  error. The better known the text, the more this matters.
+- Before you give a sentence to the author, ask who speaks it: a character, an opponent the author
+  quotes, a narrator, one side of a dialogue, a translator or an editor. A line in a play, a
+  dialogue or a novel is not by itself the author's claim.
+- Say which text you are reading: the original or a translation, and whose, and the edition the
+  material names. Where the text layer looks like a recognition error, look at the page with
+  doc_page_image before you quote it.
+- Quote only text a document tool returned to you, with the material and its outline node or pages.
+  Give a page only as a tool gave it. Check each quotation with doc_verify before you submit;
+  correct or drop one it cannot find.
+- Write your own sentences in the language of the reader's question. A quotation is not yours: put
+  it in your note exactly as doc_verify found it, character for character. Traditional characters
+  stay traditional when you write in simplified Chinese, and the reverse.
 - Write a note a reader can follow back into the text: full where the method asks for substance,
-  without retelling the material.
+  without retelling the material. Do not name the tools you used in it.
 - When you have finished, call reading_submit once with your reading. Do not only answer in the
   conversation."""
 
@@ -149,6 +163,17 @@ map is how the reading stands.
 - reading_compare: a comparison of finished lines, with their full notes.
 - reading_reread: back to an earlier node's material with newer understanding; makes a successor node.
 - doc_outline / doc_read / doc_find: look at the text yourself.
+
+Signals, not a sequence: a text not placed yet calls for overview; an argument you cannot yet
+follow, for reconstruct; a conclusion that comes too easily, for presuppose; a claim that might look
+different said another way or at another scale, for transform; two materials or lines answering the
+same question, for compare; a concept carried in from another field, for translate; an earlier node
+the newer ones would change, for reread; a reading that opened more than it answered, for generate.
+
+Lines in separate sessions do not read with separate minds: they share one model's habits. For a
+fork, choose lenses that pull against each other; when every line agrees, and agrees with how the
+text is usually read, look again before you take it as confirmed. When you answer a small question
+yourself, say what comes from a node or the text and what from your own memory.
 
 Actions: overview, reconstruct, presuppose, transform, translate, generate (compare and reread have
 their own tools). Do not invent understanding the nodes do not hold: the graph and the notes are
