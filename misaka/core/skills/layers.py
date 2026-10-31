@@ -15,6 +15,7 @@ from pathlib import Path
 from stat import S_ISLNK
 
 from misaka.config import CFG, home
+from misaka.core.source_info import BUILTIN_PATH_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +300,8 @@ def extension_roots(resources):
         label = metadata.get("source", "").removeprefix("extension:")
         if label.startswith("inline:"):
             namespace = f"<{label}>"
+        elif label.startswith(BUILTIN_PATH_PREFIX):
+            namespace = label  # a built-in extension's path, `builtin:<name>`, as the loader prints it
         else:
             if label.endswith((".py", ".js", ".ts")):
                 label = label.rsplit(".", 1)[0]
@@ -307,10 +310,14 @@ def extension_roots(resources):
 
 
 def parse_skill_name(name):
-    """Keep the loader's inline source label intact when splitting a qualified name."""
+    """Keep the loader's inline and built-in source labels intact when splitting a qualified name."""
     from .vendor.metadata import parse_qualified_name
     if name.startswith("<inline:"):
         namespace, separator, bare = name.partition(">:")
         if separator:
             return namespace + ">", bare
+    if name.startswith(BUILTIN_PATH_PREFIX):
+        namespace, separator, bare = name[len(BUILTIN_PATH_PREFIX):].partition(":")
+        if separator:
+            return BUILTIN_PATH_PREFIX + namespace, bare
     return parse_qualified_name(name)

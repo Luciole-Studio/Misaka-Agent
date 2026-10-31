@@ -26,6 +26,9 @@ from itertools import combinations
 from misaka.ai.utils.pi_user_agent import getPiUserAgent
 from misaka.ai.utils.typebox_helpers import typeboxSchema
 
+# `builtin:coverage`, like every bundled extension: hidden from the startup list, and disabled with
+# `-builtin:coverage` in the `extensions` setting.
+BUILTIN = True
 SESSION_KINDS = {"foreground", "dm", "card", "bare"}
 API = "https://api.openalex.org"
 LIMIT = 8

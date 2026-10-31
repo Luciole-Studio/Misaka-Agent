@@ -30,6 +30,7 @@ from misaka.core.skills.layers import (
     project_skill_tree_fingerprint,
     walk_skill_tree,
 )
+from misaka.core.source_info import BUILTIN_PATH_PREFIX
 
 _CACHE = {}                 # root manifests -> raw documents and category metadata
 _CACHE_MAX = 32
@@ -238,9 +239,9 @@ def _assemble(roots):
                      "prompt_compatible": skill_matches_platform(skill.get("prompt_frontmatter", {})),
                      "runtime_compatible": skill_matches_platform(skill.get("frontmatter", {}))}
             if namespace:
-                if namespace.startswith("<inline:"):
-                    # Use underscore-style public names for inline skills without
-                    # rewriting their source documents or directory names.
+                if namespace.startswith(("<inline:", BUILTIN_PATH_PREFIX)):
+                    # Use underscore-style public names for inline and built-in extension
+                    # skills without rewriting their source documents or directory names.
                     for key in ("name", "runtime_name"):
                         entry[key] = entry[key].replace("-", "_")
                 entry.update(namespace=namespace, bare_name=entry["runtime_name"],

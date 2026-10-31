@@ -6,6 +6,9 @@ host/. Upstream notices and pins remain intact. Namespaced imports at existing
 host seams are the only relocation changes in the upstream Python sources.
 """
 EXTENSION_NAME = "misaka_lcm"
+# `builtin:misaka_lcm`, like every bundled extension: hidden from the startup list, and disabled with
+# `-builtin:misaka_lcm` in the `extensions` setting.
+BUILTIN = True
 
 SESSION_KINDS = {"foreground", "dm", "card", "beast", "child", "bare"}
 

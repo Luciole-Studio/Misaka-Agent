@@ -69,7 +69,9 @@ A model without vision cannot be shown an image: a scanned page, a map from `doc
 screenshot, a picture you paste. Set one vision model for the whole team, `"vision": {"model":
 "provider/model"}` in `settings.json`, and every image a request carries is read to such a model
 in words, by that vision model; each image is read once and kept. A model that can see is sent
-the image itself and the vision model is not used.
+the image itself and the vision model is not used. With `builtin:vision` turned off (see
+[Configuration](../reference/configuration.md)), a model without vision is told only that an
+image was left out.
 
 ## Classifiers and image models
 

@@ -173,12 +173,24 @@ selection the earlier files made; a list with a plain name replaces it. `--tools
 forms for one run; a list of names there is also every tool that run may use. `/reload` activates
 tools a changed `defaultTools` newly adds; a tool it removes stays on until the next session.
 
-MISAKA ships four built-in extensions, all on by default: `builtin:mcp` (the MCP servers below),
-`builtin:codemode` and `builtin:tool-search` (the two tools below) and `builtin:llama.cpp` (the
-`/llama` command and the llama.cpp provider). `-builtin:<name>` in the home's `extensions` setting
-turns one off, for example `"extensions": ["-builtin:llama.cpp"]`; a trusted project's own
-`extensions` setting may turn it back on with `+builtin:<name>` or off for that project only.
-`-e builtin:<name>` loads one for a single run even when the setting turns it off.
+Every extension MISAKA ships is a built-in extension, on by default:
+
+| Extension | What it adds |
+|---|---|
+| `builtin:mcp` | the MCP servers below |
+| `builtin:codemode`, `builtin:tool-search` | the two tools below, for the Sisters |
+| `builtin:llama.cpp` | the `/llama` command and the llama.cpp provider |
+| `builtin:misaka_lcm` | [LCM](#long-conversations-lcm): compaction of long conversations, and the `lcm_*` tools |
+| `builtin:vision` | images read to a model that cannot see them, by the `vision.model` above |
+| `builtin:coverage` | `coverage_scan` and the coverage maps |
+| `builtin:reading` | [reading mode](../guide/reading.md), in Last Order's window |
+
+`-builtin:<name>` in the home's `extensions` setting turns one off, for example
+`"extensions": ["-builtin:llama.cpp"]`; a trusted project's own `extensions` setting may turn it
+back on with `+builtin:<name>` or off for that project only. `-e builtin:<name>` loads one for a
+single run even when the setting turns it off, and `--no-extensions` leaves them all out. Turning
+one off takes it out of sessions; its terminal command (`misaka mcp`, `misaka lcm`, `misaka read`)
+still works. A skill an extension brings is named after it, such as `builtin:coverage:coverage_maps`.
 
 ## Skills and MCP
 
@@ -320,6 +332,10 @@ private, such as a Windows drive opened from WSL, keeps it in
 |---|---|---|
 | `lcm.context_threshold` | `0.5` | share of the context window at which a session compacts; a research run can set its own. Unset, it is `compression.threshold`, whose default is Hermes' `0.5` (with `"compression": {"enabled": false}`, LCM's own `0.35`) |
 | `auxiliary.compression` | the session's model | which provider and model write the summaries |
+
+To do without LCM, add `"-builtin:misaka_lcm"` to `extensions`. A conversation LCM has already
+compacted keeps its summaries, and later compactions use MISAKA's own summary instead; with LCM
+back on, it takes the conversation up again.
 
 `/lcm-settings` in chat turns automatic recall from earlier conversations on or off. Recall
 searches by meaning, so it needs the `lcm-semantic` extra; turning it on picks a small local model

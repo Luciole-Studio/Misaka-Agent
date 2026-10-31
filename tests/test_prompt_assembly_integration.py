@@ -554,3 +554,26 @@ async def test_last_order_is_warned_off_hand_written_card_status_in_every_mode(p
     though she still has bash."""
     async with assembled(prompt_home, "last_order", "foreground", research=research) as session:
         assert (await final_prompt(session)).count("board's tables by hand") == 1
+
+
+@pytest.mark.parametrize("role,kind", [("last_order", "foreground"), ("sisters/10032", "card")])
+async def test_bundled_extensions_load_as_built_ins_a_setting_turns_off_one_at_a_time(prompt_home, role, kind):
+    """misaka's own bundled extensions are built-ins, as pi's are: each loads as `builtin:<name>`,
+    and `-builtin:<name>` in the `extensions` setting leaves it out and the others in."""
+    import json
+
+    def loaded(session):
+        tools = {tool["name"] if isinstance(tool, dict) else tool.name for tool in session.getAllTools()}
+        return {extension.path for extension in session.extensionRunner.extensions}, tools
+
+    own = {"builtin:coverage": "coverage_scan", "builtin:misaka_lcm": "lcm_grep", "builtin:vision": None}
+    async with assembled(prompt_home, role, kind) as session:
+        paths, tools = loaded(session)
+        assert set(own) <= paths and {"coverage_scan", "lcm_grep"} <= tools
+    settings = prompt_home / "agent" / f"{role.replace('/', '-')}-{kind}" / "settings.json"
+    for path, tool in own.items():
+        settings.write_text(json.dumps({"extensions": ["-" + path]}), encoding="utf-8")
+        async with assembled(prompt_home, role, kind) as session:
+            paths, tools = loaded(session)
+            assert path not in paths and set(own) - {path} <= paths
+            assert tool is None or tool not in tools

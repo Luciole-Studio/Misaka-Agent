@@ -33,6 +33,9 @@ from misaka.utils.values import read_field
 
 logger = logging.getLogger(__name__)
 
+# `builtin:vision`, like every bundled extension: hidden from the startup list, and disabled with
+# `-builtin:vision` in the `extensions` setting.
+BUILTIN = True
 # Every session, a tool-less one included: an image the user pastes there is read the same way.
 SESSION_KINDS = KINDS
 

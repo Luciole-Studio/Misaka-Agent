@@ -101,15 +101,16 @@ Sister 各有一档：
 
 **core 不在扩展清单里**：它的工具走 `customTools`（来源 `<sdk:>`），时刻由内核直接调（`moments.py`），命令由 `prompt()` 直接执行——
 和 pi 的 core 从不把自己挂到 ExtensionRunner 上是同一件事。启动屏的「Extensions」一区只剩用户装的和捆绑的；
-`misaka/extensions/` 下的捆绑扩展各自用 `HIDDEN` 决定显示与否（pi 藏了它的 llama）。
+`misaka/extensions/` 下的捆绑扩展都是 pi 意义上的内置扩展（`BUILTIN = True`，加载为 `builtin:<name>`），和 pi 的一样不上这一区，
+由 `extensions` 设置里的 `-builtin:<name>` 关掉。
 
 ## `misaka/extensions/` 现在是什么
 
 pi 意义上的**捆绑扩展**——自包含、只靠扩展 API、拔了无残留——按 misaka 原有的三层放：
 
 ```
-extensions/<module>             每个角色：llama/（pi 自带的 provider）、misaka_lcm/（LCM 上下文引擎：vendor/ 是 hermes-lcm 上游原样，host/ 是对 pi 事件的适配；拔掉它 pi 原生压缩照常）、coverage/（coverage_scan 工具，并经 resources_discover 自带 coverage-maps 技能）
-extensions/last_order/<module>  只有 Last Order 的槽位（现在是空的）
+extensions/<module>             每个角色：llama/、mcp/、codemode/ 与 tool_search/（pi 自带的四个；后两个 ROLES 只给 Sisters）、misaka_lcm/（LCM 上下文引擎：vendor/ 是 hermes-lcm 上游原样，host/ 是对 pi 事件的适配；关掉它 pi 原生压缩照常）、vision/（给看不见图的模型读图）、coverage/（coverage_scan 工具，并经 resources_discover 自带 coverage-maps 技能）
+extensions/last_order/<module>  只有 Last Order 的槽位：reading/（阅读模式）
 extensions/sisters/             其他角色的槽位（subagent 是 C 类，在 core/subagent，仅对 Sisters 暴露）
 ```
 
@@ -117,6 +118,9 @@ extensions/sisters/             其他角色的槽位（subagent 是 C 类，在
 （pi 的 `src/extensions/index.ts` 是无角色的平铺数组）。**`core/` 对这个包零引用**：进程入口（`cli/app.py`、
 `cli/subagent_child.py`、`cli/research_node.py`）调 `cli/bootstrap.install()`，把 `discover` 赋给 `core/wiring.py` 的 `bundled`，
 `build_extensions(spec)` 把它的结果排在 core 条目之前——对应 pi `main.ts` 把 `builtInExtensions` 排在最前。
+misaka 自己的捆绑扩展照 pi 的规矩也是内置扩展：能关，不能删。pi 的捆绑扩展彼此 import（`mcp` 取 `codemode`、`tool-search`
+的工具名，`codemode` 用 `tool-search` 的排序器），`interactive-mode` 也 import `mcp/config`，删掉文件夹不是它支持的用法。
+内置扩展带的技能以扩展路径为名字空间（`builtin:coverage:coverage_maps`），与内联扩展的 `<inline:name>:…` 同理（`core/skills/layers.py`）。
 pi 没有在 core 里起会话的进程，misaka 有（daemon 里的卡片、子代理子进程），所以需要这个注入点；这是此处唯一的创新。
 裸的内核入口（`engine.main()` 无 options，只有测试走）不装钩子，会话里没有捆绑扩展。
 这条零引用由 `tests/test_extension_boundary.py` 守住（2026-09-29 查出子代理运行时直接 import 了 LCM 的存储模块，
