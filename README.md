@@ -295,6 +295,7 @@ for your confirmation before committing.
 | Talk to a single Sister | `/sister 10032` |
 | Create a Sister | `misaka create 10036 --desc "Econometrics and causal inference"` |
 | Index your documents | `misaka doc scan sources/` |
+| Read materials closely with Last Order | `/read open SOURCE... --question "..."` |
 | Choose a model, sign in | `/model`, `/login` |
 | List every command | `/` in chat, `misaka --help` in the terminal |
 | Show the panel's key bindings | `ctrl+b`, then `?` (see the [panel guide](docs/guide/panel.md)) |
@@ -312,6 +313,7 @@ The [command reference](docs/reference/commands.md) lists every command.
 | The panel: tabs, panes and key bindings | [The panel](docs/guide/panel.md) |
 | Signing in, choosing models, local models | [Models](docs/guide/models.md) |
 | Working with documents and the web | [Documents and the web](docs/guide/sources.md) |
+| Reading materials with Last Order | [Reading materials](docs/guide/reading.md) |
 | Troubleshooting | [Troubleshooting](docs/guide/troubleshooting.md) |
 | What MISAKA does and does not protect | [Running MISAKA safely](docs/guide/security.md) |
 | Command and configuration reference | [Commands](docs/reference/commands.md), [Configuration](docs/reference/configuration.md) |

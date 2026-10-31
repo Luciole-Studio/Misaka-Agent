@@ -19,6 +19,9 @@ __pycache__/
 /.misaka/lcm.gate
 /.misaka/lcm.activity.sqlite*
 
+# Readings opened in a checkout (/read open, misaka read open): the reader's, not the repository's
+/reading/
+
 # Development records (plans, audits, ledgers): kept on the developer's machine, not published
 /docs/plans/
 /docs/audits/
