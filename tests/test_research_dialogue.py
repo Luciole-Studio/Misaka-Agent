@@ -251,9 +251,9 @@ async def test_a_review_brief_too_long_for_a_command_line_reaches_the_card_whole
     from misaka.core.research import node as node_module
     brief = ("证据 " + "x" * 97 + "\r\n") * 5000 + "\ufeff-- end"
     headless = node_module.HeadlessRunner(lab.con, {})
-    spawned = []
+    spawned, exited = [], []
     lab.monkeypatch.setattr(headless._processes, "spawn", lambda argv, **k: spawned.append(argv) or SimpleNamespace(
-        poll=lambda: None, pid=1))
+        poll=lambda: 0 if exited else None, pid=1))
     await headless.continue_card("t_1", brief, expected_generation=1)
     [argv] = spawned
     assert sum(len(arg) for arg in argv) < 1000
@@ -266,6 +266,9 @@ async def test_a_review_brief_too_long_for_a_command_line_reaches_the_card_whole
     lab.monkeypatch.setattr(research_node.node, "main_card", lambda task_id, *, say: seen.append((task_id, say)) or 0)
     assert research_node.main(argv[3:]) == 0
     assert seen == [("t_1", brief)]
+    exited.append(True)
+    headless._reap()
+    assert not os.path.exists(os.path.dirname(argv[-1]))
 
 
 async def test_a_card_child_that_will_not_start_ends_the_node_at_the_failure_limit(lab):
@@ -290,9 +293,15 @@ async def test_a_card_child_that_will_not_start_ends_the_node_at_the_failure_lim
     assert not isinstance(raised.value, (ValueError, RuntimeError, OSError)), "the drive loop must not retry it"
     assert not any(os.path.exists(path) for path in files), "no message file outlives a child that never started"
     # A child that does start begins the count again.
-    lab.monkeypatch.setattr(headless._processes, "spawn", lambda argv, **k: SimpleNamespace(poll=lambda: None, pid=1))
+    exited = []
+    lab.monkeypatch.setattr(headless._processes, "spawn", lambda argv, **k: SimpleNamespace(
+        poll=lambda: 0 if exited else None, pid=1))
     await headless.continue_card("t_2", "go on", expected_generation=1)
     assert headless._spawn_failures == {"t_1": task_store.FAILURE_LIMIT}
+    directory, _path = headless._prompt_files["t_2"]
+    exited.append(True)
+    headless._reap()
+    assert not os.path.exists(directory)
 
 
 def test_a_card_goes_on_in_its_newest_own_conversation(tmp_path):
