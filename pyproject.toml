@@ -3,7 +3,7 @@
 # A user install picks its provider: `pip install 'misaka[anthropic]'` (or `misaka[providers]` for all).
 [project]
 name = "misaka"
-version = "0.19.18"
+version = "0.19.19"
 description = "A research team of AI agents for the humanities and social sciences"
 readme = "README.md"
 requires-python = ">=3.12"
