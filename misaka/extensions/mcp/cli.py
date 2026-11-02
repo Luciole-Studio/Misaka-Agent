@@ -121,6 +121,9 @@ class McpCommandOptions(TypedDict):
     asRole: NotRequired[str]
     # Defaults to `mcp-auth.json` under the home's credentials.
     credentials: NotRequired[McpOAuthCredentialStore]
+    # MISAKA fork: how stdio servers start, with the role's names as her sessions start them. Defaults to
+    # `createDefaultTransport`.
+    createTransport: NotRequired[Callable[[McpServerEntry, str, Any], Any]]
     # Defaults to the platform browser.
     openUrl: NotRequired[Callable[[str], None]]
     # Defaults to console output.
@@ -175,7 +178,7 @@ def createConnection(
     return McpServerConnection({
         "entry": entry,
         "cwd": options["cwd"],
-        "createTransport": createDefaultTransport,
+        "createTransport": options.get("createTransport") or createDefaultTransport,
         "credentials": credentials,
         "log": McpServerLog(_logPath(options["agentDir"])),
         "onTools": lambda _connection: None,

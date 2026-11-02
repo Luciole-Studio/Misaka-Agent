@@ -237,6 +237,7 @@ def test_as_picks_a_sisters_own_mcp_json_and_last_order_s_is_the_default(monkeyp
     monkeypatch.setattr(dispatcher, "applyHttpProxySettings", lambda _proxy: None)
     monkeypatch.setattr(dispatcher, "configureHttpDispatcher", lambda: None)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MISAKA_PROFILE_DIR", raising=False)
     sister = home.path("profiles_root") / "10032"
     sister.mkdir(parents=True)
 
@@ -251,3 +252,45 @@ def test_as_picks_a_sisters_own_mcp_json_and_last_order_s_is_the_default(monkeyp
 
     assert mcp_extension.command(["--as", "20001", "list"]) == 1
     assert "Unknown Sister '20001'" in capsys.readouterr().err
+
+
+def test_run_from_a_roles_process_the_command_is_hers_and_servers_get_her_names(monkeypatch, tmp_path):
+    """MISAKA fork: a role's process, such as her bash tool, carries her `MISAKA_PROFILE_DIR`, as a Hermes profile's
+    carries its HERMES_HOME. Without `--as` the command uses her `mcp.json` and sign-ins, so a sign-in she runs
+    reaches her session; and wherever it runs, its stdio servers get the names her sessions give them."""
+    import misaka.core.http_dispatcher as dispatcher
+    import misaka.extensions.mcp as mcp_extension
+    from misaka.extensions.mcp import cli_lazy
+
+    monkeypatch.setattr(dispatcher, "applyHttpProxySettings", lambda _proxy: None)
+    monkeypatch.setattr(dispatcher, "configureHttpDispatcher", lambda: None)
+    monkeypatch.chdir(tmp_path)
+    sister = home.path("profiles_root") / "10032"
+    sister.mkdir(parents=True)
+    lastOrder = str(home.path("roles_root") / "last_order")
+    for name, value in (("MISAKA_PROFILE_DIR", str(sister)), ("MISAKA_MCP_ROLE", "10032"), ("MISAKA_WHO", "10032")):
+        monkeypatch.setenv(name, value)
+
+    assert mcp_extension.command(["add", "docs", "--", "docs-mcp"]) == 0
+    assert list(readConfig(str(sister / "mcp.json"))["mcpServers"]) == ["docs"]
+    assert not os.path.exists(os.path.join(lastOrder, "mcp.json"))
+
+    captured: dict = {}
+
+    async def runMcpCommand(_argv, options):
+        captured.update(options)
+        return 0
+
+    monkeypatch.setattr(cli_lazy, "loadMcpCommand", lambda: types.SimpleNamespace(runMcpCommand=runMcpCommand))
+
+    def role(argv):
+        captured.clear()
+        assert mcp_extension.command(argv) == 0
+        env = captured["createTransport"]({"name": "s", "config": {"command": "server"}}, ".", None).options["env"]
+        return captured["mcpDir"], env["MISAKA_PROFILE_DIR"], env["MISAKA_MCP_ROLE"], env["MISAKA_WHO"]
+
+    assert role(["list"]) == (str(sister), str(sister), "10032", "10032")
+    for name in ("MISAKA_PROFILE_DIR", "MISAKA_MCP_ROLE", "MISAKA_WHO"):
+        monkeypatch.delenv(name)
+    assert role(["list"]) == (lastOrder, lastOrder, "last-order", "last-order")
+    assert role(["--as", "10032", "list"]) == (str(sister), str(sister), "10032", "10032")

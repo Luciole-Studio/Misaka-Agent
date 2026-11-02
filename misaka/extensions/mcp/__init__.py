@@ -39,6 +39,7 @@ import re
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
 
 from misaka.ai.types import TextContent
@@ -1548,16 +1549,13 @@ SESSION_KINDS = frozenset({"foreground", "dm", "card", "child"})
 COMMAND = "mcp"
 
 
-def _roleEnvironment(spec: Any) -> dict[str, str]:
-    """MISAKA fork: stdio servers learn which role runs them, as the sessions themselves do."""
-    role = getattr(spec, "role", None)
-    profileDir = getattr(spec, "profile_dir", None)
+def _roleEnvironment(profileDir: Any, who: str | None) -> dict[str, str]:
+    """MISAKA fork: stdio servers learn which role runs them, as the sessions themselves do: her profile and her
+    session's name (a Sister is `10032` there, not her profile path `sisters/10032`; Last Order is `last-order`)."""
     env: dict[str, str] = {}
     if profileDir:
         env["MISAKA_PROFILE_DIR"] = str(profileDir)
-    if role:
-        # The session's own names: a Sister is `10032` there, not her profile path `sisters/10032`.
-        who = str(getattr(spec, "mcp_role", None) or role)
+    if who:
         env["MISAKA_MCP_ROLE"] = who
         env["MISAKA_WHO"] = who
     return env
@@ -1567,6 +1565,24 @@ def _configLiteral(value: str) -> str:
     """``value`` written so ``resolveConfigValue`` reads it back unchanged."""
     escaped = value.replace("$", "$$")
     return "$" + escaped if escaped.startswith("!") else escaped
+
+
+def _roleTransport(roleEnv: Mapping[str, str]) -> Callable[[McpServerEntry, str, Any], Any]:
+    """MISAKA fork: ``createTransport`` that gives stdio servers the role's names, for her sessions and for
+    ``misaka mcp`` alike, so the command checks her servers as her sessions start them."""
+
+    def createTransport(entry: McpServerEntry, cwd: str, authProvider: Any) -> Any:
+        from .runtime import createDefaultTransport
+
+        if "url" not in entry["config"]:
+            config: Any = entry["config"]
+            # The role's names are literal values: a profile path is not a config value, so a "$"
+            # in it is escaped as "$$" and a leading "!" as "$!" (resolveConfigValue's escapes).
+            literal = {key: _configLiteral(value) for key, value in roleEnv.items()}
+            entry = {**entry, "config": {**config, "env": {**literal, **(config.get("env") or {})}}}  # type: ignore[typeddict-item]
+        return createDefaultTransport(entry, cwd, authProvider)
+
+    return createTransport
 
 
 def _isMcpTool(pi: Any, name: str) -> tuple[bool, str | None]:
@@ -1641,22 +1657,14 @@ def createMisakaMcpExtension(spec: Any) -> ExtensionFactory:
     since scripts read MCP results unfenced (``structuredContent``) and what they print becomes that
     tool's own result."""
     roleDir = getattr(spec, "profile_dir", None)
-    roleEnv = _roleEnvironment(spec)
+    role = getattr(spec, "role", None)
+    roleEnv = _roleEnvironment(roleDir, str(getattr(spec, "mcp_role", None) or role) if role else None)
     mcpDir = profiles.mcp_dir(roleDir)
 
     def loadConfig(ctx: Any) -> LoadedMcpConfig:
         return loadMcpConfig({"agentDir": mcpDir, "cwd": ctx.cwd, "projectTrusted": ctx.isProjectTrusted()})
 
-    def createTransport(entry: McpServerEntry, cwd: str, authProvider: Any) -> Any:
-        from .runtime import createDefaultTransport
-
-        if "url" not in entry["config"]:
-            config: Any = entry["config"]
-            # The role's names are literal values: a profile path is not a config value, so a "$"
-            # in it is escaped as "$$" and a leading "!" as "$!" (resolveConfigValue's escapes).
-            literal = {key: _configLiteral(value) for key, value in roleEnv.items()}
-            entry = {**entry, "config": {**config, "env": {**literal, **(config.get("env") or {})}}}  # type: ignore[typeddict-item]
-        return createDefaultTransport(entry, cwd, authProvider)
+    createTransport = _roleTransport(roleEnv)
 
     def createCredentials(runtime: Any) -> McpOAuthCredentialStore:
         return _roleCredentials(runtime.McpOAuthCredentialStore, mcpDir)
@@ -1700,7 +1708,7 @@ def _roleCredentials(store: Any, mcpDir: str) -> McpOAuthCredentialStore:
 
 def _takeRole(argv: list[str]) -> tuple[list[str], str | None]:
     """MISAKA fork: ``--as <Sister>`` (before ``--``) picks whose ``mcp.json`` and sign-ins the command uses, as
-    ``hermes -p <profile> mcp`` does; without it, Last Order's."""
+    ``hermes -p <profile> mcp`` does; without it, the role whose process runs the command, else Last Order's."""
     rest: list[str] = []
     who: str | None = None
     index = 0
@@ -1738,6 +1746,7 @@ def command(argv: list[str]) -> int:
 
     argv, who = _takeRole(argv)
     roleDir = None
+    name = who
     if who is not None:
         roleDir = home.path("profiles_root") / who
         if not who or not roleDir.is_dir():
@@ -1745,7 +1754,16 @@ def command(argv: list[str]) -> int:
 
             print(f"Unknown Sister {who!r}. Roster: {', '.join(sorted(sisters())) or 'none'}", file=sys.stderr)
             return 1
+    elif os.environ.get("MISAKA_PROFILE_DIR"):
+        # Run from a role's process, such as her bash tool, the command works on her servers and sign-ins, as
+        # `hermes mcp` does under the profile's HERMES_HOME; her session picks a sign-in up on its next turn.
+        roleDir = Path(os.environ["MISAKA_PROFILE_DIR"])
+        name = os.environ.get("MISAKA_MCP_ROLE")
     mcpDir = profiles.mcp_dir(roleDir)
+    profileDir = Path(mcpDir)
+    # Her session's name: Last Order is `last-order`, a Sister her ID.
+    name = name or ("last-order" if profiles.is_last_order(profileDir) else profileDir.name)
+    roleEnv = _roleEnvironment(profileDir, name)
     cwd = os.getcwd()
     agentDir = get_agent_dir()
     # MISAKA fork: pi's entry applies the `httpProxy` setting before any command, from settings that never
@@ -1761,6 +1779,7 @@ def command(argv: list[str]) -> int:
                 "agentDir": agentDir,
                 "mcpDir": mcpDir,
                 "credentials": _roleCredentials(McpOAuthCredentialStore, mcpDir),
+                "createTransport": _roleTransport(roleEnv),
                 **({"asRole": who} if who else {}),
             },
         )

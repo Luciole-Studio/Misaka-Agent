@@ -332,3 +332,43 @@ async def test_uses_credentials_from_mcp_login_on_the_next_turn(stack):
 
     # The session still waits for a sign-in, and reconnects when the next turn starts.
     assert getMessageText(await callWhoami(harness)) == "token access-1"
+
+
+async def test_a_sisters_mcp_login_through_bash_reaches_her_session_on_the_next_turn(stack, monkeypatch):
+    """MISAKA fork, pi's loop for a role: a Sister's agent runs `misaka mcp login` through bash, whose environment
+    names her profile (as a Hermes profile's terminal gets its HERMES_HOME). The sign-in lands in her profile, not
+    Last Order's, and her session picks it up on the next turn."""
+    import types
+
+    import misaka.core.http_dispatcher as dispatcher
+    import misaka.extensions.mcp as mcp_extension
+    from misaka.config import home
+    from misaka.extensions.mcp import cli
+
+    server = await startOAuthMcpServer()
+    sister = home.path("profiles_root") / "10032"
+    sister.mkdir(parents=True)
+    (sister / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"issues": {"url": server.url, "exposure": "direct"}}}), encoding="utf-8")
+    spec = types.SimpleNamespace(role="sisters/10032", mcp_role="10032", profile_dir=str(sister))
+    harness: Harness = await stack.enter_async_context(createHarness(
+        initialActiveToolNames=[], extensionFactories=[mcp_extension.createMisakaMcpExtension(spec)]))
+    await harness.session.bindExtensions({"uiContext": createTestUiContext()})
+
+    for name, value in (("MISAKA_PROFILE_DIR", str(sister)), ("MISAKA_MCP_ROLE", "10032"), ("MISAKA_WHO", "10032")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(dispatcher, "applyHttpProxySettings", lambda _proxy: None)
+    monkeypatch.setattr(dispatcher, "configureHttpDispatcher", lambda: None)
+    tasks: set[asyncio.Task] = set()
+
+    async def follow(url: str) -> None:
+        await (await fetch(url)).text()
+
+    # The browser the command opens follows the authorization redirect to the loopback callback.
+    monkeypatch.setattr(cli, "openBrowser", lambda url: spawn(follow(url), tasks) and None)
+    assert await asyncio.to_thread(mcp_extension.command, ["login", "issues"]) == 0
+
+    assert (sister / "credentials" / "mcp-auth.json").is_file()
+    assert not (home.path("roles_root") / "last_order" / "credentials" / "mcp-auth.json").exists()
+    # Fenced as untrusted data, as every MCP result in a role's session.
+    assert "\ntoken access-1\n" in getMessageText(await callWhoami(harness))
