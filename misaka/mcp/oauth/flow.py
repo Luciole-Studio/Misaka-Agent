@@ -47,6 +47,7 @@ from misaka.mcp.oauth.types import (
     OAuthClientMetadata,
     OAuthServerInfo,
     OAuthTokens,
+    isHttpUrl,
     parseClientInformation,
     parseOAuthTokens,
 )
@@ -261,6 +262,9 @@ async def startAuthorization(
         raise RuntimeError("Authorization server does not support PKCE S256")
     authorizationEndpoint = metadata.get("authorization_endpoint") if metadata is not None else None
     url = URL(authorizationEndpoint if authorizationEndpoint is not None else URL("/authorize", authorizationServerUrl))
+    # Callers open this URL with the platform URL handler, which also launches files and custom protocols.
+    if not isHttpUrl(url):
+        raise RuntimeError(f"Invalid authorization endpoint {url.href}")
     generated = await pkce()
     verifier, challenge = generated["verifier"], generated["challenge"]
     url.searchParams.set("response_type", "code")

@@ -438,6 +438,38 @@ async def test_rejects_authorization_metadata_whose_issuer_does_not_match_discov
         await discoverAuthorizationServerMetadata(origin)
 
 
+async def test_rejects_non_http_authorization_endpoints_which_the_platform_url_handler_would_launch():
+    endpoints = ["file://attacker.example/share/x.exe", "search-ms:query=x", "ms-msdt:/id"]
+    endpoint = ""
+
+    async def handler(request, response, serverOrigin):
+        response.setHeader("content-type", "application/json")
+        response.end(json.dumps({
+            "issuer": serverOrigin,
+            "authorization_endpoint": endpoint,
+            "token_endpoint": f"{serverOrigin}/token",
+            "response_types_supported": ["code"],
+        }))
+
+    origin = await listen(handler)
+    for value in endpoints:
+        endpoint = value
+        with pytest.raises(Exception, match="Invalid authorization endpoint"):
+            await discoverAuthorizationServerMetadata(origin)
+        metadata = {
+            "issuer": origin,
+            "authorization_endpoint": value,
+            "token_endpoint": f"{origin}/token",
+            "response_types_supported": ["code"],
+        }
+        with pytest.raises(Exception, match="Invalid authorization endpoint"):
+            await startAuthorization(origin, {
+                "metadata": metadata,
+                "clientInformation": {"client_id": "client"},
+                "redirectUrl": "http://127.0.0.1/callback",
+            })
+
+
 # #10172
 async def test_uses_a_configured_authorization_server_metadata_document_as_is():
     async def handler(request, response, serverOrigin):

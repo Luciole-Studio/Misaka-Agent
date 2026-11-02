@@ -19,6 +19,7 @@ from misaka.core.auth_storage import InMemoryAuthStorageBackend
 from misaka.core.tools.truncate import truncateMiddle
 from misaka.extensions.mcp import MAX_SERVERS_SECTION_CHARS, renderServersSection
 from misaka.extensions.mcp.config import (
+    addMcpServerConfig,
     getMcpToolExposure,
     loadMcpConfig,
     updateMcpServerConfig,
@@ -145,6 +146,25 @@ def test_lets_project_entries_override_enabled_and_exposure_of_global_servers(tm
     # Overrides keep `enabled: true`, since it replaces the global value.
     updateMcpServerConfig(project, "tools", {"enabled": True})
     assert json.loads(Path(project).read_text(encoding="utf-8"))["mcpServers"]["tools"] == {"enabled": True}
+
+
+# Regression: #11191.
+def test_reads_and_edits_mcp_json_files_that_start_with_a_utf8_bom(tmp_path):
+    paths = setup(tmp_path, {}, {})
+    globalPath = Path(paths["agentDir"]) / "mcp.json"
+    projectPath = home.project_dir(paths["cwd"]) / "mcp.json"
+    globalPath.write_text('\ufeff{"mcpServers":{"demo":{"command":"echo","enabled":false}}}\n', encoding="utf-8")
+    projectPath.write_text('\ufeff{"mcpServers":{"local":{"command":"local-cmd"}}}\n', encoding="utf-8")
+
+    loaded = loadMcpConfig({**paths, "projectTrusted": True})
+    assert loaded["errors"] == []
+    assert [[server["name"], server["scope"]] for server in loaded["servers"]] == [["demo", "global"], ["local", "project"]]
+
+    assert addMcpServerConfig(str(globalPath), "other", {"command": "other-cmd"}) is False
+    assert json.loads(globalPath.read_text(encoding="utf-8"))["mcpServers"] == {
+        "demo": {"command": "echo", "enabled": False},
+        "other": {"command": "other-cmd"},
+    }
 
 
 # Regression: #10239.

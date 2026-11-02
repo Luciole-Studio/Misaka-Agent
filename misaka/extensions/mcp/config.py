@@ -54,6 +54,7 @@ from misaka.utils import v8_json
 from misaka.utils.js import errorMessage, jsObjectOrder, jsonStringify
 from misaka.utils.js_regexp import RegExp
 from misaka.utils.node_errors import withSyscall
+from misaka.utils.text import stripBom
 
 type McpServerScope = Literal["global", "project", "extension"]
 
@@ -122,7 +123,7 @@ def readConfigFile(path: str, scope: Literal["global", "project"], state: McpCon
     if not os.path.exists(path):
         return
     try:
-        parsed: Any = _parse(_readFile(path))
+        parsed: Any = _parse(stripBom(_readFile(path)))
     except Exception as error:  # noqa: BLE001 - upstream `catch (error)`: recorded as a config error
         errors.append(f"{path}: {_message(error)}")
         return
@@ -277,7 +278,7 @@ def removeMcpServerConfig(path: str, name: str) -> bool:
 def editMcpServers(path: str, edit: Callable[[dict[str, Any] | None, dict[str, Any]], bool]) -> None:
     """Read an ``mcp.json`` (an empty config when missing), let ``edit`` change its ``mcpServers``, and
     write it back with its indentation when ``edit`` returns true. Other content is kept."""
-    text = _readFile(path) if os.path.exists(path) else None
+    text = stripBom(_readFile(path)) if os.path.exists(path) else None
     parsed: Any = {} if text is None else _parse(text)
     if not isRecord(parsed) or ("mcpServers" in parsed and not isRecord(parsed["mcpServers"])):
         raise RuntimeError(f'{path}: expected an object with an "mcpServers" object')

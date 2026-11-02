@@ -150,14 +150,17 @@ def optionalStrings(value: Any, name: str) -> Any:
 
 
 def safeUrl(value: Any, name: str) -> str:
+    """Accepts only ``http:`` and ``https:`` URLs. Servers supply these URLs, and the authorization endpoint is
+    opened with the platform URL handler, so a ``file:`` or custom protocol URL would launch local programs."""
     text = requiredString(value, name)
     # URL parsing throws a `TypeError`, which discovery reserves for network failures.
-    if not URL.canParse(text):
-        raise RuntimeError(f"Invalid {name}")
-    url = URL(text)
-    if url.protocol in ("javascript:", "data:", "vbscript:"):
+    if not URL.canParse(text) or not isHttpUrl(URL(text)):
         raise RuntimeError(f"Invalid {name}")
     return text
+
+
+def isHttpUrl(url: URL) -> bool:
+    return url.protocol in ("http:", "https:")
 
 
 def optionalUrl(value: Any, name: str) -> Any:
@@ -262,6 +265,7 @@ __all__ = [
     "OAuthProtectedResourceMetadata",
     "OAuthServerInfo",
     "OAuthTokens",
+    "isHttpUrl",
     "parseAuthorizationServerMetadata",
     "parseClientInformation",
     "parseOAuthTokens",
