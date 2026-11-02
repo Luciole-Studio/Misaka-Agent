@@ -3,29 +3,29 @@
 class Misaka < Formula
   desc "A research team of AI agents for the humanities and social sciences"
   homepage "https://github.com/Luciole-Studio/Misaka-Agent"
-  version "0.19.22"
+  version "0.19.23"
   license "Apache-2.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/Luciole-Studio/Misaka-Agent/releases/download/v0.19.22/misaka-0.19.22-darwin-arm64.tar.gz"
+      url "https://github.com/Luciole-Studio/Misaka-Agent/releases/download/v0.19.23/misaka-0.19.23-darwin-arm64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
 
     on_intel do
-      url "https://github.com/Luciole-Studio/Misaka-Agent/releases/download/v0.19.22/misaka-0.19.22-darwin-x86_64.tar.gz"
+      url "https://github.com/Luciole-Studio/Misaka-Agent/releases/download/v0.19.23/misaka-0.19.23-darwin-x86_64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/Luciole-Studio/Misaka-Agent/releases/download/v0.19.22/misaka-0.19.22-linux-arm64.tar.gz"
+      url "https://github.com/Luciole-Studio/Misaka-Agent/releases/download/v0.19.23/misaka-0.19.23-linux-arm64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
 
     on_intel do
-      url "https://github.com/Luciole-Studio/Misaka-Agent/releases/download/v0.19.22/misaka-0.19.22-linux-x86_64.tar.gz"
+      url "https://github.com/Luciole-Studio/Misaka-Agent/releases/download/v0.19.23/misaka-0.19.23-linux-x86_64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
