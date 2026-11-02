@@ -238,8 +238,16 @@ class StreamCursor:
 
 def _headerValue(value: str) -> str:
     """A header value as WHATWG ``Headers`` stores it: leading and trailing HTTP whitespace (tab, LF, CR,
-    space) removed."""
-    return value.strip("\t\n\r ")
+    space) removed. It is a ByteString: a character up to U+00FF is sent as one byte (``_buildHeaders``), and
+    a later one is Node's TypeError."""
+    value = value.strip("\t\n\r ")
+    for index, unit in enumerate(memoryview(value.encode("utf-16-le")).cast("H")):
+        if unit > 0xFF:
+            raise TypeError(
+                f"Cannot convert argument to a ByteString because the character at index {index} has a value of "
+                f"{unit} which is greater than 255."
+            )
+    return value
 
 
 class StreamableHttpTransport(TransportEvents):
@@ -283,6 +291,8 @@ class StreamableHttpTransport(TransportEvents):
         self._lastToken: str | None = None
         # MISAKA fork: asyncio holds tasks weakly; the stream readers live here until they finish.
         self._tasks: set[asyncio.Task[Any]] = set()
+        # MISAKA fork: the rest of `close()`, which runs to its end even when its caller is cancelled.
+        self._closing: asyncio.Task[None] | None = None
 
     @property
     def sessionId(self) -> str | None:
@@ -341,6 +351,12 @@ class StreamableHttpTransport(TransportEvents):
             return
         self._closed = True
         self._controller.abort()
+        # MISAKA fork: a promise runs to its end whoever stops waiting for it. Cancelling the caller stops only
+        # its wait here, so the close event is still emitted and the connection pool still closed.
+        self._closing = asyncio.ensure_future(self._finishClose())
+        await asyncio.shield(self._closing)
+
+    async def _finishClose(self) -> None:
         if self._started and self._sessionIdValue:
             # Best effort: the session expires on the server anyway. The auth provider may refresh tokens
             # over the network, so it is not asked here and closing never waits for a refresh.
@@ -405,7 +421,11 @@ class StreamableHttpTransport(TransportEvents):
         return self._buildHeaders(extra if extra is not None else {}, token), (token if token else None)
 
     def _buildHeaders(self, extra: Mapping[str, str], token: str | None) -> httpx.Headers:
-        headers = httpx.Headers({name: _headerValue(value) for name, value in (self.options.get("headers") or {}).items()})
+        # Latin-1, one byte per character as a ByteString is sent: httpx would encode values as ASCII, and as
+        # UTF-8 when they are set one by one.
+        headers = httpx.Headers(
+            {name: _headerValue(value) for name, value in (self.options.get("headers") or {}).items()}, "latin-1"
+        )
         for name, value in extra.items():
             headers[name] = _headerValue(value)
         if self._sessionIdValue:

@@ -47,6 +47,29 @@ def pathKey(env: Mapping[str, str] | None = None) -> str:
     return next((key for key in reversed(list(environment)) if key.upper() == "PATH"), "Path")
 
 
+# -- process.env ---------------------------------------------------------------------------------
+
+
+def _startupNames() -> list[str]:
+    """Windows only: the environment's names as the process started with them; ``nt.environ`` keeps their
+    spelling, which ``os.environ`` turns to capitals."""
+    import nt  # type: ignore[import-not-found]
+
+    return list(nt.environ)
+
+
+def processEnv(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """``{...process.env}`` for a child's environment. On Windows Node spells each name as the process started
+    with it (``Path``), where Python's ``os.environ`` capitalises every name (``PATH``); spelled as Node spells
+    it, a server ``env`` that names ``Path`` replaces the inherited one, as in pi, instead of standing beside it
+    and losing to it in ``_windowsEnv``. A name set after startup keeps ``os.environ``'s capitals."""
+    environ = os.environ if environ is None else environ
+    if not isWin:
+        return dict(environ)
+    spelling = {name.upper(): name for name in _startupNames()}
+    return {spelling.get(name.upper(), name): value for name, value in environ.items()}
+
+
 # -- isexe (windows.js) and which ----------------------------------------------------------------
 
 

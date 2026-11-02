@@ -41,6 +41,7 @@ from misaka.mcp import (
 )
 from misaka.mcp import Tool as McpTool
 from misaka.mcp.oauth import McpOAuthAuthorizationRequiredError, OAuthChallenge
+from misaka.mcp.transports._cross_spawn import processEnv
 from misaka.ui.tui.terminal_image import pathToFileURL
 from misaka.utils import node_path
 from misaka.utils.js import (
@@ -128,7 +129,7 @@ def createDefaultTransport(entry: McpServerEntry, cwd: str, authProvider: AuthPr
         "cwd": node_path.resolve(cwd, expandHome(configCwd if configCwd is not None else ".")),
         # MISAKA fork: a stdio server inherits only the names it needs from MISAKA's environment,
         # which holds API keys (issue #10; see .environment); what else it needs is named in its env.
-        "env": {**inheritedEnvironment(), **env},
+        "env": {**processEnv(inheritedEnvironment()), **env},
         "inheritEnv": False,
         "stderr": "pipe",
     })

@@ -5,6 +5,8 @@ MCP server started with all of it. A server now gets Hermes' safe names, the pro
 variables, and its own configured env, where ${VAR} takes a value from the environment (pi's
 ``resolveConfigValue``, so an unset variable fails the server, as upstream)."""
 import asyncio
+import os
+import sys
 
 import pytest
 
@@ -134,3 +136,30 @@ def test_a_role_session_spawns_its_servers_with_the_allowlist_and_its_own_names(
     with pytest.raises(FileNotFoundError):
         asyncio.run(transport.start())
     assert seen.get("MISAKA_WHO") == "10032" and "OPENAI_API_KEY" not in seen
+
+
+def test_a_server_env_naming_path_as_windows_spells_it_replaces_the_inherited_one(monkeypatch):
+    """Python capitalises Windows names in os.environ (PATH), where Node keeps the spelling the process started with
+    (Path). Spelled back as Node spells it, a server env naming `Path` replaces the inherited value, as in pi,
+    instead of standing beside it and losing to it when the child's environment drops duplicate names."""
+    monkeypatch.setattr(_cross_spawn, "isWin", True)
+    monkeypatch.setattr(_cross_spawn, "_startupNames", lambda: ["Path", "SystemRoot", "HOME"])
+    for key in list(os.environ):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in {"PATH": "C:\\Windows\\system32", "SYSTEMROOT": "C:\\Windows", "HOME": "C:\\Users\\u"}.items():
+        monkeypatch.setenv(key, value)
+
+    env = createDefaultTransport(_entry({"Path": "C:\\mytools"}), ".", None).options["env"]
+
+    assert {key: value for key, value in env.items() if key.upper() == "PATH"} == {"Path": "C:\\mytools"}
+    assert env["SystemRoot"] == "C:\\Windows" and env["HOME"] == "C:\\Users\\u"
+    child = _cross_spawn._windowsEnv(env)
+    assert {key: value for key, value in child.items() if key.upper() == "PATH"} == {"Path": "C:\\mytools"}
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows spelling")
+def test_the_inherited_names_are_spelled_as_windows_started_with_them():
+    import nt
+
+    env = _cross_spawn.processEnv()
+    assert [name for name in nt.environ if name.upper() in os.environ and name not in env] == []

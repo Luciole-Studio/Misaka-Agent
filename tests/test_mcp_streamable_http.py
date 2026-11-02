@@ -585,3 +585,48 @@ async def test_close_does_not_wait_for_a_stream_reader_stuck_in_the_auth_provide
 
     await asyncio.wait_for(transport.close(), 1)
     assert closed == [True]
+
+
+async def test_sends_header_values_as_byte_strings_as_fetch_does():
+    """MISAKA fork: WHATWG `Headers` hold ByteStrings, so a character up to U+00FF goes as one byte and a later
+    one is Node's TypeError, where httpx would encode values as ASCII (or UTF-8 when set one by one)."""
+    server = await startServer(protocolHandler)
+    client = McpClient({"name": "http-test", "version": "1.0.0"})
+    await client.connect(StreamableHttpTransport({"url": server["url"], "openGetStream": False, "headers": {"X-User": "José"}}))
+    await client.close()
+    assert {entry["headers"].get("x-user") for entry in server["requests"]} == {"José"}
+
+    client = McpClient({"name": "http-test", "version": "1.0.0"})
+    with pytest.raises(TypeError, match="ByteString because the character at index 0 has a value of 20013 which is"):
+        await client.connect(StreamableHttpTransport({"url": server["url"], "headers": {"X-User": "中"}}))
+    await client.close()
+
+
+async def test_a_cancelled_close_still_emits_close_and_closes_the_pool():
+    """MISAKA fork: pi's `close()` is a promise, which runs to its end whoever stops waiting for it."""
+    deleting = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(request, response, requests):
+        if request.method == "DELETE":
+            deleting.set()
+            await release.wait()
+        await protocolHandler(request, response, requests)
+
+    server = await startServer(handler)
+    transport = StreamableHttpTransport({"url": server["url"], "openGetStream": False})
+    closed: list = []
+    transport.onClose(lambda: closed.append(True))
+    client = McpClient({"name": "http-test", "version": "1.0.0"})
+    await client.connect(transport)
+    closing = asyncio.ensure_future(transport.close())
+    await deleting.wait()
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    # The DELETE gives up after a second.
+    await asyncio.wait_for(asyncio.shield(transport._closing), 3)
+    release.set()
+    assert closed == [True]
+    assert transport._client is not None and transport._client.is_closed
+    await client.close()

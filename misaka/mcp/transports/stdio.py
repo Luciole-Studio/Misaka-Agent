@@ -139,7 +139,7 @@ class StdioTransport(TransportEvents):
             raise McpConnectionClosedError()
         self._started = True
         optionEnv = self.options.get("env") or {}
-        env = {**optionEnv} if self.options.get("inheritEnv") is False else {**os.environ, **optionEnv}
+        env = {**optionEnv} if self.options.get("inheritEnv") is False else {**crossSpawn.processEnv(), **optionEnv}
         args = self.options.get("args")
         child = crossSpawn.spawn(
             self.options["command"],
