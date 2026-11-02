@@ -934,19 +934,30 @@ def mcp_server_matches(pattern: Any, server: Any) -> bool:
 
 
 def configured_mcp_servers(profile_dir: Any) -> list[str]:
-    """The enabled servers the role's own ``mcp.json`` names (``profiles.mcp_dir``), connected yet or not. A
-    definition that requires one is not refused while it is still connecting or failed its first attempt."""
+    """The enabled servers the role reaches through the global ``mcp.json`` and her own (``profiles.mcp_dir``),
+    connected yet or not. A definition that requires one is not refused while it is still connecting or failed
+    its first attempt. Her entry replaces a global one of the same name, or overrides it when it has no
+    ``command``, ``url`` or ``type``, as the MCP extension reads them."""
     from misaka.config import profiles
 
-    try:
-        servers = json.loads(
-            Path(home.path("mcp_config", profiles.mcp_dir(profile_dir))).read_text(encoding="utf-8")
-        ).get("mcpServers")
-    except (OSError, ValueError, AttributeError):
-        return []
-    if not isinstance(servers, dict):
-        return []
-    return [name for name, config in servers.items() if not (isinstance(config, dict) and config.get("enabled") is False)]
+    def servers(path: Path) -> dict[str, Any]:
+        try:
+            found = json.loads(path.read_text(encoding="utf-8")).get("mcpServers")
+        except (OSError, ValueError, AttributeError):
+            return {}
+        return found if isinstance(found, dict) else {}
+
+    merged: dict[str, dict[str, Any]] = {}
+    for scope, path in (("global", home.path("mcp_config")), ("role", home.path("mcp_config", profiles.mcp_dir(profile_dir)))):
+        for name, config in servers(path).items():
+            if not isinstance(config, dict):
+                continue
+            if scope == "role" and not {"command", "url", "type"} & config.keys():
+                if name in merged:
+                    merged[name] = {**merged[name], **config}
+                continue
+            merged[name] = config
+    return [name for name, config in merged.items() if config.get("enabled") is not False]
 
 
 def available_mcp_servers(session: Any) -> list[str]:

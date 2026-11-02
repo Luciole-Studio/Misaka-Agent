@@ -33,15 +33,14 @@ README = """# MISAKA profiles
 
 One directory per role: personality, skills, sub-agent types and MCP servers live here, never
 in the source tree. A role directory overlays the home above it -- what a role does not
-define, it shares with every other role. MCP servers are the exception: each role connects
-only her own, and the home has none.
+define, it shares with every other role.
 
     last_order/        Last Order, the coordinator
       SOUL.md          her voice -- OPTIONAL; shared duties and role charter are kept
       settings.json    what she holds of her own: "defaultProvider"/"defaultModel" (the model
                        she starts on; /model Ctrl+S writes it), "web"
-      mcp.json         her MCP servers (`misaka mcp`, `/mcp` in her window)
-      credentials/     her MCP sign-ins (mcp-auth.json)
+      mcp.json         her MCP servers, over the global ones (`misaka mcp`, `/mcp` in her window)
+      credentials/     the sign-ins of her own MCP servers (mcp-auth.json)
       skills/          skills only she sees
       subagents/       sub-agent types only she sees
     sisters/<id>/      one per Sister, same layout (`misaka create <id>` builds it)
@@ -52,10 +51,15 @@ In the home, shared by every role:
     ../settings.json   every other setting, and the fallback model
     ../skills/         skills every role sees
     ../subagents/      sub-agent types every role sees
+    ../mcp.json        MCP servers every role connects (`misaka mcp add -g`); their
+                       sign-ins are in ../credentials/mcp-auth.json
 
 An mcp.json has the shape other MCP clients use:
 
     {"mcpServers": {"camofox": {"command": "npx", "args": ["-y", "camofox-mcp"]}}}
+
+A role's entry replaces a global server of the same name; one with only "enabled", "exposure"
+or "toolExposure" changes it for her alone: {"mcpServers": {"camofox": {"enabled": false}}}.
 
 Skills resolve project -> role -> shared -> external, first match winning. The project
 layer is a `skills/` folder in whatever directory MISAKA runs in.

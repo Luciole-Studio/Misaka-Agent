@@ -27,7 +27,11 @@ cannot use it, so a repository cannot pick where the credential goes.
 The top-level ``autoEnableCodemode`` (default true) activates the codemode tool when a server
 with ``codemode`` exposure connects. A project value overrides the global one.
 
-Translated from pi's ``coding-agent/src/extensions/mcp/config.ts``.
+Translated from pi's ``coding-agent/src/extensions/mcp/config.ts``. MISAKA fork: a role's own ``mcp.json``
+(scope ``role``, ``roleDir``) sits between the global file, which every role reads, and the project's. It is
+read as a project file is: its entries replace global servers of the same name, and an entry without
+``command``, ``url``, or ``type`` overrides a global server for this role alone. Unlike a project file, it may
+use ``auth``: the user writes it, not a repository.
 """
 
 from __future__ import annotations
@@ -56,7 +60,8 @@ from misaka.utils.js_regexp import RegExp
 from misaka.utils.node_errors import withSyscall
 from misaka.utils.text import stripBom
 
-type McpServerScope = Literal["global", "project", "extension"]
+# MISAKA fork: `role` is the role's own `mcp.json`.
+type McpServerScope = Literal["global", "role", "project", "extension"]
 
 
 class McpServerEntry(TypedDict):
@@ -64,10 +69,10 @@ class McpServerEntry(TypedDict):
     config: McpServerConfig
     # Config file that defined the entry, or the path of the extension that registered it.
     source: str
-    # The global or the project `mcp.json`, or `extension` for servers registered with
+    # The global, the role or the project `mcp.json`, or `extension` for servers registered with
     # `pi.registerMcpServer()`. Changes to extension servers are not saved.
     scope: NotRequired[McpServerScope]
-    # Project `mcp.json` with an override of this global server's `enabled`, `exposure`, or `toolExposure`.
+    # Role or project `mcp.json` with an override of this server's `enabled`, `exposure`, or `toolExposure`.
     override: NotRequired[str]
 
 
@@ -78,6 +83,8 @@ class LoadedMcpConfig(TypedDict):
     errors: list[str]
     # The project `mcp.json` when the project is trusted, where `/mcp` saves project overrides.
     projectConfig: NotRequired[str]
+    # MISAKA fork: the role's `mcp.json`, where `/mcp` saves her overrides of global servers.
+    roleConfig: NotRequired[str]
 
 
 OVERRIDE_KEYS = ["enabled", "exposure", "toolExposure"]
@@ -118,7 +125,7 @@ class McpConfigState:
     errors: list[str]
 
 
-def readConfigFile(path: str, scope: Literal["global", "project"], state: McpConfigState) -> None:
+def readConfigFile(path: str, scope: Literal["global", "role", "project"], state: McpConfigState) -> None:
     servers, errors = state.servers, state.errors
     if not os.path.exists(path):
         return
@@ -136,7 +143,8 @@ def readConfigFile(path: str, scope: Literal["global", "project"], state: McpCon
         errors.append(f"{path}: autoEnableCodemode must be a boolean")
     mcpServers = parsed.get("mcpServers")
     for name, value in (mcpServers if mcpServers is not None else {}).items():
-        if scope == "project" and isRecord(value) and isOverride(value):
+        # MISAKA fork: a role file overrides as a project file does.
+        if scope != "global" and isRecord(value) and isOverride(value):
             base = servers.get(name)
             extra = [key for key in value if key not in OVERRIDE_KEYS]
             if not base:
@@ -167,6 +175,8 @@ def readConfigFile(path: str, scope: Literal["global", "project"], state: McpCon
 
 class LoadMcpConfigOptions(TypedDict):
     agentDir: str
+    # MISAKA fork: the directory of the role's own `mcp.json`, read after the global one.
+    roleDir: NotRequired[str]
     cwd: str
     projectTrusted: bool
 
@@ -176,6 +186,10 @@ def loadMcpConfig(options: LoadMcpConfigOptions) -> LoadedMcpConfig:
     ``enabled: false``, so they can be enabled again."""
     state = McpConfigState(servers={}, autoEnableCodemode=None, errors=[])
     readConfigFile(os.path.join(options["agentDir"], "mcp.json"), "global", state)
+    roleDir = options.get("roleDir")
+    roleConfig = os.path.join(roleDir, "mcp.json") if roleDir is not None else None
+    if roleConfig is not None:
+        readConfigFile(roleConfig, "role", state)
     # MISAKA fork: `home.project_dir` names the project's config directory, and none at `$HOME`.
     projectDir = home.project_dir(options["cwd"]) if options["projectTrusted"] else None
     projectConfig = str(projectDir / "mcp.json") if projectDir is not None else None
@@ -190,6 +204,8 @@ def loadMcpConfig(options: LoadMcpConfigOptions) -> LoadedMcpConfig:
         }
     if projectConfig:
         loaded["projectConfig"] = projectConfig
+    if roleConfig is not None:
+        loaded["roleConfig"] = roleConfig
     return loaded
 
 

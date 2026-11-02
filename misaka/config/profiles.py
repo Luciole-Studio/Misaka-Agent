@@ -2,8 +2,8 @@
 
 A role directory is a partial overlay of the home: ``SOUL.md`` (voice), ``settings.json``
 (what she holds of her own: her pinned model, her web overrides -- see
-``settings_manager.ROLE_KEYS``), ``skills/`` and ``subagents/``. Her MCP servers (``mcp.json``) and MCP sign-ins
-overlay nothing: the home has none (``mcp_dir``). Nothing lives in the source tree. Built-in subagent types ship with the package (misaka/core/subagent/agents/).
+``settings_manager.ROLE_KEYS``), ``skills/``, ``subagents/`` and ``mcp.json`` (her MCP servers over the
+home's global ones, ``mcp_dir``). Nothing lives in the source tree. Built-in subagent types ship with the package (misaka/core/subagent/agents/).
 
 ``<role>`` is a path relative to profiles/, e.g. ``last_order`` or ``sisters/10032``.
 """
@@ -29,9 +29,8 @@ def is_last_order(profile_dir):
 
 
 def mcp_dir(profile_dir):
-    """Where a role keeps her MCP servers (``mcp.json``) and MCP sign-ins (``credentials/mcp-auth.json``): her
-    own profile, as a Hermes profile keeps its own; Last Order's for a session without a role. The home keeps
-    none, so no role reaches another's servers."""
+    """Where a role keeps her own MCP servers (``mcp.json``) and their sign-ins (``credentials/mcp-auth.json``): her
+    profile, over the home's global ones; Last Order's for a session without a role. No role reaches another's."""
     return str(profile_dir) if profile_dir else str(home.path("roles_root") / "last_order")
 
 

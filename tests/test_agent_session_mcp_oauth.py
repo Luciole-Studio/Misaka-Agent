@@ -372,3 +372,41 @@ async def test_a_sisters_mcp_login_through_bash_reaches_her_session_on_the_next_
     assert not (home.path("roles_root") / "last_order" / "credentials" / "mcp-auth.json").exists()
     # Fenced as untrusted data, as every MCP result in a role's session.
     assert "\ntoken access-1\n" in getMessageText(await callWhoami(harness))
+
+
+async def test_a_sign_in_to_a_global_server_serves_every_role(stack, monkeypatch):
+    """MISAKA fork: a global server's sign-ins are the home's, as the `/login` ones are. A Sister signs in through
+    bash, and Last Order's session uses it on her next turn without signing in herself."""
+    import types
+
+    import misaka.core.http_dispatcher as dispatcher
+    import misaka.extensions.mcp as mcp_extension
+    from misaka.config import home
+    from misaka.extensions.mcp import cli
+
+    server = await startOAuthMcpServer()
+    home.path("mcp_config").write_text(
+        json.dumps({"mcpServers": {"issues": {"url": server.url, "exposure": "direct"}}}), encoding="utf-8")
+    sister = home.path("profiles_root") / "10032"
+    sister.mkdir(parents=True)
+    lastOrder = home.path("roles_root") / "last_order"
+    spec = types.SimpleNamespace(role="last_order", mcp_role="last-order", profile_dir=str(lastOrder))
+    harness: Harness = await stack.enter_async_context(createHarness(
+        initialActiveToolNames=[], extensionFactories=[mcp_extension.createMisakaMcpExtension(spec)]))
+    await harness.session.bindExtensions({"uiContext": createTestUiContext()})
+
+    for name, value in (("MISAKA_PROFILE_DIR", str(sister)), ("MISAKA_MCP_ROLE", "10032"), ("MISAKA_WHO", "10032")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(dispatcher, "applyHttpProxySettings", lambda _proxy: None)
+    monkeypatch.setattr(dispatcher, "configureHttpDispatcher", lambda: None)
+    tasks: set[asyncio.Task] = set()
+
+    async def follow(url: str) -> None:
+        await (await fetch(url)).text()
+
+    monkeypatch.setattr(cli, "openBrowser", lambda url: spawn(follow(url), tasks) and None)
+    assert await asyncio.to_thread(mcp_extension.command, ["login", "issues"]) == 0
+
+    assert home.path("mcp_auth").is_file()
+    assert not (sister / "credentials" / "mcp-auth.json").exists()
+    assert "\ntoken access-1\n" in getMessageText(await callWhoami(harness))

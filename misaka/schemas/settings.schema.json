@@ -687,7 +687,7 @@
           "description": "Seconds a sub-agent waits for an MCP server its definition requires. Default: 30."
         }
       },
-      "description": "MCP servers, as sub-agents wait for them. The servers themselves are in each role's mcp.json."
+      "description": "MCP servers, as sub-agents wait for them. The servers themselves are in the global mcp.json and each role's."
     },
     "network": {
       "type": "object",

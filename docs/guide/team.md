@@ -44,27 +44,31 @@ each Sister.
 | `DESCRIBE.md` | Her specialty. Last Order reads it to decide who gets what. |
 | `SOUL.md` | Her personality and voice, optional. It shapes how she talks and thinks; her duties stay the same. Last Order's is written on the first start, a Sister's when she is created; delete or empty it to go without. |
 | `settings.json` | What is hers alone: her model (`defaultProvider` / `defaultModel`), `defaultThinkingLevel` and `web` overrides. |
-| `mcp.json` | Her MCP servers. No other role connects them. |
-| `credentials/mcp-auth.json` | Her MCP sign-ins (`/mcp` in her window). |
+| `mcp.json` | Her MCP servers, over the global ones. No other role connects them. |
+| `credentials/mcp-auth.json` | The sign-ins of her own MCP servers (`/mcp` in her window). |
 | `.env` | Keys that are hers, laid over the home's `.env`. |
 | `skills/` | Skills only she sees. |
 | `skill-bundles/` | Named sets of skills saved for her (`misaka bundles save`). |
 | `subagents/` | Sub-agent types only she can start. |
 
-MCP servers are set in `mcp.json` files, in the `mcpServers` shape other MCP clients use. Each role
-has her own in her folder: Last Order's in `profiles/last_order/mcp.json`, a Sister's in
-`profiles/sisters/<number>/mcp.json`. One role never connects another's servers, and the home has no
-`mcp.json`. A sub-agent a Sister starts reaches her servers and no others; servers written inline in a
-sub-agent's definition are not started:
+MCP servers are set in `mcp.json` files, in the `mcpServers` shape other MCP clients use. The home's
+`~/.misaka/mcp.json` holds the global servers, which every role connects. Each role also has her own
+in her folder -- Last Order's in `profiles/last_order/mcp.json`, a Sister's in
+`profiles/sisters/<number>/mcp.json` -- whose entries replace global ones of the same name, or turn one
+off for her alone (`{"enabled": false}`). One role never connects another's servers. A sub-agent a
+Sister starts reaches the servers she does and no others; servers written inline in a sub-agent's
+definition are not started:
 
 ```json
 {"mcpServers": {"camofox": {"command": "npx", "args": ["-y", "camofox-mcp"]}}}
 ```
 
-`misaka mcp add camofox -- npx -y camofox-mcp` writes Last Order's file, and `misaka mcp --as 10032 add
-camofox -- npx -y camofox-mcp` writes Sister 10032's. `misaka mcp list` (with the same `--as`) checks
-that her servers and the project's connect. `/mcp` in her window lists hers too, signs in to one,
-reconnects it, or turns it off. The [configuration reference](../reference/configuration.md#skills-and-mcp) lists every key.
+`misaka mcp add -g camofox -- npx -y camofox-mcp` writes the global file, `misaka mcp add camofox -- npx
+-y camofox-mcp` Last Order's, and `misaka mcp --as 10032 add camofox -- npx -y camofox-mcp` Sister
+10032's. `misaka mcp list` (with the same `--as`) checks that the servers she gets connect. `/mcp` in
+her window lists them too, signs in to one, reconnects it, or turns it off, everywhere or for her alone.
+A global server's sign-in serves every role; one of her own stays hers. The
+[configuration reference](../reference/configuration.md#skills-and-mcp) lists every key.
 
 A server starts with a small part of MISAKA's environment: `PATH`, `HOME`, the locale, the proxy
 and certificate variables, the settings of npm, uv and pip (a registry mirror reaches `npx` and
@@ -77,7 +81,7 @@ set does not start, and its error names the variable:
 ```
 
 What every role shares lives in the home: `~/.misaka/MISAKA.md` (the shared identity),
-`~/.misaka/skills/` and `~/.misaka/subagents/`. The [configuration reference](../reference/configuration.md)
+`~/.misaka/skills/`, `~/.misaka/subagents/` and `~/.misaka/mcp.json`. The [configuration reference](../reference/configuration.md)
 has the full layout.
 
 ## How a prompt is put together

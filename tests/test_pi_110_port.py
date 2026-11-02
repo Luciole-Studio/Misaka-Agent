@@ -401,10 +401,9 @@ async def test_a_radius_login_offers_the_radius_mcp_server(tmp_path, monkeypatch
     import types
 
     import misaka.modes.interactive.interactive_mode as interactiveMode
+    from misaka.config import home
     from misaka.core.radius import RADIUS_MCP_URL
 
-    # MISAKA fork: the global mcp.json is the window's role's own.
-    role = tmp_path / "profiles" / "sisters" / "10032"
     created: list = []
     reloads: list = []
 
@@ -413,7 +412,6 @@ async def test_a_radius_login_offers_the_radius_mcp_server(tmp_path, monkeypatch
 
     fake = types.SimpleNamespace(
         sessionManager=types.SimpleNamespace(getCwd=lambda: str(tmp_path)),
-        settingsManager=types.SimpleNamespace(getModelProfile=lambda: str(role)),
         showSelector=created.append,
         showError=lambda message: (_ for _ in ()).throw(AssertionError(message)),
         handleReloadCommand=handleReloadCommand,
@@ -425,7 +423,7 @@ async def test_a_radius_login_offers_the_radius_mcp_server(tmp_path, monkeypatch
     selector.onSelectCallback("Yes")
     await asyncio.sleep(0)
 
-    saved = json.loads((role / "mcp.json").read_text(encoding="utf-8"))
+    saved = json.loads(home.path("mcp_config").read_text(encoding="utf-8"))
     assert saved["mcpServers"]["radius"] == {"url": RADIUS_MCP_URL, "auth": {"provider": "radius"}}
     assert reloads == [True]
 

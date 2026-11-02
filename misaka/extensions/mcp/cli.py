@@ -14,7 +14,7 @@ import math
 import os
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, TypedDict, cast
 
@@ -61,29 +61,31 @@ def _logPath(agentDir: str) -> str:
     return os.path.join(agentDir, "mcp.log")
 
 
-# MISAKA fork: the paths name the MISAKA home (`home.display`, `home.DIR_NAME`) where pi names ~/.pi, and the
-# global file is a role's (`--as`).
+# MISAKA fork: the paths name the MISAKA home (`home.display`, `home.DIR_NAME`) where pi names ~/.pi, and a role's
+# own file sits between the global file and the project's (`--as`, `--global`).
 HELP = f"""{chalk.bold("Usage:")}
   {APP_NAME} mcp add <server> [options] -- <command> [args...]
   {APP_NAME} mcp add <server> [options] --url <url>
-  {APP_NAME} mcp remove <server> [-l]
+  {APP_NAME} mcp remove <server> [-g | -l]
   {APP_NAME} mcp list [--json]
   {APP_NAME} mcp login <server> [--timeout <seconds>]
   {APP_NAME} mcp logout <server>
 
 Configure and check MCP servers and sign in to OAuth servers without starting a session.
-Reads Last Order's {home.display(home.path("roles_root") / "last_order" / "mcp.json")} (a Sister's own with --as)
-and, in trusted projects, {home.DIR_NAME}/mcp.json.
+Reads the global {home.display(home.path("mcp_config"))}, which every role reads, then the role's own
+mcp.json -- Last Order's {home.display(home.path("roles_root") / "last_order" / "mcp.json")}, a Sister's with --as, or the
+role whose session runs the command -- and, in trusted projects, {home.DIR_NAME}/mcp.json.
 
 Commands:
-  add <server>            Add or replace a server in mcp.json
-  remove <server>         Remove a server from mcp.json
+  add <server>            Add or replace a server in the role's mcp.json
+  remove <server>         Remove a server from the role's mcp.json
   list                    Show state, tools, and errors (exits 1 on failure)
   login <server>          Sign in through the browser
   logout <server>         Delete the stored OAuth credentials
 
 Options for add and remove:
-  -l, --local             Use {home.DIR_NAME}/mcp.json in the current project instead of the global file
+  -g, --global            Use the global mcp.json, which every role reads, instead of the role's
+  -l, --local             Use {home.DIR_NAME}/mcp.json in the current project instead of the role's
 
 Options for add:
   --url <url>             Streamable HTTP server URL (instead of a command)
@@ -115,12 +117,16 @@ DEFAULT_LOGIN_TIMEOUT_SECONDS = 300
 class McpCommandOptions(TypedDict):
     cwd: str
     agentDir: str
-    # MISAKA fork: the directory of the global `mcp.json`, a role's profile. Defaults to `agentDir`.
+    # MISAKA fork: the directory of the role's own `mcp.json`, her profile, read after the global one in
+    # `agentDir`. Without it, the global file is the only one besides the project's, as in pi.
     mcpDir: NotRequired[str]
     # MISAKA fork: the Sister `--as` named, repeated in the commands the output suggests.
     asRole: NotRequired[str]
     # Defaults to `mcp-auth.json` under the home's credentials.
     credentials: NotRequired[McpOAuthCredentialStore]
+    # MISAKA fork: builds `credentials` from the loaded configuration, which says where each server's
+    # sign-ins are.
+    createCredentials: NotRequired[Callable[[LoadedMcpConfig], McpOAuthCredentialStore]]
     # MISAKA fork: how stdio servers start, with the role's names as her sessions start them. Defaults to
     # `createDefaultTransport`.
     createTransport: NotRequired[Callable[[McpServerEntry, str, Any], Any]]
@@ -135,7 +141,7 @@ class ServerReport(TypedDict):
     name: str
     scope: str
     source: str
-    # Project `mcp.json` that overrides `enabled`, `exposure`, or `toolExposure` of this global server.
+    # Role or project `mcp.json` that overrides `enabled`, `exposure`, or `toolExposure` of this server.
     override: NotRequired[str]
     enabled: bool
     exposure: str
@@ -167,6 +173,27 @@ def _mcpDir(options: McpCommandOptions) -> str:
     return options.get("mcpDir") or options["agentDir"]
 
 
+def _target(
+    values: Mapping[str, Any], projectConfig: str | None, options: McpCommandOptions, error: Callable[[str], None]
+) -> tuple[str, str] | None:
+    """MISAKA fork: the file ``add`` and ``remove`` change and its scope: the project's with ``--local``, the global
+    one with ``--global``, else the role's (pi's global file when the command has no role)."""
+    if "local" in values and "global" in values:
+        error(f"Use either --global or --local.\n{HELP_HINT}")
+        return None
+    if "local" in values and projectConfig is not None:
+        return projectConfig, "project"
+    if "global" in values or options.get("mcpDir") is None:
+        return os.path.join(options["agentDir"], "mcp.json"), "global"
+    return os.path.join(_mcpDir(options), "mcp.json"), "role"
+
+
+def _configDirs(options: McpCommandOptions) -> dict[str, str]:
+    """MISAKA fork: the global file's directory and, for a role, her own file's."""
+    mcpDir = options.get("mcpDir")
+    return {"agentDir": options["agentDir"], **({"roleDir": mcpDir} if mcpDir is not None else {})}
+
+
 def _command(options: McpCommandOptions) -> str:
     asRole = options.get("asRole")
     return f"{APP_NAME} mcp --as {asRole}" if asRole else f"{APP_NAME} mcp"
@@ -185,8 +212,9 @@ def createConnection(
     })
 
 
-# Short spellings of options. `-l`/`--local` match `pi install`; MISAKA fork: misaka has no `install`.
-OPTION_ALIASES = {"-l": "--local"}
+# Short spellings of options. `-l`/`--local` match `pi install`; MISAKA fork: misaka has no `install`, and
+# `-g`/`--global` picks the global file over the role's.
+OPTION_ALIASES = {"-l": "--local", "-g": "--global"}
 
 type _OptionKind = Literal["flag", "value", "list"]
 
@@ -270,7 +298,7 @@ async def runMcpCommand(args: list[str], options: McpCommandOptions) -> int:
             else remove(rest, projectConfig, options, log, error)
         )
     projectTrusted = ProjectTrustStore(options["agentDir"]).get(options["cwd"]) is True
-    loaded = loadMcpConfig({"agentDir": _mcpDir(options), "cwd": options["cwd"], "projectTrusted": projectTrusted})
+    loaded = loadMcpConfig({**_configDirs(options), "cwd": options["cwd"], "projectTrusted": projectTrusted})  # type: ignore[typeddict-item]
     untrustedNote = (
         f"{projectConfig} is ignored because the project is not trusted. Start {APP_NAME} in the project to trust it."
         if not projectTrusted and projectConfig is not None and os.path.exists(projectConfig)
@@ -278,7 +306,8 @@ async def runMcpCommand(args: list[str], options: McpCommandOptions) -> int:
     )
     credentials = options.get("credentials")
     if credentials is None:
-        credentials = McpOAuthCredentialStore()
+        createCredentials = options.get("createCredentials")
+        credentials = createCredentials(loaded) if createCredentials is not None else McpOAuthCredentialStore()
 
     if command == "list":
         parsed = parseOptions(rest, {"json": "flag"}, error)
@@ -351,6 +380,7 @@ def add(
         args,
         {
             "local": "flag",
+            "global": "flag",
             "url": "value",
             "env": "list",
             "cwd": "value",
@@ -443,8 +473,10 @@ def add(
         # MISAKA fork: a project file needs a project directory, which the home root is not.
         error(f"There is no project at {options['cwd']} to hold a {home.DIR_NAME}/mcp.json.")
         return 1
-    path = projectConfig if project and projectConfig is not None else os.path.join(_mcpDir(options), "mcp.json")
-    scope = "project" if project else "global"
+    target = _target(values, projectConfig, options, error)
+    if target is None:
+        return 1
+    path, scope = target
     try:
         replaced = addMcpServerConfig(path, name, validated)
     except Exception as addError:  # noqa: BLE001 - upstream `catch (addError)`: reported, exit 1
@@ -471,22 +503,23 @@ def remove(
     log: Callable[[str], None],
     error: Callable[[str], None],
 ) -> int:
-    parsed = parseOptions(args, {"local": "flag"}, error)
+    parsed = parseOptions(args, {"local": "flag", "global": "flag"}, error)
     if parsed is None:
         return 1
     name = parsed.positional[0] if len(parsed.positional) > 0 else None
     extra = parsed.positional[1:]
     if not name or len(extra) > 0:
-        error(f"Usage: {APP_NAME} mcp remove <server> [-l]\n{HELP_HINT}")
+        error(f"Usage: {APP_NAME} mcp remove <server> [-g | -l]\n{HELP_HINT}")
         return 1
     project = "local" in parsed.values
-    globalConfig = os.path.join(_mcpDir(options), "mcp.json")
     if project and projectConfig is None:
         # MISAKA fork: see `add`.
         error(f"There is no project at {options['cwd']} to hold a {home.DIR_NAME}/mcp.json.")
         return 1
-    path = projectConfig if project and projectConfig is not None else globalConfig
-    scope = "project" if project else "global"
+    target = _target(parsed.values, projectConfig, options, error)
+    if target is None:
+        return 1
+    path, scope = target
     try:
         removed = removeMcpServerConfig(path, name)
     except Exception as removeError:  # noqa: BLE001 - upstream `catch (removeError)`: reported, exit 1
@@ -498,8 +531,8 @@ def remove(
     other = next(
         (
             server
-            for server in loadMcpConfig({
-                "agentDir": _mcpDir(options),
+            for server in loadMcpConfig({  # type: ignore[typeddict-item]
+                **_configDirs(options),
                 "cwd": options["cwd"],
                 "projectTrusted": True,
             })["servers"]
@@ -509,7 +542,9 @@ def remove(
     )
     hint = ""
     if other is not None:
-        hint = f" It is defined in {other['source']}{'; use --local' if other.get('scope') == 'project' else '; omit --local'}."
+        # MISAKA fork: the option that picks the file defining it, among three.
+        option = {"project": "use --local", "global": "use --global"}.get(other.get("scope"), "omit --local and --global")
+        hint = f" It is defined in {other['source']}; {option}."
     error(f'No {scope} MCP server named "{name}" in {path}.{hint}')
     return 1
 
@@ -588,7 +623,9 @@ async def _list(
         log(f"{entry['name']}: {state} ({entry['exposure']}, {entry['scope']})")
         log(f"  {entry['transport']}")
         if entry.get("override"):
-            log(f"  project override: {entry['override']}")
+            # MISAKA fork: the override is the project's or the role's.
+            layer = "project" if entry["override"] == loaded.get("projectConfig") else "role"
+            log(f"  {layer} override: {entry['override']}")
         if entry["state"] == "needs-auth":
             log(f"  sign in with: {_command(options)} login {entry['name']}")
         if len(entry["tools"]) > 0:

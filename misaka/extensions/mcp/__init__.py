@@ -26,8 +26,8 @@ current session for registered servers.
 
 Translated from pi's ``coding-agent/src/extensions/mcp/index.ts``. The module's tail is misaka's
 glue: the bundled-extension flags, the ``misaka mcp`` command, and the forks the user kept (each role's
-own ``mcp.json`` and sign-ins in her profile, the role's identity in stdio servers' environment, the
-untrusted fence on results).
+own ``mcp.json`` in her profile over the global one, each server's sign-ins beside the file that defines it,
+the role's identity in stdio servers' environment, the untrusted fence on results).
 """
 
 from __future__ import annotations
@@ -348,7 +348,9 @@ def _defaultLogPath() -> str:
 
 
 def _emptyMessage(mcpDir: str) -> str:
-    return f"No MCP servers configured. Add them to {os.path.join(mcpDir, 'mcp.json')} or {home.DIR_NAME}/mcp.json."
+    # MISAKA fork: the global file, the role's (`mcpDir`) and the project's.
+    files = dict.fromkeys([os.path.join(get_agent_dir(), "mcp.json"), os.path.join(mcpDir, "mcp.json")])
+    return f"No MCP servers configured. Add them to {', '.join(files)} or {home.DIR_NAME}/mcp.json."
 
 
 def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionFactory:
@@ -361,6 +363,8 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
         configErrors: list[str] = []
         # The trusted project's `mcp.json`, where `/mcp` saves project overrides of global servers.
         projectConfig: str | None = None
+        # MISAKA fork: the role's `mcp.json`, where `/mcp` saves her overrides of global servers.
+        roleConfig: str | None = None
         # Registered servers that `mcp.json` overrides, shown in `/mcp`.
         overridden: list[str] = []
         autoEnableCodemode = True
@@ -768,10 +772,13 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
             indented = "\n".join(f"  {line}" for line in lines)
             ctx.ui.notify(f"MCP servers need attention:\n{indented}\nRun /mcp to fix.", "warning")
 
-        def saveConfig(server: McpServer, patch: McpServerConfigPatch, inProject: bool = False) -> str | None:
+        def saveConfig(
+            server: McpServer, patch: McpServerConfigPatch, inProject: bool = False, inRole: bool = False
+        ) -> str | None:
             """Save a config change; returns an error message when the file could not be updated. Changes to
-            registered servers only apply to the current session. ``inProject`` adds a project override."""
-            override = projectConfig if inProject else server.entry.get("override")
+            registered servers only apply to the current session. ``inProject`` adds a project override,
+            ``inRole`` (MISAKA fork) one in the role's ``mcp.json``."""
+            override = projectConfig if inProject else (roleConfig if inRole else server.entry.get("override"))
             entry: McpServerEntry = {**server.entry, "override": override} if override else server.entry
             if entry.get("scope") != "extension":
                 try:
@@ -841,9 +848,9 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
             except Exception as error:  # noqa: BLE001 - upstream `catch (error)`: reported to the user
                 return errorMessage(error)
 
-        async def setEnabled(server: McpServer, enabled: bool, inProject: bool = False) -> str | None:
+        async def setEnabled(server: McpServer, enabled: bool, inProject: bool = False, inRole: bool = False) -> str | None:
             """Returns an error message when the config could not be saved; connection errors show in the state."""
-            failed = saveConfig(server, {"enabled": enabled}, inProject)
+            failed = saveConfig(server, {"enabled": enabled}, inProject, inRole)
             if failed:
                 return failed
             if not enabled:
@@ -896,6 +903,16 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
                 *(f"overridden: {line}" for line in overridden),
             ]
 
+        def overrideLayer(entry: McpServerEntry) -> str:
+            """MISAKA fork: the file that overrides the entry, the project's or the role's."""
+            return "project" if entry.get("override") == projectConfig else "role"
+
+        def describePlace(entry: McpServerEntry) -> str:
+            # MISAKA fork: the override is the project's or the role's, of a global or a role server.
+            if entry.get("override"):
+                return f"{entry.get('scope')}, {overrideLayer(entry)} override"
+            return nullishCoalesce(entry.get("scope"), entry["source"])
+
         def serversMenu() -> McpMenu:
             return {
                 "title": "MCP servers",
@@ -905,8 +922,7 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
                         value=server.entry["name"],
                         label=server.entry["name"],
                         description=(
-                            f"{describeState(server)} · {exposureOf(server.entry)} · "
-                            f"{'global, project override' if server.entry.get('override') else nullishCoalesce(server.entry.get('scope'), server.entry['source'])}"
+                            f"{describeState(server)} · {exposureOf(server.entry)} · {describePlace(server.entry)}"
                         ),
                     )
                     for server in sorted(
@@ -934,17 +950,25 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
                 "for this session"
                 if scope == "extension"
                 else (
-                    "saved to the project mcp.json"
+                    f"saved to the {overrideLayer(entry)} mcp.json"
                     if entry.get("override")
                     else (f"saved to the {scope} mcp.json" if scope else "saved to mcp.json")
                 )
             )
             # Global servers without an override can be turned on or off for the trusted project alone.
-            inProject = scope == "global" and not entry.get("override") and projectConfig is not None
+            # MISAKA fork: a role's own servers too, and a global server overridden for the role.
+            inProject = (
+                scope in ("global", "role") and entry.get("override") != projectConfig and projectConfig is not None
+            )
             inProjectSaved = "saved to the project mcp.json"
+            # MISAKA fork: a global server can be turned on or off for this role alone.
+            inRole = scope == "global" and not entry.get("override") and roleConfig is not None
+            inRoleSaved = "saved to the role mcp.json"
             items: list[SelectItem] = []
             if not isEnabled(server):
                 items.append(SelectItem(value="enable", label="Enable", description=saved))
+                if inRole:
+                    items.append(SelectItem(value="enable-role", label="Enable for this role", description=inRoleSaved))
                 if inProject:
                     items.append(
                         SelectItem(value="enable-project", label="Enable in this project", description=inProjectSaved)
@@ -963,6 +987,8 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
                     )
                 items.append(SelectItem(value="exposure", label="Exposure", description=exposureOf(entry)))
                 items.append(SelectItem(value="disable", label="Disable", description=saved))
+                if inRole:
+                    items.append(SelectItem(value="disable-role", label="Disable for this role", description=inRoleSaved))
                 if inProject:
                     items.append(
                         SelectItem(value="disable-project", label="Disable in this project", description=inProjectSaved)
@@ -970,7 +996,7 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
             details = [
                 describeTransport(entry),
                 f"{scope if scope is not None else 'config'}: {entry['source']}",
-                *([f"project override: {entry['override']}"] if entry.get("override") else []),
+                *([f"{overrideLayer(entry)} override: {entry['override']}"] if entry.get("override") else []),
                 f"State: {describeState(server, False)}",
             ]
             error = "\n".join(
@@ -1119,9 +1145,11 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
                     await showTools(ui, server)
                 case "exposure":
                     message = await chooseExposure(ui, server)
-                case "enable" | "disable" | "enable-project" | "disable-project":
+                case "enable" | "disable" | "enable-project" | "disable-project" | "enable-role" | "disable-role":
                     enable = action.startswith("enable")
-                    runInBackground(ctx, server, lambda: setEnabled(server, enable, action.endswith("-project")))
+                    runInBackground(
+                        ctx, server, lambda: setEnabled(server, enable, action.endswith("-project"), action.endswith("-role"))
+                    )
             # The session ended meanwhile (for example during a sign-in), which made ctx stale.
             if signal.aborted:
                 return
@@ -1246,12 +1274,13 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
             ctx.ui.notify(f'Signed in to MCP server "{name}" ({count} tools).', "info")
 
         def onSessionStart(_event: Any, ctx: Any) -> None:
-            nonlocal configErrors, projectConfig, autoEnableCodemode, warnedUnreachable, waitedForStartup
+            nonlocal configErrors, projectConfig, roleConfig, autoEnableCodemode, warnedUnreachable, waitedForStartup
             nonlocal sessionCwd, modelRegistry, session, configuredEntries, overridden, servers, pending
             loadConfig = options.get("loadConfig")
             loaded = (loadConfig if loadConfig is not None else defaultLoadConfig)(ctx)
             configErrors = loaded["errors"]
             projectConfig = loaded.get("projectConfig")
+            roleConfig = loaded.get("roleConfig")
             autoEnableCodemode = nullishCoalesce(loaded.get("autoEnableCodemode"), True)
             warnedUnreachable = False
             waitedForStartup = False
@@ -1648,26 +1677,33 @@ def _mcpServersCalled(pi: Any, details: Any) -> list[str]:
 
 
 def createMisakaMcpExtension(spec: Any) -> ExtensionFactory:
-    """The MCP extension as misaka's sessions load it: pi's ``createMcpExtension`` with roles isolated (each
-    role's profile is where pi's global ``mcp.json`` and sign-ins are, as a Hermes profile keeps its own:
-    ``loadConfig``, ``createCredentials``), the role's identity in stdio servers'
-    environment (``createTransport``), and MCP output fenced as untrusted data, which the LCM's recall
-    fence keys on: every MCP tool's description says its results are data, an MCP result's text is
-    fenced (a ``tool_result`` handler), and so is the result of a codemode script that called an MCP tool,
-    since scripts read MCP results unfenced (``structuredContent``) and what they print becomes that
-    tool's own result."""
+    """The MCP extension as misaka's sessions load it: pi's ``createMcpExtension`` with roles (pi's global
+    ``mcp.json`` in the home, which every role reads, then the role's own in her profile, as a role directory
+    overlays the home; each server's sign-ins beside the file that defines it: ``loadConfig``,
+    ``createCredentials``), the role's identity in stdio servers' environment (``createTransport``), and MCP
+    output fenced as untrusted data, which the LCM's recall fence keys on: every MCP tool's description says
+    its results are data, an MCP result's text is fenced (a ``tool_result`` handler), and so is the result of
+    a codemode script that called an MCP tool, since scripts read MCP results unfenced (``structuredContent``)
+    and what they print becomes that tool's own result."""
     roleDir = getattr(spec, "profile_dir", None)
     role = getattr(spec, "role", None)
     roleEnv = _roleEnvironment(roleDir, str(getattr(spec, "mcp_role", None) or role) if role else None)
     mcpDir = profiles.mcp_dir(roleDir)
+    # Each configured server's scope, as the last load found it, for the store of its sign-ins.
+    scopes: dict[str, Any] = {}
 
     def loadConfig(ctx: Any) -> LoadedMcpConfig:
-        return loadMcpConfig({"agentDir": mcpDir, "cwd": ctx.cwd, "projectTrusted": ctx.isProjectTrusted()})
+        loaded = loadMcpConfig({
+            "agentDir": get_agent_dir(), "roleDir": mcpDir, "cwd": ctx.cwd, "projectTrusted": ctx.isProjectTrusted()
+        })
+        scopes.clear()
+        scopes.update({entry["name"]: entry.get("scope") for entry in loaded["servers"]})
+        return loaded
 
     createTransport = _roleTransport(roleEnv)
 
     def createCredentials(runtime: Any) -> McpOAuthCredentialStore:
-        return _roleCredentials(runtime.McpOAuthCredentialStore, mcpDir)
+        return _roleCredentials(runtime.McpOAuthCredentialStore, mcpDir, scopes)
 
     register = createMcpExtension({
         "loadConfig": loadConfig,
@@ -1699,11 +1735,36 @@ def createMisakaMcpExtension(spec: Any) -> ExtensionFactory:
     return factory
 
 
-def _roleCredentials(store: Any, mcpDir: str) -> McpOAuthCredentialStore:
-    """MISAKA fork: a role's MCP sign-ins, kept in her profile beside her ``mcp.json``."""
+class _RoleCredentials:
+    """MISAKA fork: a role's MCP sign-ins, each beside the ``mcp.json`` that defines its server: a global server's
+    in the home, which every role shares as the ``/login`` credentials are, and the others in her profile. A role
+    that signs in to a global server with an account of her own defines it in her ``mcp.json``."""
+
+    def __init__(self, shared: Any, own: Any, scopes: Mapping[str, Any]) -> None:
+        self._shared, self._own, self._scopes = shared, own, scopes
+
+    def _store(self, name: str) -> Any:
+        return self._shared if self._scopes.get(name) == "global" else self._own
+
+    def forServer(self, name: str, serverUrl: str) -> Any:
+        return self._store(name).forServer(name, serverUrl)
+
+    def tokens(self, name: str, serverUrl: str) -> Any:
+        return self._store(name).tokens(name, serverUrl)
+
+    def remove(self, name: str, serverUrl: str) -> bool:
+        return self._store(name).remove(name, serverUrl)
+
+
+def _roleCredentials(store: Any, mcpDir: str, scopes: Mapping[str, Any]) -> McpOAuthCredentialStore:
+    """MISAKA fork: the sign-ins of a role whose own ``mcp.json`` is in ``mcpDir``; ``scopes`` names the scope of
+    each configured server."""
     from misaka.core.auth_storage import FileAuthStorageBackend
 
-    return store(FileAuthStorageBackend(str(home.path("mcp_auth", mcpDir))), str(home.path("locks")))
+    locks = str(home.path("locks"))
+    shared = store(FileAuthStorageBackend(str(home.path("mcp_auth"))), locks)
+    own = store(FileAuthStorageBackend(str(home.path("mcp_auth", mcpDir))), locks)
+    return _RoleCredentials(shared, own, scopes)  # type: ignore[return-value]
 
 
 def _takeRole(argv: list[str]) -> tuple[list[str], str | None]:
@@ -1778,7 +1839,9 @@ def command(argv: list[str]) -> int:
                 "cwd": cwd,
                 "agentDir": agentDir,
                 "mcpDir": mcpDir,
-                "credentials": _roleCredentials(McpOAuthCredentialStore, mcpDir),
+                "createCredentials": lambda loaded: _roleCredentials(
+                    McpOAuthCredentialStore, mcpDir, {entry["name"]: entry.get("scope") for entry in loaded["servers"]}
+                ),
                 "createTransport": _roleTransport(roleEnv),
                 **({"asRole": who} if who else {}),
             },

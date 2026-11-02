@@ -109,7 +109,9 @@ def _ctx(cwd: Path):
     return types.SimpleNamespace(cwd=str(cwd), isProjectTrusted=lambda: False)
 
 
-def test_a_sister_sees_only_her_own_mcp_json(monkeypatch, tmp_path):
+def test_a_sister_sees_the_global_servers_and_her_own_never_another_roles(monkeypatch, tmp_path):
+    """The home's `mcp.json` is pi's global file, which every role reads; her own overlays it, as a role directory
+    overlays the home: her entry replaces a global one of the same name."""
     home = Path(os.environ["MISAKA_HOME"])
     _writeConfig(home / "mcp.json", {"docs": {"command": "home-docs"}, "web": {"command": "home-web"}})
     _writeConfig(home / "profiles" / "last_order" / "mcp.json", {"lo": {"command": "lo-tool"}})
@@ -119,24 +121,30 @@ def test_a_sister_sees_only_her_own_mcp_json(monkeypatch, tmp_path):
 
     loaded = captured["loadConfig"](_ctx(tmp_path))
 
-    servers = {entry["name"]: entry["config"]["command"] for entry in loaded["servers"]}
-    assert servers == {"docs": "role-docs"}
+    servers = {entry["name"]: (entry["config"]["command"], entry["scope"]) for entry in loaded["servers"]}
+    assert servers == {"docs": ("role-docs", "role"), "web": ("home-web", "global")}
+    assert loaded["roleConfig"] == str(role / "mcp.json")
 
 
-def test_last_order_reads_her_own_profile_and_the_home_mcp_json_reaches_no_one(monkeypatch, tmp_path):
-    """Each role's profile is a Hermes profile for MCP: Last Order's `mcp.json` is in `profiles/last_order`, a
-    session without a role reads hers, and the home keeps none."""
+def test_last_order_reads_the_global_mcp_json_and_her_own_profiles(monkeypatch, tmp_path):
+    """Last Order's own `mcp.json` is in `profiles/last_order`, which a session without a role reads too, over the
+    home's global one. Her entry without `command`, `url` or `type` overrides a global server for her alone."""
     # Resolved, as `config.home` resolves it: on macOS the test home under /tmp is really under /private/tmp.
     home = Path(os.environ["MISAKA_HOME"]).resolve()
-    _writeConfig(home / "mcp.json", {"stray": {"command": "home-stray"}})
+    _writeConfig(home / "mcp.json", {"shared": {"command": "home-shared"}, "web": {"command": "home-web"}})
     lastOrder = home / "profiles" / "last_order"
-    _writeConfig(lastOrder / "mcp.json", {"docs": {"command": "lo-docs"}})
+    _writeConfig(lastOrder / "mcp.json", {"docs": {"command": "lo-docs"}, "web": {"enabled": False}})
 
     for profile in (lastOrder, None):
         captured = _captureOptions(monkeypatch, types.SimpleNamespace(role="last_order", profile_dir=profile))
         loaded = captured["loadConfig"](_ctx(tmp_path))
-        assert {entry["name"]: (entry["config"]["command"], entry["scope"]) for entry in loaded["servers"]} == {
-            "docs": ("lo-docs", "global")
+        assert {
+            entry["name"]: (entry["config"]["command"], entry["scope"], entry["config"].get("enabled"), entry.get("override"))
+            for entry in loaded["servers"]
+        } == {
+            "shared": ("home-shared", "global", None, None),
+            "web": ("home-web", "global", False, str(lastOrder / "mcp.json")),
+            "docs": ("lo-docs", "role", None, None),
         }
         assert captured["mcpDir"] == str(lastOrder)
 
@@ -160,6 +168,109 @@ def test_every_role_keeps_her_mcp_sign_ins_in_her_profile(monkeypatch, tmp_path)
     assert (sister / "credentials" / "mcp-auth.json").is_file()
     assert (lastOrder / "credentials" / "mcp-auth.json").is_file()
     assert not home.path("mcp_auth").exists()
+
+
+def test_each_servers_sign_ins_sit_beside_the_mcp_json_that_defines_it(monkeypatch, tmp_path):
+    """A global server's sign-ins are the home's, shared by every role as the `/login` ones are, also when a role
+    overrides its `enabled` or `exposure`; a role's own server's, and a global one she redefines, are hers."""
+    from misaka.config import home
+    from misaka.extensions.mcp import runtime
+
+    root = Path(os.environ["MISAKA_HOME"])
+    shared, own = "https://shared.example/mcp", "https://own.example/mcp"
+    _writeConfig(root / "mcp.json", {"shared": {"url": shared}, "mine": {"url": shared}, "web": {"url": shared}})
+    sister = root / "profiles" / "sisters" / "10032"
+    _writeConfig(sister / "mcp.json", {"own": {"url": own}, "mine": {"url": own}, "web": {"exposure": "direct"}})
+    captured = _captureOptions(monkeypatch, types.SimpleNamespace(role="10032", profile_dir=sister))
+    captured["loadConfig"](_ctx(tmp_path))
+    store = captured["createCredentials"](runtime)
+    for name, url in (("shared", shared), ("web", shared), ("own", own), ("mine", own)):
+        store.forServer(name, url).save({"tokens": {"access_token": name}})
+
+    def saved(path: Path) -> int:
+        return len(json.loads(path.read_text(encoding="utf-8")))
+
+    homeStore, roleStore = home.path("mcp_auth"), home.path("mcp_auth", sister)
+    assert saved(homeStore) == 2 and saved(roleStore) == 2
+    assert [store.tokens(name, url)["access_token"] for name, url in (("shared", shared), ("web", shared))] == ["shared", "web"]
+    assert store.remove("web", shared) and saved(homeStore) == 1 and saved(roleStore) == 2
+
+
+async def test_a_global_server_turns_off_for_this_role_from_the_manager(monkeypatch):
+    """`/mcp` offers a global server's "Disable for this role" beside pi's "Disable in this project": an override
+    in the role's `mcp.json`. Once overridden there, the server reads as such and plain "Disable" saves there."""
+    from contextlib import AsyncExitStack
+
+    import misaka.extensions.mcp as mcp_extension
+    from misaka.extensions.mcp import createMcpExtension
+    from misaka.utils.js import spawn
+    from tests.suite_harness import createHarness, createTestUiContext
+    from tests.test_agent_session_mcp import (
+        _tasks,
+        createFakeServer,
+        toolNames,
+        waitFor,
+    )
+
+    def entry(override=None):
+        return {"name": "docs", "config": {"url": "http://unused.invalid"}, "source": "/home/mcp.json",
+                "scope": "global", **({"override": override} if override else {})}
+
+    async def manage(entries, answers):
+        updates: list = []
+
+        def createTransport(*_args):
+            pair = createFakeServer([])
+            spawn(pair["server"].start(), _tasks)
+            return pair["client"]
+
+        loaded = {"servers": entries, "errors": [], "projectConfig": "/p/mcp.json", "roleConfig": "/r/mcp.json"}
+        menus: list = []
+
+        class Ui:
+            async def menu(self, build, _subscribe=None):
+                await asyncio.sleep(0.05)
+                menus.append(build())
+                return answers.pop(0) if answers else None
+
+            def status(self, *_args):
+                pass
+
+        async def showMcpManager(_ctx, run):
+            await run(Ui())
+
+        monkeypatch.setattr(mcp_extension, "showMcpManager", showMcpManager)
+        async with AsyncExitStack() as stack:
+            harness = await stack.enter_async_context(createHarness(extensionFactories=[
+                createCodemodeExtension(),
+                createMcpExtension({
+                    "loadConfig": lambda _ctx: loaded,
+                    "createTransport": createTransport,
+                    "updateConfig": lambda e, patch: updates.append((e.get("override"), dict(patch))),
+                }),
+            ]))
+            await harness.session.bindExtensions({"uiContext": createTestUiContext()})
+            await waitFor(lambda: "mcp__docs__search" in toolNames(harness))
+            runner = harness.session.extensionRunner
+            runner.mode = "tui"
+            await runner.getCommand("mcp").handler("", runner.createCommandContext())
+            await asyncio.sleep(0.2)
+        return menus, updates
+
+    menus, updates = await manage([entry()], ["docs", "disable-role", None, None])
+    assert "global ·" not in menus[0]["items"][0].description and menus[0]["items"][0].description.endswith("· global")
+    items = {item.value: item.description for item in menus[1]["items"]}
+    assert items["disable"] == "saved to the global mcp.json"
+    assert items["disable-role"] == "saved to the role mcp.json"
+    assert items["disable-project"] == "saved to the project mcp.json"
+    assert updates == [("/r/mcp.json", {"enabled": False})]
+
+    menus, updates = await manage([entry("/r/mcp.json")], ["docs", "disable", None, None])
+    assert menus[0]["items"][0].description.endswith("· global, role override")
+    items = {item.value: item.description for item in menus[1]["items"]}
+    assert "disable-role" not in items and items["disable"] == "saved to the role mcp.json"
+    assert "disable-project" in items
+    assert updates == [("/r/mcp.json", {"enabled": False})]
 
 
 def test_every_role_reaches_its_servers_as_its_mcp_json_says(monkeypatch, tmp_path):

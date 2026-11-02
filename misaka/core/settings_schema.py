@@ -191,7 +191,7 @@ _KNOB_TYPES: dict[Any, Any] = {int: TypeBoxInteger(), float: float, bool: bool, 
 _NOT_NEGATIVE_KNOB_TYPES: dict[Any, Any] = {int: TypeBoxInteger(ge=0), float: Annotated[float, Field(ge=0)]}
 _PRODUCT_SECTIONS: dict[str, str] = {
     "documents": "Document reading.",
-    "mcp": "MCP servers, as sub-agents wait for them. The servers themselves are in each role's mcp.json.",
+    "mcp": "MCP servers, as sub-agents wait for them. The servers themselves are in the global mcp.json and each role's.",
     "network": "How many Sister cards run at once.",
     "panel": "The panel.",
     "research": "Research runs.",

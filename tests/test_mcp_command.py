@@ -254,6 +254,47 @@ def test_as_picks_a_sisters_own_mcp_json_and_last_order_s_is_the_default(monkeyp
     assert "Unknown Sister '20001'" in capsys.readouterr().err
 
 
+def test_global_writes_the_file_every_role_reads_and_the_roles_own_is_the_default(monkeypatch, tmp_path, capsys):
+    """MISAKA fork: `-g` writes the home's global mcp.json, which every role reads; without it the command changes
+    the role's own. `list` shows a Sister both, and `remove` names the option that reaches the file defining one."""
+    import misaka.core.http_dispatcher as dispatcher
+    import misaka.extensions.mcp as mcp_extension
+
+    monkeypatch.setattr(dispatcher, "applyHttpProxySettings", lambda _proxy: None)
+    monkeypatch.setattr(dispatcher, "configureHttpDispatcher", lambda: None)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MISAKA_PROFILE_DIR", raising=False)
+    sister = home.path("profiles_root") / "10032"
+    sister.mkdir(parents=True)
+    lastOrder = home.path("roles_root") / "last_order"
+
+    assert mcp_extension.command(["add", "-g", "shared", "--", "shared-mcp"]) == 0
+    assert f'Added global MCP server "shared" in {home.path("mcp_config")}.' in capsys.readouterr().out
+    assert mcp_extension.command(["add", "own", "--", "own-mcp"]) == 0
+    assert f'Added role MCP server "own" in {lastOrder / "mcp.json"}.' in capsys.readouterr().out
+    assert mcp_extension.command(["--as", "10032", "add", "hers", "--", "hers-mcp"]) == 0
+    capsys.readouterr()
+
+    assert mcp_extension.command(["--as", "10032", "list", "--json"]) == 1
+    listed = {server["name"]: server["scope"] for server in json.loads(capsys.readouterr().out)["servers"]}
+    assert listed == {"shared": "global", "hers": "role"}
+    hers = json.loads((sister / "mcp.json").read_text(encoding="utf-8"))
+    (sister / "mcp.json").write_text(json.dumps({"mcpServers": {**hers["mcpServers"], "shared": {"enabled": False}}}),
+                                     encoding="utf-8")
+    assert mcp_extension.command(["--as", "10032", "list"]) == 1
+    assert f"shared: disabled (codemode, global)\n  shared-mcp\n  role override: {sister / 'mcp.json'}\n" in (
+        capsys.readouterr().out)
+    (sister / "mcp.json").write_text(json.dumps(hers), encoding="utf-8")
+
+    assert mcp_extension.command(["--as", "10032", "remove", "shared"]) == 1
+    assert f"It is defined in {home.path('mcp_config')}; use --global." in capsys.readouterr().err
+    assert mcp_extension.command(["remove", "-g", "-l", "shared"]) == 1
+    assert "Use either --global or --local." in capsys.readouterr().err
+    assert mcp_extension.command(["--as", "10032", "remove", "-g", "shared"]) == 0
+    assert readConfig(str(home.path("mcp_config")))["mcpServers"] == {}
+    assert list(readConfig(str(lastOrder / "mcp.json"))["mcpServers"]) == ["own"]
+
+
 def test_run_from_a_roles_process_the_command_is_hers_and_servers_get_her_names(monkeypatch, tmp_path):
     """MISAKA fork: a role's process, such as her bash tool, carries her `MISAKA_PROFILE_DIR`, as a Hermes profile's
     carries its HERMES_HOME. Without `--as` the command uses her `mcp.json` and sign-ins, so a sign-in she runs

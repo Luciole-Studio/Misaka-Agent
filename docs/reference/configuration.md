@@ -17,6 +17,7 @@ MISAKA keeps what is yours, across projects, in one folder, the **home**: `~/.mi
 | `~/.misaka/models.json` | providers and models the built-in catalog does not know, such as a local server |
 | `~/.misaka/keybindings.json` | your changes to the chat box's keys |
 | `~/.misaka/MISAKA.md` | the identity every agent shares |
+| `~/.misaka/mcp.json` | the MCP servers every role connects; their sign-ins are in `credentials/mcp-auth.json` |
 | `~/.misaka/profiles/last_order/` | Last Order's own files |
 | `~/.misaka/profiles/sisters/<id>/` | one folder per Sister |
 | `<project>/.misaka/` | the project's own settings (`settings.json`) and its conversation-search cache |
@@ -49,8 +50,8 @@ winning:
 3. the role's `profiles/<role>/settings.json`
 
 MISAKA writes only what is that role's own into a role's file: `defaultProvider` /
-`defaultModel`, `defaultThinkingLevel` and `web`. A role's MCP servers have a file of their own,
-`profiles/<role>/mcp.json` (see [Skills and MCP](#skills-and-mcp)).
+`defaultModel`, `defaultThinkingLevel` and `web`. MCP servers have files of their own,
+`~/.misaka/mcp.json` and `profiles/<role>/mcp.json` (see [Skills and MCP](#skills-and-mcp)).
 
 A role folder may also have its own `.env`, laid over the home's. A variable already set in
 your shell wins over both files.
@@ -200,28 +201,38 @@ still works. A skill an extension brings is named after it, such as `builtin:cov
 | `skills.disabled` | none | skill names to hide from every role |
 | `mcp.required_wait` | `30` | seconds a sub-agent waits for an MCP server its definition requires |
 
-MCP servers are configured in `mcp.json` files, in the `mcpServers` shape other MCP clients use:
+MCP servers are configured in `mcp.json` files, in the `mcpServers` shape other MCP clients use.
+They are read in this order, each one over the ones before it:
 
-1. `~/.misaka/profiles/last_order/mcp.json`, Last Order's servers
-2. `~/.misaka/profiles/sisters/<id>/mcp.json`, one Sister's servers
+1. `~/.misaka/mcp.json`, the global servers, for every role
+2. `~/.misaka/profiles/last_order/mcp.json` or `~/.misaka/profiles/sisters/<id>/mcp.json`, the role's own
 3. the project's `.misaka/mcp.json`, once you have trusted the project, for every role
 
-Each role connects the servers of her own file and the project's, and no other role's. The home has
-no `mcp.json`; a session that belongs to no role uses Last Order's file. An entry in the project file
-replaces the role's entry of the same name. `misaka mcp add` writes to Last Order's file, to a
-Sister's with `--as <id>`, or to the project's with `-l`; `misaka mcp list` connects and checks the
-servers that role gets. `/mcp` in a window manages that window's role ([commands](commands.md)).
+Each role connects the global servers, her own and the project's, and never another role's. A session
+that belongs to no role reads Last Order's file. An entry replaces an earlier file's entry of the same
+name. `misaka mcp add` writes to the role's file -- Last Order's, a Sister's with `--as <id>`, or the
+one whose session runs it -- to the global file with `-g`, or to the project's with `-l`; `misaka mcp
+list` connects and checks the servers that role gets. `/mcp` in a window manages that window's role
+([commands](commands.md)).
 
-A project entry without `command`, `url` or `type` changes only `enabled`, `exposure` and
-`toolExposure` of the server of that name from the role's file, and keeps the rest of it,
-`env`, `headers` and `auth` included. This turns a server off in one project:
+An entry in the role's or the project's file without `command`, `url` or `type` changes only
+`enabled`, `exposure` and `toolExposure` of the server of that name from an earlier file, and keeps the
+rest of it, `env`, `headers` and `auth` included. This turns a global server off for one role, when it
+is in her file, or in one project:
 
 ```json
 { "mcpServers": { "internal-tools": { "enabled": false } } }
 ```
 
-In a trusted project, `/mcp` offers *Enable in this project* and *Disable in this project* for the
-servers of the role's own file. They write such an entry, and later changes to that server go to it.
+`/mcp` offers *Enable for this role* and *Disable for this role* for a global server, and in a trusted
+project *Enable in this project* and *Disable in this project* for the global servers and the role's.
+They write such an entry, and later changes to that server go to it. Only the global and the role's
+files may use `auth`: a project cannot pick where a credential goes.
+
+A server's sign-ins are kept beside the `mcp.json` that defines it: a global server's in
+`~/.misaka/credentials/mcp-auth.json`, which every role shares as the `/login` sign-ins, and a role's in
+her folder's `credentials/mcp-auth.json`. To sign in to a global server with an account of her own, a
+role defines it in her file under the same name.
 
 ```json
 {

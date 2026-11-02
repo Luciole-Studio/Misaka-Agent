@@ -23,7 +23,7 @@ KEEP = 5                   # snapshots kept per reason; the oldest go first
 LARGEST = 1 << 30          # a quick snapshot skips a file this large, as Hermes's does
 # What an update snapshot holds: what a person wrote, or the program could not rebuild. Sessions
 # stay out: they are append-only, and no update rewrites them.
-SNAPSHOT = ("settings", "models", "keybindings", "env", "credentials",
+SNAPSHOT = ("settings", "models", "keybindings", "env", "mcp_config", "credentials",
             "db", "messages_db", "spaces", "trust", "models_store")
 # What the archive leaves out: rebuilt on demand, meaningless once processes exit, or copies already.
 ARCHIVE_SKIPS = ("cache", "logs", "run", home.LAYOUT["backups"].rel)
@@ -48,8 +48,8 @@ def _copy(source: Path, target: Path) -> None:
 
 
 def _roles() -> list[Path]:
-    """Last Order's folder and every Sister's: each may hold its own settings.json and .env, and holds her
-    mcp.json and MCP sign-ins."""
+    """Last Order's folder and every Sister's: each may hold its own settings.json, .env, mcp.json and MCP
+    sign-ins."""
     return sorted(path for root in (home.path("roles_root"), home.path("profiles_root"))
                   if root.is_dir() for path in root.iterdir() if path.is_dir())
 
