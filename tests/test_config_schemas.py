@@ -19,7 +19,7 @@ from misaka.config import get_themes_dir
 from misaka.config.product import KNOBS
 from misaka.core.keybindings import KEYBINDINGS, KeybindingsManager, toKeybindingsConfig
 from misaka.core.settings_defaults import SETTINGS_DEFAULTS
-from misaka.core.settings_manager import ROLE_KEYS, SettingsManager
+from misaka.core.settings_manager import ROLE_SETTING_KEYS, SettingsManager
 from misaka.core.settings_schema import SettingsSchema
 from misaka.modes.interactive.theme.theme import getBuiltinThemes
 from misaka.modes.interactive.theme.theme_schema import validateThemeJson
@@ -278,7 +278,7 @@ def test_settings_schema_describes_misakas_settings_not_pis():
         expected = {int: "integer", float: "number", bool: "boolean", str: "string", None: None}[cast]
         assert knob.get("type") == expected, (section, key)
     # What a role's own settings.json may hold.
-    for key in ROLE_KEYS:
+    for key in ROLE_SETTING_KEYS:
         assert key in properties, key
     for section in ("web", "moa", "allies", "lcm", "auxiliary"):
         assert properties[section]["type"] == "object", section
@@ -304,7 +304,7 @@ def test_accepts_schema_in_settings_json_and_preserves_unknown_settings(tmp_path
 
 
 def test_a_roles_settings_json_keeps_schema_through_a_role_write(tmp_path):
-    # MISAKA fork: a role's own settings.json is written by the manager itself (ROLE_KEYS).
+    # MISAKA fork: a role's own settings.json is written by the manager itself (ROLE_SETTING_KEYS).
     home = tmp_path / "home"
     home.mkdir()
     role = tmp_path / "role"

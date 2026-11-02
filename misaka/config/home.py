@@ -52,7 +52,7 @@ LAYOUT: dict[str, Entry] = {
     # What you edit sits shallow at the root. It is also what pi calls the agent directory:
     # its own joins (settings, models, keybindings, themes, prompts, extensions) land here.
     # Every other setting is a section of settings.json (allies, skills, moa, web), read through
-    # SettingsManager; a role's settings.json holds what ROLE_KEYS lists. An extension reads its own
+    # SettingsManager; a role's settings.json holds what ROLE_SETTING_KEYS lists. An extension reads its own
     # section the same way and keeps its files under plugins/<name>/: nothing here names one.
     "agent": Entry("", "edit", 0o700),
     "settings": Entry("settings.json", "edit"),

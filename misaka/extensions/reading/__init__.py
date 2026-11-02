@@ -19,6 +19,7 @@ from __future__ import annotations
 
 EXTENSION_NAME = "reading"
 BUILTIN = True
+ROLES = {"last_order"}
 SESSION_KINDS = {"foreground"}
 COMMAND = "read"
 

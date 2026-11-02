@@ -2,7 +2,7 @@
 
 A role directory is a partial overlay of the home: ``SOUL.md`` (voice), ``settings.json``
 (what she holds of her own: her pinned model, her web overrides -- see
-``settings_manager.ROLE_KEYS``), ``skills/``, ``subagents/`` and ``mcp.json`` (her MCP servers over the
+``settings_manager.ROLE_SETTING_KEYS``), ``skills/``, ``subagents/`` and ``mcp.json`` (her MCP servers over the
 home's global ones, ``mcp_dir``). Nothing lives in the source tree. Built-in subagent types ship with the package (misaka/core/subagent/agents/).
 
 ``<role>`` is a path relative to profiles/, e.g. ``last_order`` or ``sisters/10032``.

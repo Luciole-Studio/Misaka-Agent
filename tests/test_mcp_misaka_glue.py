@@ -310,7 +310,7 @@ def test_codemode_and_tool_search_load_for_every_role(monkeypatch):
     activated: list[tuple[str, str]] = []
     for name, module in (("codemode", codemode), ("tool_search", tool_search)):
         monkeypatch.setattr(module, "activate", lambda spec, name=name: activated.append((name, spec.kind)) or (lambda _api: None))
-    monkeypatch.setattr(bundled, "_modules", lambda package: iter((codemode, tool_search)) if package == bundled.__name__ else iter(()))
+    monkeypatch.setattr(bundled, "_modules", lambda: iter((codemode, tool_search)))
     for profile in (home / "profiles" / "last_order", home / "profiles" / "sisters" / "10032"):
         activated.clear()
         for kind in ("foreground", "dm", "card", "child"):

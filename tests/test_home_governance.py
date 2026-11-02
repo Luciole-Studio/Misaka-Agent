@@ -347,7 +347,7 @@ def test_a_board_written_by_another_build_is_refused_by_version_and_left_alone(t
 
 
 def test_a_role_session_writes_its_own_keys_to_its_file_and_everything_else_globally(tmp_path, monkeypatch):
-    from misaka.core.settings_manager import ROLE_KEYS, SettingsManager
+    from misaka.core.settings_manager import ROLE_SETTING_KEYS, SettingsManager
 
     monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
     home.path("settings").parent.mkdir(parents=True)
@@ -371,7 +371,7 @@ def test_a_role_session_writes_its_own_keys_to_its_file_and_everything_else_glob
     other = home.path("profiles_root") / "10036"
     other.mkdir()
     assert SettingsManager.forRole(str(other)).getSection("web") == {"search_backend": "exa", "cache_ttl_minutes": 5}
-    assert {"defaultProvider", "defaultModel", "defaultThinkingLevel", "web"} == set(ROLE_KEYS)
+    assert {"defaultProvider", "defaultModel", "defaultThinkingLevel", "web"} == set(ROLE_SETTING_KEYS)
 
 
 def test_a_new_home_gives_last_order_a_soul_she_can_go_without(tmp_path, monkeypatch):

@@ -76,7 +76,7 @@ type SettingsScope = Literal["global", "role", "project"]
 # The keys a role may hold a value of its own for. A role session that sets one of these writes
 # its own scope; every other key is the user's, shared by every role, and stays global. This
 # table is what keeps Last Order's and a Sister's configuration apart -- not per-key special cases.
-ROLE_KEYS = frozenset({"defaultProvider", "defaultModel", "defaultThinkingLevel", "web"})
+ROLE_SETTING_KEYS = frozenset({"defaultProvider", "defaultModel", "defaultThinkingLevel", "web"})
 
 
 class SettingsManagerOptions(TypedDict, total=False):
@@ -328,7 +328,7 @@ class SettingsManager:
         self.errors: list[SettingsError] = list(initialErrors or [])
         self.settingsPaths = dict(settingsPaths or {})
         self.writeQueue: asyncio.Future[None] | None = None
-        # A role's own settings live in its directory (``ROLE_KEYS``); credentials and every
+        # A role's own settings live in its directory (``ROLE_SETTING_KEYS``); credentials and every
         # other setting keep their scopes. The role is bound explicitly, never read from env.
         self._modelProfileRuntime: Any = None
         self._modelDefaultsReadOnly = False
@@ -684,7 +684,7 @@ class SettingsManager:
     def _owner_scope(self, key: str) -> SettingsScope:
         """Where a write of ``key`` from this session lands: the role's own file for a key the
         role may hold, the user's global file for everything else."""
-        return "role" if self.roleSettings is not None and key in ROLE_KEYS else "global"
+        return "role" if self.roleSettings is not None and key in ROLE_SETTING_KEYS else "global"
 
     def getSection(self, key: str) -> dict[str, Any]:
         """One named mapping of the merged settings (``web``, ``mcpServers``, ``moa``, ...)."""
@@ -813,7 +813,7 @@ class SettingsManager:
 
     def bindRole(self, profile_dir: str | None) -> None:
         """Serve ``profile_dir`` as this session's role: its settings.json is read now and is
-        where the role's own keys (``ROLE_KEYS``) are written from here on."""
+        where the role's own keys (``ROLE_SETTING_KEYS``) are written from here on."""
         if not profile_dir:
             return
         from misaka.config import profiles
@@ -943,7 +943,7 @@ class SettingsManager:
         return level if isinstance(level, str) and level else None
 
     def setDefaultThinkingLevel(self, level: str) -> None:
-        # A role session saves the level as the role's own (``ROLE_KEYS``); outside a role it is
+        # A role session saves the level as the role's own (``ROLE_SETTING_KEYS``); outside a role it is
         # the global default, as in pi. A role file that cannot be read or written raises.
         if self._owner_scope("defaultThinkingLevel") == "role":
             self._write_role(lambda data: data.__setitem__("defaultThinkingLevel", level))
@@ -1387,7 +1387,7 @@ class SettingsManager:
 __all__ = [
     "CACHE_WARMING_MODES",
     "DEFAULT_TOOL_NAMES",
-    "ROLE_KEYS",
+    "ROLE_SETTING_KEYS",
     "BranchSummarySettings",
     "CacheWarmingMode",
     "CodemodeMode",

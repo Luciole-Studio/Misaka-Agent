@@ -47,7 +47,7 @@ pi 把全局文件放在 `~/.pi/agent/`，这一层的真实作用是让全局�
 pi 只有一个全局 `defaultThinkingLevel`（加按模型的 `modelThinkingLevels`）。misaka 让 Last Order 和每个
 Sister 各有一档：
 
-- `settings_manager.ROLE_KEYS` 含 `defaultThinkingLevel`；`setDefaultThinkingLevel` 在角色会话里写该角色的
+- `settings_manager.ROLE_SETTING_KEYS` 含 `defaultThinkingLevel`；`setDefaultThinkingLevel` 在角色会话里写该角色的
   `settings.json`，角色之外写全局。`getRoleThinkingLevel` 读角色自己那一档。
 - 新会话与换模型时的取值顺序：显式（`--thinking`、卡片 model 的 `:level`）→ 会话自己记录的 → 角色自己的
   → 全局 `modelThinkingLevels` → 全局 `defaultThinkingLevel`。第三步 pi 没有，`sdk.py` 与
@@ -106,16 +106,15 @@ Sister 各有一档：
 
 ## `misaka/extensions/` 现在是什么
 
-pi 意义上的**捆绑扩展**——自包含、只靠扩展 API、拔了无残留——按 misaka 原有的三层放：
+pi 意义上的**捆绑扩展**——自包含、只靠扩展 API、拔了无残留——一个扩展一个文件夹，平放，与 pi 的 `src/extensions/<name>/` 同形：
 
 ```
-extensions/<module>             每个角色：llama/、mcp/、codemode/ 与 tool_search/（pi 自带的四个）、misaka_lcm/（LCM 上下文引擎：vendor/ 是 hermes-lcm 上游原样，host/ 是对 pi 事件的适配；关掉它 pi 原生压缩照常）、vision/（给看不见图的模型读图）、coverage/（coverage_scan 工具，并经 resources_discover 自带 coverage-maps 技能）
-extensions/last_order/<module>  只有 Last Order 的槽位：reading/（阅读模式）
-extensions/sisters/             其他角色的槽位（subagent 是 C 类，在 core/subagent，仅对 Sisters 暴露）
+extensions/<module>   llama/、mcp/、codemode/ 与 tool_search/（pi 自带的四个）、misaka_lcm/（LCM 上下文引擎：vendor/ 是 hermes-lcm 上游原样，host/ 是对 pi 事件的适配；关掉它 pi 原生压缩照常）、vision/（给看不见图的模型读图）、coverage/（coverage_scan 工具，并经 resources_discover 自带 coverage-maps 技能）、reading/（阅读模式，`ROLES = {"last_order"}`）
 ```
 
-`extensions/__init__.py` 的 `discover(spec)` 扫文件夹、按文件夹定角色、按 `SESSION_KINDS` 门控——这是 misaka 加在 pi 之上的
-（pi 的 `src/extensions/index.ts` 是无角色的平铺数组）。**`core/` 对这个包零引用**：进程入口（`cli/app.py`、
+`extensions/__init__.py` 的 `discover(spec)` 扫这个文件夹，按模块自报的 `ROLES` 与 `SESSION_KINDS` 门控，与 `core/wiring.py` 的条目同一套规则——角色是 misaka 加在 pi 之上的
+（pi 的 `src/extensions/index.ts` 是无角色的平铺数组）。2026-11-03 之前这里另有 `last_order/`、`sisters/` 两个子文件夹，
+按所在位置定角色，与自报的 `ROLES` 并存成两套，已并为一套。**`core/` 对这个包零引用**：进程入口（`cli/app.py`、
 `cli/subagent_child.py`、`cli/research_node.py`）调 `cli/bootstrap.install()`，把 `discover` 赋给 `core/wiring.py` 的 `bundled`，
 `build_extensions(spec)` 把它的结果排在 core 条目之前——对应 pi `main.ts` 把 `builtInExtensions` 排在最前。
 misaka 自己的捆绑扩展照 pi 的规矩也是内置扩展：能关，不能删。pi 的捆绑扩展彼此 import（`mcp` 取 `codemode`、`tool-search`

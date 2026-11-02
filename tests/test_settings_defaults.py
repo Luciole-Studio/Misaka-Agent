@@ -11,7 +11,7 @@ import pytest
 from misaka.ai.utils.retry import DEFAULT_MAX_AGENT_RETRY_DELAY_MS
 from misaka.core.project_trust import resolveProjectTrusted
 from misaka.core.settings_defaults import SETTINGS_DEFAULTS
-from misaka.core.settings_manager import ROLE_KEYS, SettingsManager
+from misaka.core.settings_manager import ROLE_SETTING_KEYS, SettingsManager
 
 
 def test_defaults_are_read_only_all_the_way_down():
@@ -88,7 +88,7 @@ def test_session_share_destination_is_saved_globally_even_in_a_role_session(tmp_
 
     manager.setSessionShareDestination("gist")
 
-    assert "sessionShareDestination" not in ROLE_KEYS
+    assert "sessionShareDestination" not in ROLE_SETTING_KEYS
     assert manager.getSessionShareDestination() == "gist"
     assert json.loads((home / "settings.json").read_text(encoding="utf-8")) == {"sessionShareDestination": "gist"}
     assert not (role / "settings.json").exists()

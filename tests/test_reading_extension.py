@@ -1,4 +1,4 @@
-"""Reading mode (``misaka/extensions/last_order/reading``): the reading's operations on the faux
+"""Reading mode (``misaka/extensions/reading``): the reading's operations on the faux
 model, its graph's rules, its materials, ``misaka read`` and ``/read`` with the window as leader.
 
 The first group carries PR #12's continuity tests (``packages/reading/tests/continuity.test.mjs``)
@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from misaka.extensions.last_order.reading import (
+from misaka.extensions.reading import (
     cli,
     engine,
     materials,
@@ -23,7 +23,7 @@ from misaka.extensions.last_order.reading import (
     views,
     window,
 )
-from misaka.extensions.last_order.reading.store import ReadingError
+from misaka.extensions.reading.store import ReadingError
 
 # -- the faux model ------------------------------------------------------------------------------
 
@@ -524,10 +524,28 @@ async def test_reading_mode_can_be_switched_off_in_settings(tmp_path, settings, 
     assert ("builtin:reading" in [e.path for e in loader.getExtensions().extensions]) is loads
 
 
+def test_reading_mode_is_last_orders_and_only_in_her_window(tmp_path):
+    """Reading mode is Last Order's: it says so with ``ROLES``, as core's entries do, so no session
+    of a Sister loads it, and Last Order gets it in her foreground window only. ``misaka read``
+    is offered either way."""
+    from misaka import extensions
+    from misaka.config import home
+    from misaka.core.wiring import KINDS, ROLE_KEYS, SessionSpec
+
+    for role in ROLE_KEYS:
+        profile = "last_order" if role == "last_order" else "sisters/10032"
+        for kind in KINDS:
+            spec = SessionSpec(profile_dir=str(home.path("roles_root") / profile), role=profile,
+                               workspace=str(tmp_path), kind=kind)
+            names = [d["name"] for d in extensions.discover(spec)]
+            assert ("reading" in names) is (role == "last_order" and kind == "foreground"), (role, kind)
+    assert "read" in extensions.commands()
+
+
 def test_a_lease_left_by_a_dead_process_on_this_host_can_be_taken():
     import socket
 
-    from misaka.extensions.last_order.reading import store
+    from misaka.extensions.reading import store
 
     host = socket.gethostname()
     assert store._dead(f"reading:{host}:999999999:abcd") is True
@@ -1132,7 +1150,7 @@ async def test_a_failing_view_or_notice_never_fails_the_reading(project, model, 
     monkeypatch.undo()
     await harn.commands["read"]["handler"]('open nora.md --question "Q?"', ctx)
     await settle()
-    from misaka.extensions.last_order.reading import prompts
+    from misaka.extensions.reading import prompts
 
     monkeypatch.setattr(prompts, "leader_mode", lambda run_: 1 / 0)
     assert await run_starts(harn, ctx) is None
