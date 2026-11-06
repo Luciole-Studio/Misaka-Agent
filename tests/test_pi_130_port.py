@@ -43,15 +43,28 @@ def _recorded_session(tmp_path, tool_names: list[str]) -> SessionManager:
     return manager
 
 
+def _changed_session(tmp_path) -> SessionManager:
+    """A session that recorded `read`, `grep` and `active_tool`, then activated `inactive_tool` and deactivated `active_tool`."""
+    manager = _recorded_session(tmp_path, ["read", "grep", "active_tool"])
+    manager.appendMessage({
+        "role": "system",
+        "content": "",
+        "toolsAdded": [{"name": "inactive_tool", "description": "inactive_tool", "parameters": {"type": "object", "properties": {}}}],
+        "toolsRemoved": [{"name": "active_tool"}],
+        "timestamp": int(time.time() * 1000),
+    })
+    return manager
+
+
 async def test_resume_restores_the_loadout_the_transcript_records(tmp_path):
     # active_tool was deactivated during the session, inactive_tool activated.
-    manager = _recorded_session(tmp_path, ["read", "grep", "inactive_tool"])
+    manager = _changed_session(tmp_path)
     async with session_with(tmp_path, [_inactive_and_active_tools], sessionManager=manager) as session:
         assert sorted(session.getActiveToolNames()) == ["grep", "inactive_tool", "read"]
 
 
 async def test_resume_does_not_restore_excluded_tools(tmp_path):
-    manager = _recorded_session(tmp_path, ["read", "grep", "inactive_tool"])
+    manager = _changed_session(tmp_path)
     async with session_with(
         tmp_path, [_inactive_and_active_tools], sessionManager=manager, excludeTools=["inactive_tool"]
     ) as session:
@@ -72,7 +85,7 @@ async def test_resume_uses_explicit_tool_options_instead_of_the_recorded_loadout
 
 
 async def test_resume_applies_name_tool_options_to_the_recorded_loadout(tmp_path):
-    manager = _recorded_session(tmp_path, ["read", "grep", "inactive_tool"])
+    manager = _changed_session(tmp_path)
     async with session_with(
         tmp_path, [_inactive_and_active_tools], sessionManager=manager, tools=["-grep", "+write"]
     ) as session:

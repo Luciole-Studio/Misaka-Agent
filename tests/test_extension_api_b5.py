@@ -386,7 +386,7 @@ async def test_restoring_the_transcript_loadout_sets_the_selection_outside_a_sco
         session.setActiveToolsByName(["read", "bash"])
         read_tool = next(tool for tool in session.agent.state.tools if tool.name == "read")
         narrowed = SystemMessage(content="", toolsAdded=[read_tool], timestamp=1)
-        session.sessionManager.buildSessionContext = lambda: type("Context", (), {"messages": [narrowed]})()
+        session.sessionManager.getBranch = lambda: [{"type": "message", "message": narrowed}]
 
         with session.toolScope(["read", "bash"]):
             session._restoreToolsFromTranscript()

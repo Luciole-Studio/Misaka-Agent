@@ -97,6 +97,7 @@ from misaka.core.tools.write import (
 
 type Tool = AgentTool
 type ToolDef = ToolDefinition[Any, Any]
+# MISAKA fork: `office` is misaka's own built-in tool (see `tools/office.py`).
 type ToolName = Literal[
     "read", "bash", "powershell", "edit", "write", "office", "grep", "find", "ls"
 ]

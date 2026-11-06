@@ -304,9 +304,12 @@ def _register_tools(harn, bound, track):
             return {"content": [{"type": "text", "text": text}], "details": {}}
 
         # One reading operation at a time: two in one message would race for the reading's lease.
+        # Active only while this conversation leads a reading (`activate_tools`). Registered active, a
+        # resumed chat would turn them on as tools new to its branch, and turning them off at
+        # `session_start` would then drop the tools it restored that are still waiting to register.
         harn.registerTool(ToolDefinition(name=name, label=label, description=prompts.TOOLS[name],
                                          parameters=typeboxSchema(params), execute=execute,
-                                         executionMode="sequential"))
+                                         executionMode="sequential", defaultActive=False))
 
     async def act(reader, run, v):
         node = v.node or run.info["current"]

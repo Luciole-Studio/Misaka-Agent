@@ -22,6 +22,29 @@ misaka 自己的（见「misaka 新增」）。逐目录的上游改动地图（
 | `compaction/` | pi 的压缩 |
 | `export_html/` | pi 的会话导出；`template.{html,css,js}` 与 `vendor/` 的 marked、highlight.js 照搬自 1.3.0（1.1.0→1.3.0 只有 `template.js` 变了） |
 
+## 提前跟到 1.5.0 的部分（2026-11-06）
+
+内核基线仍是 1.3.0；工具 loadout 这一段已先跟上游 1.5.0，下次整体移植时这两个提交不用再做，
+用例在 `tests/test_pi_150_port.py`：
+
+- `bd3c9b82`（1.4）`_restoreToolsFromTranscript`：照搬。回放整条分支的 system 消息；分支从未提及的非内置工具按
+  新注册处理，从未提及的内置工具保持关闭。分叉：scope 内只恢复 transcript 声明的，不加新工具。
+- `b9e3eef6`（1.5）`_applyToolLoadout`：照搬，默认以活跃工具为序。分叉：`exact`，进出 scope 和
+  `_refreshToolRegistry` 时按给定顺序铺开。活跃工具会被 `toolScope` 和 part 的 `project_tools` 裁掉，以它为序的话，
+  被隐藏的工具恢复时全排到末尾、提示词随之改变。选择记录（`_unscopedToolNames`）因此自成一层：按自身排序，刷新时
+  用 `_inActiveOrder` 跟上活跃顺序。对齐上游时**不要**去掉这几处。
+- 比上游严的一处：`/tree` 也应用 `--tools -name`（只有 `-`）。pi 只在恢复时应用，这种工具会被 `/tree` 打开。
+- `reading_*` 是 `defaultActive=False`：否则恢复时会被当新工具打开，`session_start` 再关掉时会清空等待注册的工具。
+  扩展在 `session_start` 关工具的写法在 pi 里同样有这个问题，新写这种扩展时注意。
+
+和上游一样、没有改的已知行为：扩展在第一次运行前关掉的工具，transcript 没有记录，`/tree` 会打开，扩展要在
+`session_tree` 里再关一次（`reading_*` 就是这样做的）；工具关掉再打开后排到末尾，恢复时回到默认位置，第一次运行多写
+一条提示词更新。
+
+这次之前就有、和上游不同、没有修的：`before_agent_start` handler 改 `selectedTools` 不进选择记录，所以运行中的一次
+刷新会撤销它（handler 加的工具被丢掉，去掉的工具回来）；misaka 自己没有这种 handler。研究窗口开着时 `/tree` 再走一轮，
+Last Order 会丢掉 9 个看板工具：`WindowLO` 的投影不是 scope，`setActiveTools([...active])` 把隐藏的工具从选择里去掉了。
+
 ## 用户目录：和 pi 的有意分叉（2026-09-21，对齐 pi 时**不要**带回来）
 
 pi 把全局文件放在 `~/.pi/agent/`，这一层的真实作用是让全局目录不和 `$HOME` 下的项目目录 `<cwd>/.pi/`
