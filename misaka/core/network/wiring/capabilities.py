@@ -25,6 +25,11 @@ class SisterCapabilitiesPart:
             return [tool for tool in tools if tool.name not in DRIVER_OWNED_TOOLS]
         return tools
 
+    def withheld_tools(self):
+        """What ``project_tools`` can hide. A workflow hiding them says nothing about the session's own
+        tools, so the selection keeps them and a transcript's record of them going away does not count."""
+        return DRIVER_OWNED_TOOLS if self.sister_id is None else frozenset()
+
     async def tool_call(self, event, ctx):
         if (self.workflow_context and self.sister_id is None
                 and event["toolName"] in DRIVER_OWNED_TOOLS):

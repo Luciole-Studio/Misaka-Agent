@@ -42,8 +42,18 @@ misaka 自己的（见「misaka 新增」）。逐目录的上游改动地图（
 一条提示词更新。
 
 这次之前就有、和上游不同、没有修的：`before_agent_start` handler 改 `selectedTools` 不进选择记录，所以运行中的一次
-刷新会撤销它（handler 加的工具被丢掉，去掉的工具回来）；misaka 自己没有这种 handler。研究窗口开着时 `/tree` 再走一轮，
-Last Order 会丢掉 9 个看板工具：`WindowLO` 的投影不是 scope，`setActiveTools([...active])` 把隐藏的工具从选择里去掉了。
+刷新会撤销它（handler 加的工具被丢掉，去掉的工具回来）；misaka 自己没有这种 handler。
+
+## 被 projection 隐藏不等于被移除（2026-11-06，pi 没有这一层）
+
+研究窗口开着时，`SisterCapabilitiesPart.project_tools` 向 Last Order 隐藏 9 个看板工具。窗口不是 scope：它贯穿等待批准、
+用户聊天的整段时间，transcript 也只能记录模型看到了什么，分不清隐藏和移除。内核两处因此不按字面处理：
+
+- `setActiveToolsByName`：part 的 projection 此刻隐藏的工具留在选择里，和 scope 一样（`tool_search`、MCP 都按活跃工具加
+  工具）。对任何 projection 都成立，不用声明。代价：窗口里设定一份精确的工具列表，关窗后被隐藏的工具仍会回来。
+- `_restoreToolsFromTranscript`：part 用 `withheld_tools` 声明自己可能隐藏的工具，这些工具的移除记录不算数，不管这个会话
+  开没开过窗口。新增会隐藏工具的 projection 时要同时声明。代价：扩展主动关掉这些工具，恢复和 `/tree` 时会回来，要在
+  `session_start` 和 `session_tree` 里再关一次。`--tools -name` 和 `excludeTools` 不受影响。
 
 ## 用户目录：和 pi 的有意分叉（2026-09-21，对齐 pi 时**不要**带回来）
 

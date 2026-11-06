@@ -142,6 +142,10 @@ class Moments:
                 tools = project(tools)
         return tools
 
+    def withheld_tools(self) -> set[str]:
+        """The tools the parts' projections can hide, whether they are hiding them now or not."""
+        return {name for part in self.parts for name in getattr(part, "withheld_tools", tuple)()}
+
     def configure_tool_options(self, options: dict[str, Any]) -> None:
         """Parts configure native builtins before creation; SDK/extension overrides keep ownership."""
         for part in self.parts:

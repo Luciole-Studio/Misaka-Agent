@@ -1469,9 +1469,12 @@ class AgentSession:
             ]
             scopes[-1]["active"] = self._keepingOrder(scopes[-1]["active"], toolNames)
         else:
-            # MISAKA fork: the selection follows the same rule against itself, so a tool a part's
-            # projection hides keeps its slot when the caller names it.
-            names = self._keepingOrder(self._unscopedToolNames, names)
+            # MISAKA fork: the selection follows the same rule against itself. A part's projection is
+            # not the caller's to undo: what it hides now stays selected, in its slot, as under a scope.
+            selected = [self._toolRegistry[name] for name in self._unscopedToolNames if name in self._toolRegistry]
+            shown = {tool.name for tool in self.moments.project_tools(selected)}
+            hidden = [tool.name for tool in selected if tool.name not in shown]
+            names = self._keepingOrder(self._unscopedToolNames, [*names, *hidden])
         self._unscopedToolNames = names
         self._setActiveTools(toolNames)
         # A loadout that deactivates a tool replaces the restored one, whose pending tools are dropped.
@@ -3463,12 +3466,16 @@ class AgentSession:
             for message in system_messages
             for tool in [*(read_field(message, "toolsAdded") or []), *(read_field(message, "toolsRemoved") or [])]
         }
+        # MISAKA fork: a run under a part's projection records what it hides as removed, and a transcript
+        # cannot tell that from a choice. So for these tools a removal does not count, window or no window.
+        mentioned -= self.moments.withheld_tools()
         # Extension tools the branch never mentioned were registered after it recorded its loadout, so
         # they are activated like newly registered tools. Built-in tools stay as the branch recorded them.
         new_tools = [
             name
             for name in self._toolRegistry
-            if name not in mentioned and name not in self._baseToolDefinitions and self._isActivatedOnRegistration(name)
+            if name not in recorded and name not in mentioned and name not in self._baseToolDefinitions
+            and self._isActivatedOnRegistration(name)
         ]
         names = applyToolModifiers([*recorded, *new_tools], modifiers)
         self._pendingToolNames = dict.fromkeys(name for name in names if self._isAllowedTool(name))
