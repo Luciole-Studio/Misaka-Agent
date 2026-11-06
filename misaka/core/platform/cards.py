@@ -428,6 +428,8 @@ def remove(con, workspace, task_id):
             if tracked else
             " Its file, log, and attachments were deleted from disk; they were never committed "
             "to git, so there is no copy left.")
+    if os.path.isdir(tasks.card_output_dir(workspace, task_id)):
+        msg += f" What it produced stays in outputs/{task_id}."
     return ok, msg
 
 
@@ -496,7 +498,7 @@ def reconcile_one(con, workspace, task_id):
     # parse every later reconcile will answer with.
     card = {"fields": dict(fields), "body": body}
     row = con.execute(
-        "SELECT workspace," + ",".join(_MIRRORED) + " FROM tasks WHERE id=?", (task_id,)
+        "SELECT workspace,output_dir," + ",".join(_MIRRORED) + " FROM tasks WHERE id=?", (task_id,)
     ).fetchone()
     if row is None:
         return card if tasks.insert_index_row(con, fields, body, workspace=workspace) else None
@@ -504,6 +506,8 @@ def reconcile_one(con, workspace, task_id):
         return None
     if row["status"] in {"running", "review"}:
         return card                         # an in-flight contract is immutable until it rests again
+    if not row["output_dir"]:               # from before every card had a folder
+        con.execute("UPDATE tasks SET output_dir=? WHERE id=?", (tasks.card_output_dir(workspace, task_id), task_id))
     if all(row[column] == values[column] for column in _MIRRORED):
         return card
     # The status the SELECT above saw is part of the WHERE: between it and here another process

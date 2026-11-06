@@ -206,10 +206,7 @@ def unsettled_reason(task, refused=None):
 
 
 def deliverable_path(task, name):
-    """The delivered file for contract name ``name`` under the card's output directory, or None.
-    The Sister's file may differ from the contract name in a character or two: Last Order's
-    plans misspell names (2026-09-28: 莱茅邦联 for 莱茵邦联, 狂太 for 犹太), and holding her to the
-    misspelling only made her copy the file under it."""
+    """The delivered file for contract name ``name`` under the card's output directory, or None."""
     output_dir = _card_field(task, "output_dir")
     if not output_dir:
         return None
@@ -218,15 +215,10 @@ def deliverable_path(task, name):
         workspace = _card_field(task, "workspace")
         if workspace:
             root.relative_to(Path(workspace).resolve(strict=True))
-        candidates = [name] + sorted(
-            entry for entry in os.listdir(root)
-            if entry != name and len(entry) == len(name) and os.path.splitext(entry)[1] == os.path.splitext(name)[1]
-            and sum(a != b for a, b in zip(entry, name, strict=True)) <= 2)
-        for candidate in candidates:
-            path = (root / candidate).resolve(strict=True)
-            path.relative_to(root)  # a symlink outside this card is not its deliverable
-            if path.is_file() and path.stat().st_size > 0:
-                return path
+        path = (root / name).resolve(strict=True)
+        path.relative_to(root)  # a symlink outside this card is not its deliverable
+        if path.is_file() and path.stat().st_size > 0:
+            return path
     except (OSError, RuntimeError, ValueError):
         pass
     return None
@@ -343,6 +335,18 @@ def card_extras(con, task, cfg=None, *, include_materials=True):
     return extras
 
 
+def _delivers_there(task):
+    """Whether the card is told about its output folder: a workflow's cards are, and so is a card whose
+    contract names a file. Any other card works in the project, and a folder it never asked for would
+    only draw its new files away from where they belong."""
+    if task["output_dir"] != task_store.card_output_dir(task["workspace"], task["id"]):
+        return True
+    try:
+        return contract_deliverable(task) is not None
+    except ValueError:
+        return True
+
+
 def card_prompt(task):
     """Build the durable card contract shared by foreground and Sister runtimes."""
     body = task.get("body") or task.get("title") or ""
@@ -369,7 +373,7 @@ def card_prompt(task):
         body += "\n\n## Task attachments\n" + "\n".join(lines)
     if materials := task.get("_materials"):
         body += "\n\n## Materials already in this workspace\n" + materials
-    if output_dir := task.get("output_dir"):
+    if (output_dir := task.get("output_dir")) and _delivers_there(task):
         body += (
             "\n\n## Deliverable location\n"
             f"Write every new deliverable under `{output_dir}`. Files there are recorded automatically."

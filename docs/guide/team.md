@@ -160,6 +160,10 @@ the project's `cards/` folder, each with its dependencies. `/board` or `misaka b
 runs a ready one in the terminal, and `misaka task ID --delete` removes one with its history. Research runs use the same board and
 cards.
 
+A card whose contract names a file under `## deliverable` cannot be completed until that file exists
+in `outputs/<card>/` in the project. The folder appears when the card writes to it, and it stays
+when you delete the card. A card without a deliverable works in the project as it is.
+
 In the panel, each card she starts opens in a pane beside her, in her tab. A finished card's pane
 stays so you can read its last output, and Last Order closes it once she has the results. She
 leaves alone panes still working a card (stopping one takes your confirmation), panes you opened,

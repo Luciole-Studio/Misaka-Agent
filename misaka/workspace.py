@@ -148,7 +148,7 @@ def outline(bcon, task_id=None, *, workspace=None, run_id=None, research_store=N
     for t in tasks:
         kids = [{"node_id": f"task:{t['id']}#contract", "title": "Task contract (goal, boundaries, acceptance criteria)",
                  "summary": (t["body"] or "")[:80].replace("\n", " ")}]
-        if t["output_dir"]:
+        if t["output_dir"] and os.path.isdir(t["output_dir"]):
             kids.append({"node_id": f"task:{t['id']}#output", "title": "Deliverable directory", "path": t["output_dir"]})
         for m in by_task.get(t["id"], []):
             kids.append(_doc_node(m, workspace))

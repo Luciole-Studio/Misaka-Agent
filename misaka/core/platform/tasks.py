@@ -438,6 +438,13 @@ def _card_dispatchable(con, task_id):
     return cards.dispatchable(con, row["workspace"], task_id)
 
 
+def card_output_dir(workspace, task_id):
+    """Where a card's outputs go unless its owner gives it a folder of its own. Apart from the card and
+    its attachments, so deleting a card leaves what it produced, as it does a workflow's cards. Nothing
+    makes the folder until the card writes there."""
+    return os.path.join(workspace, "outputs", str(task_id))
+
+
 @_serialized
 def create_task(con, title, body="", assignee="", model=None, priority=0,
                 reviewer=None, workspace=None, output_dir=None,
@@ -465,7 +472,7 @@ def create_task(con, title, body="", assignee="", model=None, priority=0,
                 "workspace,output_dir,origin_session,created_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (tid, title, body, assignee, reviewer,
-                 model, priority, workspace, output_dir, origin_session or None,
+                 model, priority, workspace, output_dir or card_output_dir(workspace, tid), origin_session or None,
                  int(time.time())),
             )
         except sqlite3.IntegrityError:
@@ -739,14 +746,15 @@ def get(con, task_id):
 def insert_index_row(con, fields, body, *, workspace):
     """Restore one index row from a card file (misaka.core.platform.cards.rebuild). The file is
     the truth; this only re-derives the index and never overwrites an existing row."""
+    workspace = canonical_workspace(workspace)
     cur = con.execute(
         "INSERT OR IGNORE INTO tasks (id,title,body,assignee,reviewer,model,"
-        "priority,workspace,origin_session,status,generation,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "priority,workspace,output_dir,origin_session,status,generation,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (str(fields.get("id")), str(fields.get("title") or ""), body,
          str(fields.get("assignee") or ""), fields.get("reviewer"),
          fields.get("model"), int(fields.get("priority") or 0),
-         canonical_workspace(workspace),
+         workspace, card_output_dir(workspace, fields.get("id")),
          fields.get("origin_session"), str(fields.get("status") or "ready"),
          max(1, int(fields.get("generation") or 1)),
          int(time.time())),
