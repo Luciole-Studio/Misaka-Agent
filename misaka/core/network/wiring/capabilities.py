@@ -5,6 +5,10 @@ from contextlib import contextmanager
 from misaka.core.network.roster import coordinator_profile, routing_catalog
 from misaka.core.platform import owners, prompt_guard
 from misaka.core.platform.vocabulary import DRIVER_OWNED_TOOLS
+from misaka.utils.values import read_field
+
+# The session entry recording which board tools a workflow took off, as pi's plan mode keeps its own.
+WORKFLOW_TOOLS_ENTRY = "workflow-tools"
 
 
 class SisterCapabilitiesPart:
@@ -20,15 +24,39 @@ class SisterCapabilitiesPart:
     def attach(self, session):
         self.session = session
 
-    def project_tools(self, tools):
-        if self.workflow_context and self.sister_id is None:
-            return [tool for tool in tools if tool.name not in DRIVER_OWNED_TOOLS]
-        return tools
+    def _taken_tools(self):
+        """What the branch's last entry says the workflow took off and has not given back."""
+        entries = [entry for entry in self.session.sessionManager.getBranch()
+                   if read_field(entry, "type") == "custom" and read_field(entry, "customType") == WORKFLOW_TOOLS_ENTRY]
+        return list(read_field(read_field(entries[-1], "data"), "tools")) if entries else []
 
-    def withheld_tools(self):
-        """What ``project_tools`` can hide. A workflow hiding them says nothing about the session's own
-        tools, so the selection keeps them and a transcript's record of them going away does not count."""
-        return DRIVER_OWNED_TOOLS if self.sister_id is None else frozenset()
+    def _settle_tools(self):
+        """Last Order's board tools follow the workflow, the way pi's plan mode handles its tools: the
+        owner of the mode takes them off with ``setActiveTools``, records what it took, and gives back
+        that and no more. A resume finds the record, and ``/tree`` puts the branch's own record in force.
+        Not at a run's start: a loadout set there rebuilds the options the run's sections are going into."""
+        if self.session is None:
+            return
+        taken, active = self._taken_tools(), self.session.getActiveToolNames()
+        if self.workflow_context:
+            found = [name for name in active if name in DRIVER_OWNED_TOOLS]
+            if found:
+                self.session.setActiveToolsByName([name for name in active if name not in DRIVER_OWNED_TOOLS])
+                if set(found) - set(taken):
+                    self.session.sessionManager.appendCustomEntry(WORKFLOW_TOOLS_ENTRY, {"tools": [*taken, *found]})
+        elif taken:
+            self.session.setActiveToolsByName([*active, *taken])
+            # The record goes only for what came back and is in the transcript: a session opened with
+            # `--tools` cannot take them, and one killed before a running turn ends has not declared them.
+            left = [name for name in taken if name not in self.session.getActiveToolNames()]
+            if left != taken and self.session.recordLoadout():
+                self.session.sessionManager.appendCustomEntry(WORKFLOW_TOOLS_ENTRY, {"tools": left})
+
+    async def session_start(self, event, ctx):
+        self._settle_tools()
+
+    async def session_tree(self, event, ctx):
+        self._settle_tools()
 
     async def tool_call(self, event, ctx):
         if (self.workflow_context and self.sister_id is None
@@ -43,13 +71,13 @@ class SisterCapabilitiesPart:
             self.catalog = catalog
         self.workflow_context = True
         try:
-            if self.session is not None and not previous[1]:
-                self.session.refreshTools()
+            if not previous[1]:
+                self._settle_tools()
             yield
         finally:
             self.catalog, self.workflow_context = previous
-            if self.session is not None and not previous[1]:
-                self.session.refreshTools()
+            if not previous[1]:
+                self._settle_tools()
 
     async def before_agent_start(self, event, ctx):
         # Sections of the run's prompt, as pi's extensions add theirs: the workflow's context while one

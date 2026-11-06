@@ -1454,28 +1454,17 @@ class AgentSession:
         next agent turn.
         """
         previous = self.getActiveToolNames()
-        # Keep selection before scopes/projections: a temporary mode must not erase
-        # the user's ordinary tools, or revive tools the user explicitly disabled.
-        names = list(dict.fromkeys(toolNames))
-        scopes = getattr(self, "_toolScopes", ())
-        if scopes:
+        if self._toolScopes:
             # MISAKA fork: a caller inside a scope sees only the scoped loadout (`[...active, x]`).
-            # Selected tools the scope or a part hides from it stay selected underneath, in place;
-            # tools the scope itself granted (visible before the call) do not outlive it.
-            visible, chosen = set(self.getActiveToolNames()), set(names)
-            names = [
+            # Selected tools the scope hides from it stay selected underneath, in place; tools the
+            # scope itself granted (visible before the call) do not outlive it.
+            names = list(dict.fromkeys(toolNames))
+            visible, chosen = set(previous), set(names)
+            self._unscopedToolNames = [
                 *(name for name in self._unscopedToolNames if name in chosen or name not in visible),
                 *(name for name in names if name not in self._unscopedToolNames and name not in visible),
             ]
-            scopes[-1]["active"] = self._keepingOrder(scopes[-1]["active"], toolNames)
-        else:
-            # MISAKA fork: the selection follows the same rule against itself. A part's projection is
-            # not the caller's to undo: what it hides now stays selected, in its slot, as under a scope.
-            selected = [self._toolRegistry[name] for name in self._unscopedToolNames if name in self._toolRegistry]
-            shown = {tool.name for tool in self.moments.project_tools(selected)}
-            hidden = [tool.name for tool in selected if tool.name not in shown]
-            names = self._keepingOrder(self._unscopedToolNames, [*names, *hidden])
-        self._unscopedToolNames = names
+            self._toolScopes[-1]["active"] = list(toolNames)
         self._setActiveTools(toolNames)
         # A loadout that deactivates a tool replaces the restored one, whose pending tools are dropped.
         # One that only adds tools, like activating tool_search, keeps them.
@@ -1495,22 +1484,30 @@ class AgentSession:
         patterns, so tools registered after the scope starts can be admitted too.
         """
         scope = {"allowed": createToolNameMatcher([*toolNames, *callable]), "active": list(toolNames)}
+        if not self._toolScopes:
+            self._unscopedToolNames = self.getActiveToolNames()
         self._toolScopes.append(scope)
         try:
-            self._setActiveTools(scope["active"], exact=True)
+            self._setActiveTools(scope["active"])
             yield
         finally:
             self._toolScopes = [item for item in self._toolScopes if item is not scope]
             names = self._toolScopes[-1]["active"] if self._toolScopes else self._unscopedToolNames
-            self._setActiveTools(names, exact=True)
+            self._setActiveTools(names)
             if not self._toolScopes:
                 # MISAKA fork: a run inside the scope declared the scope's tools in the transcript,
-                # which a resume or `/tree` restores as the lasting loadout. Declare the loadout the
-                # scope gave back now; a run still working could declare the scope's tools after it.
-                if self._isAgentRunActive:
-                    self._recordLoadoutAfterRun = True
-                else:
-                    self._recordUnscopedLoadout()
+                # which a resume or `/tree` restores as the lasting loadout.
+                self.recordLoadout()
+
+    def recordLoadout(self) -> bool:
+        """MISAKA fork: declare the loadout now, for a change a resume must not lose to the transcript;
+        return whether it is declared. A run still working could declare the old tools after it, so
+        it waits for that run."""
+        if self._isAgentRunActive:
+            self._recordLoadoutAfterRun = True
+            return False
+        self._recordUnscopedLoadout()
+        return True
 
     def _recordUnscopedLoadout(self) -> None:
         """MISAKA fork: declare the live loadout in the transcript when it differs from the loadout
@@ -1539,8 +1536,8 @@ class AgentSession:
         self.agent.state.messages = [*self.agent.state.messages, update]
         self._entryIdsByMessage[id(update)] = (update, entry_id)
 
-    def _setActiveTools(self, toolNames: Sequence[str], *, exact: bool = False) -> None:
-        tools = self._applyToolLoadout(list(toolNames), exact=exact)
+    def _setActiveTools(self, toolNames: Sequence[str]) -> None:
+        tools = self._applyToolLoadout(list(toolNames))
         for tool in tools:
             self._pendingToolNames.pop(tool.name, None)
         self._rebuildSystemPrompt([tool.name for tool in tools])
@@ -1568,39 +1565,23 @@ class AgentSession:
             tools = [tool for tool in tools if scope["allowed"](tool.name)]
         return self.moments.project_tools(tools)
 
-    @staticmethod
-    def _keepingOrder(order: Sequence[str], toolNames: Sequence[str]) -> list[str]:
-        """The names as a set: those in ``order`` keep it and the others are appended, so reordering
-        the same names does not change the prompt (#11495)."""
-        requested = dict.fromkeys(toolNames)
-        return list(dict.fromkeys([*(name for name in order if name in requested), *requested]))
-
-    def _inActiveOrder(self, toolNames: Sequence[str]) -> list[str]:
-        """MISAKA fork: the names with those active now in their active order, for laying out the
-        selection, which a `before_agent_start` handler can leave behind the active tools. The others
-        keep their slots: that is where a part's projection hides tools."""
-        chosen = set(toolNames)
-        active = [name for name in self.getActiveToolNames() if name in chosen]
-        shown, order = set(active), iter(active)
-        return [next(order) if name in shown else name for name in toolNames]
-
-    def _applyToolLoadout(self, toolNames: list[str], *, exact: bool = False) -> list[AgentTool]:
+    def _applyToolLoadout(self, toolNames: list[str]) -> list[AgentTool]:
         """Set the agent's tools for the given active tool names and return them. The active
         tools are the registered, non-hidden ones; they are declared to the model. Active tools
         with a ``prepareLoadout`` hook can change the declared descriptions and hide declarations
         from requests (see ``_installHiddenDeclarationsProjection``).
 
-        MISAKA fork: ``exact`` lays the tools out in the given order, for the callers that lay out
-        the selection itself (a tool scope's edges, a registry refresh). The active tools can be
-        narrowed by a scope or a part's projection, and ordering by them would bring what those hid
-        back last, changing the prompt they started from."""
+        The active tools are a set: tools that stay active keep their current order and newly active
+        ones are appended, so reordering the same names does not change the prompt (#11495)."""
         # MISAKA fork: the tool scopes, the browser_exec/bash pairing and the parts' projections
         # apply to every loadout, so every path that sets the agent's tools honours them.
         for scope in self._toolScopes:
             toolNames = [name for name in toolNames if scope["allowed"](name)]
+        requested = dict.fromkeys(toolNames)
+        kept = [name for name in self.getActiveToolNames() if name in requested]
         tools = [
             self._toolRegistry[name]
-            for name in (dict.fromkeys(toolNames) if exact else self._keepingOrder(self.getActiveToolNames(), toolNames))
+            for name in dict.fromkeys([*kept, *requested])
             if name in self._toolRegistry and self._getToolExposure(name) != "hidden" and self._isActivatable(name)
         ]
         if not any(tool.name == "bash" for tool in tools):
@@ -1729,11 +1710,12 @@ class AgentSession:
         added_default_tools = [name for name in getDefaultTools() if name not in previous_default_tools]
         # Tools the new extensions register later, such as MCP tools, are pending until then.
         # MISAKA fork: the user's selection, not the loadout a tool scope shows.
-        for name in self._unscopedToolNames:
+        selected_tool_names = self._unscopedToolNames if self._toolScopes else self.getActiveToolNames()
+        for name in selected_tool_names:
             self._pendingToolNames[name] = None
         self._buildRuntime(
             {
-                "activeToolNames": [*self._unscopedToolNames, *added_default_tools],
+                "activeToolNames": [*selected_tool_names, *added_default_tools],
                 "flagValues": previous_flag_values,
                 "includeAllExtensionTools": True,
             }
@@ -2465,10 +2447,9 @@ class AgentSession:
 
             # Update finalized context from the canonical session projection.
             self._refreshFinalizedContext()
-            # MISAKA fork: `--tools -name` stays a restriction here. pi applies the modifiers on resume
-            # only, so a branch that never mentioned the tool turns it back on, as a new tool.
-            self._restoreToolsFromTranscript([entry for entry in self._defaultToolModifiers if entry.startswith("-")])
+            self._restoreToolsFromTranscript()
 
+            await self.moments.session_tree({"type": "session_tree"})  # MISAKA fork
             await self._extensionRunner.emit(
                 {
                     "type": "session_tree",
@@ -3105,7 +3086,8 @@ class AgentSession:
         previous_activated_on_registration = {
             name for name in self._toolRegistry if self._isActivatedOnRegistration(name)
         }
-        previous_active_tool_names = list(self._unscopedToolNames)
+        # MISAKA fork: the user's selection, not the loadout a tool scope shows.
+        previous_active_tool_names = list(self._unscopedToolNames) if self._toolScopes else self.getActiveToolNames()
 
         registered_tools = self._extensionRunner.getAllRegisteredTools()
         all_custom_tools: list[tuple[Any, SourceInfo]] = [
@@ -3171,7 +3153,7 @@ class AgentSession:
             next_active_tool_names = list(previous_active_tool_names)
         next_active_tool_names = [name for name in next_active_tool_names if self._isAllowedTool(name)]
 
-        if getattr(self, "_toolScopes", ()):
+        if self._toolScopes:
             # A scope is not permission to revive tools the underlying user
             # selection had turned off. Only genuinely new registrations join it.
             next_active_tool_names.extend(
@@ -3199,20 +3181,12 @@ class AgentSession:
         # Pending tools that are registered now become active.
         next_active_tool_names.extend(self._pendingToolNames)
 
-        active_tool_names: list[str] = []
-        seen: set[str] = set()
-        for name in next_active_tool_names:
-            if name in self._toolRegistry and name not in seen:
-                seen.add(name)
-                active_tool_names.append(name)
         # MISAKA fork: inside a tool scope the scoped loadout stays active; the selection changes underneath it.
-        # The selection is set directly: the public `setActiveToolsByName` would drop the pending tools.
-        if getattr(self, "_toolScopes", ()):
-            self._unscopedToolNames = active_tool_names
-            self._setActiveTools(self._toolScopes[-1]["active"], exact=True)
+        if self._toolScopes:
+            self._unscopedToolNames = [name for name in dict.fromkeys(next_active_tool_names) if name in self._toolRegistry]
+            self._setActiveTools(self._toolScopes[-1]["active"])
         else:
-            self._unscopedToolNames = self._inActiveOrder(active_tool_names)
-            self._setActiveTools(self._unscopedToolNames, exact=True)
+            self._setActiveTools(list(dict.fromkeys(next_active_tool_names)))
 
     def _isAllowedTool(self, name: str) -> bool:
         """Whether `--tools` and `--exclude-tools` keep the tool registered. MCP tools stay registered
@@ -3466,25 +3440,15 @@ class AgentSession:
             for message in system_messages
             for tool in [*(read_field(message, "toolsAdded") or []), *(read_field(message, "toolsRemoved") or [])]
         }
-        # MISAKA fork: a run under a part's projection records what it hides as removed, and a transcript
-        # cannot tell that from a choice. So for these tools a removal does not count, window or no window.
-        mentioned -= self.moments.withheld_tools()
         # Extension tools the branch never mentioned were registered after it recorded its loadout, so
-        # they are activated like newly registered tools. Built-in tools stay as the branch recorded them.
+        # they are activated like newly registered tools. Built-in tools follow `defaultTools` instead.
         new_tools = [
             name
             for name in self._toolRegistry
-            if name not in recorded and name not in mentioned and name not in self._baseToolDefinitions
-            and self._isActivatedOnRegistration(name)
+            if name not in mentioned and name not in self._baseToolDefinitions and self._isActivatedOnRegistration(name)
         ]
         names = applyToolModifiers([*recorded, *new_tools], modifiers)
         self._pendingToolNames = dict.fromkeys(name for name in names if self._isAllowedTool(name))
-        # The selection is set directly: the public `setActiveToolsByName` would drop the pending tools.
-        # MISAKA fork: misaka's selection remembers names across registry refreshes, so the unregistered
-        # ones wait as pending only; a tool that never registers is then dropped at the next run, as upstream.
-        self._unscopedToolNames = [
-            name for name in self._keepingOrder(self._unscopedToolNames, names) if name in self._toolRegistry
-        ]
         self._setActiveTools(names)
 
     def _buildUserMessage(

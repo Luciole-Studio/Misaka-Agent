@@ -22,38 +22,42 @@ misaka 自己的（见「misaka 新增」）。逐目录的上游改动地图（
 | `compaction/` | pi 的压缩 |
 | `export_html/` | pi 的会话导出；`template.{html,css,js}` 与 `vendor/` 的 marked、highlight.js 照搬自 1.3.0（1.1.0→1.3.0 只有 `template.js` 变了） |
 
-## 提前跟到 1.5.0 的部分（2026-11-06）
+## 工具 loadout：已跟到 1.5.0，只为 `toolScope` 分叉（2026-11-06）
 
-内核基线仍是 1.3.0；工具 loadout 这一段已先跟上游 1.5.0，下次整体移植时这两个提交不用再做，
-用例在 `tests/test_pi_150_port.py`：
+内核基线仍是 1.3.0，这一段已先跟上游 1.5.0，下次整体移植时 `bd3c9b82`（恢复时回放整条分支，分支没提及的非内置工具按新
+注册处理）和 `b9e3eef6`（活跃工具是集合，换顺序不改提示词）不用再做。用例在 `tests/test_pi_150_port.py`。
 
-- `bd3c9b82`（1.4）`_restoreToolsFromTranscript`：照搬。回放整条分支的 system 消息；分支从未提及的非内置工具按
-  新注册处理，从未提及的内置工具保持关闭。分叉：scope 内只恢复 transcript 声明的，不加新工具。
-- `b9e3eef6`（1.5）`_applyToolLoadout`：照搬，默认以活跃工具为序。分叉：`exact`，进出 scope 和
-  `_refreshToolRegistry` 时按给定顺序铺开。活跃工具会被 `toolScope` 和 part 的 `project_tools` 裁掉，以它为序的话，
-  被隐藏的工具恢复时全排到末尾、提示词随之改变。选择记录（`_unscopedToolNames`）因此自成一层：按自身排序，刷新时
-  用 `_inActiveOrder` 跟上活跃顺序。对齐上游时**不要**去掉这几处。
-- 比上游严的一处：`/tree` 也应用 `--tools -name`（只有 `-`）。pi 只在恢复时应用，这种工具会被 `/tree` 打开。
-- `reading_*` 是 `defaultActive=False`：否则恢复时会被当新工具打开，`session_start` 再关掉时会清空等待注册的工具。
-  扩展在 `session_start` 关工具的写法在 pi 里同样有这个问题，新写这种扩展时注意。
+原则：不影响 misaka 特性就 1:1 照 pi。`setActiveToolsByName`、`_setActiveTools`、`_applyToolLoadout`、
+`_restoreToolsFromTranscript`、`_refreshToolRegistry` 和 pi 的差别只剩这些：
 
-和上游一样、没有改的已知行为：扩展在第一次运行前关掉的工具，transcript 没有记录，`/tree` 会打开，扩展要在
-`session_tree` 里再关一次（`reading_*` 就是这样做的）；工具关掉再打开后排到末尾，恢复时回到默认位置，第一次运行多写
-一条提示词更新。
+- `toolScope`（研究阶段的工具上限）：`_unscopedToolNames` 只在 scope 期间有意义，scope 外一律读活跃工具，和 pi 一样；
+  `setActiveToolsByName`、恢复、刷新、reload 里各有一段 scope 分支。scope 进出也走 pi 的排序规则。
+- `_isAllowedTool` 的准入与禁用名单（子代理）、`browser_exec` 跟随 `bash`、parts 的 `project_tools`（子代理改写 `bash`
+  的 schema，不隐藏工具）。
+- `recordLoadout` 和 `session_tree` 时刻，给下面的研究窗口用。
 
-这次之前就有、和上游不同、没有修的：`before_agent_start` handler 改 `selectedTools` 不进选择记录，所以运行中的一次
-刷新会撤销它（handler 加的工具被丢掉，去掉的工具回来）；misaka 自己没有这种 handler。
+**不要**再用 projection 隐藏工具。transcript 只记录模型看到了什么，分不清隐藏和移除，内核只能去猜。
 
-## 被 projection 隐藏不等于被移除（2026-11-06，pi 没有这一层）
+和 pi 一样的已知行为，不算缺陷：第一次运行前关掉的工具，transcript 没有记录，恢复和 `/tree` 时按新工具打开；工具关掉再打开后
+排到末尾，恢复时回到默认位置，第一次运行多写一条提示词更新；`--tools +name`/`-name` 只在恢复时应用，`/tree` 不应用。
 
-研究窗口开着时，`SisterCapabilitiesPart.project_tools` 向 Last Order 隐藏 9 个看板工具。窗口不是 scope：它贯穿等待批准、
-用户聊天的整段时间，transcript 也只能记录模型看到了什么，分不清隐藏和移除。内核两处因此不按字面处理：
+## 研究窗口收起看板工具：照 pi 的 plan mode（2026-11-06）
 
-- `setActiveToolsByName`：part 的 projection 此刻隐藏的工具留在选择里，和 scope 一样（`tool_search`、MCP 都按活跃工具加
-  工具）。对任何 projection 都成立，不用声明。代价：窗口里设定一份精确的工具列表，关窗后被隐藏的工具仍会回来。
-- `_restoreToolsFromTranscript`：part 用 `withheld_tools` 声明自己可能隐藏的工具，这些工具的移除记录不算数，不管这个会话
-  开没开过窗口。新增会隐藏工具的 projection 时要同时声明。代价：扩展主动关掉这些工具，恢复和 `/tree` 时会回来，要在
-  `session_start` 和 `session_tree` 里再关一次。`--tools -name` 和 `excludeTools` 不受影响。
+研究窗口开着时 Last Order 不用 9 个看板工具，它们归工作流的 driver。窗口贯穿等待批准和聊天的全程。做法和
+`examples/extensions/plan-mode` 一样，逻辑在 part 里，内核只提供 `recordLoadout` 和 `session_tree` 时刻：
+
+- 模式的所有者拿掉工具：`SisterCapabilitiesPart._settle_tools` 用 `setActiveToolsByName`，并把拿掉的写进 `workflow-tools`
+  这条 custom entry。只记真正拿掉的，用户关掉的工具不会被带回来。
+- 窗口关闭时加回来并写进 transcript（`recordLoadout`），否则退出后恢复会丢。记录只清真正加回来、已写进 transcript 的：
+  `--tools` 打开的会话加不回去，运行中关窗要等这一轮结束，这两种情况记录留着，下次再兑现。
+- `session_start` 和 `session_tree` 再校正一次：被杀的窗口留下的记录在恢复时兑现，`/tree` 用目标分支自己的记录。
+  不在 `before_agent_start` 里做：那里改工具会重建这一轮 part 写入的提示词选项。
+- `tool_call` 钩子照旧拦截，`/tree` 让工具短暂可见时也用不了。
+
+和 plan mode 一样：窗口里设定一份精确的工具列表，关窗时被拿掉的工具仍会加回来；恢复的工具排在末尾，下一轮多写一条提示词
+更新；拿掉工具算一次收窄，按 pi 的规则会清空等待注册的工具；被杀窗口的记录优先于这次的 `--tools -name`。
+
+这一版之前写下的聊天没有这条记录：窗口里记成移除、之后再没跑过的话，看板工具回不来。本机的研究聊天都不是这种情况。
 
 ## 用户目录：和 pi 的有意分叉（2026-09-21，对齐 pi 时**不要**带回来）
 

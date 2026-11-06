@@ -95,6 +95,10 @@ async def assembled(home, role, kind, *, research=False, custom=False, prompt_fl
                                          "customTools": assembly.custom_tools, "parts": assembly.parts,
                                          "sessionManager": SessionManager.inMemory(str(workspace))})
     session = result["session"]
+    from misaka.core.network.wiring.capabilities import SisterCapabilitiesPart
+    for part in session.moments.parts:      # what `session_start` does for a session that is a workflow's
+        if isinstance(part, SisterCapabilitiesPart):
+            part._settle_tools()
 
     async def no_model(*_args, **_kwargs):
         raise AssertionError("Prompt integration attempted a model turn")
@@ -426,6 +430,7 @@ async def test_research_inherits_order_and_preserves_selection_through_lifecycle
     from misaka.core.research.window import WindowLO
 
     async with assembled(prompt_home, "last_order", "foreground") as session:
+        await session.bindExtensions({})        # a reload's `session_start` takes the board tools off again
         normal = session.getActiveToolNames()
         assert len(DRIVER_OWNED_TOOLS) == 9
         assert DRIVER_OWNED_TOOLS <= set(normal)
@@ -467,9 +472,10 @@ async def test_research_inherits_order_and_preserves_selection_through_lifecycle
         finally:
             await owner.close()
             await owner.close()  # restoration is idempotent
-        assert session.getActiveToolNames() == [*selected, late.name, "doc_verify"]
+        # As pi's plan mode: what the window took off comes back after the tools that stayed.
+        assert session.getActiveToolNames() == [*expected, *(name for name in selected if name in DRIVER_OWNED_TOOLS)]
         session.unregisterCustomTools([late])
-        assert session.getActiveToolNames() == [*selected, "doc_verify"]
+        assert sorted(session.getActiveToolNames()) == sorted([*selected, "doc_verify"])
 
 
 @pytest.mark.parametrize("thinking", ["max", "medium", "off"])
@@ -495,7 +501,7 @@ async def test_research_turn_rechecks_selection_and_keeps_mode_between_turns(pro
         owner = window.WindowLO(session, lambda: None, describe=dict)
         phase = tool_definition(name="misaka_research_assign", label="Plan", description="Fixture", parameters={}, execute=None)
         stale = session.getActiveToolNames()
-        selected = [n for n in normal if n != "write"]
+        selected = [n for n in session.getActiveToolNames() if n != "write"]
         session.setActiveToolsByName(selected)
         expected = list(research_tools(selected))
         seen = []
@@ -527,7 +533,7 @@ async def test_research_turn_rechecks_selection_and_keeps_mode_between_turns(pro
         finally:
             await owner.close()
         assert session.agent.state.thinkingLevel == "low"
-        assert session.getActiveToolNames() == selected
+        assert sorted(session.getActiveToolNames()) == sorted(name for name in normal if name != "write")
 
 
 def test_research_planning_and_report_do_not_set_thinking(tmp_path, monkeypatch):

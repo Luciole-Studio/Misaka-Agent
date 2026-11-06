@@ -104,7 +104,7 @@ class CoordinatorOutputTests(unittest.IsolatedAsyncioTestCase):
         source = entry()
         original = copy.deepcopy(source)
         part = capabilities.SisterCapabilitiesPart("/fixture-workspace")
-        part.attach(SimpleNamespace(getActiveToolNames=list, refreshTools=lambda: None))
+        part.attach(SimpleNamespace(getActiveToolNames=list, sessionManager=SimpleNamespace(getBranch=list)))
 
         async def render():
             text = await published(part, "BASE\n")

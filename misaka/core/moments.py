@@ -142,10 +142,6 @@ class Moments:
                 tools = project(tools)
         return tools
 
-    def withheld_tools(self) -> set[str]:
-        """The tools the parts' projections can hide, whether they are hiding them now or not."""
-        return {name for part in self.parts for name in getattr(part, "withheld_tools", tuple)()}
-
     def configure_tool_options(self, options: dict[str, Any]) -> None:
         """Parts configure native builtins before creation; SDK/extension overrides keep ownership."""
         for part in self.parts:
@@ -198,6 +194,9 @@ class Moments:
 
     async def session_start(self, event: dict[str, Any]) -> None:
         await self._notify("session_start", event)
+
+    async def session_tree(self, event: dict[str, Any]) -> None:
+        await self._notify("session_tree", event)
 
     async def resources_ready(self, event: dict[str, Any]) -> None:
         """Required resource barrier: failure stops startup, unlike notifications."""

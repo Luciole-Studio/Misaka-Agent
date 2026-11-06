@@ -2,7 +2,7 @@
 reordering the same tools changes nothing (b9e3eef6, #11495).
 
 Upstream cases, translated: default-tools-setting and system-prompt-updates. MISAKA's own: where pi has no counterpart
--- a tool scope, a part's projection, a role session, a fork child -- and `/tree` keeping `--tools -name` off.
+-- a tool scope, a role session, a fork child, and a research window taking the board tools off as pi's plan mode does.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ def _tool_with_snippet(name: str, **options) -> ToolDefinition:
                           execute=None, promptSnippet=f"{name} snippet", **options)
 
 
-async def _last_order(home, name: str, manager: SessionManager):
+async def _last_order(home, name: str, manager: SessionManager, *, workflow: bool = False, **options):
     """A Last Order session as a chat opens it, `session_start` included."""
     from misaka.ai.compat import getModels
     from misaka.core.auth_storage import AuthStorage
@@ -67,16 +67,17 @@ async def _last_order(home, name: str, manager: SessionManager):
 
     workspace = home / "workspace"
     workspace.mkdir(exist_ok=True)
-    _flags, assembly, _env = role_session_setup(str(home / "profiles" / "last_order"), str(workspace), receive_messages=True)
+    _flags, assembly, _env = role_session_setup(str(home / "profiles" / "last_order"), str(workspace), receive_messages=True,
+                                                workflow_context=workflow)
     agent_dir = home / "agent" / name
     agent_dir.mkdir(parents=True, exist_ok=True)
-    options = {"cwd": str(workspace), "agentDir": str(agent_dir)}
-    loader = DefaultResourceLoader({**options, "extensionFactories": assembly.extension_factories})
+    paths = {"cwd": str(workspace), "agentDir": str(agent_dir)}
+    loader = DefaultResourceLoader({**paths, "extensionFactories": assembly.extension_factories})
     await loader.reload()
     model = next(model for model in getModels("anthropic") if model.id == "claude-opus-5")
     runtime = await ModelRuntime.create({"authStorage": AuthStorage.inMemory(), "modelsPath": None})
     await runtime.setRuntimeApiKey(model.provider, "fixture")
-    created = await createAgentSession({**options, "resourceLoader": loader, "customTools": assembly.custom_tools, "model": model,
+    created = await createAgentSession({**paths, **options, "resourceLoader": loader, "customTools": assembly.custom_tools, "model": model,
                                         "modelRuntime": runtime, "parts": assembly.parts, "sessionManager": manager})
     await created["session"].bindExtensions({})
     return created["session"]
@@ -201,54 +202,14 @@ async def test_newly_active_tools_are_appended(tmp_path):
 # --- MISAKA: the rule where pi has no counterpart -----------------------------------------------------------------
 
 
-async def test_a_scope_gives_the_selection_back_in_its_order_with_its_prompt(tmp_path):
-    # pi orders by the active tools: what a scope hid would come back last, and the prompt would differ.
-    async with session_with(tmp_path, [_inactive_and_active_tools]) as session:
-        before, prompt = session.getActiveToolNames(), session.systemPrompt
-        with session.toolScope([name for name in before if name not in ("read", "edit")]):
-            assert "read" not in session.getActiveToolNames()
-        assert session.getActiveToolNames() == before
-        assert session.systemPrompt == prompt
-
-
-async def test_a_reordered_selection_does_not_come_back_from_a_scope(tmp_path):
-    async with session_with(tmp_path, [_inactive_and_active_tools]) as session:
-        before, prompt = session.getActiveToolNames(), session.systemPrompt
-        session.setActiveToolsByName(list(reversed(before)))
-        with session.toolScope(before[:2]):
-            pass
-        assert session.getActiveToolNames() == before
-        assert session.systemPrompt == prompt
-
-
 async def test_reordering_inside_a_scope_changes_nothing(tmp_path):
     async with session_with(tmp_path, [_inactive_and_active_tools]) as session:
         with session.toolScope(["read", "write", "bash"]):
-            session.setActiveToolsByName(["bash", "write", "read"])
-            assert session.getActiveToolNames() == ["read", "write", "bash"]
+            before = session.getActiveToolNames()
+            session.setActiveToolsByName(list(reversed(before)))
+            assert session.getActiveToolNames() == before
             session.refreshTools()      # the scope lays its own loadout out again
-            assert session.getActiveToolNames() == ["read", "write", "bash"]
-
-
-async def test_a_projection_ending_inside_a_scope_gives_its_tool_back_in_place(tmp_path):
-    async with session_with(tmp_path, [_inactive_and_active_tools]) as session:
-        project, hidden = session.moments.project_tools, {"write"}
-        session.moments.project_tools = lambda tools: [tool for tool in project(tools) if tool.name not in hidden]
-        with session.toolScope(["read", "write", "bash"]):
-            assert session.getActiveToolNames() == ["read", "bash"]
-            hidden.clear()
-            session.refreshTools()
-            assert session.getActiveToolNames() == ["read", "write", "bash"]
-
-
-async def test_a_nested_scope_gives_the_outer_scope_back_in_its_order(tmp_path):
-    async with session_with(tmp_path, [_inactive_and_active_tools]) as session:
-        before = session.getActiveToolNames()
-        with session.toolScope(["read", "write", "bash"]):
-            with session.toolScope(["bash"]):
-                assert session.getActiveToolNames() == ["bash"]
-            assert session.getActiveToolNames() == ["read", "write", "bash"]
-        assert session.getActiveToolNames() == before
+            assert session.getActiveToolNames() == before
 
 
 async def test_a_restore_inside_a_scope_keeps_the_selection(tmp_path):
@@ -273,25 +234,6 @@ async def test_a_restore_inside_a_scope_does_not_declare_a_callable_tool(tmp_pat
         with session.toolScope(["read"], callable=["mcp__*"]):
             await session.navigateTree(target, {"summarize": False})
             assert session.getActiveToolNames() == ["read"]
-
-
-async def test_a_restore_inside_a_scope_applies_a_minus_tool(tmp_path):
-    manager = _recorded_session(tmp_path, ["read", "grep"])
-    target = _user(manager, "first")
-    async with session_with(tmp_path, [], sessionManager=manager, tools=["-grep"]) as session:
-        with session.toolScope(["read", "grep"]):
-            await session.navigateTree(target, {"summarize": False})
-            assert session.getActiveToolNames() == ["read"]
-
-
-async def test_tree_navigation_keeps_a_minus_tool_off(tmp_path):
-    # MISAKA fork: pi applies the modifiers on resume only, so its `/tree` turns this tool on.
-    manager = _recorded_session(tmp_path, ["read", "grep"])
-    target = _user(manager, "first")
-    async with session_with(tmp_path, [_inactive_and_active_tools], sessionManager=manager, tools=["-active_tool"]) as session:
-        assert "active_tool" not in session.getActiveToolNames()
-        await session.navigateTree(target, {"summarize": False})
-        assert "active_tool" not in session.getActiveToolNames()
 
 
 async def test_tree_navigation_does_not_turn_a_plus_tool_back_on(tmp_path):
@@ -344,52 +286,6 @@ async def test_a_refresh_after_an_extension_gave_a_tool_back_does_not_patch_the_
         assert session.getActiveToolNames() == before
         await session.prompt("three")
         assert len(_system_messages(session)) == patches
-
-
-async def test_a_projection_gives_its_tools_back_in_place_with_the_prompt(prompt_home):  # noqa: F811
-    from misaka.core.research.tool_policy import DRIVER_OWNED_TOOLS
-    from misaka.core.research.window import WindowLO
-
-    async with assembled(prompt_home, "last_order", "foreground") as session:
-        before, prompt = session.getActiveToolNames(), session.systemPrompt
-        owner = WindowLO(session, lambda: None, describe=dict)
-        try:
-            assert not DRIVER_OWNED_TOOLS.intersection(session.getActiveToolNames())
-        finally:
-            await owner.close()
-        assert session.getActiveToolNames() == before
-        assert session.systemPrompt == prompt
-
-
-async def test_a_resume_after_a_scope_keeps_the_order_and_writes_no_prompt_update(tmp_path):
-    # A scope removes tools and gives them back, so replaying the transcript puts them last, where they
-    # never were. The resumed session must keep its order, or its first run would record a prompt update.
-    (tmp_path / "workspace").mkdir(exist_ok=True)
-    manager = SessionManager.create(str(tmp_path / "workspace"), str(tmp_path / "sessions"))
-
-    def written(entries) -> list:
-        return [entry for entry in entries if read_field(entry, "type") == "message"
-                and read_field(read_field(entry, "message"), "role") == "system"]
-
-    async with session_with(tmp_path, [_inactive_and_active_tools], sessionManager=manager) as session:
-        session.agent.streamFunction = _scripted([_assistant([TextContent(text=text)]) for text in "abc"])
-        await session.prompt("one")
-        before = session.getActiveToolNames()
-        assert before[0] == "read"
-        with session.toolScope([name for name in before if name != "read"]):
-            await session.prompt("two")
-        await session.prompt("three")
-        assert session.getActiveToolNames() == before
-        path = manager.getSessionFile()
-
-    resumed = SessionManager.open(path)
-    recorded = len(written(resumed.getEntries()))
-    assert recorded > 1, "the scope wrote its loadout changes"
-    async with session_with(tmp_path, [_inactive_and_active_tools], sessionManager=resumed) as session:
-        session.agent.streamFunction = _scripted([_assistant([TextContent(text="d")])])
-        assert session.getActiveToolNames() == before
-        await session.prompt("four")
-    assert len(written(resumed.getEntries())) == recorded
 
 
 async def test_last_order_resuming_an_old_chat_gets_the_tools_added_since(prompt_home):  # noqa: F811
@@ -491,114 +387,118 @@ async def test_a_fork_request_carries_the_parent_s_tools_in_the_parent_s_order(t
         assert head.content == "PARENT PROMPT"
 
 
-# --- MISAKA: a projection hides tools, it does not remove them ----------------------------------------------------
+# --- MISAKA: a research window takes the board tools off as pi's plan mode does -----------------------------------
 
 
-def _driver_owned_recorded_as_removed(tools: list[str], manager: SessionManager) -> None:
-    """The transcript of a chat that ran a research window: the board tools go away and nothing brings them back."""
-    from misaka.core.research.tool_policy import DRIVER_OWNED_TOOLS
-
-    _record(manager, tools)
-    _user(manager, "before the window")
-    _record(manager, ["misaka_research_assign"], sorted(DRIVER_OWNED_TOOLS))
-    _user(manager, "in the window")
-    _record(manager, [], ["misaka_research_assign"])
-
-
-async def test_last_order_gets_her_board_tools_back_after_a_research_window(prompt_home):  # noqa: F811
-    from misaka.core.research.tool_policy import DRIVER_OWNED_TOOLS
-
-    workspace = prompt_home / "workspace"
+def _chat(home, name: str = "") -> SessionManager:
+    workspace = home / "workspace"
     workspace.mkdir(exist_ok=True)
-    session = await _last_order(prompt_home, "new", SessionManager.inMemory(str(workspace)))
+    return SessionManager.create(str(workspace), str(home / "sessions"))
+
+
+async def _chat_that_ran_a_window(home, *, closed: bool):
+    """A chat that talked, then ran a research window, as far as a resume can tell: its file and the tools it had."""
+    from misaka.core.research.window import WindowLO
+
+    manager = _chat(home)
+    session = await _last_order(home, "first", manager)
+    session.agent.streamFunction = _replies("ab")
+    await session.prompt("one")
     full = session.getActiveToolNames()
+    owner = WindowLO(session, lambda: None, describe=dict)
+    await session.prompt("a turn in the window")     # records the tools going away
+    if closed:
+        await owner.close()
+    path = manager.getSessionFile()
+    session.dispose()
+    return path, full
+
+
+async def test_a_chat_stopped_and_quit_after_a_window_has_its_board_tools(prompt_home):  # noqa: F811
+    from misaka.core.research.tool_policy import DRIVER_OWNED_TOOLS
+
+    path, full = await _chat_that_ran_a_window(prompt_home, closed=True)
+    session = await _last_order(prompt_home, "resumed", SessionManager.open(path))
+    active = session.getActiveToolNames()
     session.dispose()
     assert DRIVER_OWNED_TOOLS <= set(full)
-    manager = SessionManager.inMemory(str(workspace))
-    _driver_owned_recorded_as_removed(full, manager)
-    session = await _last_order(prompt_home, "old", manager)
+    assert sorted(active) == sorted(full)
+
+
+async def test_a_chat_killed_in_a_window_has_its_board_tools_on_resume(prompt_home):  # noqa: F811
+    path, full = await _chat_that_ran_a_window(prompt_home, closed=False)
+    session = await _last_order(prompt_home, "resumed", SessionManager.open(path))
     active = session.getActiveToolNames()
     session.dispose()
-    assert active == full
+    assert sorted(active) == sorted(full)
 
 
-async def test_a_minus_tool_stays_off_after_a_research_window(prompt_home):  # noqa: F811
-    from misaka.core.resource_loader import DefaultResourceLoader
-    from misaka.core.sdk import createAgentSession
-    from misaka.core.wiring import role_session_setup
-
-    workspace = prompt_home / "workspace"
-    workspace.mkdir(exist_ok=True)
-    session = await _last_order(prompt_home, "new", SessionManager.inMemory(str(workspace)))
-    full = session.getActiveToolNames()
+async def test_a_closing_window_records_the_loadout_so_a_resume_needs_nothing_more(prompt_home):  # noqa: F811
+    path, _full = await _chat_that_ran_a_window(prompt_home, closed=True)
+    manager = SessionManager.open(path)
+    entries = len(manager.getEntries())
+    session = await _last_order(prompt_home, "resumed", manager)
     session.dispose()
-    manager = SessionManager.inMemory(str(workspace))
-    _driver_owned_recorded_as_removed(full, manager)
-    _flags, assembly, _env = role_session_setup(str(prompt_home / "profiles" / "last_order"), str(workspace), receive_messages=True)
-    agent_dir = prompt_home / "agent" / "minus"
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    options = {"cwd": str(workspace), "agentDir": str(agent_dir)}
-    loader = DefaultResourceLoader({**options, "extensionFactories": assembly.extension_factories})
-    await loader.reload()
-    created = await createAgentSession({**options, "resourceLoader": loader, "customTools": assembly.custom_tools, "parts": assembly.parts,
-                                        "sessionManager": manager, "tools": ["-misaka_dispatch"]})
-    active = created["session"].getActiveToolNames()
-    created["session"].dispose()
-    assert "misaka_dispatch" not in active and "misaka_card" in active
+    assert len(manager.getEntries()) == entries
 
 
-async def test_a_minus_tool_recorded_as_active_stays_off(prompt_home):  # noqa: F811
-    # Nearly every Last Order chat: the transcript declares the tool. It must not be counted twice.
-    from misaka.core.resource_loader import DefaultResourceLoader
-    from misaka.core.sdk import createAgentSession
-    from misaka.core.wiring import role_session_setup
+async def test_a_board_tool_turned_off_before_a_window_stays_off_after_it(prompt_home):  # noqa: F811
+    from misaka.core.research.window import WindowLO
 
-    workspace = prompt_home / "workspace"
-    workspace.mkdir(exist_ok=True)
-    session = await _last_order(prompt_home, "new", SessionManager.inMemory(str(workspace)))
-    full = session.getActiveToolNames()
+    manager = _chat(prompt_home)
+    session = await _last_order(prompt_home, "first", manager)
+    session.agent.streamFunction = _replies("abc")
+    await session.prompt("one")
+    session.setActiveToolsByName([name for name in session.getActiveToolNames() if name != "misaka_card"])
+    await session.prompt("two")
+    owner = WindowLO(session, lambda: None, describe=dict)
+    await session.prompt("a turn in the window")
+    await owner.close()
+    live = session.getActiveToolNames()
+    path = manager.getSessionFile()
     session.dispose()
-    manager = SessionManager.inMemory(str(workspace))
-    _record(manager, full)
-    target = _user(manager, "first")
-    _flags, assembly, _env = role_session_setup(str(prompt_home / "profiles" / "last_order"), str(workspace), receive_messages=True)
-    agent_dir = prompt_home / "agent" / "recorded"
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    options = {"cwd": str(workspace), "agentDir": str(agent_dir)}
-    loader = DefaultResourceLoader({**options, "extensionFactories": assembly.extension_factories})
-    await loader.reload()
-    created = await createAgentSession({**options, "resourceLoader": loader, "customTools": assembly.custom_tools, "parts": assembly.parts,
-                                        "sessionManager": manager, "tools": ["-misaka_dispatch"]})
-    session = created["session"]
-    assert "misaka_dispatch" not in session.getActiveToolNames()
-    await session.navigateTree(target, {"summarize": False})
+    assert "misaka_card" not in live and "misaka_dispatch" in live
+    session = await _last_order(prompt_home, "resumed", SessionManager.open(path))
     active = session.getActiveToolNames()
     session.dispose()
-    assert "misaka_dispatch" not in active and "misaka_card" in active
+    assert "misaka_card" not in active and "misaka_dispatch" in active
 
 
-async def test_a_tool_joining_an_open_window_leaves_the_hidden_tools_selected(prompt_home):  # noqa: F811
-    # What tool_search and MCP do: they can only name the tools they see.
+async def test_a_board_tool_turned_off_after_a_window_stays_off_on_resume(prompt_home):  # noqa: F811
+    path, _full = await _chat_that_ran_a_window(prompt_home, closed=True)
+    manager = SessionManager.open(path)
+    session = await _last_order(prompt_home, "second", manager)
+    session.agent.streamFunction = _replies("a")
+    session.setActiveToolsByName([name for name in session.getActiveToolNames() if name != "misaka_card"])
+    await session.prompt("one more")
+    session.dispose()
+    session = await _last_order(prompt_home, "third", SessionManager.open(path))
+    active = session.getActiveToolNames()
+    session.dispose()
+    assert "misaka_card" not in active and "misaka_dispatch" in active
+
+
+async def test_a_tool_joining_an_open_window_does_not_cost_the_board_tools(prompt_home):  # noqa: F811
+    # What tool_search and MCP do: they set the loadout from the tools they see.
     from misaka.core.research.window import WindowLO
 
-    async with assembled(prompt_home, "last_order", "foreground") as session:
-        before = session.getActiveToolNames()
-        owner = WindowLO(session, lambda: None, describe=dict)
-        try:
-            session.setActiveToolsByName([*session.getActiveToolNames(), "tool_search"])
-            assert "tool_search" in session.getActiveToolNames()
-        finally:
-            await owner.close()
-        assert session.getActiveToolNames() == [*before, "tool_search"]
+    session = await _last_order(prompt_home, "first", _chat(prompt_home))
+    before = session.getActiveToolNames()
+    owner = WindowLO(session, lambda: None, describe=dict)
+    session.setActiveToolsByName([*session.getActiveToolNames(), "tool_search"])
+    assert "tool_search" in session.getActiveToolNames() and "misaka_card" not in session.getActiveToolNames()
+    await owner.close()
+    active = session.getActiveToolNames()
+    session.dispose()
+    assert sorted(active) == sorted([*before, "tool_search"])
 
 
-async def test_tree_navigation_in_an_open_window_keeps_the_hidden_tools(prompt_home):  # noqa: F811
+async def test_tree_navigation_in_an_open_window_keeps_them_off_and_gives_them_back(prompt_home):  # noqa: F811
+    from misaka.core.research.tool_policy import DRIVER_OWNED_TOOLS
     from misaka.core.research.window import WindowLO
 
-    workspace = prompt_home / "workspace"
-    workspace.mkdir(exist_ok=True)
-    manager = SessionManager.create(str(workspace), str(prompt_home / "sessions"))
-    session = await _last_order(prompt_home, "tree", manager)
+    manager = _chat(prompt_home)
+    session = await _last_order(prompt_home, "first", manager)
     session.agent.streamFunction = _replies("abc")
     await session.prompt("one")
     first = manager.getLeafId()
@@ -606,26 +506,122 @@ async def test_tree_navigation_in_an_open_window_keeps_the_hidden_tools(prompt_h
     before = session.getActiveToolNames()
     owner = WindowLO(session, lambda: None, describe=dict)
     await session.navigateTree(first, {"summarize": False})
+    assert not DRIVER_OWNED_TOOLS.intersection(session.getActiveToolNames())
     await session.prompt("a turn in the window")
     await owner.close()
     active = session.getActiveToolNames()
     session.dispose()
-    assert active == before
+    assert sorted(active) == sorted(before)
 
 
-async def test_without_a_projection_a_caller_can_still_remove_a_board_tool(prompt_home):  # noqa: F811
+async def test_tree_navigation_back_into_a_window_gives_the_tools_back(prompt_home):  # noqa: F811
+    from misaka.core.research.window import WindowLO
+
+    manager = _chat(prompt_home)
+    session = await _last_order(prompt_home, "first", manager)
+    session.agent.streamFunction = _replies("abc")
+    await session.prompt("one")
+    full = session.getActiveToolNames()
+    owner = WindowLO(session, lambda: None, describe=dict)
+    await session.prompt("in the window")
+    inside = manager.getLeafId()
+    await owner.close()
+    await session.prompt("after the window")
+    await session.navigateTree(inside, {"summarize": False})
+    active = session.getActiveToolNames()
+    session.dispose()
+    assert sorted(active) == sorted(full)
+
+
+async def test_a_window_opened_in_a_resumed_chat_works_like_the_first(prompt_home):  # noqa: F811
+    from misaka.core.research.tool_policy import DRIVER_OWNED_TOOLS
+    from misaka.core.research.window import WindowLO
+
+    path, full = await _chat_that_ran_a_window(prompt_home, closed=False)
+    session = await _last_order(prompt_home, "resumed", SessionManager.open(path))
+    owner = WindowLO(session, lambda: None, describe=dict)
+    assert not DRIVER_OWNED_TOOLS.intersection(session.getActiveToolNames())
+    await owner.close()
+    active = session.getActiveToolNames()
+    session.dispose()
+    assert sorted(active) == sorted(full)
+
+
+async def test_a_session_that_is_a_workflow_s_has_no_board_tools(prompt_home):  # noqa: F811
+    from misaka.core.research.tool_policy import DRIVER_OWNED_TOOLS
+
+    session = await _last_order(prompt_home, "workflow", _chat(prompt_home), workflow=True)
+    active = session.getActiveToolNames()
+    session.dispose()
+    assert not DRIVER_OWNED_TOOLS.intersection(active)
+
+
+async def test_a_workflow_session_records_once_however_often_it_is_opened(prompt_home):  # noqa: F811
+    manager = _chat(prompt_home)
+    session = await _last_order(prompt_home, "workflow", manager, workflow=True)
+    session.agent.streamFunction = _replies("a")
+    await session.prompt("one")
+    path = manager.getSessionFile()
+    session.dispose()
+    counts = []
+    for name in ("again", "and-again"):
+        reopened = SessionManager.open(path)
+        session = await _last_order(prompt_home, name, reopened, workflow=True)
+        session.dispose()
+        counts.append(len(reopened.getEntries()))
+    assert counts[0] == counts[1]
+
+
+async def test_a_chat_killed_while_a_closing_window_waited_for_a_run_has_its_board_tools(prompt_home):  # noqa: F811
+    # `/research stop` during a chat turn: the loadout waits for that turn, and the process dies first.
+    from misaka.core.research.window import WindowLO
+
+    manager = _chat(prompt_home)
+    session = await _last_order(prompt_home, "first", manager)
+    session.agent.streamFunction = _replies("ab")
+    await session.prompt("one")
+    full = session.getActiveToolNames()
+    owner = WindowLO(session, lambda: None, describe=dict)
+    await session.prompt("in the window")
+    session._isAgentRunActive = True
+    await owner.close()
+    path = manager.getSessionFile()
+    session._isAgentRunActive = False
+    session._recordLoadoutAfterRun = False
+    session.dispose()
+    session = await _last_order(prompt_home, "resumed", SessionManager.open(path))
+    active = session.getActiveToolNames()
+    session.dispose()
+    assert sorted(active) == sorted(full)
+
+
+async def test_a_session_that_cannot_take_the_tools_leaves_the_record_for_the_next(prompt_home):  # noqa: F811
+    path, full = await _chat_that_ran_a_window(prompt_home, closed=False)
+    session = await _last_order(prompt_home, "narrow", SessionManager.open(path), tools=["read", "bash"])
+    assert session.getActiveToolNames() == ["read", "bash"]
+    session.dispose()
+    session = await _last_order(prompt_home, "resumed", SessionManager.open(path))
+    active = session.getActiveToolNames()
+    session.dispose()
+    assert sorted(active) == sorted(full)
+
+
+async def test_the_run_s_sections_survive_a_window_opening(prompt_home):  # noqa: F811
+    # A loadout set while a run starts would rebuild the options its sections go into.
+    from misaka.core.research.prompting import RESEARCH_LO_ORCHESTRATION
+    from misaka.core.research.window import WindowLO
+    from tests.test_prompt_assembly_integration import final_prompt
+
+    async with assembled(prompt_home, "last_order", "foreground") as session:
+        owner = WindowLO(session, lambda: None, describe=dict)
+        assert (await final_prompt(session)).count(RESEARCH_LO_ORCHESTRATION) == 1
+        await owner.close()
+
+
+async def test_without_a_window_a_caller_can_still_remove_a_board_tool(prompt_home):  # noqa: F811
     async with assembled(prompt_home, "last_order", "foreground") as session:
         kept = [name for name in session.getActiveToolNames() if name != "misaka_card"]
         session.setActiveToolsByName(kept)
-        session.refreshTools()
-        assert "misaka_card" not in session.getActiveToolNames()
-
-
-async def test_a_board_tool_nothing_is_hiding_is_really_removed(prompt_home):  # noqa: F811
-    # What keeps a tool selected is a projection hiding it now, not that one could.
-    async with assembled(prompt_home, "last_order", "foreground") as session:
-        session.agent.state.tools = [tool for tool in session.agent.state.tools if tool.name != "misaka_card"]
-        session.setActiveToolsByName(session.getActiveToolNames())
         session.refreshTools()
         assert "misaka_card" not in session.getActiveToolNames()
 
@@ -654,6 +650,36 @@ async def test_a_tool_a_handler_took_out_is_really_removed(tmp_path):
         assert "read" not in session.getActiveToolNames()
 
 
-async def test_a_sister_withholds_nothing(prompt_home):  # noqa: F811
-    async with assembled(prompt_home, "sisters/10032", "foreground") as session:
-        assert session.moments.withheld_tools() == set()
+async def test_a_window_gives_back_all_it_took_when_it_had_to_take_one_again(prompt_home):  # noqa: F811
+    from misaka.core.research.tool_policy import DRIVER_OWNED_TOOLS
+    from misaka.core.research.window import WindowLO
+
+    session = await _last_order(prompt_home, "first", _chat(prompt_home))
+    before = session.getActiveToolNames()
+    owner = WindowLO(session, lambda: None, describe=dict)
+    session.setActiveToolsByName([*session.getActiveToolNames(), "misaka_card"])
+    await session.moments.session_tree({"type": "session_tree"})
+    assert not DRIVER_OWNED_TOOLS.intersection(session.getActiveToolNames())
+    await owner.close()
+    active = session.getActiveToolNames()
+    session.dispose()
+    assert sorted(active) == sorted(before)
+
+
+async def test_a_reload_inside_a_scope_keeps_the_selection(tmp_path):
+    async with session_with(tmp_path, [_inactive_and_active_tools]) as session:
+        before = sorted(session.getActiveToolNames())
+        with session.toolScope(["read"]):
+            await session.reload()
+            assert session.getActiveToolNames() == ["read"]
+        assert sorted(session.getActiveToolNames()) == before
+
+
+async def test_a_reload_after_a_scope_keeps_what_changed_since(tmp_path):
+    # The selection is a scope's. Outside one the active tools are the truth, as in pi.
+    async with session_with(tmp_path, [_inactive_and_active_tools]) as session:
+        with session.toolScope(["read"]):
+            pass
+        session.setActiveToolsByName([name for name in session.getActiveToolNames() if name != "write"])
+        await session.reload()
+        assert "write" not in session.getActiveToolNames()

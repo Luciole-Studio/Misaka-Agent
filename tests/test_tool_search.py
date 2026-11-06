@@ -283,7 +283,7 @@ async def test_inside_a_tool_scope_tool_search_only_finds_what_the_run_can_reach
         result = next(message for message in session.messages if getattr(message, "role", None) == "toolResult")
         assert result.content[0].text == "No matching tools found."
         # The selection the scope hid survives the run inside it.
-        assert session.getActiveToolNames() == ["read", "bash", "tool_search"]
+        assert sorted(session.getActiveToolNames()) == ["bash", "read", "tool_search"]
 
 
 async def test_a_caller_inside_a_scope_keeps_the_tools_the_scope_hides(tmp_path):
@@ -293,7 +293,7 @@ async def test_a_caller_inside_a_scope_keeps_the_tools_the_scope_hides(tmp_path)
             session.setActiveToolsByName([*session.getActiveToolNames(), "weather_lookup"])
             assert session.getActiveToolNames() == ["read", "tool_search", "weather_lookup"]
         # The scope granted weather_lookup; it ends with the scope.
-        assert session.getActiveToolNames() == ["read", "bash", "tool_search"]
+        assert sorted(session.getActiveToolNames()) == ["bash", "read", "tool_search"]
 
 
 async def test_a_tool_a_caller_adds_inside_a_scope_outlives_it(tmp_path):
@@ -301,7 +301,7 @@ async def test_a_tool_a_caller_adds_inside_a_scope_outlives_it(tmp_path):
                             settings={"defaultTools": ["read", "bash", "tool_search"]}) as session:
         with session.toolScope(["read", "tool_search"], callable=["weather_lookup"]):
             session.setActiveToolsByName([*session.getActiveToolNames(), "weather_lookup"])
-        assert session.getActiveToolNames() == ["read", "bash", "tool_search", "weather_lookup"]
+        assert sorted(session.getActiveToolNames()) == ["bash", "read", "tool_search", "weather_lookup"]
 
 
 async def test_tools_a_scope_grants_do_not_outlive_it(tmp_path):
@@ -311,7 +311,7 @@ async def test_tools_a_scope_grants_do_not_outlive_it(tmp_path):
             # tool_search loading a tool sets the loadout to what is visible plus the tool.
             session.setActiveToolsByName([*session.getActiveToolNames(), "weather_lookup"])
             assert session.getActiveToolNames() == ["read", "tool_search", "weather_lookup"]
-        assert session.getActiveToolNames() == ["read", "bash", "weather_lookup"]
+        assert sorted(session.getActiveToolNames()) == ["bash", "read", "weather_lookup"]
 
 
 async def test_a_loaded_tool_stays_on_its_branch_across_a_refresh(tmp_path):

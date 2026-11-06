@@ -396,4 +396,3 @@ async def test_restoring_the_transcript_loadout_sets_the_selection_outside_a_sco
         session._restoreToolsFromTranscript()
         session.refreshTools()
         assert session.getActiveToolNames() == ["read"]
-        assert session._unscopedToolNames == ["read"]
