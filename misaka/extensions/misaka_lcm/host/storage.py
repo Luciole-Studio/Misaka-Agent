@@ -1,8 +1,11 @@
-"""Project-owned, disposable LCM storage. Sessions remain the durable archive.
+"""Project-owned LCM storage. Sessions remain the durable archive.
 
-One process holds a shared lease until its project runtimes finish. A short gate
-serializes lease admission and last-owner cleanup, including across processes.
-Lock files live outside the disposable directory and contain no conversation data.
+The cache outlives the processes that use it, so what one session stored can still be found after
+every process has exited, and a numeric handle stays good. It stays disposable: nothing in it is
+the only copy, ``clear`` removes it, and a session whose rows drifted from its file is rebuilt
+(``context_engine._messages``). One process holds a shared lease until its project runtimes finish;
+only ``clear`` and the recovery of an unreadable database take the exclusive one. A short gate
+serializes admission. Lock files live outside the directory and contain no conversation data.
 """
 from __future__ import annotations
 
@@ -26,7 +29,10 @@ _LOCK = threading.RLock()
 _LEASES: dict[Path, ReadWriteLock] = {}
 _IDENTITY: dict[Path, tuple | None] = {}
 _PRIVATE: dict[Path, bool] = {}
+_FIRST_OWNER: set[Path] = set()
 _MARKER = ".misaka-lcm-cache"
+_STAMP = "misaka-lcm 2\n"             # 2: images stay in the session file (`images`)
+_OUTDATED = ("misaka-lcm\n",)
 # A subagent's copy of this plugin joins the project store of the session that started it: the
 # parent sets this for the child on ``subagent_start`` (see ``extension.register``).
 PROJECT_ENV = "MISAKA_LCM_PROJECT"
@@ -125,11 +131,19 @@ def _marked(root):
     contents = list(root.iterdir())
     marker = root / _MARKER
     content = marker.read_text(encoding="utf-8-sig") if marker.is_file() and not marker.is_symlink() else None
-    if content == "misaka-lcm\n":
+    if content == _STAMP or content in _OUTDATED:
         return True
     if not contents or (content == "" and contents == [marker]):
         return None
     return False
+
+
+def _outdated(root):
+    """Whether this cache's rows hold what this code no longer compares against. A row with a payload
+    reference matches no message now, and a session end then searches for it (20-40 s a session)."""
+    marker = root / _MARKER
+    return (marker.is_file() and not marker.is_symlink()
+            and marker.read_text(encoding="utf-8-sig") in _OUTDATED)
 
 
 def _set_aside(root):
@@ -164,7 +178,7 @@ def _prepare(root):
         _set_aside(root)
     if state is not True:
         root.mkdir(mode=0o700, exist_ok=True)
-        (root / _MARKER).write_text("misaka-lcm\n", encoding="utf-8")
+        (root / _MARKER).write_text(_STAMP, encoding="utf-8")
 
 
 def _identity(root, lock_path):
@@ -190,10 +204,10 @@ def acquire(workspace: Path) -> None:
                 except Timeout:
                     pass  # Another live process owns this project's cache.
                 else:
-                    try:
-                        _discard(root)  # Orphan from an interrupted previous run.
-                    finally:
-                        lease.release()
+                    if _outdated(root):
+                        _discard(root)   # the session files rebuild it, and nobody else holds it
+                    lease.release()
+                    _FIRST_OWNER.add(workspace)
                 _prepare(root)
                 lease.acquire_read(timeout=30)
             _LEASES[workspace] = lease
@@ -225,26 +239,54 @@ def current(workspace: Path):
         return None
 
 
-def release(workspace: Path) -> None:
+def take_first_owner(workspace: Path) -> bool:
+    """Whether this process opened the project's cache with nobody else in it, once: the moment
+    for housekeeping no running session should see."""
     workspace = workspace.resolve()
     with _LOCK:
-        lease = _LEASES.get(workspace)
-        if lease is None:
-            return
-        root, gate, lock_path = _paths(workspace)
-        with gate:
+        first = workspace in _FIRST_OWNER
+        _FIRST_OWNER.discard(workspace)
+        return first
+
+
+def release(workspace: Path) -> None:
+    """Let the cache go. Nothing is removed and nothing waits on the gate: a run's processes all
+    exit together, and the gate used to be where they queued to delete it."""
+    workspace = workspace.resolve()
+    with _LOCK:
+        lease = _LEASES.pop(workspace, None)
+        _IDENTITY.pop(workspace, None)
+        _FIRST_OWNER.discard(workspace)
+        if lease is not None:
             lease.close()
-            del _LEASES[workspace]
-            _IDENTITY.pop(workspace, None)
-            cleanup = ReadWriteLock(lock_path, is_singleton=False)
+
+
+def clear(workspace: Path) -> bool:
+    """Remove the project's cache. False, with nothing removed, while a process is using it."""
+    workspace = workspace.resolve()
+    if not directory(workspace).exists():
+        return True  # and no project layout is created to say so
+    root, gate, lock_path = _paths(workspace)
+    lease = ReadWriteLock(lock_path, is_singleton=False)
+    try:
+        with gate:
             try:
-                try:
-                    cleanup.acquire_write(timeout=0)
-                except Timeout:
-                    return  # A sibling is still using it. Its exit owns cleanup.
-                _discard(root)
-            finally:
-                cleanup.close()
+                lease.acquire_write(timeout=0)
+            except Timeout:
+                return False
+            _discard(root)
+            return True
+    finally:
+        lease.close()
+
+
+def reset_unreadable(workspace: Path) -> bool:
+    """Replace a cache whose database cannot be opened, now that an exit no longer sweeps it away.
+    False while another process is using it: this one then runs without LCM, as before."""
+    release(workspace)
+    cleared = clear(workspace)
+    acquire(workspace)
+    return cleared
 
 
 def release_all() -> None:

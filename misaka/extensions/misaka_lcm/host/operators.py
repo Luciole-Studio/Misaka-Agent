@@ -27,6 +27,13 @@ def main(argv=None):
     from . import config_bridge, context_engine, operations, storage
 
     args = list(sys.argv[1:] if argv is None else argv)
+    if args[:1] == ["clear"]:
+        workspace = storage.project()
+        if storage.clear(workspace):
+            print(f"MISAKA LCM cache of {workspace} removed. Session files are untouched.")
+            return 0
+        print(f"MISAKA LCM cache of {workspace} is in use; nothing was removed.")
+        return 1
     if args and args[0] in COMMANDS:
         module = importlib.import_module("misaka.extensions.misaka_lcm.vendor." + COMMANDS[args[0]])
         options = args[1:]

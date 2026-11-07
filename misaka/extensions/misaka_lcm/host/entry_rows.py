@@ -46,6 +46,7 @@ def _connection(store):
                 con.execute("PRAGMA journal_mode=WAL")
             con.execute("CREATE TABLE IF NOT EXISTS rows (store_id INTEGER PRIMARY KEY, entry_id TEXT NOT NULL, "
                         "position INTEGER NOT NULL)")
+            con.execute("CREATE TABLE IF NOT EXISTS session_files (session_id TEXT PRIMARY KEY, path TEXT NOT NULL)")
             _CONNECTIONS[key] = con
         return con
 
@@ -73,6 +74,40 @@ def record(store, store_ids, messages) -> None:
     except sqlite3.Error:
         logger.warning("LCM could not record which entries %d rows came from; they are matched by content.",
                        len(rows), exc_info=True)
+
+
+def keys(store, store_ids) -> dict:
+    """``{store id: (entry id, position)}`` for every bound row, a duplicate row included."""
+    ids = sorted({int(store_id) for store_id in store_ids})
+    con = _connection(store)
+    found = {}
+    with _LOCK:
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            found.update((row[0], (row[1], row[2])) for row in con.execute(
+                f"SELECT store_id, entry_id, position FROM rows WHERE store_id IN ({','.join('?' * len(chunk))})",
+                chunk))
+    return found
+
+
+def note_session(store, session_id, path) -> None:
+    """Remember the file a session's rows came from, so rows can go when the file does."""
+    con = _connection(store)
+    with _LOCK:
+        con.execute("INSERT OR REPLACE INTO session_files (session_id, path) VALUES (?, ?)",
+                    (str(session_id), str(path)))
+
+
+def session_files(store) -> list:
+    con = _connection(store)
+    with _LOCK:
+        return con.execute("SELECT session_id, path FROM session_files").fetchall()
+
+
+def forget_session(store, session_id) -> None:
+    con = _connection(store)
+    with _LOCK:
+        con.execute("DELETE FROM session_files WHERE session_id = ?", (str(session_id),))
 
 
 def bound(store, store_ids):

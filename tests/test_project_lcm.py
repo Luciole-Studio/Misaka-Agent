@@ -136,7 +136,7 @@ def test_project_isolation_shared_roles_and_session_switch(tmp_path):
     ce.close(sister)
     assert Path(config_bridge.database_path(sister)).is_file()  # /new or reload is not application exit
     ce.release_project(sister)
-    assert not storage.directory(storage.project(a)).exists()
+    assert storage.clear(storage.project(a))
     assert Path(config_bridge.database_path(b)).is_file()
 
 
@@ -168,7 +168,7 @@ def test_a_project_on_a_drive_without_private_permissions_keeps_its_cache_in_the
         assert not (tmp_path / name / ".misaka" / "lcm").exists()
         ce.close(ctx)
         ce.release_project(ctx)
-        assert not root.exists()
+        assert storage.clear(storage.project(ctx)) and not root.exists()
 
 
 def test_project_marker_preserves_child_worktree_identity(tmp_path):
@@ -187,12 +187,12 @@ def test_full_checkpoint_rebuild_and_fork_preserve_session_bytes(tmp_path):
     before = source.read_bytes()
     ce.close(ctx)
     ce.release_project(ctx)
-    assert not storage.directory(storage.project(ctx)).exists()
+    assert storage.clear(storage.project(ctx))
     restored = SessionManager.openInMemory(str(source))
     resumed = storage.context(SimpleNamespace(cwd=ctx.cwd, sessionManager=restored, model=None), ctx.lcm_project)
     ce.sync(resumed)
     built = ce.bound_engine(resumed)
-    nodes, _ = ce._checkpoint_nodes(built, ce._checkpoint(ce.snapshot(resumed)), ce.snapshot(resumed))
+    nodes = ce._checkpoint_nodes(built, ce._checkpoint(ce.snapshot(resumed)), ce.snapshot(resumed))
     assert len(nodes) == 1
     rows = built._store.get_batch(carry.source_ids(built, nodes[0]))
     assert any("original evidence" in row["content"] for row in rows.values())
@@ -290,6 +290,7 @@ def test_carry_rebuild_after_reordered_row_ids_and_chained_carry(tmp_path):
     source_files = [Path(ctx.sessionManager.getSessionFile()) for ctx in (original, next_ctx, final_ctx)]
     saved = {p: p.read_bytes() for p in source_files}
     ce.close_all()
+    assert storage.clear(storage.project(original))
     # Change row allocation before rebuilding. Old store IDs must not select this text.
     other = session(tmp_path / "project")
     say(other, "DECOY new cache row one")
@@ -314,6 +315,7 @@ def test_carry_rejects_missing_modified_or_cross_project_sources(tmp_path, damag
     summary(original)
     target = carried(original)
     ce.close_all()
+    assert storage.clear(storage.project(original))
     source = Path(original.sessionManager.getSessionFile())
     if damage == "missing":
         source.unlink()
@@ -407,9 +409,9 @@ def test_unknown_files_are_set_aside_intact_and_symlinks_refused(tmp_path):
     storage.acquire(project)
     [aside] = root.parent.glob("lcm.unrecognized-*")
     assert (aside / "valuable").read_text(encoding="utf-8") == "keep"
-    assert (root / storage._MARKER).read_text(encoding="utf-8") == "misaka-lcm\n"
+    assert (root / storage._MARKER).read_text(encoding="utf-8") == storage._STAMP
     storage.release(project)
-    assert not root.exists() and (aside / "valuable").exists()
+    assert storage.clear(project) and not root.exists() and (aside / "valuable").exists()
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     root.symlink_to(elsewhere, target_is_directory=True)
@@ -434,7 +436,7 @@ def test_a_cache_deleted_under_a_running_session_is_rebuilt_from_its_transcript(
     ce.sync(ctx)
     new = ce.bound_engine(ctx)
     assert new is not old
-    assert (root / storage._MARKER).read_text(encoding="utf-8") == "misaka-lcm\n"
+    assert (root / storage._MARKER).read_text(encoding="utf-8") == storage._STAMP
     assert new._store.db_path == root / "lcm.db"
     assert count(new) == 2                      # both turns, re-ingested from the transcript
     assert storage.current(storage.project(ctx)) == new._misaka_cache
@@ -447,7 +449,7 @@ def test_a_joiner_restores_a_cache_that_is_missing_or_unmarked(tmp_path):
         root = storage.directory(project)
         shutil.rmtree(root)
         storage.acquire(project)                # cannot take the exclusive lease, restores anyway
-        assert (root / storage._MARKER).read_text(encoding="utf-8") == "misaka-lcm\n"
+        assert (root / storage._MARKER).read_text(encoding="utf-8") == storage._STAMP
         storage.release(project)
     finally:
         proc.communicate("finish\n", timeout=20)
@@ -471,7 +473,7 @@ def test_interrupted_marker_initialization_and_failed_engine_retry(tmp_path, mon
     assert count(ce.bound_engine(ctx)) == 1
     ce.close(ctx)
     ce.release_project(ctx)
-    assert not root.exists()
+    assert storage.clear(storage.project(ctx)) and not root.exists()
 
 
 _CHILD = '''
@@ -505,29 +507,28 @@ def child(project):
     return proc
 
 
-def test_cross_process_last_owner_and_crash_recovery(tmp_path):
+def test_the_cache_outlives_its_owners_and_only_an_idle_one_is_cleared(tmp_path):
     project = (tmp_path / "project").resolve()
     storage.acquire(project)
     proc = child(project)
     root = storage.directory(project)
-    (root / "payload").write_text("active", encoding="utf-8")
+    (root / "payload").write_text("kept", encoding="utf-8")
     storage.release(project)
+    assert not storage.clear(project)  # a sibling is using it
     assert (root / "payload").exists()
     out, err = proc.communicate("finish\n", timeout=20)
     assert proc.returncode == 0, (out, err)
-    assert not root.exists()
+    assert (root / "payload").exists()
     proc = child(project)
-    (root / "payload").write_text("abandoned", encoding="utf-8")
     proc.kill()
     proc.communicate(timeout=20)
-    assert root.exists()
-    storage.acquire(project)
-    assert not (root / "payload").exists()
+    storage.acquire(project)  # an interrupted run leaves it as it was
+    assert (root / "payload").exists()
     storage.release(project)
-    assert not root.exists()
+    assert storage.clear(project) and not root.exists()
 
 
-def test_atexit_cleans_after_closing_real_engine(tmp_path):
+def test_atexit_lets_go_of_the_cache_after_closing_real_engine(tmp_path):
     project = tmp_path / "project"
     result = subprocess.run([sys.executable, "-c", '''
 import sys
@@ -538,7 +539,7 @@ ctx = SimpleNamespace(cwd=sys.argv[1], model=None, sessionManager=SessionManager
 context_engine.bound_engine(ctx)
 ''', str(project)], capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr
-    assert not storage.directory(project).exists()
+    assert storage.clear(project)  # exiting let the lease go
 
 
 def test_real_compaction_rebuild_then_fork(tmp_path, monkeypatch):
@@ -568,7 +569,7 @@ def test_real_compaction_rebuild_then_fork(tmp_path, monkeypatch):
     ce.sync(ctx)
     built = ce.bound_engine(ctx)
     snap = ce.snapshot(ctx)
-    nodes, _ = ce._checkpoint_nodes(built, ce._checkpoint(snap), snap)
+    nodes = ce._checkpoint_nodes(built, ce._checkpoint(snap), snap)
     assert nodes and all(built._store.get_batch(carry.source_ids(built, node)) for node in nodes)
     assert source.read_bytes() == before
 
@@ -592,7 +593,7 @@ async def test_extension_new_reload_and_quit_lifetime(tmp_path):
     assert Path(config_bridge.database_path(ctx)).exists()
     await events["session_start"]({}, ctx)
     await events["session_shutdown"]({"reason": "quit"}, ctx)
-    assert not storage.directory(storage.project(ctx)).exists()
+    assert storage.clear(storage.project(ctx))
     assert source.read_bytes() == before
 
 
@@ -655,7 +656,7 @@ def test_status_names_disposable_project_and_cleans_up(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     output = operations.command("status")
     assert output.startswith("MISAKA LCM status\n")
-    assert "storage_lifetime: project-runtime" in output
+    assert "storage_lifetime: project" in output
     assert "no active Hermes session" not in output
     assert not storage.directory(tmp_path).exists()
 
@@ -688,7 +689,7 @@ def test_operator_import_keeps_payloads_scoped_and_live_owner_intact(tmp_path, m
     assert row > (1 << 32)
     ce.close(ctx)
     ce.release_project(ctx)
-    assert not root.exists() and source.read_bytes() == saved
+    assert storage.clear(storage.project(ctx)) and not root.exists() and source.read_bytes() == saved
 
 
 def test_core_matches_namespace_import_seams_and_documented_fixes():
@@ -784,7 +785,7 @@ def test_audit_quit_waits_for_timed_out_tool_worker(tmp_path, monkeypatch):
         closer.join(5)
         finished.wait(1)
     assert closed.is_set() and finished.is_set()
-    assert not storage.directory(storage.project(ctx)).exists()
+    assert storage.clear(storage.project(ctx))
 
 
 def test_audit_image_calibration_does_not_write_global_cache(tmp_path, monkeypatch):
@@ -843,7 +844,7 @@ def test_audit_one_failed_shutdown_does_not_retain_other_projects(tmp_path, monk
         scoped.setattr(ce, '_shutdown', fail)
         ce.close_all()
     assert storage.directory(storage.project(a)).exists()
-    assert not storage.directory(storage.project(b)).exists()
+    assert storage.clear(storage.project(b))
 
 
 def test_audit_archive_import_does_not_rebind_live_lifecycle(tmp_path):
@@ -869,7 +870,7 @@ def test_audit_cleaned_carry_sources_rebuild_without_stale_node_hint(tmp_path):
         ce.sync(target)
         built = ce.bound_engine(target)
         snap = ce.snapshot(target)
-        nodes, _ = ce._checkpoint_nodes(built, ce._checkpoint(snap), snap)
+        nodes = ce._checkpoint_nodes(built, ce._checkpoint(snap), snap)
         assert nodes and all(built._store.get_batch(carry.source_ids(built, node)) for node in nodes)
         _delete_clean_candidates_atomically(built, {original.sessionManager.getSessionId()})
         # A same-process resume keeps this project's cache, but must rebuild
@@ -916,7 +917,7 @@ def test_audit_abbreviated_apply_initializes_generation_ids(tmp_path, monkeypatc
         return 0
     monkeypatch.setattr(importer, 'main', observe)
     assert operators.main(['import', '--source-jsonl', str(tmp_path / 'source.jsonl'), '--app']) == 0
-    assert not storage.directory(tmp_path).exists()
+    assert storage.clear(tmp_path)
 
 
 def test_audit_six_real_engines_share_until_final_process_exit(tmp_path):
@@ -953,7 +954,7 @@ ce.release_project(ctx)
             assert root.exists(), 'another live process still owns this cache'
         _, error = processes[-1].communicate('quit\n', timeout=30)
         assert processes[-1].returncode == 0, error
-        assert not root.exists()
+        assert root.exists() and storage.clear(project)
     finally:
         for process in processes:
             if process.poll() is None:
@@ -998,7 +999,7 @@ def test_audit_shutdown_timeout_retains_live_owner(tmp_path, monkeypatch, worker
                 thread.join(1)
     ce.close(ctx)
     ce.release_project(ctx)
-    assert not storage.directory(storage.project(ctx)).exists()
+    assert storage.clear(storage.project(ctx))
 
 
 def test_audit_shutdown_does_not_wait_for_other_projects_fts(tmp_path, monkeypatch):
@@ -1021,7 +1022,7 @@ def test_audit_shutdown_does_not_wait_for_other_projects_fts(tmp_path, monkeypat
     closer.start()
     try:
         assert closed.wait(1), 'project A waited for unrelated project B background scan'
-        assert not storage.directory(storage.project(a)).exists()
+        assert storage.clear(storage.project(a))
         assert storage.directory(storage.project(b)).exists()
     finally:
         unblock.set()
@@ -1037,6 +1038,7 @@ def test_status_separates_native_catalog_from_loaded_lcm_history(tmp_path, monke
     before = archive.read_bytes()
     ce.close(old)
     ce.release_project(old)
+    assert storage.clear(storage.project(old))
     current = session(tmp_path / 'project')
     say(current, 'current session only')
     monkeypatch.setattr(native, 'session_ids', lambda: {
@@ -1057,7 +1059,7 @@ def test_status_separates_native_catalog_from_loaded_lcm_history(tmp_path, monke
     guideline = tools.recall_guideline()
     assert 'Tool availability is not evidence' in guideline
     assert 'state_only_sessions' in guideline
-    assert 'final project owner exits' in guideline
+    assert 'clearing the cache empties it' in guideline
 
 
 def test_a_research_conversation_is_not_all_fresh_tail(monkeypatch):

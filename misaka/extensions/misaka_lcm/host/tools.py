@@ -218,7 +218,7 @@ def _deliver(name: str, output: str, engine=None) -> str:
 def _answer(name: str, args: dict, transcript, ctx) -> str:
     built = context_engine.bound_engine(ctx)
     messages = context_engine._messages(transcript, built) if transcript is not None else None
-    output = str(built.handle_tool_call(name, args, messages=messages))
+    output = str(built.handle_tool_call(name, context_engine.local_nodes(built, args), messages=messages))
     return fence.refence(_deliver(name, output, built), engine=built, tool_name=name)
 
 
@@ -248,11 +248,11 @@ def recall_guideline() -> str:
     an injection to be distrusted."""
     from ..vendor import get_recall_policy
     return ("MISAKA LCM is this project's context cache, not a permanent memory. Its tools search the sessions "
-            "loaded into the cache while it is live -- Last Order's and her Sisters' -- and nothing else: it is "
-            "cleared when the final project owner exits (after an interrupted exit, on the next start), and a "
-            "new session does not import earlier archives. Native session files stay durable; resume and carry "
-            "rebuild a session's searchable context from them. Numeric handles belong to the current cache: after "
-            "a rebuild, search again for new handles instead of reusing old IDs.\n\n"
+            "loaded into the cache -- Last Order's and her Sisters' -- and nothing else: it stays between runs, "
+            "but a session that was never opened here is not in it, and clearing the cache empties it. "
+            "Native session files stay durable; resume and carry rebuild a session's searchable context from "
+            "them. Numeric handles belong to the current cache: if one is not found, the session was rebuilt, "
+            "so search again for its new handle.\n\n"
             "When asked about memory, distinguish tool capability from currently available evidence. "
             "Tool availability is not evidence that earlier conversations are loaded or remembered. "
             "In lcm_status, state_sessions_total and state_only_sessions refer to native session-catalog "

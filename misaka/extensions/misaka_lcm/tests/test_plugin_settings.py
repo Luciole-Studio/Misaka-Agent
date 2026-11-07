@@ -57,7 +57,7 @@ def test_persist_refresh_false_values_and_explicit_env(tmp_path, monkeypatch):
     assert settings.path().read_bytes() == saved
     ce.close(ctx)
     ce.release_project(ctx)
-    assert not storage.directory(storage.project(ctx)).exists()
+    assert storage.clear(storage.project(ctx))
     assert settings.path().read_bytes() == saved  # preferences are not task content
 
 
@@ -270,7 +270,7 @@ def test_cached_local_model_indexes_and_recalls_without_network(tmp_path, monkey
     settings.configure(False)
     assert preanswer.inject({'messages': messages}, current, active_tools=['lcm_recall']) is None
     ce.close_all()
-    assert not storage.directory(tmp_path).exists()
+    assert storage.clear(tmp_path)
     assert settings.path().exists()
 
 
@@ -317,4 +317,4 @@ def test_index_timeout_keeps_owner_and_freezes_worker_config(tmp_path, monkeypat
         closer.join(5)
     assert closed.is_set() and not built._misaka_index_busy
     assert observed == [['--corpus', 'both', '--apply', '--limit', '32'], True]
-    assert not storage.directory(tmp_path).exists()
+    assert storage.clear(tmp_path)

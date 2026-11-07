@@ -10,13 +10,16 @@ User-controlled settings: `/lcm-settings` opens the plugin's native dialog;
 uses the same loaded-project boundary below. The switch and effective embedding
 route are plugin preferences, not saved conversation memory.
 
-LCM is this project's disposable context cache, not a permanent user-memory service.
+LCM is this project's context cache, not a permanent user-memory service.
 All roles belonging to the project share its cache; another project's data is not
-searched. Native MISAKA session files are the durable archive. Reopening a saved
-session reconstructs its context and source-backed summaries. The cache and its
-payload sidecars are removed after the final project owner exits; abandoned caches
-are cleared on the next start. Original session files remain unchanged by cleanup.
-Starting a new session does not automatically import earlier session archives.
+searched. Native MISAKA session files are the durable archive. The cache stays between
+runs, so a session loaded once can still be found after every process has exited.
+Reopening a saved session reconstructs its context and source-backed summaries, and a
+session whose rows no longer match its file is rebuilt from it, so a numeric handle
+that is not found belongs to rows that were rebuilt: search again. A deleted session's
+rows go when the project is next opened. `misaka lcm clear` removes the cache and its
+payload sidecars; original session files are never touched. A session never opened
+here is not in the cache: starting one does not import earlier session archives.
 
 When asked about memory, separate capability from evidence. Available LCM tools
 do not prove that earlier conversations are loaded. In `lcm_status`, native

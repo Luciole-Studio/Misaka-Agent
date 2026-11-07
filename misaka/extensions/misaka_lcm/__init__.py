@@ -1,7 +1,7 @@
 """MISAKA LCM: the project-scoped fork of hermes-lcm.
 
 The upstream compression/retrieval implementation lives in vendor/ and native/;
-MISAKA's project ownership, disposable storage and session provenance live in
+MISAKA's project ownership, rebuildable storage and session provenance live in
 host/. Upstream notices and pins remain intact. Namespaced imports at existing
 host seams are the only relocation changes in the upstream Python sources.
 """

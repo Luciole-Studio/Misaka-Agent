@@ -65,7 +65,7 @@ def test_a_source_whose_content_upstream_rewrote_still_maps(tmp_path):
     built._store._conn.commit()
     say(ctx, "next", tick=1)
     ce.sync(ctx)                                                # the request's _checkpoint_nodes
-    nodes, _ = ce._checkpoint_nodes(built, ce._checkpoint(ce.snapshot(ctx)), ce.snapshot(ctx))
+    nodes = ce._checkpoint_nodes(built, ce._checkpoint(ce.snapshot(ctx)), ce.snapshot(ctx))
     assert nodes
     drop_bindings(built)                                        # what content matching alone made of it
     try:

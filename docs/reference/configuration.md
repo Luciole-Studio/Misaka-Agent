@@ -330,10 +330,12 @@ An invalid theme is reported when MISAKA starts and at `/reload`, and is not use
 
 When a conversation grows too long for the model, LCM summarises its older part, and the agent
 can still search what was said earlier: in her own conversation,
-and in the other conversations running in the same project. Your conversations themselves are
+and in the other conversations of the same project. Your conversations themselves are
 kept in `~/.misaka/state/sessions/`; the search index is a cache in `<project>/.misaka/lcm/`,
-filled from the conversations as they open and removed when the last MISAKA process in the
-project exits. Don't commit or sync it. A project on a drive that cannot keep that folder
+filled from the conversations as they open. It stays between runs, so finished work can still
+be found, and it grows with your conversations: `misaka lcm clear` removes it
+when no MISAKA process is using the project, and nothing is lost, since it is rebuilt from your
+conversations as they open again. Don't commit or sync it. A project on a drive that cannot keep that folder
 private, such as a Windows drive opened from WSL, keeps it in
 `~/.misaka/state/plugins/misaka-lcm/projects/` instead.
 
