@@ -905,7 +905,7 @@ ws = [
 
 [[package]]
 name = "misaka"
-version = "0.19.23"
+version = "0.19.24"
 source = { editable = "." }
 dependencies = [
     { name = "filelock" },
