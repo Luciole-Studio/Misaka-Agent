@@ -766,3 +766,22 @@ def install() -> None:
         sys.modules["agent.auxiliary_client"] = module
         if "agent" in sys.modules:
             sys.modules["agent"].auxiliary_client = module
+    _summaries_without_output_limit()
+
+
+def _summaries_without_output_limit() -> None:
+    """A summary asks for no output limit, as Hermes' own compressor does (``_generate_summary`` in
+    ``native/context_compressor.py``). Upstream sizes its limit for the text, but adaptive thinking
+    spends the same limit: the text came back cut, which upstream accepts, or empty, which opens
+    the route's circuit. Only this call: ``lcm_expand_query`` shares its task and promises its
+    caller a limit."""
+    from ..vendor import escalation
+    original = escalation._call_llm_for_summary
+    if getattr(original, "misaka_no_output_limit", False):
+        return
+
+    def summarize(prompt, _max_tokens, **kwargs):
+        return original(prompt, None, **kwargs)
+
+    summarize.misaka_no_output_limit = True
+    escalation._call_llm_for_summary = summarize

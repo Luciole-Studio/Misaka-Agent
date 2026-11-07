@@ -1,5 +1,15 @@
 # MISAKA LCM fork 契约
 
+## 2026-11-07：摘要不带输出上限
+
+改动在 `host/llm.py`，`vendor/`、`native/` 不变。
+
+- **为什么。** 上游的上限按正文算（第一级是预算的 2 倍，第二级等于预算，预算最低 2000；汇总节点的预算最低 1000），但 adaptive 思考和正文共用这个上限。`thinkingLevelMap.off` 是 `null`，思考关不掉，请求发的是 `effort: high`。真实重放 36 次有 27 次停在 `length`，其中 2 次只有思考没有正文。
+- **两种后果。** 正文被截断时，`_call_llm_for_summary` 不看停止原因，直接当成摘要；正文为空时不算异常，也不留日志，连续两次就让路由熔断 5 分钟，这段时间该进程的压缩都退回原文截断。
+- **做法和 Hermes 自己的压缩器一样。** `native/context_compressor.py` 不传 `max_tokens`，注释写的就是这个原因。`install` 换掉 `_call_llm_for_summary`，不换 `agent.auxiliary_client`：`lcm_expand_query` 也用 `compression` 这个任务名，它的 `max_tokens` 是对调用方承诺的回答上限。
+- **不用另外拒收截断。** 不传上限时实际发的是模型上限（128000），"必须比原文短"的检查还在。
+- 回归在 `tests/test_lcm_summary_limit.py`。
+
 ## 2026-11-06：图片留在会话文件里，不再进缓存
 
 改动在 `host/images.py`、`host/context_engine.py`、`host/storage.py`，`vendor/`、`native/` 不变。
