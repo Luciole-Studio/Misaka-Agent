@@ -1003,6 +1003,7 @@ def test_a_node_s_window_reads_its_own_mail_and_leaves_the_card_notifications_to
                     and isinstance(n.func, ast.Name) and n.func.id == "role_session_setup")
         flags = {k.arg: k.value.value for k in call.keywords if isinstance(k.value, ast.Constant)}
         assert flags["receive_messages"] is True and flags["receive_notifications"] is False
+        assert any(keyword.arg == "node" for keyword in call.keywords)      # her rows name her node
     spec = SessionSpec(profile_dir="/p", role="last_order", workspace="/w", kind="foreground",
                        sender="last-order", receive_messages=True, receive_notifications=False)
     assert network.part(spec).receive_notifications is False

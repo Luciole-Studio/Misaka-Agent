@@ -309,7 +309,7 @@ async def node_session(con, cfg, run, node):
     flags, assembly, env = role_session_setup(
         os.path.join(cfg["roles_root"], "last_order"), run["workspace"],
         workflow_context=True, receive_messages=True, receive_notifications=False,
-        overrides=runs.session_overrides(run))
+        overrides=runs.session_overrides(run), node=node["id"])
     flags += ["--session-dir", directory]
     # A conversation recorded but never written -- the run failed before its first entry was
     # persisted -- is opened anew: asked for by name it raised FileNotFoundError on every resume,

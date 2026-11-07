@@ -34,6 +34,9 @@ def main(argv=None):
             return 0
         print(f"MISAKA LCM cache of {workspace} is in use; nothing was removed.")
         return 1
+    if args[:1] == ["repair"]:
+        from . import repair
+        return repair.run(apply="--apply" in args[1:])
     if args and args[0] in COMMANDS:
         module = importlib.import_module("misaka.extensions.misaka_lcm.vendor." + COMMANDS[args[0]])
         options = args[1:]

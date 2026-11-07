@@ -60,9 +60,14 @@ _REWRITES = {
         "Search every session loaded into this project's LCM cache -- Last Order's and her Sisters' -- "
         "by meaning.",
     # Hermes's sources are chat platforms; here a row's source is the session that wrote it.
+    "Optional raw-message role filter. When supplied, lcm_grep returns raw message hits only.":
+        "Optional raw-message role filter: `user` (the user, or a work order), `assistant`, `tool`, `system`, "
+        "`notice` (a system notice), or `agent:<name>` (mail from that agent: `agent:10032`, `agent:last-order`). "
+        "When supplied, lcm_grep returns raw message hits only.",
     "Optional source/platform filter (for example cli, discord, telegram).":
         "Optional filter by the session that wrote the rows, named by its exact address: `last-order`, a "
-        "Sister's name, `name@<card id>` for a card session, `name/<agent id>` for a sub-agent.",
+        "Sister's name, `name@<card id>` for a card session, `last-order@<node id>` for a research node's "
+        "Last Order, `name/<agent id>` for a sub-agent.",
     "Optional gateway conversation/session key filter for lane-scoped retrieval. Use this to restrict "
     "Discord searches to one channel/thread/forum topic lane when rows carry metadata.":
         "Optional conversation filter. A conversation is a session and the sessions continued from it "
@@ -266,8 +271,9 @@ def recall_guideline() -> str:
             "delivered, notes and findings on its card -- read those first; open its conversation only where a "
             "product is unclear or needs the context it came from: a conversation supplements its products, "
             "never replaces them. Every stored row names the session that wrote it in `source`: `last-order`, a "
-            "Sister's name, `name@<card id>` for a card session (`momo@t_3fa9c1`), `name/<agent id>` for a "
-            "sub-agent. `lcm_grep(query, session_scope=\"all\", source=...)` searches one of them -- the value "
+            "Sister's name, `name@<card id>` for a card session (`momo@t_3fa9c1`), `last-order@<node id>` for a "
+            "research node's Last Order, `name/<agent id>` for a sub-agent. A row's `role` says who spoke: `user` "
+            "is the user or a work order, `agent:<name>` is mail from that agent, `notice` a system notice. `lcm_grep(query, session_scope=\"all\", source=...)` searches one of them -- the value "
             "is exact, so take it from a hit or build it from a card -- and a hit's `session_id` opens that "
             "conversation with `lcm_load_session`.\n\n"
             + misaka_text(get_recall_policy().strip()))
@@ -277,9 +283,11 @@ def _parameters(schema: dict) -> dict:
     """Upstream's JSON Schema as it stands -- restating it as a pydantic model would be a second
     copy of the contract -- with each property's description in misaka's terms."""
     parameters = copy.deepcopy(schema.get("parameters") or {"type": "object", "properties": {}})
-    for spec in (parameters.get("properties") or {}).values():
+    for name, spec in (parameters.get("properties") or {}).items():
         if isinstance(spec, dict) and isinstance(spec.get("description"), str):
             spec["description"] = misaka_text(spec["description"])
+            if name == "role":
+                spec.pop("enum", None)      # `agent:<name>` is no closed list
     return parameters
 
 

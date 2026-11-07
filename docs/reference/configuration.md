@@ -335,7 +335,9 @@ kept in `~/.misaka/state/sessions/`; the search index is a cache in `<project>/.
 filled from the conversations as they open. It stays between runs, so finished work can still
 be found, and it grows with your conversations: `misaka lcm clear` removes it
 when no MISAKA process is using the project, and nothing is lost, since it is rebuilt from your
-conversations as they open again. Don't commit or sync it. A project on a drive that cannot keep that folder
+conversations as they open again. Don't commit or sync it. `misaka lcm repair` reports the
+older conversations whose summaries show up as things you typed, and `misaka lcm repair --apply`
+corrects them, keeping a copy of each file it changes in `~/.misaka/state/`. A project on a drive that cannot keep that folder
 private, such as a Windows drive opened from WSL, keeps it in
 `~/.misaka/state/plugins/misaka-lcm/projects/` instead.
 

@@ -344,8 +344,11 @@ def test_core_tool_schemas_unchanged_and_product_guidance(tmp_path):
     from misaka.extensions.misaka_lcm.vendor.engine import LCMEngine
     for schema in LCMEngine.get_tool_schemas():
         definition = tools._definition(schema, str(tmp_path))
-        # The contract is upstream's; only the prose is said in misaka's terms (2026-10-17).
-        assert _contract(definition.parameters) == _contract(schema["parameters"])
+        # The contract is upstream's; only the prose is said in misaka's terms (2026-10-17). One
+        # exception: `role` takes `agent:<name>`, which no closed list can hold (2026-11-07).
+        contract = _contract(schema["parameters"])
+        contract.get("properties", {}).get("role", {}).pop("enum", None)
+        assert _contract(definition.parameters) == contract
         for key, spec in schema["parameters"].get("properties", {}).items():
             if "description" in spec:
                 assert definition.parameters["properties"][key]["description"] == tools.misaka_text(spec["description"])

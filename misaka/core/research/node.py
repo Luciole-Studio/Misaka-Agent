@@ -475,7 +475,7 @@ def run_interactive(run_id, node_id, *, runner_key):
     # and leaves the card notifications to the root's window, which reads them for the run (B123).
     flags, assembly, env = role_session_setup(profile, run["workspace"], workflow_context=True,
                                               receive_messages=True, receive_notifications=False,
-                                              overrides=runs.session_overrides(run))
+                                              overrides=runs.session_overrides(run), node=node["id"])
     flags += ["--session-dir", planner._lo_session(run, node)]
     if node["session_file"] and os.path.exists(node["session_file"]):
         flags += ["--session", node["session_file"]]    # a resumed node goes on in its own conversation

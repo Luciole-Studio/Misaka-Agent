@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 # Upstream's summary labels, used for lineage fencing, not as proof of compaction.
 _SUMMARY_BLOCK = re.compile(r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]")
+_SHOWN_HINT = re.compile(r"\[Expand for details: ([^\n]*)\]\s*$")
 
 # Per-session locks serialize engine work; the registry serializes admission and
 # retirement. Weak locks disappear after their last owner/waiter releases them.
@@ -81,6 +82,7 @@ def engine(ctx=None):
 
             llm.install()
             images.install()
+            ingest.install()
             execution.install_worker_ownership()
             class NativeLCMEngine(LCMEngine):
                 def _bind_storage(self, *args, **kwargs):
@@ -497,6 +499,13 @@ def _archive_sources(built, transcript):
             {row: key for key, row in carry.sources(built, transcript).items()})
 
 
+def _hint(entry, record):
+    """The hint a restored node shows: the one its frame was drawn with, which the summarizer wrote.
+    A native compaction's record has no frame; its text also says the compaction was imported."""
+    shown = _SHOWN_HINT.search(record.get('frame') or '')
+    return shown.group(1) if shown else f"MISAKA session compaction {entry['id']} node {record['id']}"
+
+
 def _checkpoint_nodes(built, entry, transcript):
     """Resolve/import checkpoint lineage by SessionEntry IDs, not matching prose.
 
@@ -546,7 +555,7 @@ def _checkpoint_nodes(built, entry, transcript):
                                  or set(carry.source_ids(built, node)) != set(sources)):
             node = None
         if node is None:
-            hint = f"MISAKA session compaction {entry['id']} node {record['id']}"
+            hint = _hint(entry, record)
             node = next((node for node in built._dag.get_session_nodes(built.current_session_id, limit=-1)
                          if node.expand_hint == hint and node.summary == record['summary']
                          and node.depth == record['depth']
@@ -825,6 +834,7 @@ class Prepared:
     focus: str | None
     compress: bool
     replay_changed: bool
+    scaffolds: frozenset = frozenset()      # the replay rows the checkpoint named as its own summaries
 
 
 def _aligned(native, original_native):
@@ -875,6 +885,7 @@ def prepare(event, ctx, *, transcript=None):
     replay_changed = len(positions) != len(messages)
     replay = ingest.Replay(native)
     checkpoint = _checkpoint(transcript)
+    scaffolds = frozenset()
     if checkpoint is not None:
         metadata = ((checkpoint.get('details') or {}).get('lcm') or {}).get('nativeMetadata', {})
         if not isinstance(metadata, dict):
@@ -890,6 +901,8 @@ def prepare(event, ctx, *, transcript=None):
                 raise ValueError('Invalid native compression checkpoint metadata')
             if index in active_positions:
                 replay.messages[active_positions[index]].update(values)
+        scaffolds = frozenset(active_positions[index] for index in checkpoint.get('contextSummaries') or ()
+                              if index in active_positions)
     # Checkpoint rebinding changes generated content only. Keep the live source's
     # timestamp/tool metadata -- except a custom message's timestamp, which takes the
     # transcript's: persistence stamps a custom entry with its own receipt time, and a
@@ -943,7 +956,7 @@ def prepare(event, ctx, *, transcript=None):
     if not wants and replay.unchanged(messages) and not replay_changed:
         return None
     return Prepared(built, transcript, replay, messages, read_field(ctx, 'model'), int(tokens),
-                    reason, read_field(event, 'customInstructions'), wants, replay_changed)
+                    reason, read_field(event, 'customInstructions'), wants, replay_changed, scaffolds)
 
 
 def compact(prepared):
@@ -992,7 +1005,9 @@ def compact(prepared):
             metadata = {key: message[key] for key in ingest.NATIVE_METADATA if key in message}
             if metadata:
                 native_metadata[str(index)] = metadata
-            if ingest.SOURCE not in message:
+            # A summary the engine wrote this round has no source; one a checkpoint only carries
+            # over has, and was named by the checkpoint before it.
+            if ingest.SOURCE not in message or message[ingest.SOURCE] in prepared.scaffolds:
                 scaffolds.append(index)
             if message.get('_compressed_summary'):
                 from .native import fence_summary_content

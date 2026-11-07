@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from misaka.ai.utils.typebox_helpers import typeboxSchema
 from misaka.config import CFG, sisters
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.moments import SENDERS
 from misaka.utils.async_lifecycle import run_in_thread, settle, settle_thread_call
 
 logger = logging.getLogger(__name__)
@@ -1098,7 +1099,8 @@ class MessagesPart:
             # notices and nudges stay followUp elsewhere: they are for when the work stops.
             sending = self._hand_over(
                 {"customType": "agent-messages", "content": text,
-                 "display": True, "details": {"count": len(rows), "mail_ids": mail_ids}},
+                 "display": True, "details": {"count": len(rows), "mail_ids": mail_ids,
+                                              SENDERS: sorted({str(row["sender"]) for row in rows})}},
                 {"deliverAs": "steer", "triggerTurn": True,
                  "_deliveryId": delivery_id or "mail:" + ",".join(mail_ids),
                  "_onPersist": on_persist, "_onError": on_error})

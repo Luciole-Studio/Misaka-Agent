@@ -31,8 +31,8 @@ _IDENTITY: dict[Path, tuple | None] = {}
 _PRIVATE: dict[Path, bool] = {}
 _FIRST_OWNER: set[Path] = set()
 _MARKER = ".misaka-lcm-cache"
-_STAMP = "misaka-lcm 2\n"             # 2: images stay in the session file (`images`)
-_OUTDATED = ("misaka-lcm\n",)
+_STAMP = "misaka-lcm 3\n"             # 2: images stay in the session file (`images`); 3: rows say who spoke (`ingest.archive_role`)
+_OUTDATED = ("misaka-lcm\n", "misaka-lcm 2\n")
 # A subagent's copy of this plugin joins the project store of the session that started it: the
 # parent sets this for the child on ``subagent_start`` (see ``extension.register``).
 PROJECT_ENV = "MISAKA_LCM_PROJECT"

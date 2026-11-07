@@ -34,10 +34,13 @@ navigation aids, not exact evidence. Do not claim a memory was permanently saved
 
 Every stored row says who said it: its `source` is that session's address --
 `last-order`, a Sister's name, `name@<card id>` when she worked a card
-(`momo@t_3fa9c1`), `name/<agent id>` for a sub-agent. `lcm_grep(query,
-session_scope="all", source=...)` searches one of them (the value is exact: take
-it from a hit or build it from a card); a hit's `session_id` opens that
-conversation with `lcm_load_session`. One LCM result is at most 25k tokens: a
+(`momo@t_3fa9c1`), `last-order@<node id>` for a research node's Last Order,
+`name/<agent id>` for a sub-agent. `lcm_grep(query, session_scope="all",
+source=...)` searches one of them (the value is exact: take it from a hit or
+build it from a card); a hit's `session_id` opens that conversation with
+`lcm_load_session`. A row's `role` says who spoke in that session: `user` is the
+user or a work order, `agent:<name>` is mail from that agent (`lcm_grep(query,
+role="agent:10032")`), `notice` a system notice. One LCM result is at most 25k tokens: a
 larger transcript page comes back cut short with `has_more` and `next_cursor`,
 and any other oversized result asks for a smaller request.
 

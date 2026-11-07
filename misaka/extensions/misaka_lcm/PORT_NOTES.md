@@ -1,5 +1,21 @@
 # MISAKA LCM fork 契约
 
+## 2026-11-07：行说清是谁说的，检查点记住自己的摘要
+
+改动在 `host/`，外加 `core/moments.py`、`core/network/messages.py`、`core/wiring.py` 各一小处；`vendor/`、`native/` 不变。
+
+- **归档角色。** `convertToLlm` 把所有自定义消息变成 user 回合，对模型是对的，对上游是错的：摘要标签、自动焦点、保留任务目标、自动召回的查询词都把 user 行读成用户在提要求。真实会话里约 2,700 条通知和邮件对 1,041 条工作指令，一条待办提醒就成了摘要焦点。`ingest.archive_role` 在唯一入口改写：不是任务消息（`is_task_message`，即 `moments.TURN`）的，写成 `notice`；带 `moments.SENDERS` 的写成 `agent:<发信人>`。上游读不到 `user`，也就不用逐处改；`[{role.upper()}]` 的标签自己变成 `[NOTICE]`、`[AGENT:10032]`。
+- **角色只在归档里。** 发给模型的是 `Replay.restore` 还原的原始消息，带来源的行还原，不带来源的内部角色行在 `restore` 里报错，发不出去。`Replay` 和 `upstream_messages` 都走 `_rows`，所以两边角色一致。
+- **邮件不算任务。** 发信工具写明 "A message does not authorize new work"，邮件也按不可信内容处理，所以 Last Order 发给 Sister 的信是 `agent:last-order`，不升级成 `user`，否则不可信内容可能被保留成任务目标。
+- **旧邮件是 `notice`。** 2026-11-07 之前的邮件 details 里没有发信人。文字里的 `<from>` 还在，这里不解析。
+- **`lcm_grep` 的 `role` 参数是唯一和上游合约不同的地方。** `agent:<name>` 不是封闭列表，所以去掉 enum，`ingest.install` 放行这两种角色。多人同批的邮件角色里是逗号分隔的全部发信人，精确过滤查不到它们（真实 568 批里 23 批）。
+- **`source` 分得清节点了。** `SessionSpec.node` 让研究节点的 Last Order 写成 `last-order@<节点>`，和卡片的 `name@<card>` 同一形式。
+- **`expand_hint` 不再当查重键。** 恢复节点时提示取自检查点的 `frame`，也就是摘要器写的那句。过去这里写 `MISAKA session compaction ...` 同时用来再次找到节点，分叉自己压缩时就把这串文字画进了帧。pi 原生压缩的导入记录没有 `frame`，仍用这串文字，`_messages` 靠它判断是否已导入。
+- **检查点记住自己的摘要。** `contextSummaries` 过去按“这行没有来源”判断，这只对本轮刚写的摘要成立。只重放的检查点现在按位置带上上一个检查点的标记，做法和 `nativeMetadata` 相同。
+- **`misaka lcm repair` 修旧检查点。** 56 个重放检查点没有这个字段，摘要显示成用户消息（B30）。修复只用检查点自己记录的 `frame` 精确定位，不读文字猜，匹配不全的不动；默认只报告，`--apply` 才写，并把原文件复制到 `state/lcm-repair-<时间>/`，运行中的会话跳过。这个命令要手动运行。
+- **缓存格式升到 3。** 行的角色变了，旧缓存要重建。
+- 回归在 `tests/test_lcm_archive_roles.py`、`tests/test_lcm_fork_frames.py`。
+
 ## 2026-11-07：摘要不带输出上限
 
 改动在 `host/llm.py`，`vendor/`、`native/` 不变。

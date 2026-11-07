@@ -35,6 +35,9 @@ _OMITTED = "[{kind} omitted]"
 # ``tool_calls``, and reasoning does not travel at all (see the module docstring).
 _NOT_CONTENT = frozenset({"toolCall", "thinking"})
 
+NOTICE = "notice"
+AGENT = "agent"
+
 
 def is_task_message(message) -> bool:
     """Native task ingress, before logs and summaries become provider user turns: a user
@@ -48,6 +51,42 @@ def is_task_message(message) -> bool:
         details = read_field(message, 'details')
         return isinstance(details, dict) and details.get(TURN) is True
     return False
+
+
+def archive_role(message) -> str | None:
+    """Who a custom message is in the archive, or None for a role it keeps. ``convertToLlm`` makes
+    every custom message a user turn, which is right for the model and wrong for upstream, whose
+    summaries, focus and preserved objective read a user row as the user asking. Only a task
+    message is that (``is_task_message``): mail reads ``agent:<sender>``, anything else ``notice``.
+    The role lives in the archive only: ``Replay.restore`` gives the model the original."""
+    from misaka.core.moments import SENDERS
+
+    if read_field(message, 'role') != 'custom' and read_field(message, 'type') != 'custom_message':
+        return None
+    if is_task_message(message):
+        return None
+    details = read_field(message, 'details')
+    senders = details.get(SENDERS) if isinstance(details, dict) else None
+    return f"{AGENT}:{','.join(senders)}" if senders else NOTICE
+
+
+def is_archive_role(role) -> bool:
+    return role == NOTICE or str(role).startswith(AGENT + ":")
+
+
+def install() -> None:
+    """Let ``lcm_grep(role=...)`` ask for the roles ``archive_role`` writes."""
+    from ..vendor import tools
+    original = tools._parse_grep_role
+    if getattr(original, "misaka_archive_roles", False):
+        return
+
+    def parse(value):
+        role = str(value or "").strip()
+        return (role, None) if is_archive_role(role) else original(value)
+
+    parse.misaka_archive_roles = True
+    tools._parse_grep_role = parse
 
 
 def is_memory(message) -> bool:
@@ -135,11 +174,18 @@ def to_upstream(message) -> dict:
     return converted
 
 
+def _rows(message) -> list[dict]:
+    """One native message as upstream rows, under the role it has in the archive."""
+    role = archive_role(message)
+    rows = [to_upstream(converted) for converted in convertToLlm([message])]
+    return [{**row, "role": role} for row in rows] if role else rows
+
+
 def upstream_messages(messages) -> list[dict]:
     """A misaka active context (``buildSessionContext(...).messages``), converted; what its
     sender marked as not memory is left out, here and only here, so the live view, the
     session's originals and the replay alignment all agree on the same list."""
-    return [to_upstream(message) for message in convertToLlm([m for m in messages if is_memory(m)])]
+    return [row for message in messages if is_memory(message) for row in _rows(message)]
 
 
 
@@ -292,13 +338,10 @@ class Replay:
         for message in messages:
             if not is_memory(message):
                 continue                    # the same rule as upstream_messages, or the source ordinals drift
-            converted = convertToLlm([message])
-            if not converted:
-                continue
-            for converted_message in converted:
+            for row in _rows(message):
                 index = len(self.originals)
                 self.originals.append(copy.deepcopy(message))
-                self.messages.append({**to_upstream(converted_message), SOURCE: index})
+                self.messages.append({**row, SOURCE: index})
 
     def unchanged(self, messages):
         """Receipt-time jitter is lost on restore; all other fields must match.
@@ -348,6 +391,8 @@ class Replay:
                     restored.append(copy.deepcopy(self.originals[source]))
                     continue
             role = replay.get('role')
+            if before is not None and is_archive_role(role):
+                role = 'user'
             if role not in {'user', 'assistant', 'tool'}:
                 raise ValueError(f'Unsupported LCM replay role: {role}')
             original = self.originals[source] if before is not None else None

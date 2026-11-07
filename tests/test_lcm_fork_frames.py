@@ -59,7 +59,8 @@ def publish(ctx, reason):
     result = ce.compact(prepared)
     if result is not None:
         ctx.sessionManager.appendCompaction(result.summary, result.firstKeptEntryId, result.tokensBefore,
-                                            details=result.details, contextMessages=result.contextMessages)
+                                            details=result.details, contextMessages=result.contextMessages,
+                                            contextSummaries=result.contextSummaries)
     return result
 
 
@@ -209,6 +210,22 @@ def test_a_wipe_keeps_the_hint_the_summarizer_wrote(tmp_path, monkeypatch):
     assert any(record["frame"] in str(message.get("content")) for message in ce._messages(ce.snapshot(ctx), built))
 
 
+def test_a_fork_s_own_compaction_keeps_the_hint_the_summarizer_wrote(tmp_path, monkeypatch):
+    """The fork imports its parent's frontier as nodes of its own. Their hint used to double as the
+    key that found them again, and a compaction of the fork drew that key into the frames."""
+    ctx, _ = compacted(tmp_path, monkeypatch)
+    fork(ctx)
+    built = ce.bound_engine(ctx)
+    built._config.fresh_tail_count = 2
+    built._config.leaf_chunk_tokens = 40
+    for i in range(12):
+        say(ctx, f"BETA evidence {i} " + "material " * 50, tick=100 + i)
+    assert publish(ctx, "manual") is not None
+    frames = [node["frame"] for node in ce._checkpoint(ce.snapshot(ctx))["details"]["lcm"]["nodes"]]
+    assert len(frames) > 1
+    assert not any("MISAKA session compaction" in frame for frame in frames)
+
+
 def test_a_fork_and_its_parent_each_open_the_same_frame_after_a_wipe(tmp_path, monkeypatch):
     ctx, record = compacted(tmp_path, monkeypatch)
     fork(ctx)
@@ -240,6 +257,27 @@ def test_a_retried_turn_in_a_fork_does_not_lose_the_number_its_frame_shows(tmp_p
     assert "ALPHA evidence" in json.dumps(open_node(ctx, record["id"]))
     wipe(ctx)
     assert "ALPHA evidence" in json.dumps(open_node(ctx, record["id"]))
+
+
+def test_a_replay_update_still_names_the_summaries_it_carries(tmp_path, monkeypatch):
+    """A checkpoint that only replays keeps its summaries as rows with a source. Read as "the engine
+    did not write these", they came back on screen, and in the input history, as things the user
+    typed (B30): all 56 replay updates on this machine lost them."""
+    ctx, _ = compacted(tmp_path, monkeypatch)
+    named = ce._checkpoint(ce.snapshot(ctx))["contextSummaries"]
+    assert named
+    say(ctx, "next question", tick=50)
+    ctx.sessionManager.appendMessage({
+        "role": "assistant", "content": [{"type": "text", "text": "attempt that failed"}], "api": "a", "provider": "p",
+        "model": "m", "stopReason": "error", "timestamp": 1789460410051,
+        "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+                  "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}})
+    ce.sync(ctx)
+    live = ctx.sessionManager.buildSessionContext().messages[:-1]    # the native retry dropped the attempt
+    result = ce.compact(ce.prepare({"reason": "threshold", "messages": live}, ctx))
+    assert result is not None and result.summary == "LCM replay update"
+    assert result.contextSummaries == named
+    assert result.details["lcm"]["scaffolds"] == named
 
 
 def test_the_fence_reads_a_kept_frame_as_the_node_it_stands_for(tmp_path, monkeypatch):

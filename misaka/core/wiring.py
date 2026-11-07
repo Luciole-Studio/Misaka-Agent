@@ -62,6 +62,8 @@ class SessionSpec:
     # notifications to the root's window (B123).
     receive_notifications: bool | None = None
     task_id: str | None = None
+    # The workflow node whose Last Order this session is, for a session that works no card.
+    node: str | None = None
     tool_ceiling: tuple[str, ...] | None = None
     startup_skills: tuple[str, ...] = ()
     # Optional one-call catalog snapshot shared with a workflow's assignment validator.
@@ -247,7 +249,8 @@ def spec_overrides(overrides) -> tuple[tuple[str, Any], ...]:
 
 
 def role_session_setup(profile_dir, workspace, *, model=None, receive_messages=False,
-                       receive_notifications=None, workflow_context=False, startup_skills=(), overrides=None):
+                       receive_notifications=None, workflow_context=False, startup_skills=(), overrides=None,
+                       node=None):
     """One role session entry, independent of terminal, root/fork and lifetime.
 
     Callers add only their transport/session-selection flags. A workflow changes the
@@ -266,7 +269,8 @@ def role_session_setup(profile_dir, workspace, *, model=None, receive_messages=F
     assembly = assemble(SessionSpec(
         profile_dir=profile_dir, role=role, workspace=workspace, kind="foreground",
         sender=sender, mcp_role=sender, receive_messages=receive_messages,
-        receive_notifications=receive_notifications, workflow_context=workflow_context, startup_skills=tuple(startup_skills),
+        receive_notifications=receive_notifications, workflow_context=workflow_context, node=node,
+        startup_skills=tuple(startup_skills),
         overrides=spec_overrides(overrides)))
     from misaka.config import env as env_file
 

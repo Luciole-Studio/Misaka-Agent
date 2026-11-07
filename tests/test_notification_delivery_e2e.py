@@ -699,6 +699,9 @@ async def test_a_cancellation_never_ends_the_mail_inbox(tmp_path, monkeypatch, c
             assert not inbox._job.done()
             texts = [str(read_field(m, "content")) for m in s.messages if read_field(m, "customType") == "agent-messages"]
             assert sum("MAIL-ONE" in text for text in texts) == 1 and sum("MAIL-TWO" in text for text in texts) == 1
+            # Who wrote it travels with the message: LCM's archive says so (`ingest.archive_role`).
+            assert all(read_field(m, "details")["senders"] == ["10032"]
+                       for m in s.messages if read_field(m, "customType") == "agent-messages")
         finally:
             await inbox.session_shutdown(None, None)
 

@@ -40,6 +40,8 @@ MEMORY = "memory"   # False: a feed entry the model is never shown again (a stat
                     # keeps it out of what it archives and summarises.
 TURN = "turn"       # True: the message opens a turn the way a user prompt does (a work order); an
                     # engine that keys its per-turn work on ingress counts it as one.
+SENDERS = "senders" # The addresses a message from other agents came from (mail); an engine keeps
+                    # who said it, and that a message like this is not the user speaking.
 
 _MISSING = object()
 
