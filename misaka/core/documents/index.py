@@ -2395,7 +2395,8 @@ def search_literal(q, limit=10, doc_id=None, workspace=None):
 
     Matching follows ``normalize_for_quote_match``, so this agrees with ``verify_quote``: a search
     that reported "no matches" for a passage verification then confirmed used to send the model
-    away from material that was there. Snippets are cut from the raw page.
+    away from material that was there. Snippets are cut from the raw page. ``limit=None`` finds
+    every match.
     """
     needle = normalize_for_quote_match(q)
     if not needle:
@@ -2413,7 +2414,7 @@ def search_literal(q, limit=10, doc_id=None, workspace=None):
                     labels = page_labels(did, workspace=workspace)[0]
                 hits.append({"doc_id": did, "page": page, "printed": labels.get(page, ""),
                              "s": snip.replace("\n", " ")})
-                if len(hits) >= limit:
+                if limit is not None and len(hits) >= limit:
                     return hits
     return hits
 
