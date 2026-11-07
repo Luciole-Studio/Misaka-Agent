@@ -9,9 +9,9 @@ their locators) and from the ``## Sources`` lines and inline locators of the pro
 they close over references: a conclusion that cites a card's output also gets that card's
 sources; a final report that cites a node's conclusion gets that node's.
 
-The bundle is derived state -- rebuilt from scratch on every call, never registered as an
-artifact, never indexed -- so ``sources/`` belongs to this module and anything put there by hand
-is gone at the next rebuild. Runs written before the research graph are left alone.
+The bundle is derived state -- rebuilt on every call, never registered as an artifact, never
+indexed. A rebuild removes only what the last one placed, so a file saved under ``sources/`` by
+hand stays. Runs written before the research graph are left alone.
 """
 from __future__ import annotations
 
@@ -57,10 +57,11 @@ _LOCATOR = re.compile(
        r'''|(?<![\w:.\\/])[A-Za-z]:[\\/](?:[^\s`'"<>\[\]()/\\]+[\\/])+[^\s`'"<>\[\]()/\\]+'''
        if os.name == "nt" else "")
 )
-_NOTE = ("Written by misaka when the products here were settled and rebuilt from scratch each time, so edit "
-         "nothing in this file or under the sources folder. Each file there is a hard link to where it already "
+_NOTE = ("Written by misaka when the products here were settled and rebuilt each time, so edit nothing in this "
+         "file or in the files it lists under the sources folder. Each of those is a hard link to where it already "
          "lives in the project (a copy only where a hard link was not possible); the originals never move. "
          "Cite original project files, not this bundle's disposable sources paths.")
+_PLACED = re.compile(r"^- `(?P<placed>[^`]+)` ← `(?P<source>[^`]+)`")   # a "Cited sources" line of the manifest
 
 
 def _spellings(locator):
@@ -431,9 +432,22 @@ def _placed_name(relative, taken):
     return name
 
 
-def _reset(path, *, keep):
-    """Empty the sources folder we own (and only that: a symlink or a file there is somebody
-    else's), recreating it when there is something to put in it."""
+def placed_before(manifest, folder, workspace):
+    """What the last build placed under the sources folder, read from its manifest. A file whose
+    original has gone is the last copy, so it is left out."""
+    try:
+        with open(manifest, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except (OSError, UnicodeError):
+        return set()
+    return {os.path.normpath(os.path.join(folder, found["placed"]))
+            for found in filter(None, map(_PLACED.match, lines))
+            if os.path.exists(os.path.join(workspace, found["source"]))}
+
+
+def _reset(path, *, keep, placed):
+    """Remove from the sources folder what the last build ``placed`` (a symlink or a file at this
+    path is somebody else's), recreating the folder when there is something to put in it."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -441,9 +455,14 @@ def _reset(path, *, keep):
     if st is not None:
         if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
             raise ValueError(f"{path} is not a folder this bundle owns; refusing to rebuild it")
-        shutil.rmtree(path)
+        for base, _dirs, files in os.walk(path, topdown=False):
+            for name in files:
+                if os.path.normpath(os.path.join(base, name)) in placed:
+                    os.unlink(os.path.join(base, name))
+            with contextlib.suppress(OSError):      # a folder that still holds something stays
+                os.rmdir(base)
     if keep:
-        os.makedirs(path)
+        os.makedirs(path, exist_ok=True)
 
 
 def _build(collector, *, folder, manifest, sources_dir, title, products, cards=()):
@@ -452,10 +471,11 @@ def _build(collector, *, folder, manifest, sources_dir, title, products, cards=(
     if not corpus.under(folder, index.workspace) or not sources_dir.startswith(folder + os.sep):
         raise ValueError("A bundle is written only inside the research project.")
     inside = lambda real: real.startswith(folder + os.sep)
+    placed = placed_before(manifest, folder, index.workspace)
     valid = []
     for source in collector.sources.values():
         try:
-            if corpus.under(source.real, sources_dir):
+            if os.path.normpath(source.real) in placed:
                 raise ValueError("disposable bundle source; cite the original project file instead")
             source.digest = collector.checked_digest(source.real)
             valid.append(source)
@@ -463,8 +483,9 @@ def _build(collector, *, folder, manifest, sources_dir, title, products, cards=(
             collector.unresolved.append((source.relative, str(error), ""))
     to_place = sorted((s for s in valid if not inside(s.real)), key=lambda s: s.relative)
     in_folder = sorted((s for s in valid if inside(s.real)), key=lambda s: s.relative)
-    _reset(sources_dir, keep=bool(to_place))
-    taken = set()
+    _reset(sources_dir, keep=bool(to_place), placed=placed)
+    taken = {posix_relpath(os.path.join(base, name), sources_dir)   # a new link must not land on what stayed
+             for base, _dirs, files in os.walk(sources_dir) for name in files}
     for source in to_place:
         name = _placed_name(source.relative, taken)
         taken.add(name)

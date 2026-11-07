@@ -160,9 +160,17 @@ def doc_id(run, path):
 
 def index_run(con, run, node=None):
     """Every registered text product of the run, or of one ``node``, in the workspace corpus:
-    ``{path: doc_id}``."""
+    ``{path: doc_id}``. A file saved by hand under a card's ``sources/`` was offered to the corpus
+    when the card finished: it keeps the id it got, and a scan refused then is not read again."""
     rows = runs.artifacts(con, run["id"], branch_id=node["id"] if node is not None else None)
-    return {row["path"]: found for row in rows if (found := doc_id(run, row["path"])) is not None}
+
+    def indexed(row):
+        if not json.loads(row["metadata_json"] or "{}").get("saved_by_hand"):
+            return doc_id(run, row["path"])
+        known = row["sha256"][:12]
+        return known if corpus.resolve_doc(known, workspace=run["workspace"]) else None
+
+    return {row["path"]: found for row in rows if (found := indexed(row)) is not None}
 
 
 def _catalog(con, run, docs, focus=None):

@@ -782,8 +782,10 @@ def _register_task_artifacts(con, run, task, submitted):
     bundle (``SOURCES.md``, ``sources/``) is rebuilt at every settle, and a node-level file such
     as a coordination ledger is written by every card that shares it; freezing either failed
     whole runs (2026-09-24: 18 changed paths across 6 cards, one of them settle's own bundle).
-    A changed or missing file of the card's own raises ``ArtifactDrift`` after the whole list
-    is checked, and nothing of that card is registered under the stale declaration."""
+    A file saved under ``sources/`` by hand is the card's own and is registered, but only while it
+    still matches its digest: anything else there is skipped, never drift. A changed or missing
+    file of the card's own raises ``ArtifactDrift`` after the whole list is checked, and nothing
+    of that card is registered under the stale declaration."""
     link = con.execute("SELECT * FROM research_cards WHERE task_id=?", (task["id"],)).fetchone()
     if not link or not task["workspace"]:
         return
@@ -797,7 +799,15 @@ def _register_task_artifacts(con, run, task, submitted):
     # every layout file it declares is frozen, as before 2026-09-24.
     output_dir = dict(task).get("output_dir")
     own = Path(output_dir).resolve() if output_dir else None
+    placed = bundle.placed_before(str(own / bundle.MANIFEST), str(own), str(workspace)) if own else None
     accepted, drifted = [], []
+
+    def refuse(rel, derived):
+        if derived:
+            task_store.add_event(con, task["id"], "artifact_derived_skipped", {"path": str(rel)}, generation=generation)
+        else:
+            drifted.append(str(rel))
+
     for rel in submitted.get("artifacts") or []:
         source = Path(task["workspace"], str(rel)).resolve()
         try:
@@ -810,17 +820,18 @@ def _register_task_artifacts(con, run, task, submitted):
         if own is not None and not source.is_relative_to(own):
             task_store.add_event(con, task["id"], "artifact_outside_card", {"path": str(rel)}, generation=generation)
             continue
-        if DERIVED_BUNDLE_NAMES & set((source.relative_to(own) if own is not None else inside).parts):
-            task_store.add_event(con, task["id"], "artifact_derived_skipped", {"path": str(rel)}, generation=generation)
+        derived = bool(DERIVED_BUNDLE_NAMES & set((source.relative_to(own) if own is not None else inside).parts))
+        if derived and (placed is None or source.name == bundle.MANIFEST or str(source) in placed):
+            refuse(rel, derived)
             continue
         try:
             raw = source.read_bytes()
         except OSError:
-            drifted.append(str(rel))
+            refuse(rel, derived)
             continue
         digest = hashlib.sha256(raw).hexdigest()
         if digests.get(str(rel)) != digest:
-            drifted.append(str(rel))
+            refuse(rel, derived)
             continue
         try:
             raw.decode("utf-8")
@@ -829,15 +840,16 @@ def _register_task_artifacts(con, run, task, submitted):
             # Keep binary deliverables by identity. Document tools read their content;
             # registration neither decodes them as prose nor certifies any quotation.
             binary = True
-        accepted.append((rel, source, digest, binary))
+        accepted.append((rel, source, digest, binary, derived))
     if drifted:
         raise ArtifactDrift(task["id"], drifted)
     kind = ARTIFACT_KINDS.get(link["kind"], "task_output")
-    for rel, source, digest, binary in accepted:
+    for rel, source, digest, binary, saved_by_hand in accepted:
         runs.register_file(con, run["id"], kind, f"[{task['id']}] {source.name}",
                            str(source), sha256=digest,
                            branch_id=node["id"], task_id=task["id"],
-                           metadata={"source_file": str(rel), **({"binary": True} if binary else {})})
+                           metadata={"source_file": str(rel), **({"binary": True} if binary else {}),
+                                     **({"saved_by_hand": True} if saved_by_hand else {})})
 
 
 def _reopen_for_resubmission(con, task, generation):
