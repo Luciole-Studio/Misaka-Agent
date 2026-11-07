@@ -304,9 +304,12 @@ async def node_session(con, cfg, run, node):
     session_file = planner.lo_session_file(run, node)
     from misaka.core.wiring import role_session_setup
 
+    # Her Sisters write to her here as they do in a window (`node.run_interactive`, B123). The card
+    # notifications stay with the root's window, and the driver reads the cards itself.
     flags, assembly, env = role_session_setup(
         os.path.join(cfg["roles_root"], "last_order"), run["workspace"],
-        workflow_context=True, overrides=runs.session_overrides(run))
+        workflow_context=True, receive_messages=True, receive_notifications=False,
+        overrides=runs.session_overrides(run))
     flags += ["--session-dir", directory]
     # A conversation recorded but never written -- the run failed before its first entry was
     # persisted -- is opened anew: asked for by name it raised FileNotFoundError on every resume,

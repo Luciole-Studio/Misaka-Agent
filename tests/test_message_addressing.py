@@ -986,20 +986,23 @@ def test_last_order_inside_a_run_means_the_last_order_of_the_sender_s_own_node(w
 
 def test_a_node_s_window_reads_its_own_mail_and_leaves_the_card_notifications_to_the_root():
     """B123: the node window ran without a mailbox, so its Sisters could not reach her; reading
-    the workspace's card notifications as well would take them from the root's window."""
+    the workspace's card notifications as well would take them from the root's window. A Last
+    Order with no window is the same: without a mailbox, a card's message woke the contact
+    session, which is outside the run, in the home folder (2026-11-07)."""
     import ast
     import inspect
     import textwrap
 
     from misaka.core.network.wiring import network
-    from misaka.core.research import node
+    from misaka.core.research import node, window
     from misaka.core.wiring import SessionSpec
 
-    tree = ast.parse(textwrap.dedent(inspect.getsource(node.run_interactive)))
-    call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call)
-                and isinstance(n.func, ast.Name) and n.func.id == "role_session_setup")
-    flags = {k.arg: k.value.value for k in call.keywords if isinstance(k.value, ast.Constant)}
-    assert flags["receive_messages"] is True and flags["receive_notifications"] is False
+    for adapter in (node.run_interactive, window.node_session.__wrapped__):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(adapter)))
+        call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Name) and n.func.id == "role_session_setup")
+        flags = {k.arg: k.value.value for k in call.keywords if isinstance(k.value, ast.Constant)}
+        assert flags["receive_messages"] is True and flags["receive_notifications"] is False
     spec = SessionSpec(profile_dir="/p", role="last_order", workspace="/w", kind="foreground",
                        sender="last-order", receive_messages=True, receive_notifications=False)
     assert network.part(spec).receive_notifications is False
