@@ -19,7 +19,9 @@ What each section touches, and nothing else:
   least one Sister a research run has nobody to hand cards to.
 - skills: nothing; it shows the three skill layers and the optional catalog. The one skill a
   research install needs, ``coverage-maps``, ships with the coverage extension.
-- documents: the optional PDF outline extra and the office libraries, checked by import.
+- documents: the optional PDF outline extra and the office libraries, checked by import; what reads a
+  scan (``documents.ocr_engine``) and how hard MinerU reads (``documents.mineru_tier``) in the global
+  ``settings.json``, with MinerU installed by ``uv tool install`` when wanted.
 - web: the same complete settings menu as ``misaka web`` (search, extraction, browser, accounts and policy).
 - research: nothing; it explains the shape of a run and the approval gate, which is the one
   behaviour a first run meets without warning.
@@ -63,6 +65,13 @@ SECTIONS = ("environment", "model", "sisters", "skills", "documents", "web", "re
 # Ordered so the ones that sign in through a browser come first. A subscription is the path
 # that needs no API key at all. A ChatGPT subscription signs in to `openai` itself ("Sign in
 # with ChatGPT"); `openai-codex` is the legacy route to it and stays one menu further.
+SCAN_READERS = {"auto": "auto: MinerU where it is installed, ocrmypdf otherwise",
+                "mineru": "mineru: MinerU only",
+                "ocrmypdf": "ocrmypdf: ocrmypdf only"}
+MINERU_TIERS = {"advanced": "advanced: its strongest, handwriting too; about 12 to 19 s a page",
+                "standard": "standard: about as slow; read a Japanese manuscript best",
+                "basic": "basic: about a tenth of the time; handwriting and old Japanese much worse"}
+
 FEATURED_PROVIDERS = ("anthropic", "openai", "github-copilot", "xai", "openrouter",
                       "google", "mistral", "amazon-bedrock", "ollama")
 
@@ -513,10 +522,75 @@ class Wizard:
         ui.print_check(has_outline, "PDF outlines", "PageIndex" if has_outline else
                        "PyPDF2 or sortedcontainers missing, so PDFs have no outline: reinstall misaka "
                        "(they are dependencies)")
-        ocr = next((name for name in ("mineru-kit", "ocrmypdf") if shutil.which(name)), None)
-        ui.print_check(True if ocr else None, "OCR", f"{ocr} present" if ocr else
-                       f"scanned PDFs need MinerU or ocrmypdf: {_install_command('mineru-kit')}")
         self.state["office"], self.state["pageindex"] = office, has_outline
+        self._scans()
+
+    def _scans(self) -> None:
+        """What reads a scanned PDF or DjVu, and how hard. MinerU lives in a uv tool environment of
+        its own, so installing it here does not touch the one this wizard runs in. Its models are
+        offered right after an install only: ``models verify`` reports missing files on a home
+        that reads fine, and the first scan fetches what it needs anyway."""
+        from misaka.config.product import setting
+        from misaka.core.documents import mineru
+
+        ui.print_info("", "A scanned PDF or DjVu is read by OCR when it is indexed. MinerU reads vertical Chinese and",
+                      "Japanese, and handwriting on its strongest setting, where ocrmypdf reads most of them as noise.")
+        installed_now = False if shutil.which(mineru.BINARY) else self._install_mineru()
+        reader = shutil.which(mineru.BINARY)
+        off_path = installed_now and not reader
+        ui.print_check(False if off_path else True if reader else None, "MinerU", reader or (
+            "installed, not on PATH: see above, then run `misaka setup documents` again" if off_path
+            else f"not installed  →  {_install_command(mineru.BINARY)}"))
+        tesseract = find_tool("tesseract")
+        ui.print_check(True if tesseract else None, "tesseract", "stands sideways pages up for MinerU" if tesseract else
+                       f"without it MinerU reads sideways pages as they lie  →  {_install_command('tesseract')}")
+        engine = self._pick_setting("ocr_engine", "Read scans with", SCAN_READERS)
+        tier = setting("documents", "mineru_tier", mineru.ADVANCED, str)
+        if engine != "ocrmypdf":
+            tier = self._pick_setting("mineru_tier", "How hard MinerU reads", MINERU_TIERS)
+        if reader and installed_now and engine != "ocrmypdf" and prompt_yes_no(
+                "Fetch MinerU's models now (about 2 GB)? Otherwise the first scan fetches them", True):
+            self._run([reader, "models", "download", "--tier", "basic" if tier == mineru.BASIC else "standard"])
+        uses_mineru = engine == "mineru" or (engine == "auto" and reader)
+        if off_path and engine != "ocrmypdf":
+            self.state["scans"], self.state["scans_ok"] = "MinerU installed, not on PATH: `uv tool update-shell`", False
+        elif uses_mineru:
+            self.state["scans"], self.state["scans_ok"] = ((f"MinerU, {tier}", True) if reader else
+                                                           ("MinerU chosen but not installed", False))
+        else:
+            ocrmypdf = shutil.which("ocrmypdf")
+            self.state["scans"] = "ocrmypdf" if ocrmypdf else "nothing installed reads them"
+            self.state["scans_ok"] = True if ocrmypdf else None
+
+    def _install_mineru(self) -> bool:
+        uv = find_tool("uv")
+        if not uv:
+            ui.print_info("MinerU installs with uv, which this machine does not have:", "  uv tool install mineru")
+            return False
+        if not prompt_yes_no("Install MinerU now? (uv tool install mineru, about 1.2 GB)", True):
+            return False
+        if not self._run([uv, "tool", "install", "mineru"]):
+            return False
+        from misaka.core.documents import mineru
+        if not shutil.which(mineru.BINARY):
+            where = subprocess.run([uv, "tool", "dir", "--bin"], capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", check=False).stdout.strip()
+            ui.print_warning(f"{mineru.BINARY} is in {where or 'uv tool dir --bin'}, which is not on PATH, so MISAKA "
+                             "would not find it. Run `uv tool update-shell` and open a new terminal.")
+        return True
+
+    @staticmethod
+    def _pick_setting(key: str, question: str, labels: dict[str, str]) -> str:
+        """One ``documents`` knob from a menu that opens on its current value; only a change is written."""
+        from misaka.config.product import setting
+        from misaka.core.settings_manager import SettingsManager
+
+        keys = list(labels)
+        current = setting("documents", key, keys[0], str)
+        chosen = keys[prompt_choice(question, list(labels.values()), keys.index(current) if current in keys else 0)]
+        if chosen != current:
+            SettingsManager.create(os.getcwd()).updateSection("documents", lambda section: section.__setitem__(key, chosen))
+        return chosen
 
     # -- 6. web -------------------------------------------------------------------------------
 
@@ -646,6 +720,8 @@ class Wizard:
             present = find_tool(binary) is not None
             ui.print_check(present, binary, "" if present else _install_command(binary))
         ui.print_check(state.get("pageindex", None), "PDF outlines", "" if state.get("pageindex") else "missing: reinstall misaka")
+        ui.print_check(state.get("scans_ok"), "scanned documents",
+                       state.get("scans") or "not checked: `misaka setup documents`")
         ui.print_check(None, "web tools", str(state.get("web") or "not checked: misaka web status"))
         ui.print_check(None, "skills", "coverage-maps built in; more: `misaka skills optional-list`")
         ui.print_check(True if state.get("openalex") else None, "literature scan",
@@ -719,20 +795,21 @@ class Wizard:
                           "start MISAKA again (signing in below works without it):", f"  {shlex.join(command)}")
             self.state["sdk"] = shlex.join(command)
             return
-        if not prompt_yes_no("Install it now?", True):
+        if not prompt_yes_no("Install it now?", True) or not self._run(command):
             self.state["sdk"] = shlex.join(command)
-            return
+
+    @staticmethod
+    def _run(command: list[str]) -> bool:
+        """Run ``command`` in this terminal, its output shown as it goes; whether it worked."""
         ui.print_info(color_dim(shlex.join(command)))
         try:
             result = subprocess.run(command, check=False)
         except OSError as error:
             ui.print_error(f"{command[0]} could not start: {error}")
-            self.state["sdk"] = shlex.join(command)
-            return
+            return False
         (ui.print_success if result.returncode == 0 else ui.print_error)(
-            "installed" if result.returncode == 0 else f"{command[0]} exited with {result.returncode}")
-        if result.returncode != 0:
-            self.state["sdk"] = shlex.join(command)
+            "done" if result.returncode == 0 else f"{command[0]} exited with {result.returncode}")
+        return result.returncode == 0
 
 
 def color_dim(text: str) -> str:

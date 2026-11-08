@@ -61,7 +61,7 @@ is an unrelated project.
 
 Each GitHub release also has a prebuilt archive for those architectures. The archive includes
 uv, git, ripgrep (`rg`), fd and poppler (`pdftotext`); running `misaka` puts them on `PATH` for
-that process. ocrmypdf, DjVuLibre and LibreOffice stay optional and are not in the archive.
+that process. MinerU, ocrmypdf, DjVuLibre and LibreOffice stay optional and are not in the archive.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Luciole-Studio/Misaka-Agent/main/scripts/install.sh | sh
