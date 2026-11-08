@@ -36,6 +36,7 @@ def makeConfig(**overrides: Any) -> SettingsConfig:
         "autoResizeImages": True,
         "blockImages": False,
         "enableSkillCommands": True,
+        "codemode": {"lastOrder": False, "sisters": False, "subagents": True},
         "steeringMode": "one-at-a-time",
         "followUpMode": "one-at-a-time",
         "transport": "sse",

@@ -107,7 +107,7 @@ from misaka.core.session_manager import (
     session_entry_to_display_messages,
     sessions_root_of,
 )
-from misaka.core.settings_manager import MermaidRenderingMode
+from misaka.core.settings_manager import ROLE_TYPES, MermaidRenderingMode
 from misaka.core.slash_commands import (
     _LOCAL_ALIAS_SLASH_COMMANDS,
     BUILTIN_SLASH_COMMANDS,
@@ -5072,6 +5072,8 @@ class InteractiveMode:
                     autoResizeImages=self.settingsManager.getImageAutoResize(),
                     blockImages=self.settingsManager.getBlockImages(),
                     enableSkillCommands=self.settingsManager.getEnableSkillCommands(),
+                    # MISAKA fork: the codemode switch of each kind of agent (`roles.<kind>.codemode`).
+                    codemode={roleType: self.settingsManager.getRoleCodemode(roleType) for roleType in ROLE_TYPES},
                     steeringMode=self.session.steeringMode,
                     followUpMode=self.session.followUpMode,
                     transport=self.settingsManager.getTransport(),
@@ -5110,6 +5112,7 @@ class InteractiveMode:
                     onAutoResizeImagesChange=lambda enabled: self.settingsManager.setImageAutoResize(enabled),
                     onBlockImagesChange=lambda blocked: self.settingsManager.setBlockImages(blocked),
                     onEnableSkillCommandsChange=onEnableSkillCommandsChange,
+                    onCodemodeChange=lambda roleType, enabled: self.settingsManager.setRoleCodemode(roleType, enabled),
                     onSteeringModeChange=lambda mode: self.session.setSteeringMode(mode),
                     onFollowUpModeChange=lambda mode: self.session.setFollowUpMode(mode),
                     onTransportChange=onTransportChange,

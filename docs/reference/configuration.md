@@ -272,7 +272,21 @@ Each role keeps her sign-ins in her own folder, in `credentials/mcp-auth.json`. 
 
 With the `codemode` tool the model writes a JavaScript script that calls the other tools, so it can
 run calls in parallel and filter large results before it reads them. MCP tools reach the model this
-way by default. The tool is off until something names it: `defaultTools` (`["+codemode"]`) or an MCP server with `codemode` exposure.
+way by default. Whether a new session starts with the tool depends on the kind of agent, and each kind
+has a switch of its own in the home's `settings.json`; the three **Codemode** rows in `/settings` write them:
+
+| Setting | Unset | Sessions it covers |
+|---|---|---|
+| `roles.lastOrder.codemode` | as `defaultTools` says (off) | Last Order's: her window, research windows, the reader, her contact sessions |
+| `roles.sisters.codemode` | as `defaultTools` says (off) | every Sister's: her window, her cards, her contact sessions |
+| `roles.subagents.codemode` | on | sub-agents without a tool list of their own, which start with every tool |
+
+A switch that is set wins over `defaultTools` for its kind. A sub-agent whose definition lists its tools
+gets that list, and a fork keeps its parent's tools. A switch is for new sessions: the window you change
+it in keeps its tools, and a resumed session keeps the tools its transcript recorded. An MCP server with
+`codemode` exposure turns the tool on whatever the switch says
+(`autoEnableCodemode`), since its tools are reached no other way.
+
 Scripts run in a QuickJS sandbox with no
 file system, network or timers; they call tools through `tools.<name>(args)`. The reference the
 model reads is shipped with MISAKA as `codemode.md`.

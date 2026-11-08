@@ -81,6 +81,39 @@ def _requested_tool_names(flags: list[str]) -> list[str]:
     return names
 
 
+def inherited_tool_names(session: Any, *, card: bool, fork: bool) -> list[str]:
+    """Every registered tool, for a child without a tool list of its own -- MISAKA fork: but codemode only as the
+    session's kind has it (`roles.<kind>.codemode`).
+
+    A card is a Sister's session: her role is bound, and her settings already decided codemode for the tools the
+    session started with. A sub-agent is bound to no role, so it asks for the sub-agents' switch. Either way an
+    MCP server reached through codemode, which turned it on as the session started, keeps it on, as pi's MCP
+    extension wants. A fork keeps its parent's tools exactly, codemode with them: they are its prompt cache. And a
+    resumed child keeps codemode when its transcript declared it: the switch is for new sessions, and taking a
+    declared tool back sends a `tool_removal`, which sub2api refuses once a request has more than five tools.
+    """
+    from misaka.ai.utils.transcript import getCurrentTools
+    from misaka.core.settings_manager import CODEMODE_TOOL, DEFAULT_TOOL_NAMES
+
+    names = [tool.name for tool in session.getAllTools()]
+    if fork or CODEMODE_TOOL not in names:
+        return names
+    started = CODEMODE_TOOL in session.getActiveToolNames()
+    declared = any(
+        read_field(tool, "name") == CODEMODE_TOOL
+        for tool in getCurrentTools([read_field(entry, "message") for entry in session.sessionManager.getBranch()
+                                     if read_field(entry, "type") == "message"])
+    )
+    if card or declared:
+        keep = started or declared
+    else:
+        settings = session.settingsManager
+        configured = settings.getDefaultTools()
+        byMcp = started and CODEMODE_TOOL not in (DEFAULT_TOOL_NAMES if configured is None else configured)
+        keep = settings.getRoleCodemode("subagents") or byMcp
+    return names if keep else [name for name in names if name != CODEMODE_TOOL]
+
+
 def _hook_tools(kind: str, tools: list[Any]) -> list[Any]:
     """Prompt hooks are tool-free; agent hooks cannot spawn descendants."""
 
@@ -505,7 +538,7 @@ async def amain() -> int:
     if os.environ.get("MISAKA_SUBAGENT_INHERIT_ALL_TOOLS") == "1":
         # No frontmatter allow/deny list means Claude's complete independently
         # assembled worker pool, not harn's four-tool interactive default.
-        session.setActiveToolsByName([tool.name for tool in session.getAllTools()])
+        session.setActiveToolsByName(inherited_tool_names(session, card=bool(card), fork=fork_snapshot is not None))
 
     async def evaluate_model_hook(
         kind: str,

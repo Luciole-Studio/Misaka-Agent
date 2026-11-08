@@ -93,6 +93,22 @@ Sister 各有一档：
   （pi 的全局写不会在这里失败）。设置面板的推理强度项也走这条路。
 - `tests/test_role_thinking_level.py` 钉住以上行为。
 
+## 每类 agent 各自的 codemode 开关：和 pi 的有意分叉（2026-11-08，对齐 pi 时**不要**带回来）
+
+pi 只有一类会话，codemode 靠手写 `defaultTools`（`+codemode`）打开。misaka 有三类 agent，各有一个开关，
+写在全局 `settings.json` 的 `roles.lastOrder` / `roles.sisters` / `roles.subagents` 的 `codemode` 里：
+
+- `settings_manager.getDefaultTools` 在绑定了角色的会话里（`bindRole`：Last Order 或某位 Sister）把该类的
+  开关作为 `+codemode`/`-codemode` 叠在 pi 的 `defaultTools` 之上；开关没写就完全照 pi。新会话与 `/reload`
+  因此照 pi 读 `defaultTools` 的老路跟着走，`sdk.py` 不改。
+- 子代理不绑定角色：`subagent/child.py` 在"没有工具清单就启用全部工具"那一步调 `inherited_tool_names`，
+  按 `roles.subagents.codemode` 去留 codemode；无界面卡片走同一步，按她启动时的工具（即 Sister 的开关）去留；
+  fork 照抄父会话的工具（缓存要求）；MCP 打开的 codemode 一律保留（pi 的 `autoEnableCodemode`）；续上的子代理
+  会话记录里已声明的 codemode 也保留（拿掉就是线上的 `tool_removal`）。
+- 开关只管新会话：`/settings` 的三行只写设置，不动当前会话的工具表（中途移除工具会发 `tool_removal`，
+  sub2api 在工具多于 5 个时报 400）。
+- `tests/test_codemode_setting.py` 钉住以上行为。
+
 ## misaka 新增
 
 ### 顶层文件

@@ -6,6 +6,9 @@ MISAKA forks:
   ported: MISAKA has only the regular renderer.
 - (D11) No system theme: where upstream lists or falls back to it, MISAKA uses the built-in theme matching the
   terminal.
+- Three "Codemode" rows (after "Skill commands"), one for each kind of agent -- Last Order, the Sisters, sub-agents
+  -- set whether its new sessions start with the codemode tool (`roles.<kind>.codemode`). Upstream has one kind of
+  session, no row, and enables codemode by editing `defaultTools`.
 """
 
 from __future__ import annotations
@@ -72,6 +75,13 @@ THINKING_DESCRIPTIONS: dict[ThinkingLevel, str] = {
     "max": "Maximum reasoning",
 }
 
+# MISAKA fork: the codemode rows, one for each kind of agent (`settings_manager.ROLE_TYPES`): label and description.
+CODEMODE_ROWS: dict[str, tuple[str, str]] = {
+    "lastOrder": ("Last Order", "Let Last Order's new sessions run scripts that call the other tools"),
+    "sisters": ("Sisters", "Let new Sister sessions (windows and cards) run scripts that call the other tools"),
+    "subagents": ("Sub-agents", "Let new sub-agents without a tool list of their own run scripts that call the other tools"),
+}
+
 DEFAULT_PROJECT_TRUST_LABELS: dict[DefaultProjectTrust, str] = {
     "ask": "Ask",
     "always": "Always trust",
@@ -94,6 +104,7 @@ class SettingsConfig:
     autoResizeImages: bool
     blockImages: bool
     enableSkillCommands: bool
+    codemode: dict[str, bool]           # MISAKA fork: by kind of agent (`ROLE_TYPES`)
     steeringMode: SteeringMode
     followUpMode: SteeringMode
     transport: Transport
@@ -132,6 +143,7 @@ class SettingsCallbacks:
     onAutoResizeImagesChange: Callable[[bool], None]
     onBlockImagesChange: Callable[[bool], None]
     onEnableSkillCommandsChange: Callable[[bool], None]
+    onCodemodeChange: Callable[[str, bool], None]  # MISAKA fork: (kind of agent, enabled)
     onSteeringModeChange: Callable[[SteeringMode], None]
     onFollowUpModeChange: Callable[[SteeringMode], None]
     onTransportChange: Callable[[Transport], None]
@@ -846,10 +858,24 @@ class SettingsSelectorComponent(Container):
             ),
         )
 
-        # Hardware cursor toggle (insert after skill-commands)
-        skillCommandsIndex = indexOf("skill-commands")
+        # MISAKA fork: a codemode toggle for each kind of agent (insert after skill-commands)
+        codemodeIndex = indexOf("skill-commands")
+        for roleType, (label, description) in CODEMODE_ROWS.items():
+            codemodeIndex += 1
+            items.insert(
+                codemodeIndex,
+                SettingItem(
+                    id=f"codemode-{roleType}",
+                    label=f"Codemode: {label}",
+                    description=description,
+                    currentValue="true" if config.codemode.get(roleType) else "false",
+                    values=["true", "false"],
+                ),
+            )
+
+        # Hardware cursor toggle (insert after the codemode rows)
         items.insert(
-            skillCommandsIndex + 1,
+            codemodeIndex + 1,
             SettingItem(
                 id="show-hardware-cursor",
                 label="Show hardware cursor",
@@ -943,6 +969,8 @@ class SettingsSelectorComponent(Container):
                     callbacks.onBlockImagesChange(newValue == "true")
                 case "skill-commands":
                     callbacks.onEnableSkillCommandsChange(newValue == "true")
+                case _ if id.startswith("codemode-"):
+                    callbacks.onCodemodeChange(id.removeprefix("codemode-"), newValue == "true")
                 case "steering-mode":
                     callbacks.onSteeringModeChange(value)
                 case "follow-up-mode":
@@ -1009,6 +1037,7 @@ class SettingsSelectorComponent(Container):
 
 
 __all__ = [
+    "CODEMODE_ROWS",
     "SettingsCallbacks",
     "SettingsConfig",
     "SettingsSelectorComponent",

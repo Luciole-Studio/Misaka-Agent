@@ -534,6 +534,42 @@
       ],
       "description": "WebSocket connect or open handshake timeout in milliseconds; 0 or \"disabled\" disables it."
     },
+    "roles": {
+      "type": "object",
+      "properties": {
+        "lastOrder": {
+          "type": "object",
+          "properties": {
+            "codemode": {
+              "type": "boolean",
+              "description": "Whether its new sessions start with the codemode tool. Unset: Last Order and the Sisters follow defaultTools, and sub-agents start with every tool, codemode among them. MCP servers reached through codemode still turn it on."
+            }
+          },
+          "description": "Last Order: her window, research windows, the reader and her contact sessions."
+        },
+        "sisters": {
+          "type": "object",
+          "properties": {
+            "codemode": {
+              "type": "boolean",
+              "description": "Whether its new sessions start with the codemode tool. Unset: Last Order and the Sisters follow defaultTools, and sub-agents start with every tool, codemode among them. MCP servers reached through codemode still turn it on."
+            }
+          },
+          "description": "Every Sister: her window, her cards and her contact sessions."
+        },
+        "subagents": {
+          "type": "object",
+          "properties": {
+            "codemode": {
+              "type": "boolean",
+              "description": "Whether its new sessions start with the codemode tool. Unset: Last Order and the Sisters follow defaultTools, and sub-agents start with every tool, codemode among them. MCP servers reached through codemode still turn it on."
+            }
+          },
+          "description": "Sub-agents a Sister starts without a tool list of their own; forks keep their parent's tools."
+        }
+      },
+      "description": "Settings for each kind of agent: Last Order, the Sisters (their windows and cards), and sub-agents."
+    },
     "web": {
       "type": "object",
       "additionalProperties": true,

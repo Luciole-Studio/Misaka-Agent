@@ -418,7 +418,31 @@ class _SubagentWorktreeSchema(TypeBoxObject):
     )
 
 
+# MISAKA fork: what each kind of agent starts with. pi has one kind of session, and `defaultTools` for all of it.
+class _RoleTypeSettingsSchema(TypeBoxObject):
+    """What new sessions of one kind of agent start with."""
+
+    codemode: bool | None = _optional(
+        "Whether its new sessions start with the codemode tool. Unset: Last Order and the Sisters follow "
+        "defaultTools, and sub-agents start with every tool, codemode among them. MCP servers reached through "
+        "codemode still turn it on."
+    )
+
+
+class _RolesSettingsSchema(TypeBoxObject):
+    """Settings for each kind of agent: Last Order, the Sisters (their windows and cards), and sub-agents."""
+
+    lastOrder: _RoleTypeSettingsSchema | None = _optional(
+        "Last Order: her window, research windows, the reader and her contact sessions."
+    )
+    sisters: _RoleTypeSettingsSchema | None = _optional("Every Sister: her window, her cards and her contact sessions.")
+    subagents: _RoleTypeSettingsSchema | None = _optional(
+        "Sub-agents a Sister starts without a tool list of their own; forks keep their parent's tools."
+    )
+
+
 _misakaSections: dict[str, Any] = {
+    "roles": (_RolesSettingsSchema | None, Field(default=None)),
     "web": (
         dict[str, Any] | None,
         _optional(

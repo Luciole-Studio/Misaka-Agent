@@ -77,6 +77,11 @@ type SettingsScope = Literal["global", "role", "project"]
 # its own scope; every other key is the user's, shared by every role, and stays global. This
 # table is what keeps Last Order's and a Sister's configuration apart -- not per-key special cases.
 ROLE_SETTING_KEYS = frozenset({"defaultProvider", "defaultModel", "defaultThinkingLevel", "web"})
+# MISAKA fork: the kinds of agent the `roles` section sets switches for. Last Order and the Sisters are told apart
+# by the role a session is bound to; a sub-agent is bound to none, and its runner asks for "subagents".
+type RoleType = Literal["lastOrder", "sisters", "subagents"]
+ROLE_TYPES: tuple[RoleType, ...] = ("lastOrder", "sisters", "subagents")
+CODEMODE_TOOL = "codemode"
 
 
 class SettingsManagerOptions(TypedDict, total=False):
@@ -910,14 +915,70 @@ class SettingsManager:
     def setFollowUpMode(self, mode: str) -> None:
         self._set_global_value("followUpMode", mode)
 
-    def getDefaultTools(self) -> list[str] | None:
-        """The resolved `defaultTools` selection, or None when no settings layer sets it."""
+    def _configuredDefaultTools(self) -> list[str] | None:
+        """pi's `getDefaultTools`: the resolved `defaultTools` selection, or None when no settings layer sets it."""
         tools = self.settings.get("defaultTools")
         if tools is None:
             return None
         return resolveDefaultTools(
             [tool for tool in tools if isinstance(tool, str)] if isinstance(tools, list) else []
         )
+
+    def getDefaultTools(self) -> list[str] | None:
+        """The resolved `defaultTools` selection, or None when no settings layer sets it. MISAKA fork: a session
+        bound to a role also takes its kind's codemode switch (`roles.<kind>.codemode`) when one is set, so its
+        new sessions and `/reload` follow it as they follow `defaultTools`."""
+        configured = self._configuredDefaultTools()
+        roleType = self.getRoleType()
+        codemode = self._roleSwitch(roleType, "codemode") if roleType is not None else None
+        if codemode is None:
+            return configured
+        return applyToolModifiers(
+            DEFAULT_TOOL_NAMES if configured is None else configured, [f"{'+' if codemode else '-'}{CODEMODE_TOOL}"]
+        )
+
+    # ── MISAKA fork: the kinds of agent (`roles`) ──────────────────────────────────────────
+
+    def getRoleType(self) -> RoleType | None:
+        """Which kind of agent this manager's bound role is -- Last Order or a Sister -- or None for a session
+        without a role (a sub-agent, a bare engine)."""
+        roleDir = self._role_dir()
+        if roleDir is None:
+            return None
+        from misaka.config import profiles
+
+        return "lastOrder" if profiles.is_last_order(roleDir) else "sisters"
+
+    def _roleSwitch(self, roleType: RoleType, key: str) -> bool | None:
+        if roleType not in ROLE_TYPES:
+            raise ValueError(f"Unknown kind of agent: {roleType!r}")
+        entry = self._settings_object("roles").get(roleType)
+        value = entry.get(key) if isinstance(entry, dict) else None
+        return value if isinstance(value, bool) else None
+
+    def getRoleCodemode(self, roleType: RoleType) -> bool:
+        """Whether new sessions of `roleType` start with the codemode tool: `roles.<kind>.codemode` when it is set,
+        otherwise what they do without it -- Last Order and the Sisters follow `defaultTools`, and sub-agents
+        start with every tool."""
+        explicit = self._roleSwitch(roleType, "codemode")
+        if explicit is not None:
+            return explicit
+        if roleType == "subagents":
+            return True
+        configured = self._configuredDefaultTools()
+        return CODEMODE_TOOL in (DEFAULT_TOOL_NAMES if configured is None else configured)
+
+    def setRoleCodemode(self, roleType: RoleType, enabled: bool) -> None:
+        """Set `roles.<kind>.codemode` in the home's settings.json, for every new session of that kind."""
+        if roleType not in ROLE_TYPES:
+            raise ValueError(f"Unknown kind of agent: {roleType!r}")
+        roles = self._ensure_global_nested("roles")
+        entry = roles.get(roleType)
+        if not isinstance(entry, dict):
+            entry = roles[roleType] = {}
+        entry["codemode"] = enabled
+        self.markModified("roles", roleType)
+        self.save()
 
     def getThemeSetting(self) -> str | None:
         value = self.settings.get("theme")
@@ -1393,8 +1454,10 @@ class SettingsManager:
 
 __all__ = [
     "CACHE_WARMING_MODES",
+    "CODEMODE_TOOL",
     "DEFAULT_TOOL_NAMES",
     "ROLE_SETTING_KEYS",
+    "ROLE_TYPES",
     "BranchSummarySettings",
     "CacheWarmingMode",
     "CodemodeMode",
@@ -1410,6 +1473,7 @@ __all__ = [
     "ProviderRetrySettings",
     "QuietStartup",
     "RetrySettings",
+    "RoleType",
     "SessionShareDestination",
     "Settings",
     "SettingsError",
