@@ -607,7 +607,10 @@ def createRuntimeFactory(
             if cachedProjectTrust is not None
             else parsed.projectTrustOverride
             if parsed.projectTrustOverride is not None
-            else (not hasTrustRequiringResources or trustStore.get(cwd) is True)
+            # pi v1.5.0 (#10947): a saved decision before auto-trust.
+            else savedProjectTrust
+            if (savedProjectTrust := trustStore.get(cwd)) is not None
+            else not hasTrustRequiringResources
         )
         runtimeSettingsManager = SettingsManager.create(cwd, agentDir, {"projectTrusted": projectTrusted})
 

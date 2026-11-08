@@ -1,4 +1,5 @@
-"""Translated from pi's ``packages/coding-agent/src/core/trust-manager.ts`` (v1.1.0).
+"""Translated from pi's ``packages/coding-agent/src/core/trust-manager.ts`` (v1.1.0); trust file keys and the $HOME
+check compare paths with ``pathsEqual`` as in v1.5.0.
 
 MISAKA forks:
 - What needs trust is what MISAKA loads from a project: its MISAKA home's settings, MCP servers, prompts and themes,
@@ -21,7 +22,7 @@ from typing import TypedDict
 from filelock import FileLock, Timeout
 
 from misaka.config import home
-from misaka.utils.paths import canonicalizePath, homedir, resolvePath
+from misaka.utils.paths import canonicalizePath, homedir, pathsEqual, resolvePath
 from misaka.utils.text import stripBom
 
 type ProjectTrustDecision = bool | None
@@ -57,12 +58,18 @@ def normalizeCwd(cwd: str) -> str:
     return canonicalizePath(resolvePath(cwd))
 
 
+def findTrustFileKeys(data: TrustFile, path: str) -> list[str]:
+    """Trust file keys naming `path`. Usually one; several on Windows when saved with different casing."""
+    return [key for key in data if pathsEqual(key, path)]
+
+
 def findNearestTrustEntry(data: TrustFile, cwd: str) -> ProjectTrustStoreEntry | None:
     currentDir = normalizeCwd(cwd)
     while True:
-        value = data.get(currentDir)
-        if value is True or value is False:
-            return ProjectTrustStoreEntry(path=currentDir, decision=value)
+        for key in findTrustFileKeys(data, currentDir):
+            value = data[key]
+            if value is True or value is False:
+                return ProjectTrustStoreEntry(path=key, decision=value)
 
         parentDir = os.path.dirname(currentDir)
         if parentDir == currentDir:
@@ -199,7 +206,9 @@ def hasTrustRequiringProjectResources(cwd: str) -> bool:
         if configDir is not None and (configDir / home.SUBAGENTS_DIR).is_dir():
             return True
 
-        if (currentDir / ".git").exists() or currentDir == homeDir or currentDir.parent == currentDir:
+        # `pathsEqual`, as upstream (v1.5.0) compares its walk with the user's own directory: on Windows `c:\Users\me`
+        # is the same $HOME as `C:\Users\me`.
+        if (currentDir / ".git").exists() or pathsEqual(str(currentDir), str(homeDir)) or currentDir.parent == currentDir:
             return False
         currentDir = currentDir.parent
 
@@ -230,9 +239,9 @@ class ProjectTrustStore:
             data = readTrustFile(self.trustPath)
             for update in decisions:
                 key = normalizeCwd(update.path)
-                if update.decision is None:
-                    data.pop(key, None)
-                else:
+                for existingKey in findTrustFileKeys(data, key):
+                    del data[existingKey]
+                if update.decision is not None:
                     data[key] = update.decision
             writeTrustFile(self.trustPath, data)
 

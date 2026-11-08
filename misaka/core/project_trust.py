@@ -69,7 +69,9 @@ async def resolveProjectTrusted(options: ResolveProjectTrustedOptions) -> bool:
     if options.get("trustOverride") is not None:
         return options["trustOverride"]
     if not hasTrustRequiringProjectResources(options["cwd"]):
-        return True
+        # pi v1.5.0 (#10947): a saved decision wins; auto-trust applies only when none is saved.
+        saved = options["trustStore"].get(options["cwd"])
+        return saved if saved is not None else True
 
     if options.get("extensionsResult"):
         from misaka.core.extensions.runner import emitProjectTrustEvent
