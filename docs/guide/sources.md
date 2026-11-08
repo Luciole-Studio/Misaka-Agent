@@ -96,6 +96,10 @@ What joins the index by itself:
 - a card's deliverables and the files it cites, once the card is accepted as done;
 - a research node's texts when the node closes.
 
+From a card's folder that means what stands directly in it or under `sources/` and `reports/`,
+and PDF, DjVu, EPUB and Office files anywhere in it. Other text in its subfolders stays out; index
+one such file with `doc_add` if it should be found.
+
 Pages saved by the web tools (under `downloads/pages/`) stay files and are not indexed.
 
 ## Office files

@@ -140,6 +140,11 @@ def test_a_workflow_card_without_a_contract_file_is_still_told(board):
         board.con, run["id"], t, kind="red_team", node=runs.root(board.con, run["id"]), local_id="a"))
     assert "Deliverable location" in worker.card_prompt(dict(tasks.get(board.con, tid)))
 
+def test_the_card_is_told_where_a_reading_report_goes(board):
+    _tid, row = card(board)
+    prompt = worker.card_prompt(row)
+    assert "`reports/`" in prompt and "`sources/`" in prompt
+
 def test_a_malformed_contract_is_still_told_where_to_write(board):
     _tid, row = card(board, BODY + "\n## deliverable\n`other.md`\n")
     assert "Deliverable location" in worker.card_prompt(row)

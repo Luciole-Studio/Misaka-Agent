@@ -11,6 +11,7 @@ it never judges or rewrites research prose.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -19,6 +20,7 @@ import time
 from pathlib import Path
 
 from misaka.core.documents import index as corpus
+from misaka.core.documents import workspace as ws_index
 from misaka.core.platform import prompt_guard
 from misaka.core.platform import tasks as task_store
 from misaka.core.research import bundle, commands, planner, runs, views
@@ -161,11 +163,22 @@ def doc_id(run, path):
 def index_run(con, run, node=None):
     """Every registered text product of the run, or of one ``node``, in the workspace corpus:
     ``{path: doc_id}``. A file saved by hand under a card's ``sources/`` was offered to the corpus
-    when the card finished: it keeps the id it got, and a scan refused then is not read again."""
+    when the card finished: it keeps the id it got, and a scan refused then is not read again. A
+    card's working files stay out here as they did then, unless the card indexed one itself."""
     rows = runs.artifacts(con, run["id"], branch_id=node["id"] if node is not None else None)
 
+    @functools.cache
+    def card(task_id):
+        return task_store.get(con, task_id)
+
+    def offered(row):
+        if json.loads(row["metadata_json"] or "{}").get("saved_by_hand"):
+            return False
+        task = card(row["task_id"]) if row["task_id"] else None
+        return task is None or ws_index.belongs_in_corpus(task, row["path"])
+
     def indexed(row):
-        if not json.loads(row["metadata_json"] or "{}").get("saved_by_hand"):
+        if offered(row):
             return doc_id(run, row["path"])
         known = row["sha256"][:12]
         return known if corpus.resolve_doc(known, workspace=run["workspace"]) else None

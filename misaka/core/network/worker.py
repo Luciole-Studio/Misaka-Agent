@@ -376,7 +376,10 @@ def card_prompt(task):
     if (output_dir := task.get("output_dir")) and _delivers_there(task):
         body += (
             "\n\n## Deliverable location\n"
-            f"Write every new deliverable under `{output_dir}`. Files there are recorded automatically."
+            f"Write every new deliverable under `{output_dir}`. Files there are recorded automatically.\n"
+            "The project's searchable documents take what stands directly in that folder or under its "
+            "`sources/` and `reports/`, and PDF, DjVu, EPUB and Office files anywhere in it. Put a transcription "
+            "or reading report others should find under `reports/`, and working files in any other folder."
         )
     if failure := task.get("last_failure_error"):
         body += (
