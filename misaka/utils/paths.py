@@ -1,4 +1,5 @@
-"""Translated from pi's ``packages/coding-agent/src/utils/paths.ts`` (v1.1.0).
+"""Translated from pi's ``packages/coding-agent/src/utils/paths.ts`` (v1.1.0); ``getPathComparisonKey``,
+``pathsEqual``, ``isPathWithin`` and ``shortenHomePath`` from v1.5.0.
 
 MISAKA forks:
 - ``getFileRevision`` is a tuple, compared as pi compares its string, and on Windows it uses the creation time where
@@ -11,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import TypedDict
 from urllib.parse import unquote, urlsplit
@@ -43,6 +45,50 @@ def canonicalizePath(path: str) -> str:
         return os.path.realpath(path, strict=True)
     except OSError:
         return path
+
+
+def getPathComparisonKey(path: str) -> str:
+    """Key for comparing filesystem paths: the resolved absolute path, case-folded
+    on Windows because Windows paths are case-insensitive (`c:\\Users` and
+    `C:\\Users` are the same directory). NTFS can enable per-directory case
+    sensitivity, but it is rarely used outside WSL interop, so it is ignored
+    here (https://learn.microsoft.com/en-us/windows/wsl/case-sensitivity).
+    Does not touch the filesystem; call `canonicalizePath` first when symlinks
+    should compare equal to their targets."""
+    pathApi = _getPlatformPathApi()
+    resolvedPath = pathApi.resolve(path)
+    return resolvedPath.lower() if pathApi is node_path.win32 else resolvedPath
+
+
+def _getPlatformPathApi():
+    """`node:path` rules for the current platform, read at call time so tests can simulate Windows."""
+    return node_path.win32 if sys.platform == "win32" else node_path.posix
+
+
+def pathsEqual(left: str, right: str) -> bool:
+    """True when both paths name the same location (see `getPathComparisonKey`)."""
+    return getPathComparisonKey(left) == getPathComparisonKey(right)
+
+
+def isPathWithin(parent: str, child: str) -> bool:
+    """True when `child` is `parent` or inside it (see `getPathComparisonKey`)."""
+    parentKey = getPathComparisonKey(parent)
+    childKey = getPathComparisonKey(child)
+    if childKey == parentKey:
+        return True
+    # Filesystem roots (`/`, `C:\`) already end with a separator.
+    pathSep = _getPlatformPathApi().sep
+    return childKey.startswith(parentKey if parentKey.endswith(pathSep) else f"{parentKey}{pathSep}")
+
+
+def shortenHomePath(path: str, homeDir: str | None = None) -> str:
+    """Replace a leading home directory with `~` for display. Relative paths are returned unchanged."""
+    homeDir = homedir() if homeDir is None else homeDir
+    pathApi = _getPlatformPathApi()
+    if not homeDir or not pathApi.isAbsolute(path) or not isPathWithin(homeDir, path):
+        return path
+    relativePath = pathApi.relative(homeDir, path)
+    return f"~{pathApi.sep}{relativePath}" if relativePath else "~"
 
 
 def getFileRevision(path: str) -> tuple[int, int, int, int, int] | None:
@@ -208,9 +254,13 @@ __all__ = [
     "formatPathRelativeToCwdOrAbsolute",
     "getCwdRelativePath",
     "getFileRevision",
+    "getPathComparisonKey",
     "isLocalPath",
+    "isPathWithin",
     "markPathIgnoredByCloudSync",
     "normalizePath",
+    "pathsEqual",
     "posix_relpath",
     "resolvePath",
+    "shortenHomePath",
 ]

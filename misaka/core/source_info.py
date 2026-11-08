@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
 
+from misaka.utils.paths import canonicalizePath, getPathComparisonKey
+
 if TYPE_CHECKING:
     from misaka.core.package_manager import PathMetadata
 
@@ -46,6 +48,12 @@ def isSyntheticPath(path: str) -> bool:
     return path.startswith((BUILTIN_PATH_PREFIX, "<"))
 
 
+def getResourcePathKey(path: str) -> str:
+    """Key for deduplicating resource paths: synthetic paths as-is, file paths via realpath and platform casing.
+    (pi v1.5.0 ``source-info.ts``.)"""
+    return path if isSyntheticPath(path) else getPathComparisonKey(canonicalizePath(path))
+
+
 def createSourceInfo(path: str, metadata: PathMetadata) -> SourceInfo:
     return SourceInfo(
         path=path,
@@ -76,6 +84,7 @@ __all__ = [
     "SourceOrigin",
     "SourceScope",
     "createSyntheticSourceInfo",
+    "getResourcePathKey",
     "getSyntheticPathSource",
     "isSyntheticPath",
 ]

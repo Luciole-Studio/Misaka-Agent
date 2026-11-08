@@ -170,9 +170,10 @@ runs in sub-agents, so a top-level session cannot use it.
 `defaultTools` takes a list of tool names, which replaces the default set, or a list of only
 `+name` and `-name` entries, which changes it: `["+codemode", "-ls"]` adds `codemode` and drops
 `ls`. A file later in the [layers](#which-file-wins) with a list of only `+`/`-` entries changes the
-selection the earlier files made; a list with a plain name replaces it. `--tools` takes the same two
-forms for one run; a list of names there is also every tool that run may use. `/reload` activates
-tools a changed `defaultTools` newly adds; a tool it removes stays on until the next session.
+selection the earlier files made; a list with a plain name replaces it. MISAKA's commands set each
+session's engine options themselves and take no `--tools`, so `defaultTools` is how you change the
+tools sessions start with. `/reload` activates tools a changed `defaultTools` newly adds; a tool it
+removes stays on until the next session.
 
 Every extension MISAKA ships is a built-in extension, on by default:
 
@@ -188,10 +189,17 @@ Every extension MISAKA ships is a built-in extension, on by default:
 
 `-builtin:<name>` in the home's `extensions` setting turns one off, for example
 `"extensions": ["-builtin:llama.cpp"]`; a trusted project's own `extensions` setting may turn it
-back on with `+builtin:<name>` or off for that project only. `-e builtin:<name>` loads one for a
-single run even when the setting turns it off, and `--no-extensions` leaves them all out. Turning
+back on with `+builtin:<name>` or off for that project only. Turning
 one off takes it out of sessions; its terminal command (`misaka mcp`, `misaka lcm`, `misaka read`)
 still works. A skill an extension brings is named after it, such as `builtin:coverage:coverage_maps`.
+
+`misaka config` writes these entries for you. It lists the built-in extensions and the extensions,
+prompts and themes found in the home and in the settings; space turns the selected one on or off in
+the home's `settings.json`. In a trusted project, Tab (or `misaka config -l`) switches to the
+project's `.misaka/settings.json`, where space cycles through inherit, `+` and `-`; `-a` trusts the
+project for that one command, `-na` ignores its files. Skills are not listed: `misaka skills` and
+`skills.disabled` manage them. Project extensions are not listed either, because a project's files
+never load Python code by themselves.
 
 ## Skills and MCP
 
@@ -280,7 +288,7 @@ The `tool_search` tool lets the model find tools that are not declared to it up 
 ones it needs for its next request. MCP servers with `deferred` exposure reach the model this way,
 and `tool_search` is turned on for them. Otherwise it is off
 until something names it:
-`defaultTools` (`["+tool_search"]`) or `--tools`. It searches the names and descriptions of the
+`defaultTools` (`["+tool_search"]`). It searches the names and descriptions of the
 deferred tools; a tool it loads is then called like any other.
 
 ## Documents and the web

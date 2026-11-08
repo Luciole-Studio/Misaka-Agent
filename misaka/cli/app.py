@@ -199,6 +199,9 @@ def _parser(extension_commands=None):
     # "auth"` before argparse runs, because auth has its own Pi-compatible grammar.
     ac = sub.add_parser("auth", help="Check or print provider credentials")
     ac.add_argument("auth_args", nargs=argparse.REMAINDER)
+    # Like auth: listed here, dispatched by `main` before argparse runs, with pi's `config` grammar.
+    cf = sub.add_parser("config", help="Enable or disable extensions, prompts and themes (-l: this project)")
+    cf.add_argument("config_args", nargs=argparse.REMAINDER)
     for name, command in (extension_commands or {}).items():
         sub.add_parser(name, help=(command.__doc__ or "").strip().split("\n")[0]).add_argument(
             "args", nargs=argparse.REMAINDER)
@@ -962,7 +965,7 @@ def main(argv=None):
     home.ensure()
     configure_logging()      # warnings go to the log file, never to a TUI's screen (B6)
     env_file.load()          # the home's .env: environment for code that is not MISAKA
-    if argv and argv[0] not in COMMANDS and argv[0] != "auth" and not argv[0].startswith("-"):
+    if argv and argv[0] not in COMMANDS and argv[0] not in ("auth", "config") and not argv[0].startswith("-"):
         # A command a bundled extension offers runs here, before the project layout exists: it
         # decides for itself what it creates (a dry run or read-only operator creates nothing).
         from misaka import extensions
@@ -1008,6 +1011,13 @@ def main(argv=None):
         from misaka.cli.engine import runAuthCommand
 
         raise SystemExit(asyncio.run(runAuthCommand(argv)))
+    if argv[0] == "config":
+        # pi's `config` grammar (`-l`, `-a`, `-na`), parsed by the command itself as upstream does.
+        import asyncio
+
+        from misaka.cli.package_manager import handleConfigCommand
+
+        raise SystemExit(asyncio.run(handleConfigCommand(argv)))
     if argv[0] in ("-h", "--help"):
         from misaka import extensions
         _parser(extensions.commands()).parse_args(argv)

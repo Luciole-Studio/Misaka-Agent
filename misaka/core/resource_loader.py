@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, TypedDict
 
-from misaka.config import home
+from misaka.config import APP_NAME, home
 from misaka.core.diagnostics import ResourceCollision, ResourceDiagnostic
 from misaka.core.event_bus import createEventBus
 from misaka.core.extensions.loader import (
@@ -125,15 +125,13 @@ def omitReplacedExtensions(
             builtinName = extension.path[len(BUILTIN_PATH_PREFIX):]
             kind, rawName = replacement[0].split(":")[:2]
             registeredName = f"/{rawName}" if kind == "command" else f"--{rawName}" if kind == "flag" else rawName
-            # MISAKA fork: misaka has no `pi config` screen; built-in extensions are enabled in the
-            # `extensions` setting.
             warnings.append({
                 "path": extension.path,
                 "warning": (
                     f"Extension {replacement[1].path} registers {kind} `{registeredName}`, so built-in extension "
-                    f"`{builtinName}` was not loaded. To use `{builtinName}`, make sure the `extensions` setting "
-                    f"does not disable it (`-{BUILTIN_PATH_PREFIX}{builtinName}`), then disable or remove the "
-                    "existing extension. We recommend only having one or the other loaded at a time."
+                    f"`{builtinName}` was not loaded. To use `{builtinName}`, run `{APP_NAME} config` and make sure "
+                    "it is enabled under Built-in extensions, then disable or remove the existing extension. We "
+                    "recommend only having one or the other loaded at a time."
                 ),
             })
     return kept

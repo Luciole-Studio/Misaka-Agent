@@ -1200,6 +1200,13 @@ class SettingsManager:
     def setExtensionPaths(self, paths: list[str]) -> None:
         self._set_global_value("extensions", paths)
 
+    def setProjectExtensionPaths(self, paths: list[str]) -> None:
+        self._assertProjectTrustedForWrite()
+        project_settings = copy.deepcopy(self.projectSettings)
+        project_settings["extensions"] = paths
+        self.markProjectModified("extensions")
+        self.saveProjectSettings(project_settings)
+
     def getPromptTemplatePaths(self) -> list[str]:
         return list(self.settings.get("prompts") or [])
 

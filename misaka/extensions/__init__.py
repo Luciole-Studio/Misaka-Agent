@@ -64,6 +64,16 @@ def discover(spec) -> list[dict[str, Any]]:
     return out
 
 
+def builtin_names() -> list[str]:
+    """The names every built-in extension goes by in the `extensions` setting (`builtin:<name>`), whatever role or
+    session kind loads it. `misaka config` lists these where pi lists the CLI's built-in extension factories."""
+    return [
+        getattr(mod, "EXTENSION_NAME", mod.__name__.rsplit(".", 1)[-1])
+        for mod in _modules()
+        if getattr(mod, "BUILTIN", False)
+    ]
+
+
 def commands() -> dict[str, Any]:
     """The top-level commands bundled extensions offer: ``{COMMAND: command}``. Every bundled
     module is imported to look, so the process entry asks only for a name that is not its own."""
@@ -75,4 +85,4 @@ def commands() -> dict[str, Any]:
     return found
 
 
-__all__ = ["commands", "discover"]
+__all__ = ["builtin_names", "commands", "discover"]

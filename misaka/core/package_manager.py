@@ -17,10 +17,9 @@ from wcmatch import glob as wc_glob
 
 from misaka.config import home
 from misaka.core.settings_manager import SettingsManager
-from misaka.core.source_info import BUILTIN_PATH_PREFIX, SourceScope
+from misaka.core.source_info import BUILTIN_PATH_PREFIX, SourceScope, getResourcePathKey
 from misaka.utils.node_fs import readdirEntries
 from misaka.utils.paths import (
-    canonicalizePath,
     homedir,
     isLocalPath,
     normalizePath,
@@ -722,10 +721,10 @@ class DefaultPackageManager:
             seen: set[str] = set()
             deduped: list[ResolvedResource] = []
             for entry in resolved:
-                canonical = canonicalizePath(entry.path)
-                if canonical in seen:
+                pathKey = getResourcePathKey(entry.path)
+                if pathKey in seen:
                     continue
-                seen.add(canonical)
+                seen.add(pathKey)
                 deduped.append(entry)
             return deduped
 
