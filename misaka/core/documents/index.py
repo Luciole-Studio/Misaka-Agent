@@ -2026,13 +2026,24 @@ def _fsync_stage(stage):
             os.close(fd)
 
 
-def _meta_lock(ddir):
-    """One lock per document for meta.json read-modify-write: two ingests of the same content
-    (two cards, two panes) must not lose each other's task or path link."""
+def _doc_lock(ddir, suffix):
     from filelock import FileLock
     locks = os.path.join(os.path.dirname(ddir), ".locks")
     os.makedirs(locks, exist_ok=True)
-    return FileLock(os.path.join(locks, os.path.basename(ddir) + ".lock"))
+    return FileLock(os.path.join(locks, os.path.basename(ddir) + suffix))
+
+
+def _meta_lock(ddir):
+    """One lock per document for meta.json read-modify-write: two ingests of the same content
+    (two cards, two panes) must not lose each other's task or path link."""
+    return _doc_lock(ddir, ".lock")
+
+
+def _reading_lock(ddir):
+    """One lock per content for the whole of an ingest: two cards handing in the same book both
+    found it missing and both paid for its OCR, to keep one result. The second now waits and finds
+    the document there. Different content never shares this lock, so it never waits."""
+    return _doc_lock(ddir, ".reading.lock")
 
 
 def _link(ddir, p, task_id):
@@ -2066,8 +2077,14 @@ def ingest(p, title=None, with_tree=True, task_id=None, workspace=None):
         raise ValueError("Document source resolves outside the workspace.")
     _extractor(p)          # refuse an unreadable format before hashing, and before extracting
     sha = sha256_file(p)
-    doc_id = sha[:12]
-    ddir = os.path.join(corpus_root(workspace), doc_id)
+    ddir = os.path.join(corpus_root(workspace), sha[:12])
+    with _reading_lock(ddir):
+        return _index(p, sha, ddir, title, with_tree, task_id, workspace)
+
+
+def _index(p, sha, ddir, title, with_tree, task_id, workspace):
+    """``ingest`` past the hash, under the lock that lets one caller at a time index this content."""
+    doc_id = os.path.basename(ddir)
     existing = resolve_doc(doc_id, workspace=workspace)
     if existing:
         if (_read_meta_at(existing) or {}).get("sha256") != sha:
