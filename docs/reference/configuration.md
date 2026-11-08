@@ -287,7 +287,9 @@ deferred tools; a tool it loads is then called like any other.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `documents.ocr_langs` | `eng+chi_sim+jpn` | languages for reading scanned PDFs, joined with `+` (needs `ocrmypdf` and each language's data) |
+| `documents.ocr_engine` | `auto` | what reads scans: `mineru`, `ocrmypdf`, or `auto` for MinerU where it is installed and `ocrmypdf` otherwise. A program named here is never swapped for the other |
+| `documents.mineru_tier` | `advanced` | how MinerU reads: `advanced` is its strongest and also reads handwriting it takes for a picture, at about 12 to 19 seconds a page on an Apple M4; `standard` is about as slow; `basic` takes about a tenth of the time |
+| `documents.ocr_langs` | `eng+chi_sim+jpn` | languages `ocrmypdf` reads, joined with `+` (each needs its language data); MinerU needs none |
 | `web.*` | search works with no setup | set with `misaka web`; see [Documents and the web](../guide/sources.md#the-web) |
 | `web.allow_private_urls` | `false` | let web tools reach private and loopback addresses; cloud metadata addresses stay blocked |
 

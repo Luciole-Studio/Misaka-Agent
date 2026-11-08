@@ -70,17 +70,20 @@ FEATURED_PROVIDERS = ("anthropic", "openai", "github-copilot", "xai", "openroute
 def _install_command(binary: str) -> str:
     """The package manager line for a missing binary on this OS."""
     brew = {"git": "xcode-select --install", "rg": "brew install ripgrep", "fd": "brew install fd",
-            "pdftotext": "brew install poppler", "ocrmypdf": "brew install ocrmypdf tesseract-lang"}
+            "pdftotext": "brew install poppler", "ocrmypdf": "brew install ocrmypdf tesseract-lang",
+            "tesseract": "brew install tesseract"}
     apt = {"git": "sudo apt install git", "rg": "sudo apt install ripgrep", "fd": "sudo apt install fd-find",
            "pdftotext": "sudo apt install poppler-utils",
            # The chi_sim and jpn packs: documents.ocr_langs defaults to eng+chi_sim+jpn.
-           "ocrmypdf": "sudo apt install ocrmypdf tesseract-ocr-chi-sim tesseract-ocr-jpn"}
+           "ocrmypdf": "sudo apt install ocrmypdf tesseract-ocr-chi-sim tesseract-ocr-jpn",
+           "tesseract": "sudo apt install tesseract-ocr"}
     # OCRmyPDF has no Windows package: it needs Tesseract and Ghostscript first, then pip.
     winget = {"git": "winget install Git.Git", "rg": "winget install BurntSushi.ripgrep.MSVC",
               "fd": "winget install sharkdp.fd", "pdftotext": "winget install oschwartz10612.Poppler",
-              "ocrmypdf": "see https://ocrmypdf.readthedocs.io/en/latest/installation.html#installing-on-windows"}
+              "ocrmypdf": "see https://ocrmypdf.readthedocs.io/en/latest/installation.html#installing-on-windows",
+              "tesseract": "winget install UB-Mannheim.TesseractOCR"}
     table = brew if sys.platform == "darwin" else winget if sys.platform == "win32" else apt
-    return table.get(binary, f"install {binary}")
+    return {**table, "mineru-kit": "uv tool install mineru"}.get(binary, f"install {binary}")
 
 
 class Wizard:
@@ -96,7 +99,9 @@ class Wizard:
         required = {"git": "projects are git repositories; /commit records results once you confirm",
                     "rg": "the grep tool (ripgrep)", "fd": "the find tool",
                     "pdftotext": "reads the text of PDFs (poppler)"}
-        optional = {"ocrmypdf": "scanned PDFs (OCR); only needed for image-only documents"}
+        optional = {"mineru-kit": "scanned PDFs (OCR), vertical Chinese, Japanese and handwriting above all; fetches its models on first use",
+                    "ocrmypdf": "scanned PDFs (OCR); only needed for image-only documents",
+                    "tesseract": "lets MinerU read scanned pages lying on their side"}
         missing = []
         for binary, purpose in required.items():
             present = find_tool(binary) is not None
@@ -508,9 +513,9 @@ class Wizard:
         ui.print_check(has_outline, "PDF outlines", "PageIndex" if has_outline else
                        "PyPDF2 or sortedcontainers missing, so PDFs have no outline: reinstall misaka "
                        "(they are dependencies)")
-        ocr = shutil.which("ocrmypdf") is not None
-        ui.print_check(True if ocr else None, "OCR", "ocrmypdf present" if ocr else
-                       f"scanned PDFs need ocrmypdf: {_install_command('ocrmypdf')}")
+        ocr = next((name for name in ("mineru-kit", "ocrmypdf") if shutil.which(name)), None)
+        ui.print_check(True if ocr else None, "OCR", f"{ocr} present" if ocr else
+                       f"scanned PDFs need MinerU or ocrmypdf: {_install_command('mineru-kit')}")
         self.state["office"], self.state["pageindex"] = office, has_outline
 
     # -- 6. web -------------------------------------------------------------------------------

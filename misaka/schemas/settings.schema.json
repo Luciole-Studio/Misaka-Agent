@@ -672,9 +672,27 @@
     "documents": {
       "type": "object",
       "properties": {
+        "mineru_tier": {
+          "type": "string",
+          "enum": [
+            "advanced",
+            "standard",
+            "basic"
+          ],
+          "description": "How MinerU reads: \"advanced\" is its strongest and also reads handwriting it takes for a picture; \"standard\" is about as slow; \"basic\" takes about a tenth of the time. Default: advanced."
+        },
+        "ocr_engine": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "mineru",
+            "ocrmypdf"
+          ],
+          "description": "What reads scans: \"mineru\", \"ocrmypdf\", or \"auto\" for MinerU where it is installed. Default: auto."
+        },
         "ocr_langs": {
           "type": "string",
-          "description": "Languages for reading scanned PDFs, joined with \"+\". Default: eng+chi_sim+jpn."
+          "description": "Languages ocrmypdf reads, joined with \"+\". MinerU needs none. Default: eng+chi_sim+jpn."
         }
       },
       "description": "Document reading."

@@ -332,8 +332,8 @@ async def _index_in_corpus(path: str, workspace: str) -> tuple[str, str | None]:
         # by one: on the event loop that is the whole session held still for minutes.
         doc_id, pages = await run_in_thread(corpus.ingest, path, workspace=workspace)
     except Exception as error:  # noqa: BLE001 - the file is downloaded, verified and kept; indexing is the step after, and its failures may damage nothing but themselves
-        # ValueError is ingest's documented refusal (a scanned PDF with no text layer), and
-        # its text is exactly the instruction the model needs -- OCR it, then doc_add. Any
+        # ValueError is ingest's documented refusal (a scan no OCR could read, or with no OCR
+        # program installed), and its text says which. Any
         # other failure is reported the same way rather than swallowed: the file is on disk
         # either way, and a download that succeeded must not be reported as one that failed.
         reason = str(error) or type(error).__name__  # some OSErrors carry no message at all

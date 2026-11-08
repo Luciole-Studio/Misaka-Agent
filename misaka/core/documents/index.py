@@ -19,7 +19,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 import zipfile
 
-from misaka.core.documents import htmltext, text_outline
+from misaka.core.documents import htmltext, mineru, text_outline
 from misaka.core.documents.pageindex import PageIndexUnavailable
 from misaka.utils import atomic
 
@@ -676,6 +676,27 @@ OCR_TIMEOUT = 900
 # ocrmypdf accepts --sidecar together with --pages from 11.7 on; an older one OCRs every page.
 OCR_PAGES_SINCE = (11, 7)
 _SKIPPED = re.compile(r"\[OCR skipped on page\(s\) (\d+)(?:-(\d+))?\]")
+_NO_OCR = (OCR_MISSING, mineru.MISSING)        # how a page waiting for OCR says so
+
+
+def _ocr_engine():
+    """The program that reads scans: ``documents.ocr_engine``, by default MinerU where it is
+    installed and ocrmypdf otherwise. One named there is never swapped for the other: it was asked
+    for, and a book read by the other would look the same on the shelf."""
+    from misaka.config.product import setting
+
+    chosen = setting("documents", "ocr_engine", "auto", str)
+    if chosen == "auto":
+        return mineru.BINARY if shutil.which(mineru.BINARY) else OCR_BINARY
+    return mineru.BINARY if chosen == "mineru" else OCR_BINARY
+
+
+def _ocr_missing():
+    """What this machine lacks to read a scan, or None when it has it."""
+    engine = _ocr_engine()
+    if shutil.which(engine):
+        return None
+    return mineru.MISSING if engine == mineru.BINARY else OCR_MISSING
 
 
 @functools.lru_cache(maxsize=1)
@@ -732,9 +753,26 @@ def _sidecar_pages(text, count=None):
 
 def _ocr_pages(p, meta=None, numbers=None, count=None):
     """OCR pages ``numbers`` of a PDF (every page when None): ``{page: text}``, or None when that
-    cannot be done.
+    cannot be done. A page missing from a reading is one a failed run cost."""
+    read = _mineru_pages if _ocr_engine() == mineru.BINARY else _ocrmypdf_pages
+    return read(p, meta, numbers, count)
 
-    ``--force-ocr`` reads the named pages whatever text they carry -- a stamp or a garbled layer
+
+def _mineru_pages(p, meta, numbers, count):
+    """A run that fails writes why into ``meta['ocr_error']``, as ``_ocrmypdf_pages`` does."""
+    if not shutil.which(mineru.BINARY):
+        return None
+    from misaka.config.product import setting
+
+    tier = setting("documents", "mineru_tier", mineru.ADVANCED, str)
+    pages, error = mineru.read(p, list(range(1, count + 1)) if numbers is None and count else numbers, tier)
+    if error:
+        _note(meta, "ocr_error", error)
+    return pages or None
+
+
+def _ocrmypdf_pages(p, meta=None, numbers=None, count=None):
+    """``--force-ocr`` reads the named pages whatever text they carry -- a stamp or a garbled layer
     is exactly what ``--skip-text`` used to leave alone -- and every other page is skipped. The
     OCR'd PDF is discarded: the corpus stores the original file, whose sha256 is the document's
     identity, so rasterising a page here changes nothing a reader sees. The sidecar is the only
@@ -827,8 +865,8 @@ def _record_reading(meta, merged, ocred, unread):
 
 
 def _why_not_read(learned):
-    if not shutil.which(OCR_BINARY):
-        return OCR_MISSING
+    if missing := _ocr_missing():
+        return missing
     return f"OCR failed: {learned['ocr_error']}" if learned.get("ocr_error") else "OCR did not read it"
 
 
@@ -841,7 +879,7 @@ def _pdf_pages(p, meta=None):
         if not read:
             return []
         _note(meta, "ocr", True)
-        return [read[number] for number in sorted(read)]
+        return [read.get(number, "") for number in range(1, max(read) + 1)]     # a gap keeps its number
     routed = _route(pages, _cover_and_marked(p, learned))
     if not routed:
         return pages                        # a real text layer on every page: never OCR over it
@@ -854,19 +892,20 @@ def _pdf_pages(p, meta=None):
 def _no_text_error(p, pages, ocr_error=None):
     """The refusal for a file whose extracted text is not a usable text layer.
 
-    For a PDF the advice has to be one the reader can carry out: with ocrmypdf installed the scan
-    has already been through it by the time this runs, so what is left to say is either why that
+    For a PDF the advice has to be one the reader can carry out: with OCR installed the scan has
+    already been through it by the time this runs, so what is left to say is either why that
     failed or where to get it -- not the old "run OCR first", which named no way to.
     """
     name, solid = os.path.basename(p), _solid(pages)
     if os.path.splitext(p)[1].lower() != ".pdf":
         return ValueError(f"No text found in {name}: the file has no readable content.")
+    missing = _ocr_missing()
     if ocr_error:
-        tried = f"ocrmypdf failed ({ocr_error})"
-    elif shutil.which(OCR_BINARY):
+        tried = f"{_ocr_engine()} failed ({ocr_error})"
+    elif not missing:
         tried = "OCR produced no text either"
     else:
-        tried = "this is a scan -- install ocrmypdf to index it (brew install ocrmypdf)"
+        tried = f"this is a scan -- {missing}"
     if pages and solid:
         return ValueError(
             f"Incomplete text layer: only {solid} of {len(pages)} pages contain text "
@@ -1736,10 +1775,40 @@ def _stored_pages(ddir, count):
 
 def _outline_for(p, ext, pages, reason):
     """One outline call for either family: the text reader over the stored pages, or PageIndex
-    over the PDF. ``pages`` is only consulted for the text family."""
+    over the PDF. ``pages`` is only consulted for the text family.
+
+    A scan states no outline PageIndex can read -- it has no bookmarks and no text layer to lay
+    out -- so the headings MinerU marks on its pages stand in, where it read the document.
+    """
     if ext in TEXT_TREE_SUFFIXES:
         return _text_tree(pages, ext, reason)
-    return _build_tree_with_reason(p, reason)
+    tree = _build_tree_with_reason(p, reason)
+    if tree or ext != ".pdf" or reason.get("tree") != "none_found" or _ocr_engine() != mineru.BINARY:
+        return tree
+    return _printed_tree(p, len(pages or ()), reason)
+
+
+def _printed_tree(p, count, reason):
+    """The outline the headings printed on a scan's pages make, as JSON, or None.
+
+    Sparser than a publisher's, and not always right: against the bookmarks of three scanned books
+    it found 2, 7 and 7 of 23, 25 and 48, and of what it offered on one of them about half were a
+    title page's lines or a running head rather than sections. On another all twelve were sections.
+    A document that would otherwise have no outline at all is what this is weighed against.
+    """
+    if not count:
+        return None
+    try:
+        found = mineru.headings(p, count)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    marked = ["\n\n".join(f"{'#' * level} {title}" for level, title in found.get(number, []))
+              for number in range(1, count + 1)]
+    nodes = text_outline.build_text_tree(marked, markdown=True)
+    if not nodes:
+        return None
+    reason.pop("tree", None)
+    return json.dumps(nodes, ensure_ascii=False)
 
 
 # PDFium is not thread-safe. Text extraction and page renders run it in child processes; the
@@ -1878,8 +1947,8 @@ def _reread(ddir, p, count):
                 m = _read_meta_at(ddir) or {}
                 put_off = m.get("reread_put_off") if isinstance(m.get("reread_put_off"), dict) else {}
                 tries = int(put_off.get("tries") or 0) + 1 if put_off.get("version") == EXTRACT_VERSION else 1
-                waits_for_ocr = not shutil.which(OCR_BINARY) and any(
-                    str(why).endswith(OCR_MISSING) for why in (m.get("unread_pages") or {}).values())
+                waits_for_ocr = _ocr_missing() and any(
+                    str(why).endswith(_NO_OCR) for why in (m.get("unread_pages") or {}).values())
                 if tries >= REREAD_TRIES and not waits_for_ocr:
                     m.pop("reread_put_off", None)
                     m["extract_version"] = EXTRACT_VERSION
@@ -1888,7 +1957,7 @@ def _reread(ddir, p, count):
                 atomic.write_text(os.path.join(ddir, "meta.json"), json.dumps(m, ensure_ascii=False, indent=2))
             return count
     unread = {int(n): why for n, why in (learned.get("unread_pages") or {}).items()}
-    ocr_missing = any(why.endswith(OCR_MISSING) for why in unread.values())
+    ocr_missing = any(why.endswith(_NO_OCR) for why in unread.values())
     was_ocr, now_ocr = _ocr_set(meta, count), _ocr_set(learned, len(pages or ()))
     changed, final_ocr = [], was_ocr
     if pages is not None and len(pages) != count:

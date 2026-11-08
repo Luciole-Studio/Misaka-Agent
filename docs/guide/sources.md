@@ -29,7 +29,7 @@ What reading them needs:
 | Files | Needs |
 |---|---|
 | PDF | `pdftotext` from poppler (`brew install poppler`); a built-in reader is the fallback |
-| scanned PDF | `ocrmypdf` with the language data: `brew install ocrmypdf tesseract-lang`, or `ocrmypdf` and `tesseract-ocr` with your language packs on Linux |
+| scanned PDF | MinerU (`uv tool install mineru`), which fetches its models (about 1.4 GB) on first use, with `tesseract` to stand sideways pages up; or `ocrmypdf` with the language data: `brew install ocrmypdf tesseract-lang`, or `ocrmypdf` and `tesseract-ocr` with your language packs on Linux |
 | DjVu | DjVuLibre (`djvused`, and `ddjvu` for pages that need OCR); scanned DjVu goes through OCR as well |
 | old `.doc`, `.xls`, `.ppt` | LibreOffice |
 
@@ -38,12 +38,29 @@ What reading them needs:
   its text is garbled (a broken font encoding), or when it is mostly a picture with little text on
   it. A page that has a text layer keeps it, and what OCR reads on it is added after it, so a
   scanned facsimile under a typeset heading loses neither. Pages that needed OCR and did not get
-  it -- no `ocrmypdf`, or a failed run -- are marked unread: `doc_list` counts them, and
+  it -- no OCR program, or a failed run -- are marked unread: `doc_list` counts them, and
   `doc_read` names each one with the reason. Pages OCR read and found no text on (blank scans,
   pictures, maps) are named by `doc_read` too, but not counted as unread. A document is turned
-  away only when, after OCR, fewer than a fifth of its pages carry text. `documents.ocr_langs` in
-  `settings.json` sets the languages (default `eng+chi_sim+jpn`); each needs its language data
-  installed, or OCR fails and the message says why.
+  away only when, after OCR, fewer than a fifth of its pages carry text.
+- **Which program reads a scan.** MinerU reads where it is installed, `ocrmypdf` otherwise;
+  `documents.ocr_engine` in `settings.json` names one instead. MinerU reads vertical Chinese and
+  Japanese, which `ocrmypdf` mostly cannot, and needs no language named. It runs on this machine,
+  25 pages at a time, so a failed run costs only those pages. Where `tesseract` is installed,
+  pages lying on their side are stood up first, which handwriting needs; a page that cannot be
+  judged is read as it lies, and an upright page is left alone. It reads at its strongest by
+  default, handwriting included, at about 12 to 19 seconds a page on an Apple M4, and a document
+  is ready when all of it is read: a 400-page scan takes one to two hours. `documents.mineru_tier`
+  set to `basic` takes about a tenth of the time, reads print almost as well and handwriting and
+  old Japanese much worse. For `ocrmypdf`, `documents.ocr_langs` sets the languages (default
+  `eng+chi_sim+jpn`); each needs its language data installed, or OCR fails and the message says
+  why. Changing these reads new documents that way; a document already indexed keeps its text.
+- **An outline for a scan.** A scanned PDF states no outline: it has no bookmarks and no text
+  layer to lay out, so `doc_outline` had only its pages. Where MinerU read it, the headings it
+  marks on the pages stand in, read in a pass of their own. Such an outline is sparser than a
+  publisher's and not always right -- against the bookmarks of three scanned books it found 2, 7
+  and 7 of 23, 25 and 48, and on one of them about half of what it offered was a title page's
+  lines or a running head. A PDF that states an outline of its own keeps it.
+
 - **Documents indexed by an older version.** Running `misaka doc add` or `scan` again on a PDF or
   DjVu indexed before per-page OCR re-reads it when its stored pages show it may need it: pages
   that printed something the old version did not read get OCR, and a document whose pages were

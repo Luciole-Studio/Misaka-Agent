@@ -23,6 +23,12 @@ from misaka.core.documents.wiring import documents as tools
 
 _real_extract_pages = corpus.extract_pages
 
+
+@pytest.fixture(autouse=True)
+def read_with_ocrmypdf(monkeypatch):
+    """These tests are of ocrmypdf: a machine with MinerU installed would otherwise read with that."""
+    monkeypatch.setattr(corpus, "_ocr_engine", lambda: corpus.OCR_BINARY)
+
 TYPESET = "Typeset page {n}. The editor's introduction to the documents that follow."
 PLACES = ("Aachen", "Bremen", "Cologne", "Dresden", "Erfurt", "Frankfurt", "Gotha", "Hanover", "Jena", "Kassel")
 

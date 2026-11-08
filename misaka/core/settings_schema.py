@@ -32,7 +32,7 @@ from misaka.ai.providers.model_schema import (
     schemaDefault,
 )
 from misaka.ai.types import Transport
-from misaka.config.product import KNOBS, NOT_NEGATIVE
+from misaka.config.product import KNOBS, NOT_NEGATIVE, ONE_OF
 from misaka.core.settings_defaults import SETTINGS_DEFAULTS
 
 _MAX_SAFE_INTEGER = 2**53 - 1
@@ -201,7 +201,9 @@ _PRODUCT_SECTIONS: dict[str, str] = {
     "vision": "Reading images for models that cannot see.",
 }
 _KNOB_DESCRIPTIONS: dict[tuple[str, str], str] = {
-    ("documents", "ocr_langs"): 'Languages for reading scanned PDFs, joined with "+". Default: eng+chi_sim+jpn.',
+    ("documents", "mineru_tier"): 'How MinerU reads: "advanced" is its strongest and also reads handwriting it takes for a picture; "standard" is about as slow; "basic" takes about a tenth of the time. Default: advanced.',
+    ("documents", "ocr_engine"): 'What reads scans: "mineru", "ocrmypdf", or "auto" for MinerU where it is installed. Default: auto.',
+    ("documents", "ocr_langs"): 'Languages ocrmypdf reads, joined with "+". MinerU needs none. Default: eng+chi_sim+jpn.',
     ("mcp", "required_wait"): "Seconds a sub-agent waits for an MCP server its definition requires. Default: 30.",
     ("network", "max_concurrent_per_sister"): "Cards one Sister runs at once. Default: the machine limit.",
     ("network", "max_concurrent_sisters"): "Cards running at once on this machine. Default: free memory / 256 MiB, between 4 and 12.",
@@ -233,7 +235,8 @@ _KNOB_DESCRIPTIONS: dict[tuple[str, str], str] = {
 def _productSection(section: str) -> type[TypeBoxObject]:
     knobs = {
         key: (
-            (_NOT_NEGATIVE_KNOB_TYPES if (section, key) in NOT_NEGATIVE else _KNOB_TYPES)[cast] | None,
+            (TypeBoxLiteralUnion(*ONE_OF[section, key]) if (section, key) in ONE_OF
+             else (_NOT_NEGATIVE_KNOB_TYPES if (section, key) in NOT_NEGATIVE else _KNOB_TYPES)[cast]) | None,
             _optional(_KNOB_DESCRIPTIONS.get((section, key))),
         )
         for (knobSection, key), cast in sorted(KNOBS.items())

@@ -686,13 +686,17 @@ def register(harn):
         return _text(untrusted(f"doc-search:{params.query}", cut.content) + tail)
 
     class AddParams(BaseModel):
-        path: str = Field(description="File or folder to index (PDF, EPUB, HTML, Markdown, text), relative to the workspace or absolute; must stay inside the workspace.")
+        path: str = Field(description="File or folder to index (PDF, DjVu, EPUB, HTML, Word, Excel, PowerPoint, Markdown, text), relative to the workspace or absolute; must stay inside the workspace.")
 
     @_register(
         harn, name="doc_add", label="Index materials",
-        description="Index a file or a folder of materials into the document store so the doc_* tools can navigate, search, and cite them.",
-        snippet="Index a file or folder of materials for doc_* tools",
-        guidelines=["Use doc_add for material that needs shared navigation and is not already indexed; a returned document ID indicates it is indexed."],
+        description=("Index a file or a folder of materials into the document store so the doc_* tools can navigate, "
+                     "search, and cite them. A scanned PDF or DjVu is read by OCR as part of this, page by page, "
+                     "pages lying on their side stood up first."),
+        snippet="Index a file or folder of materials for doc_* tools; scans are OCR'd",
+        guidelines=["Use doc_add for material that needs shared navigation and is not already indexed; a returned document ID indicates it is indexed.",
+                    ("Do not run OCR yourself or save page-by-page text from a scan: doc_add reads it once for every card, "
+                     "and doc_read gives the result. A long scan takes minutes; doc_read names any page it could not read.")],
         parameters=AddParams)
     async def doc_add(tool_call_id, params, signal, on_update, ctx):
         ws = _workspace(ctx)
