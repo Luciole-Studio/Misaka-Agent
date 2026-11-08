@@ -1,5 +1,16 @@
 # MISAKA LCM fork 契约
 
+## 2026-11-08：搜索也读工具调用
+
+改动在 `host/calls.py` 和 `host/tools.py`；`vendor/`、`native/`、库结构、缓存格式都不变。
+
+- **为什么。** 上游只索引 `content`，而 agent 做过的事在 `tool_calls`：命令、网址、写进文件的内容。真实压缩过的卡片里，这部分占 agent 所写内容的 98%（1,393 万字符对 33 万）。16 次零命中里有 13 次要找的词在之前的工具参数里，0 次在正文里，其中 14 次带 `role: assistant`，它们是在找“我之前怎么做的”。
+- **查询时扫，不建索引。** `calls.install` 包一层 `MessageStore.search`：上游结果照旧，再按同样的过滤条件从新到旧读工具调用。LCM 搜索很少（551 个会话 111 次），这样不用改库结构，也不用重建缓存。本机全部 27,661 行工具调用（67 MB）放进一个库，搜不存在的词 0.50 秒，能搜到时通常 0.01 秒。
+- **词按原样匹配。** 上游的查询清洗会把 `dl.ndl.go.jp` 拆开，这里按空白和引号切词，做不分大小写的子串匹配。所有词要落在同一个调用里；只匹配工具名和参数值，不匹配字段名。
+- **单独的只读连接。** 工具并行跑，共用 `store._conn` 时实测报 `bad parameter or other API misuse`，分页 `fetchall` 也一样，而且被兜底吞掉后只是悄悄少命中。所以每次搜索开自己的 `mode=ro` 连接。
+- **`lcm_expand` 带上工具调用。** 上游只在 `lcm_load_session` 里返回，打开一个靠命令搜到的行会看不到命令。`tools._with_calls` 在 host 层补上，放不进单次结果预算时不带，标 `tool_calls_omitted`，正文照常打开。
+- **影响到的其他调用。** `lcm_expand_query` 也走 `store.search`，所以也能搜到工具调用。`allow_operators=True` 的查询是调用方拼的 FTS5 语法，只走上游。
+
 ## 2026-11-07：行说清是谁说的，检查点记住自己的摘要
 
 改动在 `host/`，外加 `core/moments.py`、`core/network/messages.py`、`core/wiring.py` 各一小处；`vendor/`、`native/` 不变。

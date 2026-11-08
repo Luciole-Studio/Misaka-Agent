@@ -28,7 +28,8 @@ LCM conversation content. Check actual LCM session/content counts and retrieval
 results before claiming access to a previous conversation. Status is not a project
 file listing and does not prove that project files were inspected.
 
-Use existing context first. For exact old wording use `lcm_grep` then `lcm_expand`;
+Use existing context first. For exact old wording use `lcm_grep` then `lcm_expand`; a
+search also reads tool calls, so a command, an address or text written to a file is found;
 for already-loaded cross-conversation history use `lcm_recall`. Summaries are
 navigation aids, not exact evidence. Do not claim a memory was permanently saved.
 

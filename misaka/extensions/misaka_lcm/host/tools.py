@@ -208,6 +208,26 @@ def _attribute(engine, payload):
     return payload
 
 
+def _with_calls(name: str, engine, payload):
+    """A raw row ``lcm_expand`` opened, with its tool calls. Upstream leaves them out, and a row found
+    by what it ran may hold nothing else. A call too large for one result stays out, marked as
+    upstream marks it, so that the row's text still opens."""
+    reader = fence._reader(engine) if isinstance(payload, dict) and payload.get("source_type") == "raw_message" else None
+    if reader is None:
+        return payload
+    conn, lock = reader
+    try:
+        with lock:
+            row = conn.execute("SELECT tool_calls FROM messages WHERE store_id = ?", (payload.get("store_id"),)).fetchone()
+    except sqlite3.Error:
+        logger.debug("LCM could not read the tool calls of a row.", exc_info=True)
+        return payload
+    if not row or not row[0]:
+        return payload
+    opened = {**payload, "tool_calls": json.loads(row[0])}
+    return opened if _tokens(name, opened) <= RESULT_BUDGET_TOKENS else {**payload, "tool_calls_omitted": True}
+
+
 def _deliver(name: str, output: str, engine=None) -> str:
     """The text one upstream result reaches the model as: every cited session named, within budget,
     readable."""
@@ -217,6 +237,8 @@ def _deliver(name: str, output: str, engine=None) -> str:
         return output  # not upstream's JSON: refence fences it unread
     if engine is not None:
         payload = _attribute(engine, payload)
+        if name == "lcm_expand":
+            payload = _with_calls(name, engine, payload)
     return _json(_within_budget(name, payload))
 
 
@@ -273,7 +295,10 @@ def recall_guideline() -> str:
             "never replaces them. Every stored row names the session that wrote it in `source`: `last-order`, a "
             "Sister's name, `name@<card id>` for a card session (`momo@t_3fa9c1`), `last-order@<node id>` for a "
             "research node's Last Order, `name/<agent id>` for a sub-agent. A row's `role` says who spoke: `user` "
-            "is the user or a work order, `agent:<name>` is mail from that agent, `notice` a system notice. `lcm_grep(query, session_scope=\"all\", source=...)` searches one of them -- the value "
+            "is the user or a work order, `agent:<name>` is mail from that agent, `notice` a system notice. "
+            "A search also reads tool calls, so a command, an address or text written to a file is found: such "
+            "a hit is an `assistant` row whose snippet starts with the tool, and `lcm_expand` opens the whole "
+            "call. `lcm_grep(query, session_scope=\"all\", source=...)` searches one of them -- the value "
             "is exact, so take it from a hit or build it from a card -- and a hit's `session_id` opens that "
             "conversation with `lcm_load_session`.\n\n"
             + misaka_text(get_recall_policy().strip()))

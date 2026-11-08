@@ -28,6 +28,7 @@ from misaka.utils.values import read_field, signal_aborted
 from ..vendor import aux_session
 from ..vendor.reconcile import _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from . import (
+    calls,
     config_bridge,
     entry_rows,
     execution,
@@ -83,6 +84,7 @@ def engine(ctx=None):
             llm.install()
             images.install()
             ingest.install()
+            calls.install()
             execution.install_worker_ownership()
             class NativeLCMEngine(LCMEngine):
                 def _bind_storage(self, *args, **kwargs):
