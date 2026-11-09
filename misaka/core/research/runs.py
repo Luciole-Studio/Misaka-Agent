@@ -571,9 +571,38 @@ def _own_identity(pid):
     return processes.identity(pid) or f"{socket.gethostname()}:{pid}"
 
 
+def _recorded_runner_is_me(row, pid, identity):
+    """Whether the process the row records is this one, or the launcher that started it.
+
+    The parent records the PID its spawn handed back. On Windows that is a venv's python.exe,
+    a launcher that starts the real interpreter as its own child (see core/subagent/child.py),
+    so every node refused its own claim there: "runner identity mismatch", the row holding the
+    launcher and the node its child. The parent's identity is checked, so a reused PID does not
+    pass for it, and so is its program: a launcher runs another one than the interpreter it
+    starts, while a claimed node's own child, which can hold the same key, runs the node's."""
+    from misaka.core.platform import processes
+    recorded = int(row["runner_pid"])
+    if recorded == pid:
+        return processes.same_identity(row["runner_identity"], identity)
+    parent = os.getppid()
+    return (recorded == parent and processes.same_identity(row["runner_identity"], processes.identity(parent))
+            and _runs_another_program(parent))
+
+
+def _runs_another_program(pid):
+    """Whether process ``pid`` runs another executable than this process; False when unreadable."""
+    import psutil
+    try:
+        theirs, mine = psutil.Process(pid).exe(), psutil.Process().exe()
+    except (psutil.Error, OSError):
+        return False
+    if not theirs or not mine:
+        return False
+    return os.path.normcase(os.path.realpath(theirs)) != os.path.normcase(os.path.realpath(mine))
+
+
 def claim_runner(con, table, row_id, key):
     """Fence delayed/duplicate spawns, including a lost pane.create reply."""
-    from misaka.core.platform import processes
     if not key:
         return False
     pid = os.getpid()
@@ -581,16 +610,20 @@ def claim_runner(con, table, row_id, key):
     # The parent recorded this process's identity from its own psutil, whose start times can
     # sit a whole second from what this process reads (processes.IDENTITY_TOLERANCE_SECONDS),
     # so the fence compares in Python and the row then carries this process's own reading.
-    row = con.execute(f'SELECT runner_pid, runner_identity FROM "{table}" WHERE id=? AND runner_key=?',
-                      (row_id, key)).fetchone()
-    if row is None:
-        return False
-    if row["runner_pid"] is not None and not (
-            int(row["runner_pid"]) == pid and processes.same_identity(row["runner_identity"], identity)):
-        return False
-    return con.execute(f'UPDATE "{table}" SET runner_pid=?, runner_identity=? WHERE id=? AND runner_key=? '
-                       'AND (runner_pid IS NULL OR runner_pid=?)',
-                       (pid, identity, row_id, key, pid)).rowcount == 1
+    # The write is conditional on the PID that was read: the parent's record, or a duplicate's
+    # claim, can land between the two, and is then read and judged again. The parent writes only
+    # over NULL, so it lands once at most.
+    for _attempt in range(3):
+        row = con.execute(f'SELECT runner_pid, runner_identity FROM "{table}" WHERE id=? AND runner_key=?',
+                          (row_id, key)).fetchone()
+        if row is None:
+            return False
+        if row["runner_pid"] is not None and not _recorded_runner_is_me(row, pid, identity):
+            return False
+        if con.execute(f'UPDATE "{table}" SET runner_pid=?, runner_identity=? WHERE id=? AND runner_key=? '
+                       'AND runner_pid IS ?', (pid, identity, row_id, key, row["runner_pid"])).rowcount == 1:
+            return True
+    return False
 
 
 def note_claim_failure(con, table, row_id, key):
@@ -602,7 +635,6 @@ def note_claim_failure(con, table, row_id, key):
     never captured because the losing side wrote nothing down. Now it does: the row as the
     process saw it against what the process holds, kept in ``last_error`` (only if nothing
     else is there yet) so the driver's error carries it."""
-    from misaka.core.platform import processes
     row = con.execute(f'SELECT runner_key, runner_pid, runner_identity FROM "{table}" WHERE id=?',
                       (row_id,)).fetchone()
     pid = os.getpid()
@@ -614,10 +646,9 @@ def note_claim_failure(con, table, row_id, key):
     elif row["runner_key"] != key:
         reason = (f"runner key mismatch: row holds {(row['runner_key'] or '')[:8] or 'NULL'!r}, "
                   f"this process holds {key[:8]!r}")
-    elif row["runner_pid"] is not None and (row["runner_pid"] != pid
-                                            or not processes.same_identity(row["runner_identity"], identity)):
+    elif row["runner_pid"] is not None and not _recorded_runner_is_me(row, pid, identity):
         reason = (f"runner identity mismatch: row holds pid {row['runner_pid']} {row['runner_identity']!r}, "
-                  f"this process is pid {pid} {identity!r}")
+                  f"this process is pid {pid} {identity!r}, started by pid {os.getppid()}")
     else:
         reason = "fence refused for no visible reason (the row changed between the claim and this read)"
     text = f"claim refused: {reason}"
