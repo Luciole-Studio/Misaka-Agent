@@ -59,7 +59,7 @@ Windows 已实际验证；macOS / Linux 共用标准库网页服务与原项目�
 ## 验证
 
 ```sh
-python -m unittest discover -s tests/gui -v
+uv run --frozen --group dev python -m pytest tests/gui -v
 ```
 
 后端测试覆盖访问控制、参数校验、路径约束、会话复用、中文及多行输入、原后端转发，以及原生会话管理器的事件流、游标重放与进程清理（`tests/gui/fixtures/stub_chat_runner.py` 为协议桩，不装配真实模型）。真实模型生成与长时间研究执行需要现有有效账号，GUI 验收不自动花费模型额度。

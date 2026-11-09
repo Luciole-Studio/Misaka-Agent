@@ -37,7 +37,7 @@ def skill(folder):
 @pytest.fixture
 def sealed_copy(tmp_path):
     """Supply a real sealed legacy snapshot and release its read-only files."""
-    source = skill(tmp_path / "source")
+    source = skill(tmp_path / "sample")
     root = home.path("tasks_root") / "fixture-card" / ".skills-ro"
     entry = {"dir": str(source), "path": str(source / "SKILL.md"), "name": "sample",
              "runtime_name": "sample", "rel": "sample", "category": "general", "layer": "external"}
@@ -92,6 +92,41 @@ def test_refreshed_snapshot_excludes_cache_and_repository_data(sealed_copy):
     sandbox.read_manifest(root, verify_files=True)
 
 
+def test_refresh_restores_directory_write_permission_before_publication(sealed_copy):
+    """A sealed staging root must be writable while its parent is being changed."""
+    source, root, destination = sealed_copy
+    replace = os.replace
+
+    def require_writable_directory(src, dst):
+        if Path(src).name == "replacement":
+            assert Path(src).stat().st_mode & stat.S_IWUSR
+        return replace(src, dst)
+
+    with patch.object(sandbox.os, "replace", side_effect=require_writable_directory):
+        updated, errors = sandbox.refresh_copies(source)
+    assert updated == [str(destination)] and not errors
+    sandbox.read_manifest(root, verify_files=True)
+    assert not root.stat().st_mode & stat.S_IWUSR
+
+
+def test_refresh_lock_timeout_preserves_the_committed_source_edit(sealed_copy, tmp_path, monkeypatch):
+    """A busy execution copy reports a warning without undoing the source write."""
+    from filelock import FileLock
+
+    source, root, destination = sealed_copy
+    before = (destination / "SKILL.md").read_bytes()
+    layers.write_skills_config({"skill_write_mode": "allow"})
+    monkeypatch.setattr(sandbox, "_REFRESH_LOCK_TIMEOUT", 0.02)
+    with FileLock(str(root) + ".refresh.lock"):
+        result = manage.manage("patch", "sample", profile_dir=str(tmp_path / "profiles" / "fixture"),
+                               workspace=str(tmp_path / "project"), visible_roots=[("external", str(source.parent))],
+                               source=str(source / "SKILL.md"), old_string="Original body.", new_string="Revised body.")
+    assert result["success"] and result["copy_errors"], result
+    assert "Revised body." in (source / "SKILL.md").read_text(encoding="utf-8")
+    assert (destination / "SKILL.md").read_bytes() == before
+    sandbox.read_manifest(root, verify_files=True)
+
+
 def test_oversized_refresh_preserves_the_sealed_copy(sealed_copy):
     """An over-limit source cannot replace an otherwise usable snapshot."""
     source, root, destination = sealed_copy
@@ -117,6 +152,23 @@ def test_copy_discovery_ignores_refresh_and_replacement_images(sealed_copy):
     finally:
         for folder in temporary:
             sandbox.cleanup(folder)
+
+
+def test_copy_discovery_stops_at_published_snapshot_roots(sealed_copy):
+    """Discovery must not traverse every copied skill after finding its manifest."""
+    source, root, destination = sealed_copy
+    visited = []
+    walk = os.walk
+
+    def record_walk(*args, **kwargs):
+        for entry in walk(*args, **kwargs):
+            visited.append(Path(entry[0]))
+            yield entry
+
+    with patch.object(sandbox.os, "walk", side_effect=record_walk):
+        assert sandbox.copies_of(source) == [str(destination)]
+    assert root in visited
+    assert not any(folder != root and folder.is_relative_to(root) for folder in visited)
 
 
 def test_pending_reviews_scan_copies_once_and_isolate_diff_failure(sealed_copy):

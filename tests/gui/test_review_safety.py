@@ -133,6 +133,28 @@ def test_ended_channel_keeps_final_events_then_expires(tmp_path):
         assert manager.list() == []
 
 
+def test_restoring_a_live_chat_uses_a_locked_channel_snapshot(tmp_path):
+    """Restoration cannot iterate the registry while another thread removes entries."""
+    bridge = Bridge(str(tmp_path))
+    manager = bridge.chats
+
+    class CheckedChannels(dict):
+        def values(self):
+            assert manager.lock.locked(), "Reading live channels requires the manager lock"
+            return super().values()
+
+    session = str(tmp_path / "fixture.jsonl")
+    channel = ChatChannel("fixture", {"workspace": str(tmp_path), "sourceSession": session}, "unused.log")
+    channel.status = "ready"
+    manager.channels = CheckedChannels({channel.id: channel})
+    bridge._saved_session = Mock(return_value=session)
+    assert bridge.native_chat({"session_path": session}) == {"chat_id": channel.id}
+    snapshot = manager.channels_snapshot()
+    with manager.lock:
+        manager.channels.clear()
+    assert snapshot == [channel]
+
+
 def test_cached_workspace_search_does_not_wait_for_another_walk(tmp_path):
     slow, cached = tmp_path / "slow", tmp_path / "cached"
     slow.mkdir()

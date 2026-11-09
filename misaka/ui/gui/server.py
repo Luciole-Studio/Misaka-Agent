@@ -181,7 +181,7 @@ class Bridge:
             spec["role"] = role
         if data.get("session_path"):
             path = self._saved_session(required_text(data, "session_path", 1024), spec.get("role"), spec["workspace"])
-            for channel in self.chats.channels.values():
+            for channel in self.chats.channels_snapshot():
                 source = channel.meta.get("sessionFile") or channel.meta.get("sourceSession")
                 if source and os.path.normcase(os.path.abspath(source)) == os.path.normcase(path) and channel.status in {"starting", "ready"}:
                     return {"chat_id": channel.id}

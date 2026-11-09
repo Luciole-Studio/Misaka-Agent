@@ -233,6 +233,11 @@ class ChatManager:
 
     # ---- browser API ----
 
+    def channels_snapshot(self) -> list[ChatChannel]:
+        """Copy the channel registry under its lock for iteration by other threads."""
+        with self.lock:
+            return list(self.channels.values())
+
     def _channel(self, chat_id) -> ChatChannel:
         if not isinstance(chat_id, str) or len(chat_id) > 64:
             raise ValueError("会话标识无效")
@@ -378,9 +383,7 @@ class ChatManager:
         return {"closed": True}
 
     def close_all(self) -> None:
-        with self.lock:
-            channels = list(self.channels.values())
-        for channel in channels:
+        for channel in self.channels_snapshot():
             try:
                 self.close(channel.id, timeout=3)
             except Exception:  # noqa: BLE001 - exit must not be blocked by one chat
@@ -388,9 +391,7 @@ class ChatManager:
 
     def list(self) -> list[dict]:
         self._prune_closed()
-        with self.lock:
-            channels = list(self.channels.values())
-        return [channel.summary() for channel in channels]
+        return [channel.summary() for channel in self.channels_snapshot()]
 
     def alive_count(self) -> int:
         self._prune_closed()

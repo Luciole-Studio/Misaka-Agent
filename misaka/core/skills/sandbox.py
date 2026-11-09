@@ -11,6 +11,8 @@ import stat
 import tempfile
 from pathlib import Path
 
+_REFRESH_LOCK_TIMEOUT = 5.0
+
 
 def size_cap_mb() -> int:
     """How many MB of skill copies one session may hold: settings.json ``skills.copy_cap_mb``."""
@@ -316,6 +318,7 @@ def _snapshot_roots():
                    and not os.path.isjunction(os.path.join(folder, name))]
         path = Path(folder) / ".misaka-skill-snapshot.json"
         if path.name in files and path.is_file() and not path.is_symlink():
+            dirs[:] = []
             yield path.parent
 
 
@@ -406,7 +409,7 @@ def _refresh_copy(origin, destination):
 
     root = destination.parent
     _ensure_real_directory(root, create=False)
-    with FileLock(str(root) + ".refresh.lock"):
+    with FileLock(str(root) + ".refresh.lock", timeout=_REFRESH_LOCK_TIMEOUT):
         if read_manifest(root, verify_files=True) is None:
             raise ValueError(f"Skill snapshot manifest is missing: {root}")
         _file_digests(root)
@@ -422,6 +425,7 @@ def _refresh_copy(origin, destination):
                 raise ValueError(f"Refreshed Skill copies exceed the {size_cap_mb()} MB owner limit.")
             _reseal_hashes(stage)
             _make_writable(root)
+            os.chmod(stage, os.stat(stage).st_mode | stat.S_IWUSR)
             os.replace(root, backup)
             moved = True
             try:
