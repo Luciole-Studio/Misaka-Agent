@@ -64,12 +64,22 @@ def database_path(ctx=None) -> str:
     return str(storage.directory(storage.project(ctx)) / "lcm.db")
 
 
+# What Hermes' DEFAULT_CONFIG gives every config.yaml (hermes_cli/config_defaults.py, bda3a363e9):
+# upstream inherits compression.threshold before its own 0.35 (config._hermes_compression_threshold),
+# so in Hermes an unconfigured session compacts at half its window. settings.json carried no such
+# default, and MISAKA compacted at 0.35 (F16, 2026-10-24).
+HERMES_COMPRESSION_DEFAULTS = {"threshold": 0.50}
+
+
 def _session_host_config(ctx) -> dict:
-    """The host config this session reads: settings.json, with the session's own compaction
-    threshold (``misaka.core.session_overrides``, a research run's choice) as its
-    ``lcm.context_threshold`` -- the same channel, so upstream's precedence and its explicit-choice
-    rules (no Codex autoraise over it) treat it exactly as the global setting."""
+    """The host config this session reads: settings.json over Hermes' compression defaults, with
+    the session's own compaction threshold (``misaka.core.session_overrides``, a research run's
+    choice) as its ``lcm.context_threshold`` -- the same channel, so upstream's precedence and its
+    explicit-choice rules (no Codex autoraise over it) treat it exactly as the global setting."""
     config = load_auxiliary_config()
+    compression = config.get("compression")
+    if compression is None or isinstance(compression, dict):
+        config = {**config, "compression": {**HERMES_COMPRESSION_DEFAULTS, **(compression or {})}}
     if ctx is None:
         return config
     from misaka.core import session_overrides

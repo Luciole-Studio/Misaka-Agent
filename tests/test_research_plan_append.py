@@ -35,7 +35,7 @@ def state(tmp_path, monkeypatch):
     run = runs.create(con, workspace=str(tmp_path), question="fixture")
     root = runs.nodes(con, run["id"])[0]
     assert runs.acquire_driver(con, run["id"], "driver")
-    runs.prepare_runner(con, "research_branches", root["id"])
+    runs.prepare_runner(con, "research_execution", root["id"])
     try:
         yield con, runs.get(con, run["id"]), runs.node(con, root["id"])
     finally:

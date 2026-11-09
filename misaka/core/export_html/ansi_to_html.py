@@ -38,7 +38,7 @@ class TextStyle:
     underline: bool = False
 
 
-def color256_to_hex(index: int) -> str:
+def color256ToHex(index: int) -> str:
     if index < 16:
         return ANSI_COLORS[index]
     if index < 232:
@@ -56,11 +56,11 @@ def color256_to_hex(index: int) -> str:
     return f"#{gray:02x}{gray:02x}{gray:02x}"
 
 
-def escape_html(text: str) -> str:
+def escapeHtml(text: str) -> str:
     return html.escape(text, quote=True).replace("&#x27;", "&#039;")
 
 
-def style_to_inline_css(style: TextStyle) -> str:
+def styleToInlineCSS(style: TextStyle) -> str:
     parts: list[str] = []
     if style.fg:
         parts.append(f"color:{style.fg}")
@@ -77,11 +77,11 @@ def style_to_inline_css(style: TextStyle) -> str:
     return ";".join(parts)
 
 
-def has_style(style: TextStyle) -> bool:
+def hasStyle(style: TextStyle) -> bool:
     return any((style.fg, style.bg, style.bold, style.dim, style.italic, style.underline))
 
 
-def apply_sgr_code(params: list[int], style: TextStyle) -> None:
+def applySgrCode(params: list[int], style: TextStyle) -> None:
     index = 0
     while index < len(params):
         code = params[index]
@@ -111,7 +111,7 @@ def apply_sgr_code(params: list[int], style: TextStyle) -> None:
             style.fg = ANSI_COLORS[code - 30]
         elif code == 38:
             if index + 2 < len(params) and params[index + 1] == 5:
-                style.fg = color256_to_hex(params[index + 2])
+                style.fg = color256ToHex(params[index + 2])
                 index += 2
             elif index + 4 < len(params) and params[index + 1] == 2:
                 style.fg = f"rgb({params[index + 2]},{params[index + 3]},{params[index + 4]})"
@@ -122,7 +122,7 @@ def apply_sgr_code(params: list[int], style: TextStyle) -> None:
             style.bg = ANSI_COLORS[code - 40]
         elif code == 48:
             if index + 2 < len(params) and params[index + 1] == 5:
-                style.bg = color256_to_hex(params[index + 2])
+                style.bg = color256ToHex(params[index + 2])
                 index += 2
             elif index + 4 < len(params) and params[index + 1] == 2:
                 style.bg = f"rgb({params[index + 2]},{params[index + 3]},{params[index + 4]})"
@@ -136,7 +136,7 @@ def apply_sgr_code(params: list[int], style: TextStyle) -> None:
         index += 1
 
 
-def ansi_to_html(text: str) -> str:
+def ansiToHtml(text: str) -> str:
     style = TextStyle()
     result = ""
     last_index = 0
@@ -145,7 +145,7 @@ def ansi_to_html(text: str) -> str:
     for match in ANSI_REGEX.finditer(text):
         before_text = text[last_index : match.start()]
         if before_text:
-            result += escape_html(before_text)
+            result += escapeHtml(before_text)
 
         if in_span:
             result += "</span>"
@@ -153,17 +153,17 @@ def ansi_to_html(text: str) -> str:
 
         param_str = match.group(1)
         params = [int(part) if part.isascii() and part.isdigit() else 0 for part in param_str.split(";")] if param_str else [0]
-        apply_sgr_code(params, style)
+        applySgrCode(params, style)
 
-        if has_style(style):
-            result += f'<span style="{style_to_inline_css(style)}">'
+        if hasStyle(style):
+            result += f'<span style="{styleToInlineCSS(style)}">'
             in_span = True
 
         last_index = match.end()
 
     remaining = text[last_index:]
     if remaining:
-        result += escape_html(remaining)
+        result += escapeHtml(remaining)
 
     if in_span:
         result += "</span>"
@@ -171,8 +171,8 @@ def ansi_to_html(text: str) -> str:
     return result
 
 
-def ansi_lines_to_html(lines: list[str]) -> str:
-    return "".join(f'<div class="ansi-line">{ansi_to_html(line) or "&nbsp;"}</div>' for line in lines)
+def ansiLinesToHtml(lines: list[str]) -> str:
+    return "".join(f'<div class="ansi-line">{ansiToHtml(line) or "&nbsp;"}</div>' for line in lines)
 
 
 __all__ = [

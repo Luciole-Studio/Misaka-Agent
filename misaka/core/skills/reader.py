@@ -137,7 +137,7 @@ def load(entry, session_id=None, *, file_path=None, profile_dir=None, preprocess
     if entry.get("namespace"):
         namespace, siblings = entry["namespace"], entry.get("siblings", [])
         result["extension_provenance"] = {"namespace": namespace, "root": entry.get("extension_root"),
-                                          "path": entry.get("origin_path", entry["path"])}
+                                          "path": entry["path"]}
         banner = f"[Bundle context: This skill is part of the '{namespace}' plugin." + (
             f"\nSibling skills: {', '.join(siblings)}.\nUse qualified form to invoke siblings "
             f"(e.g. {namespace}:{siblings[0]})." if siblings else "") + "]\n\n"

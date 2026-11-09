@@ -33,6 +33,9 @@ from misaka.utils.values import read_field
 
 logger = logging.getLogger(__name__)
 
+# `builtin:vision`, like every bundled extension: hidden from the startup list, and disabled with
+# `-builtin:vision` in the `extensions` setting.
+BUILTIN = True
 # Every session, a tool-less one included: an image the user pastes there is read the same way.
 SESSION_KINDS = KINDS
 
@@ -49,8 +52,8 @@ def _omitted_note():
     """The line Pi's read tool appends to its text for a model without vision -- "the image will be
     omitted" -- which this extension makes untrue. Asked of the tool rather than copied."""
     try:
-        from misaka.core.tools.read import _get_non_vision_image_note
-        return _get_non_vision_image_note(SimpleNamespace(input=["text"]))
+        from misaka.core.tools.read import getNonVisionImageNote
+        return getNonVisionImageNote(SimpleNamespace(input=["text"]))
     except Exception:  # noqa: BLE001 - only a courtesy: the note is left in place
         return None
 

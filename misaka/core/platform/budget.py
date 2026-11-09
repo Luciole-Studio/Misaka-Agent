@@ -1,10 +1,10 @@
-"""The token ledger: what was spent, what is in flight, and ``research.token_cap``.
+"""The token ledger: what was spent, what is in flight, and the token cap.
 
 Every model request a metered session makes (``misaka.core.platform.metering``) leases its worst
 case here before it is sent and, when it ends, records what it used and gives the lease back in
-one transaction. So at any moment ``spent + in flight <= cap`` for the research run the request
-belongs to, across processes. Spending is recorded per request, as it happens; outside a
-research run it is recorded and never capped.
+one transaction. So at any moment ``spent + in flight <= cap`` for the scope the request belongs
+to -- a workflow's run, as its card owner says (``platform.owners``) -- across processes.
+Spending is recorded per request, as it happens; outside any scope it is recorded and never capped.
 """
 import contextvars
 import hashlib
@@ -20,21 +20,21 @@ from contextlib import contextmanager, nullcontext
 LEASE_TTL_SECONDS = 900
 # Said when a request does not fit under the cap. Every supervisor matches this text to stop work
 # as "reached the cap" (resumable) rather than failed, and the retry classifier never matches it.
-EXHAUSTED_MESSAGE = "research.token_cap reached"
+EXHAUSTED_MESSAGE = "token_cap reached"
 
 
 def default_cap():
-    """The token cap of one research run (0 = none): settings.json ``research.token_cap``."""
-    from misaka.config.product import setting
+    """The token cap of one scope (0 = none), as the card owners set it (``platform.owners``)."""
+    from misaka.core.platform import owners
 
-    return max(0, setting("research", "token_cap", 0, int))      # a negative cap is none, as 0 is
+    return owners.token_cap()
 
 
 def beast_at():
-    """The share of the cap at which cards switch to beast mode: settings.json ``research.beast_at``."""
-    from misaka.config.product import setting
+    """The share of the cap at which cards switch to beast mode, as the card owners set it."""
+    from misaka.core.platform import owners
 
-    return setting("research", "beast_at", 0.85, float)
+    return owners.beast_at()
 
 BEAST_SUFFIX = """
 
@@ -129,19 +129,11 @@ def _charge_expired_reservations(con, now):
 
 
 def scope(con, task_id):
-    """The ledger rows ``task_id`` is capped with: its research run and every card of that run, or
-    None when it belongs to no run (an ordinary card, a contact session) and is never capped."""
-    if not task_id or not con.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_runs'").fetchone():
-        return None
-    run = con.execute("SELECT id FROM research_runs WHERE id=?", (str(task_id),)).fetchone()
-    if run is None:
-        run = con.execute("SELECT run_id FROM research_run_tasks WHERE task_id=?", (str(task_id),)).fetchone()
-    if run is None:
-        return None
-    run_id = run[0]
-    return {run_id, *(row[0] for row in con.execute(
-        "SELECT task_id FROM research_run_tasks WHERE run_id=?", (run_id,)))}
+    """The ledger rows ``task_id`` is capped with -- for a workflow's card, its run and every card of
+    that run, as its owner says (``platform.owners``) -- or None when it is never capped (an ordinary
+    card, a contact session)."""
+    from misaka.core.platform import owners
+    return owners.budget_scope(con, task_id)
 
 
 def _held(con, ids, now):
@@ -156,7 +148,7 @@ def _held(con, ids, now):
 
 
 def reserved(con, *, task_id=None):
-    """Tokens in flight: the whole board's, or the research run ``task_id`` belongs to."""
+    """Tokens in flight: the whole board's, or the scope ``task_id`` belongs to."""
 
     now = int(time.time())
     with _locked(con):
@@ -207,14 +199,14 @@ def _cap_refused(con, ids, cap):
 
 def cap_reached(con, task_id, cap):
     """Record that a request of ``task_id`` did not fit under ``cap``: every driver and card of its
-    research run stops as reached-the-cap from here (``exhausted``), until the cap is raised."""
+    scope stops as reached-the-cap from here (``exhausted``), until the cap is raised."""
     with _locked(con):
         con.execute("INSERT INTO events (task_id,kind,payload,generation,created_at) VALUES (?,?,?,?,?)",
                     (str(task_id), "token_cap_reached", json.dumps({"cap": int(cap)}), 0, int(time.time())))
 
 
 def exhausted(con, cap=None, *, task_id=None):
-    """Whether the research run ``task_id`` belongs to has reached its cap: spent it, or had a request
+    """Whether the scope ``task_id`` belongs to has reached its cap: spent it, or had a request
     refused under it. Without ``task_id``: whether the board has spent it (a status reading, never
     a reason to stop a run)."""
     cap = default_cap() if cap is None else cap
@@ -227,8 +219,8 @@ def exhausted(con, cap=None, *, task_id=None):
 
 
 def status(con, cap=None, *, task_id=None):
-    """Spent, in flight and the cap, for the research run ``task_id`` belongs to (``mode`` normal,
-    beast past ``beast_at`` of the cap, stop at the cap); a task outside a run is never capped.
+    """Spent, in flight and the cap, for the scope ``task_id`` belongs to (``mode`` normal,
+    beast past ``beast_at`` of the cap, stop at the cap); a task outside any scope is never capped.
     The mode follows what is spent, as ``exhausted`` does: a lease is a request's worst case and
     mostly comes back, and one large request can hold all the room left (0.18.9 counted leases
     in, so a busy run read "stop" with nothing spent and its planner failed)."""
@@ -260,7 +252,7 @@ def lease_request(con, cap, task_id, generation, need, want, ttl_seconds=LEASE_T
     """Lease room for one model request: ``need`` is the least it can run with, ``want`` its whole
     worst case. Returns ``{"status": "granted", "lease", "tokens", "used", "held", "cap"}``;
     ``"wait"`` when only other requests in flight stand in the way (they end, or expire);
-    ``"exhausted"`` when what is already spent does. Outside a research run, or with no cap, the
+    ``"exhausted"`` when what is already spent does. Outside any scope, or with no cap, the
     whole ``want`` is granted with no lease (``lease`` None): it is only recorded."""
     cap = int(cap or 0)
     now = int(time.time())
@@ -325,8 +317,8 @@ def renew_request(con, lease, ttl_seconds=LEASE_TTL_SECONDS):
 
 
 # Characters of the sha256 kept for the URL or query one external call was made
-# against. Same 16 as the repo's other privacy digests (core/mcp.py, the task
-# fingerprints in platform/tasks.py): enough that two different pages never collide in
+# against. Same 16 as the repo's other privacy digests (the task fingerprints in
+# platform/tasks.py): enough that two different pages never collide in
 # one run's ledger, short enough that the row stays readable.
 _SUBJECT_DIGEST_CHARS = 16
 
@@ -337,7 +329,7 @@ _USAGE_CONTEXT = contextvars.ContextVar("misaka_usage_context", default=None)
 @contextmanager
 def usage_context(path, task_id, generation, cap=None):
     """Bill a window turn's model requests and tools to ``task_id`` without changing other
-    sessions' process environment; ``cap`` None means ``research.token_cap``."""
+    sessions' process environment; ``cap`` None means the owners' cap (``default_cap``)."""
     token = _USAGE_CONTEXT.set((path, task_id, str(generation), cap))
     try:
         yield
@@ -346,11 +338,11 @@ def usage_context(path, task_id, generation, cap=None):
 
 
 def ledger():
-    """``(path, task_id, generation, cap)`` this turn is billed to, or None: a window research turn
+    """``(path, task_id, generation, cap)`` this turn is billed to, or None: a workflow's window turn
     supplies an async-local ``usage_context``; other metered processes the ``MISAKA_USAGE_*``
     environment a worker exports for its card. A session with neither (an interactive chat) has
     nothing to bill. No cap given (an empty ``MISAKA_USAGE_TOKEN_CAP``, the drivers' choice) is
-    ``research.token_cap`` as settings.json reads at this request: a driver and its cards that each
+    the owners' cap as settings.json reads at this request: a driver and its cards that each
     kept the value they started with disagreed once it was edited, and the driver relaunched cards
     the cap refused, for ever (0.18.9 sweep)."""
     context = _USAGE_CONTEXT.get()
@@ -367,7 +359,7 @@ def ledger():
 def record_external_call(service, *, subject="", **facts):
     """Charge one outbound third-party call to the ledger this turn is billed to.
 
-    Model tokens are only half of what a research run spends: a search, a page fetch and
+    Model tokens are only half of what a run spends: a search, a page fetch and
     a download each cost money or quota at somebody's API, and without a row apiece the
     run's real cost cannot be reconstructed afterwards. The row lands in the same
     ``events`` table as ``budget_usage`` -- durable, cross-process, exported with the rest
@@ -380,7 +372,7 @@ def record_external_call(service, *, subject="", **facts):
     backend name, a result count, a byte count) are stored verbatim, so nothing that
     identifies a person may be passed as one.
 
-    A window research turn supplies an async-local usage context. Other callers use
+    A workflow's window turn supplies an async-local usage context. Other callers use
     the environment because these tools hold no board handle: ``MISAKA_USAGE_DB`` / ``_TASK_ID`` / ``_GENERATION`` are
     what a worker already exports to charge the turn's tokens to a card, and an external
     call rides the same three. A session with none of them (an interactive chat) has no
@@ -405,7 +397,7 @@ def record_external_call(service, *, subject="", **facts):
         try:
             # Written straight rather than through ``tasks.add_event``, for the same
             # reason ``settle_request`` is: that helper drops any event whose
-            # ``task_id`` has no row in ``tasks``, and a research run charges its usage
+            # ``task_id`` has no row in ``tasks``, and a workflow's run charges its usage
             # to a run id that lives in another database.
             con.execute(
                 "INSERT INTO events (task_id,kind,payload,generation,created_at) "

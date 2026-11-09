@@ -1,4 +1,9 @@
-"""Stdout takeover helpers for print and RPC modes."""
+"""Translated from pi's ``packages/coding-agent/src/core/output-guard.ts`` (v1.1.0).
+
+MISAKA fork: a chunk is written synchronously, retried in place on a transient refusal, so there is no promise chain
+(``rawStdoutWriteTail``) to wait on; a write that fails for good raises to the caller, which ``misaka.__main__`` turns
+into a quiet exit, where pi calls ``process.exit(1)``.
+"""
 
 from __future__ import annotations
 
@@ -14,13 +19,13 @@ type _WriteMethod = Callable[..., Any]
 
 
 @dataclass(slots=True)
-class _StdoutTakeoverState:
+class StdoutTakeoverState:
     rawStdoutWrite: _WriteMethod
     rawStderrWrite: _WriteMethod
     originalStdoutWrite: _WriteMethod
 
 
-_stdoutTakeoverState: _StdoutTakeoverState | None = None
+stdoutTakeoverState: StdoutTakeoverState | None = None
 
 
 def _invoke_write(write: _WriteMethod, chunk: Any, callback: _WriteCallback | None = None) -> Any:
@@ -35,54 +40,14 @@ def _invoke_write(write: _WriteMethod, chunk: Any, callback: _WriteCallback | No
     return result
 
 
-def takeOverStdout() -> None:
-    global _stdoutTakeoverState
-    if _stdoutTakeoverState is not None:
-        return
-
-    rawStdoutWrite = sys.stdout.write
-    rawStderrWrite = sys.stderr.write
-    originalStdoutWrite = sys.stdout.write
-
-    def redirected_write(
-        chunk: str | bytes,
-        encodingOrCallback: Any = None,
-        callback: _WriteCallback | None = None,
-    ) -> Any:
-        if callable(encodingOrCallback):
-            return _invoke_write(rawStderrWrite, chunk, encodingOrCallback)
-        return _invoke_write(rawStderrWrite, chunk, callback)
-
-    sys.stdout.write = redirected_write  # type: ignore[method-assign]
-
-    _stdoutTakeoverState = _StdoutTakeoverState(
-        rawStdoutWrite=rawStdoutWrite,
-        rawStderrWrite=rawStderrWrite,
-        originalStdoutWrite=originalStdoutWrite,
-    )
-
-
-def restoreStdout() -> None:
-    global _stdoutTakeoverState
-    if _stdoutTakeoverState is None:
-        return
-
-    sys.stdout.write = _stdoutTakeoverState.originalStdoutWrite  # type: ignore[method-assign]
-    _stdoutTakeoverState = None
-
-
-def isStdoutTakenOver() -> bool:
-    return _stdoutTakeoverState is not None
-
-
-# pi output-guard.ts:9-43 — chunks are written strictly in order, each one acknowledged before the
-# next, and a transient kernel-buffer refusal is retried every 10ms instead of failing the run.
-RAW_STDOUT_RETRY_DELAY_S = 0.01
+RAW_STDOUT_RETRY_DELAY_MS = 10
 _RETRYABLE_ERRNOS = {errno.EAGAIN, errno.EWOULDBLOCK, errno.ENOBUFS}
 
 
-def _rawStdoutWrite() -> _WriteMethod:
-    return _stdoutTakeoverState.rawStdoutWrite if _stdoutTakeoverState is not None else sys.stdout.write
+def getRawStdoutWrite() -> _WriteMethod:
+    if stdoutTakeoverState is not None:
+        return stdoutTakeoverState.rawStdoutWrite
+    return sys.stdout.write
 
 
 def _retry_transient(operation: Callable[[], Any]) -> None:
@@ -93,11 +58,11 @@ def _retry_transient(operation: Callable[[], Any]) -> None:
         except OSError as error:
             if error.errno not in _RETRYABLE_ERRNOS:
                 raise
-            time.sleep(RAW_STDOUT_RETRY_DELAY_S)
+            time.sleep(RAW_STDOUT_RETRY_DELAY_MS / 1000)
 
 
-def _write_raw_stdout_chunk(text: str) -> None:
-    write = _rawStdoutWrite()
+def writeRawStdoutChunk(text: str) -> None:
+    write = getRawStdoutWrite()
     stream = getattr(write, "__self__", None)
     buffer = getattr(stream, "buffer", None)
     if buffer is None:                        # StringIO-style stand-ins: no binary layer, so no EAGAIN either
@@ -123,21 +88,60 @@ def _write_raw_stdout_chunk(text: str) -> None:
     _retry_transient(buffer.flush)
 
 
+def takeOverStdout() -> None:
+    global stdoutTakeoverState
+    if stdoutTakeoverState is not None:
+        return
+
+    rawStdoutWrite = sys.stdout.write
+    rawStderrWrite = sys.stderr.write
+    originalStdoutWrite = sys.stdout.write
+
+    def redirectedWrite(
+        chunk: str | bytes,
+        encodingOrCallback: Any = None,
+        callback: _WriteCallback | None = None,
+    ) -> Any:
+        if callable(encodingOrCallback):
+            return _invoke_write(rawStderrWrite, chunk, encodingOrCallback)
+        return _invoke_write(rawStderrWrite, chunk, callback)
+
+    sys.stdout.write = redirectedWrite  # type: ignore[method-assign]
+
+    stdoutTakeoverState = StdoutTakeoverState(
+        rawStdoutWrite=rawStdoutWrite,
+        rawStderrWrite=rawStderrWrite,
+        originalStdoutWrite=originalStdoutWrite,
+    )
+
+
+def restoreStdout() -> None:
+    global stdoutTakeoverState
+    if stdoutTakeoverState is None:
+        return
+
+    sys.stdout.write = stdoutTakeoverState.originalStdoutWrite  # type: ignore[method-assign]
+    stdoutTakeoverState = None
+
+
+def isStdoutTakenOver() -> bool:
+    return stdoutTakeoverState is not None
+
+
 def writeRawStdout(text: str) -> None:
     if not text:
         return
-    _write_raw_stdout_chunk(text)
+    writeRawStdoutChunk(text)
 
 
 async def waitForRawStdoutBackpressure() -> None:
-    """Every chunk is pushed through synchronously, so the queue is always drained by the time a
-    caller awaits this; print mode still awaits it between agent events (pi print-mode.ts:113-118)."""
+    # MISAKA fork: every chunk is pushed through synchronously, so nothing is pending by the time a caller awaits this.
     return
 
 
 async def flushRawStdout() -> None:
     await waitForRawStdoutBackpressure()
-    _write_raw_stdout_chunk("")
+    writeRawStdoutChunk("")
 
 
 __all__ = [

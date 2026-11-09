@@ -1,0 +1,25 @@
+"""Translated from pi's ``packages/ai/src/providers/groq.ts`` (v1.1.0)."""
+
+from __future__ import annotations
+
+from misaka.ai.api.openai_completions_lazy import openAICompletionsApi
+from misaka.ai.auth.helpers import envApiKeyAuth
+from misaka.ai.auth.types import ProviderAuth
+from misaka.ai.models import CreateProviderOptions, Provider, createProvider
+from misaka.ai.providers.groq_models import GROQ_MODELS
+
+
+def groqProvider() -> Provider:
+    return createProvider(
+        CreateProviderOptions(
+            id="groq",
+            name="Groq",
+            baseUrl="https://api.groq.com/openai/v1",
+            auth=ProviderAuth(apiKey=envApiKeyAuth("Groq API key", ["GROQ_API_KEY"])),
+            models=list(GROQ_MODELS.values()),
+            api=openAICompletionsApi(),
+        )
+    )
+
+
+__all__ = ["groqProvider"]

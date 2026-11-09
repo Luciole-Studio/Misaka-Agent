@@ -1,4 +1,9 @@
-"""Diagnostic helpers shared by AI providers and stream orchestration."""
+"""Translated from pi's ``packages/ai/src/utils/diagnostics.ts`` (v1.1.0).
+
+MISAKA fork: the two interfaces are pydantic models; an error's name falls back to its class name and it has a stack
+only when it carries a ``stack`` string; ``appendAssistantMessageDiagnostic`` also takes a dict-shaped message (durable
+and LCM records).
+"""
 
 from __future__ import annotations
 
@@ -26,7 +31,7 @@ class AssistantMessageDiagnostic(_DiagnosticsModel):
     details: dict[str, Any] | None = None
 
 
-def format_thrown_value(value: Any) -> str:
+def formatThrownValue(value: Any) -> str:
     if isinstance(value, Exception):
         name = getattr(value, "name", value.__class__.__name__)
         return str(value) or name
@@ -35,9 +40,9 @@ def format_thrown_value(value: Any) -> str:
     return str(value)
 
 
-def extract_diagnostic_error(error: Any) -> DiagnosticErrorInfo:
+def extractDiagnosticError(error: Any) -> DiagnosticErrorInfo:
     if not isinstance(error, Exception):
-        return DiagnosticErrorInfo(name="ThrownValue", message=format_thrown_value(error))
+        return DiagnosticErrorInfo(name="ThrownValue", message=formatThrownValue(error))
 
     code = getattr(error, "code", None)
     name = getattr(error, "name", None) or error.__class__.__name__ or None
@@ -52,7 +57,7 @@ def extract_diagnostic_error(error: Any) -> DiagnosticErrorInfo:
     )
 
 
-def create_assistant_message_diagnostic(
+def createAssistantMessageDiagnostic(
     type: str,
     error: Any,
     details: dict[str, Any] | None = None,
@@ -60,12 +65,12 @@ def create_assistant_message_diagnostic(
     return AssistantMessageDiagnostic(
         type=type,
         timestamp=int(time.time() * 1000),
-        error=extract_diagnostic_error(error),
+        error=extractDiagnosticError(error),
         details=details,
     )
 
 
-def append_assistant_message_diagnostic(message: Any, diagnostic: AssistantMessageDiagnostic) -> None:
+def appendAssistantMessageDiagnostic(message: Any, diagnostic: AssistantMessageDiagnostic) -> None:
     if isinstance(message, dict):
         diagnostics = list(message.get("diagnostics") or [])
         diagnostics.append(diagnostic)
@@ -80,4 +85,8 @@ def append_assistant_message_diagnostic(message: Any, diagnostic: AssistantMessa
 __all__ = [
     "AssistantMessageDiagnostic",
     "DiagnosticErrorInfo",
-    ]
+    "appendAssistantMessageDiagnostic",
+    "createAssistantMessageDiagnostic",
+    "extractDiagnosticError",
+    "formatThrownValue",
+]

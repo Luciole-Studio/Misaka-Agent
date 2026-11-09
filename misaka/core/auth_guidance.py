@@ -7,7 +7,7 @@ from misaka.config import get_auth_path, get_models_path
 _UNKNOWN_PROVIDER = "unknown"
 
 
-def get_provider_login_help() -> str:
+def getProviderLoginHelp() -> str:
     return "\n".join(
         [
             "Use /login to log into a provider via OAuth or API key, or set the provider's API key",
@@ -20,25 +20,22 @@ def get_provider_login_help() -> str:
     )
 
 
-def format_no_models_available_message() -> str:
-    return f"No models available. {get_provider_login_help()}"
+def formatNoModelsAvailableMessage() -> str:
+    return f"No models available. {getProviderLoginHelp()}"
 
 
-def format_no_model_selected_message() -> str:
-    return f"No model selected.\n\n{get_provider_login_help()}\n\nThen use /model to select a model."
+def formatNoModelSelectedMessage() -> str:
+    return f"No model selected.\n\n{getProviderLoginHelp()}\n\nThen use /model to select a model."
 
 
-def format_no_api_key_found_message(provider: str) -> str:
+def formatNoApiKeyFoundMessage(provider: str) -> str:
     provider_display = "the selected model" if provider == _UNKNOWN_PROVIDER else provider
-    return f"No API key found for {provider_display}.\n\n{get_provider_login_help()}"
+    return f"No API key found for {provider_display}.\n\n{getProviderLoginHelp()}"
 
-
-formatNoModelsAvailableMessage = format_no_models_available_message
 
 __all__ = [
+    "formatNoApiKeyFoundMessage",
+    "formatNoModelSelectedMessage",
     "formatNoModelsAvailableMessage",
-    "format_no_api_key_found_message",
-    "format_no_model_selected_message",
-    "format_no_models_available_message",
-    "get_provider_login_help",
+    "getProviderLoginHelp",
 ]

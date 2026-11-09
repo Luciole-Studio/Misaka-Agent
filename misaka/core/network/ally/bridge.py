@@ -3,7 +3,7 @@
 The ally's agent starts it from ``session/new``'s ``mcpServers`` with the card's claim, the sender's
 session and its panel space in the environment (``card.Attempt._bridge``). Every tool is the
 definition a Sister's card session carries -- the card's own (``todo.card_tools``), SendMessage
-(``messages.send_as``), the research view and the document index -- run against the board and
+(``messages.send_as``), a workflow's read-only views and the document index -- run against the board and
 the card's folder. Nothing is kept here: ``misaka_card_complete`` records the completion on the
 board, where the runner reads it when the turn ends. ACP has no system prompt, so each tool's
 prompt guidelines travel in its description.
@@ -17,11 +17,13 @@ import secrets
 from contextlib import closing
 from types import SimpleNamespace
 
+from misaka.ai.utils.typebox_helpers import typeboxSchema
 from misaka.core.network import messages, todo
 from misaka.core.platform import tasks as db
 
-# The workspace tools a research card needs, by name; the rest of their modules is not lent.
-BORROWED = ("misaka_research_view", "doc_list", "doc_outline", "doc_read", "doc_find", "doc_verify", "doc_add")
+# The document tools a card needs, by name; the rest of their module is not lent. A workflow's own
+# read-only tools (``platform.owners``) are lent beside them.
+BORROWED = ("doc_list", "doc_outline", "doc_read", "doc_find", "doc_verify", "doc_add")
 
 
 def _send_message(definition, sender, task_id):
@@ -37,7 +39,7 @@ def _send_message(definition, sender, task_id):
 def definitions():
     """The tools, for the card this process was started for."""
     from misaka.core.documents.wiring import documents
-    from misaka.core.research import tools as research_tools
+    from misaka.core.platform import owners
     from misaka.core.wiring import ToolCollector
 
     task_id = os.environ["MISAKA_USAGE_TASK_ID"]
@@ -47,15 +49,17 @@ def definitions():
         raise SystemExit(f"Card not found: {task_id}")
     sender = row["assignee"]
     borrowed = ToolCollector()
-    research_tools.register(borrowed)
+    for owner in owners.registered():       # a workflow's read-only views
+        owner.borrowed_tools(borrowed)
     documents.register(borrowed)
+    lent = {*BORROWED, *owners.read_only_tools()}
     send = messages.MessagesPart(sender=sender, card_task=task_id).tools[0]
     return [*todo.card_tools(task_id, sender), _send_message(send, sender, task_id),
-            *(tool for tool in borrowed.tools if tool.name in BORROWED)]
+            *(tool for tool in borrowed.tools if tool.name in lent)]
 
 
 def _schema(parameters):
-    return parameters.model_json_schema() if isinstance(parameters, type) else parameters
+    return typeboxSchema(parameters) if isinstance(parameters, type) else parameters
 
 
 def _description(tool):

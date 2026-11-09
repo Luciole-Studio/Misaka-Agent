@@ -50,6 +50,6 @@ def test_assembly_reaches_the_tools_in_each_declared_kind(kind):
 
 
 def test_no_web_tool_is_marked_sequential(monkeypatch):
-    """A sequential tool forces the whole batch serial (agent_loop.execute_tool_calls)."""
+    """A sequential tool forces the whole batch serial (agent_loop._executeToolCalls)."""
     monkeypatch.setattr("misaka.core.web.registry.web_search_available", lambda: True)
     assert [t.executionMode for t in web.part(_spec()).tools] == [None, None, None, None]

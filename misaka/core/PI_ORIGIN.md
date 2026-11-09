@@ -1,7 +1,7 @@
 # core/ 里什么是 pi 的，什么是 misaka 的
 
 `misaka/core/` 是 misaka 的内核：pi 的 coding-agent 内核（`packages/coding-agent/src/core/`，
-本机对照件为 `@earendil-works/pi-coding-agent` 0.87.1 的 `dist/core/`，2026-09-23 从 0.85.1 基线整体移植了 0.86.0–0.87.1 的内核改动，台账见 `docs/plans/pi-0.87-port-2026-09-23.md`）加上 misaka 自己的产品能力。
+对照件为上游仓库 `v1.3.0` 标签的 `packages/coding-agent/src/core/`；2026-09-23 从 0.85.1 基线移植了 0.86.0–0.87.1 的内核改动，台账见 `docs/plans/pi-0.87-port-2026-09-23.md`，2026-10 又从 0.87.1 经 0.99.1、1.0.0 移植到 1.1.0，台账见 `docs/plans/pi-0.99-port-2026-09-30.md`；2026-10-21～22 按分区从 1.1.0 经 1.2.0 移植到 1.3.0（ai、agent、tui、mcp、codemode、chord、durable、env 与 coding-agent 各区全部对齐），台账见 `docs/plans/pi-1.3-port-2026-10-21.md`）加上 misaka 自己的产品能力。
 两者按**目录/文件**分得开，按**目录名**分不开——这份清单就是那条线。改 pi 文件之前先看
 `docs/audits/pi-kernel-compat-audit.md` 的去向总表；改了要在改处留 `# MISAKA fork:` 注释说明理由
 （先例：`system_prompt.py:96`）。新增 misaka 子树要登记到下面。
@@ -10,16 +10,54 @@
 
 ## pi 来源（一字不动，或已标注分叉）
 
-顶层 40 个文件与 pi `dist/core/` 同名对应；其中 pi 有而 misaka **未移植**的 10 个见末节。
+pi 1.3.0 `src/core/` 顶层 59 个文件里 55 个与 misaka 同名对应；**未移植**的 4 个见末节。另有 5 个顶层文件是
+misaka 自己的（见「misaka 新增」）。逐目录的上游改动地图（1.0.0、1.1.0 两轮）存在 `docs/plans/pi-maps/`。
 
 子目录：
 
 | 目录 | 说明 |
 |---|---|
 | `tools/` | pi 的内置工具；misaka 加了 4 个文件与 1 个子目录（下表） |
-| `extensions/` | pi 的扩展**协议**（types/loader/runner/wrapper），不是扩展本身 |
+| `extensions/` | pi 的扩展**协议**（types/loader/runner/wrapper），不是扩展本身；pi 的 `jiti-loader`、`jiti-static-loader`、`virtual-modules` 是 TypeScript 的模块加载，Python 无对应物 |
 | `compaction/` | pi 的压缩 |
-| `export_html/` | pi 的会话导出（`template` 未移植） |
+| `export_html/` | pi 的会话导出；`template.{html,css,js}` 与 `vendor/` 的 marked、highlight.js 照搬自 1.3.0（1.1.0→1.3.0 只有 `template.js` 变了） |
+
+## 工具 loadout：已跟到 1.5.0，只为 `toolScope` 分叉（2026-11-06）
+
+内核基线仍是 1.3.0，这一段已先跟上游 1.5.0，下次整体移植时 `bd3c9b82`（恢复时回放整条分支，分支没提及的非内置工具按新
+注册处理）和 `b9e3eef6`（活跃工具是集合，换顺序不改提示词）不用再做。用例在 `tests/test_pi_150_port.py`。
+
+原则：不影响 misaka 特性就 1:1 照 pi。`setActiveToolsByName`、`_setActiveTools`、`_applyToolLoadout`、
+`_restoreToolsFromTranscript`、`_refreshToolRegistry` 和 pi 的差别只剩这些：
+
+- `toolScope`（研究阶段的工具上限）：`_unscopedToolNames` 只在 scope 期间有意义，scope 外一律读活跃工具，和 pi 一样；
+  `setActiveToolsByName`、恢复、刷新、reload 里各有一段 scope 分支。scope 进出也走 pi 的排序规则。
+- `_isAllowedTool` 的准入与禁用名单（子代理）、`browser_exec` 跟随 `bash`、parts 的 `project_tools`（子代理改写 `bash`
+  的 schema，不隐藏工具）。
+- `recordLoadout` 和 `session_tree` 时刻，给下面的研究窗口用。
+
+**不要**再用 projection 隐藏工具。transcript 只记录模型看到了什么，分不清隐藏和移除，内核只能去猜。
+
+和 pi 一样的已知行为，不算缺陷：第一次运行前关掉的工具，transcript 没有记录，恢复和 `/tree` 时按新工具打开；工具关掉再打开后
+排到末尾，恢复时回到默认位置，第一次运行多写一条提示词更新；`--tools +name`/`-name` 只在恢复时应用，`/tree` 不应用。
+
+## 研究窗口收起看板工具：照 pi 的 plan mode（2026-11-06）
+
+研究窗口开着时 Last Order 不用 9 个看板工具，它们归工作流的 driver。窗口贯穿等待批准和聊天的全程。做法和
+`examples/extensions/plan-mode` 一样，逻辑在 part 里，内核只提供 `recordLoadout` 和 `session_tree` 时刻：
+
+- 模式的所有者拿掉工具：`SisterCapabilitiesPart._settle_tools` 用 `setActiveToolsByName`，并把拿掉的写进 `workflow-tools`
+  这条 custom entry。只记真正拿掉的，用户关掉的工具不会被带回来。
+- 窗口关闭时加回来并写进 transcript（`recordLoadout`），否则退出后恢复会丢。记录只清真正加回来、已写进 transcript 的：
+  `--tools` 打开的会话加不回去，运行中关窗要等这一轮结束，这两种情况记录留着，下次再兑现。
+- `session_start` 和 `session_tree` 再校正一次：被杀的窗口留下的记录在恢复时兑现，`/tree` 用目标分支自己的记录。
+  不在 `before_agent_start` 里做：那里改工具会重建这一轮 part 写入的提示词选项。
+- `tool_call` 钩子照旧拦截，`/tree` 让工具短暂可见时也用不了。
+
+和 plan mode 一样：窗口里设定一份精确的工具列表，关窗时被拿掉的工具仍会加回来；恢复的工具排在末尾，下一轮多写一条提示词
+更新；拿掉工具算一次收窄，按 pi 的规则会清空等待注册的工具；被杀窗口的记录优先于这次的 `--tools -name`。
+
+这一版之前写下的聊天没有这条记录：窗口里记成移除、之后再没跑过的话，看板工具回不来。本机的研究聊天都不是这种情况。
 
 ## 用户目录：和 pi 的有意分叉（2026-09-21，对齐 pi 时**不要**带回来）
 
@@ -46,14 +84,30 @@ pi 把全局文件放在 `~/.pi/agent/`，这一层的真实作用是让全局�
 pi 只有一个全局 `defaultThinkingLevel`（加按模型的 `modelThinkingLevels`）。misaka 让 Last Order 和每个
 Sister 各有一档：
 
-- `settings_manager.ROLE_KEYS` 含 `defaultThinkingLevel`；`setDefaultThinkingLevel` 在角色会话里写该角色的
+- `settings_manager.ROLE_SETTING_KEYS` 含 `defaultThinkingLevel`；`setDefaultThinkingLevel` 在角色会话里写该角色的
   `settings.json`，角色之外写全局。`getRoleThinkingLevel` 读角色自己那一档。
 - 新会话与换模型时的取值顺序：显式（`--thinking`、卡片 model 的 `:level`）→ 会话自己记录的 → 角色自己的
   → 全局 `modelThinkingLevels` → 全局 `defaultThinkingLevel`。第三步 pi 没有，`sdk.py` 与
-  `agent_session._get_thinking_level_for_model_switch` 各有一处 `# MISAKA fork:`。
+  `agent_session._getThinkingLevelForModelSwitch` 各有一处 `# MISAKA fork:`。
 - `interactive_mode._apply_thinking_level` 先存默认值再切会话：角色文件写不进去时，文件和会话都不变
   （pi 的全局写不会在这里失败）。设置面板的推理强度项也走这条路。
 - `tests/test_role_thinking_level.py` 钉住以上行为。
+
+## 每类 agent 各自的 codemode 开关：和 pi 的有意分叉（2026-11-08，对齐 pi 时**不要**带回来）
+
+pi 只有一类会话，codemode 靠手写 `defaultTools`（`+codemode`）打开。misaka 有三类 agent，各有一个开关，
+写在全局 `settings.json` 的 `roles.lastOrder` / `roles.sisters` / `roles.subagents` 的 `codemode` 里：
+
+- `settings_manager.getDefaultTools` 在绑定了角色的会话里（`bindRole`：Last Order 或某位 Sister）把该类的
+  开关作为 `+codemode`/`-codemode` 叠在 pi 的 `defaultTools` 之上；开关没写就完全照 pi。新会话与 `/reload`
+  因此照 pi 读 `defaultTools` 的老路跟着走，`sdk.py` 不改。
+- 子代理不绑定角色：`subagent/child.py` 在"没有工具清单就启用全部工具"那一步调 `inherited_tool_names`，
+  按 `roles.subagents.codemode` 去留 codemode；无界面卡片走同一步，按她启动时的工具（即 Sister 的开关）去留；
+  fork 照抄父会话的工具（缓存要求）；MCP 打开的 codemode 一律保留（pi 的 `autoEnableCodemode`）；续上的子代理
+  会话记录里已声明的 codemode 也保留（拿掉就是线上的 `tool_removal`）。
+- 开关只管新会话：`/settings` 的三行只写设置，不动当前会话的工具表（中途移除工具会发 `tool_removal`，
+  sub2api 在工具多于 5 个时报 400）。
+- `tests/test_codemode_setting.py` 钉住以上行为。
 
 ## misaka 新增
 
@@ -62,14 +116,15 @@ Sister 各有一档：
 | 文件 | 职责 |
 |---|---|
 | `wiring.py` | 会话装配：`SessionSpec`；`TOOL_MODULES` + `tools_for`——只贡献工具的 core 模块走 pi 的 SDK 门 `customTools`（与内置工具同一张表，来源 `<sdk:>`），不进扩展清单；`PART_MODULES` + `parts_for`——还要被内核在时刻叫到的 core 模块，做成会话的 **part**（`part(spec)` 返回带 `tools`、`commands` 与时刻方法的对象），工具同样走 `customTools`，时刻由内核经 `moments.py` 直接调用，斜杠命令由内核的 `prompt()` 直接执行；`build_extensions`——只剩进程入口注入的捆绑扩展（`bundled`），core 一条都不贡献；`PROVIDER_MODULES` + `core_providers`——core 自己的 provider（moa），由注册表在每次重载时并入；`assemble` 返回**惰性**的 `Assembly`（第一次读才构造：worker 是先装配、后在环境窗口里写 `os.environ` 的，part 和当年的扩展工厂一样要在环境就位后再建） |
-| `moments.py` | 内核对 misaka 子系统的直接调用：`Moments` 持有会话的 parts，在 pi 内核标出的时刻（session_start/shutdown/compact/compact_failed、before_agent_start、agent_end、session_before_compact、tool_call/tool_result、input、context）先于 ExtensionRunner 叫它们，折叠规则与 runner 相同——对应 pi 内核自己在时刻里做事的写法（`_check_compaction` 那种直接调用），而不是把自己挂到 runner 上。part 在时刻之外要用的会话 API 也是 pi 现成的：`sendCustomMessage`/`sendUserMessage`（经 `Moments.send_message`/`send_user_message` 按 runner 的顺序调度）、`getActiveToolNames`、`registerCustomTools`/`refreshTools`（晚到的工具走 `customTools` 那扇门）。`CoreCommand` 是 part 的斜杠命令：`getSlashCommands` 以 source `core` 列出，`prompt()` 在扩展命令之前直接执行。接入点：`AgentSessionConfig.parts` ← `sdk`/`services` 的 `parts` 选项 ← `cli/engine.py` `parts=` ← `Assembly.parts`；改处都有 `# MISAKA fork:` |
-| `pi_manifest.py` `provider_display_names.py` `session_export.py` `settings_diagnostics.py` | 移植期加的小件 |
-| `mcp.py` | MCP 客户端与按角色的服务器配置（原 `extensions/mcp.py`） |
-| `moa/` | Mixture-of-Agents 虚拟 provider（原 `extensions/moa/`，2026-09-03 用户决定进 core）。core provider 走注册表的 `PROVIDER_MODULES` 通道：`model_registry._reloadLegacy` 每次重载末尾调 `core/wiring.core_providers(configured)` 把它并进表，和 pi 的内置 provider 一样在每个注册表里；只发布聚合器 provider 已配置凭据的预设（裸注册表保持为空，`No models available` 照常触发）；会话侧两个时刻是 `MoaPart` |
+| `moments.py` | 内核对 misaka 子系统的直接调用：`Moments` 持有会话的 parts，在 pi 内核标出的时刻（session_start/shutdown/compact/compact_failed、before_agent_start、agent_end、session_before_compact、tool_call/tool_result、input、context）先于 ExtensionRunner 叫它们，折叠规则与 runner 相同——对应 pi 内核自己在时刻里做事的写法（`_checkCompaction` 那种直接调用），而不是把自己挂到 runner 上。part 在时刻之外要用的会话 API 也是 pi 现成的：`sendCustomMessage`/`sendUserMessage`（经 `Moments.send_message`/`send_user_message` 按 runner 的顺序调度）、`getActiveToolNames`、`registerCustomTools`/`refreshTools`（晚到的工具走 `customTools` 那扇门）。自 pi 1.2 起 `before_agent_start` 也在通知唤醒的 run（`triggerTurn` 的自定义消息）里触发，事件带 `messageType`；只为用户回合做的事分两种判断：board 收件只看 `messageType == "user"`（研究阶段的 TURN 消息不收件），SubagentStart 钩子用 `opens_turn(event)`（用户提示，或 `details[TURN]` 为真的自定义消息）。`CoreCommand` 是 part 的斜杠命令：`getSlashCommands` 以 source `core` 列出，`prompt()` 在扩展命令之前直接执行。接入点：`AgentSessionConfig.parts` ← `sdk`/`services` 的 `parts` 选项 ← `cli/engine.py` `parts=` ← `Assembly.parts`；改处都有 `# MISAKA fork:` |
+| `session_catalog.py` | 面板的会话清单：先找会话文件，再标注它们的属主（生命周期记录只是指针与状态，不是第二份记录） |
+| `session_control.py` | 让终端接到拥有该会话的 `AgentSession` 上（本地套接字），不另开第二个写会话的进程 |
+| `session_overrides.py` | 一个会话用来代替全局设置的值：研究运行自己的压缩阈值与单次输出上限，按会话 id 存放 |
+| `moa/` | Mixture-of-Agents 虚拟 provider（原 `extensions/moa/`，2026-09-03 用户决定进 core）。core provider 走 `core/wiring.py` 的 `PROVIDER_MODULES` 通道：`ModelRuntime.create` 调 `core_providers(runtime)` 把它并进 runtime，和 pi 的内置 provider 一样在每个 runtime 里，它的 `refreshModels` 在每次刷新时按当下的凭据重算预设；只发布聚合器 provider 已配置凭据的预设（裸注册表保持为空，`No models available` 照常触发）；会话侧两个时刻是 `MoaPart` |
 
 ### `tools/` 里的 misaka 文件
 
-`_common.py` `download_file.py` `powershell.py` `web_fetch.py`（抓取工具的安全层原在 `tools/_web/`，2026-09-18 并入 `core/web/`）
+`_common.py` `download_file.py` `office.py` `web_fetch.py`，以及子目录 `_office/`（`office` 工具读写 Office 文档的实现，来源见其 `ORIGIN.md`）。`powershell.py` 自 1.1.0 起是 pi 的工具。抓取工具的安全层原在 `tools/_web/`，2026-09-18 并入 `core/web/`。
 
 ### `extensions/` 里的 misaka 文件
 
@@ -99,22 +154,25 @@ Sister 各有一档：
 
 **core 不在扩展清单里**：它的工具走 `customTools`（来源 `<sdk:>`），时刻由内核直接调（`moments.py`），命令由 `prompt()` 直接执行——
 和 pi 的 core 从不把自己挂到 ExtensionRunner 上是同一件事。启动屏的「Extensions」一区只剩用户装的和捆绑的；
-`misaka/extensions/` 下的捆绑扩展各自用 `HIDDEN` 决定显示与否（pi 藏了它的 llama）。
+`misaka/extensions/` 下的捆绑扩展都是 pi 意义上的内置扩展（`BUILTIN = True`，加载为 `builtin:<name>`），和 pi 的一样不上这一区，
+由 `extensions` 设置里的 `-builtin:<name>` 关掉。
 
 ## `misaka/extensions/` 现在是什么
 
-pi 意义上的**捆绑扩展**——自包含、只靠扩展 API、拔了无残留——按 misaka 原有的三层放：
+pi 意义上的**捆绑扩展**——自包含、只靠扩展 API、拔了无残留——一个扩展一个文件夹，平放，与 pi 的 `src/extensions/<name>/` 同形：
 
 ```
-extensions/<module>             每个角色：llama/（pi 自带的 provider）、misaka_lcm/（LCM 上下文引擎：vendor/ 是 hermes-lcm 上游原样，host/ 是对 pi 事件的适配；拔掉它 pi 原生压缩照常）、coverage/（coverage_scan 工具，并经 resources_discover 自带 coverage-maps 技能）
-extensions/last_order/<module>  只有 Last Order 的槽位（现在是空的）
-extensions/sisters/             其他角色的槽位（subagent 是 C 类，在 core/subagent，仅对 Sisters 暴露）
+extensions/<module>   llama/、mcp/、codemode/ 与 tool_search/（pi 自带的四个）、misaka_lcm/（LCM 上下文引擎：vendor/ 是 hermes-lcm 上游原样，host/ 是对 pi 事件的适配；关掉它 pi 原生压缩照常）、vision/（给看不见图的模型读图）、coverage/（coverage_scan 工具，并经 resources_discover 自带 coverage-maps 技能）、reading/（阅读模式，`ROLES = {"last_order"}`）
 ```
 
-`extensions/__init__.py` 的 `discover(spec)` 扫文件夹、按文件夹定角色、按 `SESSION_KINDS` 门控——这是 misaka 加在 pi 之上的
-（pi 的 `src/extensions/index.ts` 是无角色的平铺数组）。**`core/` 对这个包零引用**：进程入口（`cli/app.py`、
+`extensions/__init__.py` 的 `discover(spec)` 扫这个文件夹，按模块自报的 `ROLES` 与 `SESSION_KINDS` 门控，与 `core/wiring.py` 的条目同一套规则——角色是 misaka 加在 pi 之上的
+（pi 的 `src/extensions/index.ts` 是无角色的平铺数组）。2026-11-03 之前这里另有 `last_order/`、`sisters/` 两个子文件夹，
+按所在位置定角色，与自报的 `ROLES` 并存成两套，已并为一套。**`core/` 对这个包零引用**：进程入口（`cli/app.py`、
 `cli/subagent_child.py`、`cli/research_node.py`）调 `cli/bootstrap.install()`，把 `discover` 赋给 `core/wiring.py` 的 `bundled`，
 `build_extensions(spec)` 把它的结果排在 core 条目之前——对应 pi `main.ts` 把 `builtInExtensions` 排在最前。
+misaka 自己的捆绑扩展照 pi 的规矩也是内置扩展：能关，不能删。pi 的捆绑扩展彼此 import（`mcp` 取 `codemode`、`tool-search`
+的工具名，`codemode` 用 `tool-search` 的排序器），`interactive-mode` 也 import `mcp/config`，删掉文件夹不是它支持的用法。
+内置扩展带的技能以扩展路径为名字空间（`builtin:coverage:coverage_maps`），与内联扩展的 `<inline:name>:…` 同理（`core/skills/layers.py`）。
 pi 没有在 core 里起会话的进程，misaka 有（daemon 里的卡片、子代理子进程），所以需要这个注入点；这是此处唯一的创新。
 裸的内核入口（`engine.main()` 无 options，只有测试走）不装钩子，会话里没有捆绑扩展。
 这条零引用由 `tests/test_extension_boundary.py` 守住（2026-09-29 查出子代理运行时直接 import 了 LCM 的存储模块，
@@ -132,9 +190,28 @@ pi 的 `pi install npm:/git:` 与 `~/.pi/agent/extensions/` 安装通道 misaka 
 
 ## pi 有而 misaka 未移植的 `core/` 顶层文件
 
-`cache_stats` `index`（barrel，misaka 用 `__init__.py`）`model_config`（内联进 `model_registry.py`）
-`model_runtime` `provider_composer` `radius` `remote_catalog_provider` `runtime_credentials`
-`skills`（被 `skills/` 替换）`trust_manager`。逐条理由在 compat 审计。
+`bug-report` 与 `bug-report-upload`（pi 的 `/bug`：把报告上传到 pi 的 Radius 网关；misaka 没有这个功能，`/debug` 写本地文件）、
+`index`（barrel，misaka 用 `__init__.py`）、`skills`（被 `skills/` 整体替换）。`trust-manager` 是移植了的（`trust_manager.py`）。
+1.2.0 新增的 `keybindings-schema`、`key-id-schema`、`settings-defaults`、`settings-schema` 都已移植（`keybindings_schema.py`、`key_id_schema.py`、`settings_defaults.py`、`settings_schema.py`）；`settings_schema.py` 描述的是 misaka 的 settings.json（含 misaka 自己的各节），`keybindings_schema.py` 列的是 misaka 的键位（没有 `tui.altScreen.*`）。`scripts/generate_schemas.py`（pi `scripts/generate-schemas.ts`）由它们和 `modes/interactive/theme/theme_schema.py` 生成 `misaka/schemas/{models,settings,keybindings,theme}.schema.json`，`$id` 指向 misaka 仓库的发版标签，不指 pi.dev；同一脚本把内置主题 `dark.json`/`light.json` 的 `$schema` 改写成该版本的 theme.schema.json，发版改版本号后跑一次即可。
+
+## core/ 之外的 pi 来源
+
+`misaka/ai/`、`misaka/agent/`、`misaka/ui/tui/` 之外，下面这些包也逐行对照 pi 1.3.0（规则同上：分叉处标 `# MISAKA fork:`）：
+
+| misaka | pi |
+|---|---|
+| `misaka/mcp/` | `packages/mcp` |
+| `misaka/codemode/` | `packages/codemode`。运行时按 1.3.0 拆分：`runtime/execution.py`（宿主侧执行）、`runtime/vm.py`（VM 驱动）、`runtime/host.py`（只剩 worker 启动）、`runtime/worker.py`（worker 是线程，misaka 分叉）；QuickJS wasm 经 `quickjs_wasi/`（quickjs-wasi 3.6.2 的 Python 移植）跑在 wasmtime 上。**未移植**：`InlineCodemodeSandbox`（进程内 VM 会堵住 asyncio 循环）、`RemoteCodemodeSandbox` 与 `cloudflare`/`portable` 入口（只为 Cloudflare Durable Object 而设，misaka 没有这层边界） |
+| `misaka/chord/` | `packages/chord`（1.3.0 重写后的 cell/object/host 运行时；`chord/node` 是 Python 分叉） |
+| `misaka/durable/` | `packages/durable`。分叉：图片处理用 Pillow 代替 Photon（wasm），在线程里跑而非 Node worker，输出按 Photon 的行为对齐（16 位灰度 PNG、JPEG 4:4:4）；`structuredOutputSchema` 用 chord 的 TypeBox 替身 `chord/_typebox.py` 校验；`images/cloudflare`、`storage/sqlite/cloudflare` 只为 Cloudflare Workers 而设，未移植；本地执行环境的文件监视（`durable/env/node_watch.py`）在 macOS 上与 Node 一致：目录用 FSEvents（每个事件循环共用一个流）、文件用 kqueue |
+| `misaka/env/` | `packages/env`（纯 Python）。分叉：守护进程的 list/pty 是 Python 实现——gitignore 匹配器代替 Rust 的 `ignore` crate（与上游守护进程逐例一致），pty 经启动器起程序，用 `select.poll` 等待（`select` 作后备） |
+| `misaka/extensions/{mcp,codemode,tool_search,llama}/` | `coding-agent/src/extensions/` 的同名捆绑扩展（`builtin:<name>`） |
+
+`chord`、`durable`、`env` 三个包 misaka 的任何入口都不可达（只有它们自己的测试用；`tests/test_stack_boundary.py` 守着这条边界）。
+pi 1.3.0 的 coding-agent 也已不依赖它们；2026-10-21 用户裁定仍保留并逐函数跟进上游。
+pi 1.2.0 删掉的实验性服务端/客户端/插件栈（`src/experimental`、`src/cli/experimental`、`packages/{client,protocol,server}`
+与示例插件 `pi-example-plugin`），misaka 的对应物 `misaka/{experimental,cli/experimental,client,protocol,server}/` 与
+`examples/` 已于同日随之删除，不要恢复。
 
 ## 旧路径 → 新路径（给 `docs/` 里 27 份历史文档对照用；历史文档不改）
 
@@ -152,7 +229,7 @@ misaka/extensions/misaka_lcm/          留在原地：2026-09-03 用户决定 LC
 misaka/extensions/sisters/subagent/    → misaka/core/subagent/
 misaka/extensions/last_order/ally/     → misaka/core/network/ally/
 misaka/extensions/ask_user/            → misaka/core/ask_user/
-misaka/extensions/mcp.py               → misaka/core/mcp.py
+misaka/extensions/mcp.py               → misaka/core/mcp.py（2026-10-03 删除：MCP 现为 misaka/mcp + misaka/extensions/mcp，逐行移植 pi（现对照 1.3.0），归 pi 侧规则）
 misaka/extensions/skills.py            → misaka/core/skills/wiring/skills.py
 misaka/extensions/documents.py         → misaka/core/documents/wiring/documents.py
 misaka/extensions/{messages,todo,roster}.py

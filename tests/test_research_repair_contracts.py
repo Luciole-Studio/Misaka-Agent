@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from misaka.agent.agent_loop import execute_tool_calls
+from misaka.agent.agent_loop import _executeToolCalls
 from misaka.agent.types import AgentContext, AgentLoopConfig, AgentTool, AgentToolResult
 from misaka.ai.types import (
     AssistantMessage,
@@ -22,9 +22,10 @@ from misaka.ai.types import (
     Usage,
     UsageCost,
 )
-from misaka.ai.utils.json_parse import StreamingArgs
+from misaka.ai.utils._streaming_args import StreamingArgs
 from misaka.core.platform import tasks
 from misaka.core.research import bundle, commands, runs, workflow
+from tests.anthropic_sse import patchRawResponse
 
 
 @pytest.fixture
@@ -130,7 +131,7 @@ async def test_invalid_call_gets_receipt_without_blocking_valid_sibling(executio
     StreamingArgs("not-json").finish_into(bad)
     StreamingArgs("{}").finish_into(good)
     msg = AssistantMessage.model_validate_json(message([bad, good]).model_dump_json())
-    result = await execute_tool_calls(
+    result = await _executeToolCalls(
         AgentContext(messages=[], tools=[tool]),
         msg,
         AgentLoopConfig(model=None, convertToLlm=lambda m: m, toolExecution=execution),
@@ -138,11 +139,15 @@ async def test_invalid_call_gets_receipt_without_blocking_valid_sibling(executio
         lambda e: None,
     )
     assert called == [("good", {})]
-    assert prepared == [{}]
+    # pi 1.3.0 order: the tool lookup and `prepareArguments` run for the malformed call too, and argument validation
+    # then fails with its `argumentsError`.
+    assert prepared == [{}, {}]
     assert [(r.toolCallId, r.isError) for r in result.messages] == [
         ("bad", True),
         ("good", False),
     ]
+    assert result.messages[0].content[0].text.startswith('Invalid arguments for tool "probe": ')
+    assert "Received arguments:\nnot-json" in result.messages[0].content[0].text
 
 
 @pytest.mark.parametrize(
@@ -157,7 +162,7 @@ async def test_invalid_call_gets_receipt_without_blocking_valid_sibling(executio
 async def test_anthropic_finalization_on_real_stream_path(
     monkeypatch, raw, inline, stop_block
 ):
-    from misaka.ai.providers import anthropic
+    from misaka.ai.api import anthropic_messages as anthropic
 
     events = [
         {
@@ -187,10 +192,9 @@ async def test_anthropic_finalization_on_real_stream_path(
         for event in events:
             yield event
 
-    monkeypatch.setattr(
-        anthropic, "_create_raw_response", AsyncMock(return_value=incoming())
+    patchRawResponse(monkeypatch, incoming()
     )
-    stream = anthropic.stream_anthropic(
+    stream = anthropic.stream(
         model(), Context(messages=[]), {"client": object()}
     )
     seen = [event async for event in stream]
@@ -206,15 +210,16 @@ async def test_anthropic_finalization_on_real_stream_path(
 @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
 @pytest.mark.parametrize("send_end", [True, False])
 def test_transport_preserves_raw_parse_failure(bridge, send_end):
-    from misaka.agent.proxy import _process_proxy_event
-    from misaka.ai.providers.pi_messages import _EventConverter
+    from misaka.agent.proxy import _processProxyEvent
+    from misaka.ai.api.pi_messages import _createEventConverter
 
-    converter = _EventConverter(model())
+    convertEvent = _createEventConverter(model())
     partial, buffers = message(), {}
+    events: list = []
     convert = (
-        converter.convert
+        (lambda e: events.append(convertEvent(e)))
         if bridge == "pi-messages"
-        else lambda e: _process_proxy_event(e, partial, buffers)
+        else lambda e: _processProxyEvent(e, partial, buffers)
     )
     convert(
         {
@@ -241,14 +246,14 @@ def test_transport_preserves_raw_parse_failure(bridge, send_end):
     convert(
         {"type": "done", "reason": "toolUse", "usage": message().usage.model_dump()}
     )
-    result = converter.partial if bridge == "pi-messages" else partial
+    result = events[-1].message if bridge == "pi-messages" else partial
     assert result.content[0].argumentsError
 
 
 @pytest.mark.parametrize("raw", ["not-json", "{}"])
 @pytest.mark.parametrize("start", [False, True])
 async def test_responses_final_item_has_same_validation(raw, start):
-    from misaka.ai.providers.openai_responses_shared import process_responses_stream
+    from misaka.ai.api.openai_responses_shared import processResponsesStream
 
     item = {
         "type": "function_call",
@@ -270,7 +275,7 @@ async def test_responses_final_item_has_same_validation(raw, start):
         yield {"type": "response.completed", "response": {"status": "completed"}}
 
     output, seen = message(), []
-    await process_responses_stream(
+    await processResponsesStream(
         incoming(), output, SimpleNamespace(push=seen.append), model("openai-responses")
     )
     call = next(e.toolCall for e in seen if e.type == "toolcall_end")
@@ -353,7 +358,7 @@ async def test_real_approval_tools_fence_captured_owner(state, changed, action):
     con, run, root = state
     branch = runs.create_node(con, run["id"], question="fixture", parents=[root["id"]])
     assert runs.acquire_driver(con, run["id"], "old-driver")
-    key = runs.prepare_runner(con, "research_branches", branch["id"])
+    key = runs.prepare_runner(con, "research_execution", branch["id"])
     run = runs.get(con, run["id"])
     branch = runs.node(con, branch["id"])
     runs.set_node(con, branch["id"], status="awaiting_approval")
@@ -374,12 +379,12 @@ async def test_real_approval_tools_fence_captured_owner(state, changed, action):
     tool = next(t for t in definitions if t.name == "misaka_research_" + action)
     if changed in ["driver", "both"]:
         con.execute(
-            "UPDATE research_runs SET driver_lock=? WHERE id=?",
+            "UPDATE graphs SET lease_token=? WHERE id=?",
             ("new-driver", run["id"]),
         )
     if changed in ["node", "both"]:
         con.execute(
-            "UPDATE research_branches SET runner_key=? WHERE id=?",
+            "UPDATE research_execution SET runner_key=? WHERE id=?",
             ("new-node", branch["id"]),
         )
     args = (
@@ -411,7 +416,7 @@ async def test_real_approval_tools_fence_captured_owner(state, changed, action):
     if changed == "none" and action == "withdraw":
         assert runs.action(con, run["id"], branch["id"], runs.plan_key(round_)) is None
     if changed == "none":
-        runs.release_runner(con, "research_branches", branch["id"], key)
+        runs.release_runner(con, "research_execution", branch["id"], key)
 
 
 async def test_spawn_cancellation_waits_for_and_reaps_late_handle(state):
@@ -467,7 +472,7 @@ async def test_a_level_starts_its_nodes_one_at_a_time(state, tmp_path):
     async def start(node):
         started.append(node["id"])
         handles[node["id"]] = SimpleNamespace(pid=None)
-        return runs.prepare_runner(con, "research_branches", node["id"])
+        return runs.prepare_runner(con, "research_execution", node["id"])
 
     def answer(node, stop_reason):
         with open(runs.node(con, node["id"])["session_file"], "a", encoding="utf-8") as handle:
@@ -497,7 +502,7 @@ async def test_a_level_starts_its_nodes_one_at_a_time(state, tmp_path):
         assert await eventually(lambda: started == ids)
         for node in nodes:
             runs.set_node(con, node["id"], status="closed")
-            runs.release_runner(con, "research_branches", node["id"], runs.node(con, node["id"])["runner_key"])
+            runs.release_runner(con, "research_execution", node["id"], runs.node(con, node["id"])["runner_key"])
         assert await asyncio.wait_for(task, 1) == "done"
     finally:
         task.cancel()
@@ -525,7 +530,7 @@ async def test_a_node_that_has_planned_does_not_hold_the_next_start(state, tmp_p
     async def start(node):
         started.append(node["id"])
         handles[node["id"]] = SimpleNamespace(pid=None)
-        return runs.prepare_runner(con, "research_branches", node["id"])
+        return runs.prepare_runner(con, "research_execution", node["id"])
 
     async def eventually(check):
         for _ in range(400):
@@ -553,7 +558,7 @@ def _reply(stop_reason):
 
 async def test_unclaimed_runner_is_not_completed_and_late_release_is_fenced(state):
     con, run, root = state
-    key = runs.prepare_runner(con, "research_branches", root["id"])
+    key = runs.prepare_runner(con, "research_execution", root["id"])
     task = asyncio.create_task(
         workflow._wait_level(
             con,
@@ -569,10 +574,10 @@ async def test_unclaimed_runner_is_not_completed_and_late_release_is_fenced(stat
         await asyncio.sleep(0.02)
         assert not task.done()
         runs.set_node(con, root["id"], status="closed")
-        runs.release_runner(con, "research_branches", root["id"], key)
+        runs.release_runner(con, "research_execution", root["id"], key)
         assert await asyncio.wait_for(task, 0.5) == "done"
-        new = runs.prepare_runner(con, "research_branches", root["id"])
-        runs.release_runner(con, "research_branches", root["id"], key)
+        new = runs.prepare_runner(con, "research_execution", root["id"])
+        runs.release_runner(con, "research_execution", root["id"], key)
         assert runs.node(con, root["id"])["runner_key"] == new
     finally:
         task.cancel()
@@ -626,112 +631,42 @@ async def test_shared_session_environment_restored_after_dispose(
         await asyncio.gather(task, return_exceptions=True)
 
 
-@pytest.mark.parametrize(
-    "command,reason",
-    [
-        ("printf '%s' '`literal`'", None),
-        ("echo '${literal}'", None),
-        ('printf "%s" "$(printf ok)"', "dynamic"),
-        ("bash -c 'echo $(cat $PRIVATE)'", "dynamic"),
-        ("printf '%s' '`literal`'; bash -c 'echo ${PRIVATE}'", "dynamic"),
-        ("cat /tmp/live-skills/SKILL.md", "path"),
-    ],
-)
-def test_skill_guard_keeps_policy_but_allows_literal_display(command, reason):
-    from misaka.core.skills.wiring.skills import _command_touches
-
-    assert _command_touches(command, "/tmp/workspace", {"/tmp/live-skills"}) == reason
-    if "`" in command:
-        assert _command_touches(
-            command, "/tmp/workspace", {"/tmp/live-skills"}, shell="powershell"
-        )
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "cp board.db board.db.bak-$(date +%s)",
-        "for pid in $(ps aux | grep card-shell | awk '{print $2}'); do echo $pid; done",
-        'printf "%s" "$(printf ok)"',
-        'echo "unterminated',
-    ],
-)
-def test_substitution_alone_is_refused_only_where_nobody_is_watching(command):
-    """2026-09-18 (B23): the guard refused every command carrying $( , ` or ${ , whatever it
-    pointed at and whoever was watching. Backing up the board and listing processes were both
-    killed in Last Order's own window, under a message about skill trees."""
-    from misaka.core.skills.wiring.skills import _command_touches
-
-    roots = {"/tmp/live-skills"}
-    assert _command_touches(command, "/tmp/workspace", roots) == "dynamic"
-    assert _command_touches(command, "/tmp/workspace", roots, unattended=False) is None
-
-
-def test_a_path_into_a_live_tree_is_refused_with_a_person_watching_too():
-    from misaka.core.skills.wiring.skills import _command_touches
-
-    roots = {"/tmp/live-skills"}
-    for command in ("cat /tmp/live-skills/SKILL.md", "rm -rf /tmp/live-skills/$(whoami)"):
-        assert _command_touches(command, "/tmp/workspace", roots, unattended=False) == "path"
-
-
-@pytest.mark.parametrize("kind,refused", [
-    ("foreground", False),      # a window with a person in it
-    ("dm", True),               # a scripted turn: nobody reads the command but the guard
-    ("bare", True),
-    ("card", True),
-    ("child", True),
+@pytest.mark.parametrize("kind", ["foreground", "dm", "bare", "card", "child"])
+@pytest.mark.parametrize("command", [
+    "cp board.db board.db.bak-$(date +%s)",
+    'EI=/data/scripts\nls "$EI"',
+    'SKILLS=/Users/me/.misaka/skills; python3 -B "$SKILLS/cnki/scripts/run.py" search q',
+    "cat ~/.misaka/skills/pptx/SKILL.md",
+    "bash -c 'cat ~/.misaka/profiles/sisters/10032/skills/s/SKILL.md'",
 ])
-def test_only_a_window_with_a_person_in_it_is_exempt(tmp_path, kind, refused):
-    """Every kind but ``foreground`` runs unattended, so the substitution it cannot resolve is
-    refused there -- including a DM turn and a bare one-shot, which look like Last Order but
-    have nobody watching."""
+def test_no_shell_command_is_refused_for_a_skill_path_or_an_expansion(tmp_path, kind, command):
+    """2026-10-24: a Sister's card could not run `$SKILLS/.../run.py` as its SKILL.md says. Hermes
+    runs a skill where it lives and refuses no shell command for naming one or expanding a
+    variable (tools/skills_tool.py returns the live `skill_dir`; approval_detection.py does not
+    evaluate `$var`); neither the skills extension nor the home guard looks at a shell command."""
+    from misaka.core.platform.home_guard import HomeGuard
     from misaka.core.skills.wiring.skills import SkillsPart
 
-    live = tmp_path / "skills"
-    live.mkdir()
-    part = SkillsPart(None, str(tmp_path / "profile"), cwd=str(tmp_path), kind=kind)
-    part._live_roots = {str(live)}
-    part._refresh_roots = lambda: None
-    decision = asyncio.run(part.tool_call(
-        {"toolName": "bash", "input": {"command": "cp board.db board.db.bak-$(date +%s)"}}, None))
-    assert bool(decision and decision.get("block")) is refused
-    if refused:
-        assert "unattended" in decision["reason"]
-
-
-def test_the_refusal_names_the_bare_variable_it_refuses(tmp_path):
-    """2026-10-01: `EI=<path>; ls "$EI"` was refused, but the message named only $(...), backticks
-    and ${...} -- two Sisters rewrote ${X} as $X and were refused again, five times in one run."""
-    from misaka.core.skills.wiring.skills import SkillsPart
-
-    live = tmp_path / "skills"
-    live.mkdir()
-    part = SkillsPart(None, str(tmp_path / "profile"), cwd=str(tmp_path), kind="card")
-    part._live_roots = {str(live)}
-    part._refresh_roots = lambda: None
-    decision = asyncio.run(part.tool_call(
-        {"toolName": "bash", "input": {"command": 'EI=/data/scripts\nls "$EI"'}}, None))
-    assert decision["block"] and "$NAME" in decision["reason"] and "set earlier in the same command" in decision["reason"]
-    # A dollar sign inside single quotes stays literal, as the message says.
-    assert asyncio.run(part.tool_call(
-        {"toolName": "bash", "input": {"command": "awk '{print $1}' data.csv"}}, None)) is None
+    assert not hasattr(SkillsPart(None, str(tmp_path / "profile"), cwd=str(tmp_path), kind=kind), "tool_call")
+    guard = HomeGuard(kind, str(tmp_path), guard_paths=True)
+    assert asyncio.run(guard.tool_call({"toolName": "bash", "input": {"command": command}})) is None
 
 
 @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
-def test_native_argument_error_is_persisted_but_not_sent_on_wire(bridge):
+def test_native_argument_error_is_persisted_and_sent_on_wire_as_upstream(bridge):
+    # pi 1.3.0 made `argumentsError` a ToolCall field and its proxy and pi-messages bridges send `context` whole.
     from misaka.agent import proxy
-    from misaka.ai.providers import pi_messages
+    from misaka.ai.api import pi_messages
     from misaka.ai.types import UserMessage
 
     call = ToolCall(id="bad", name="probe", arguments={}, argumentsError="fixture")
     context = Context(
         messages=[UserMessage(content="hello", timestamp=0), message([call])]
     )
-    serialize = (proxy if bridge == "proxy" else pi_messages)._serialize_context
+    serialize = proxy._serializeContext if bridge == "proxy" else pi_messages._serializeContext
     wire = serialize(context)
     assert wire["messages"][0]["content"] == "hello"
-    assert "argumentsError" not in wire["messages"][1]["content"][0]
+    assert wire["messages"][1]["content"][0]["argumentsError"] == "fixture"
     assert (
         context.model_dump()["messages"][1]["content"][0]["argumentsError"] == "fixture"
     )
@@ -821,7 +756,7 @@ async def test_clarification_drains_running_sibling_without_starting_pending_nod
     async def start(node):
         started.append(node["id"])
         handles[node["id"]] = object()
-        keys[node["id"]] = runs.prepare_runner(con, "research_branches", node["id"])
+        keys[node["id"]] = runs.prepare_runner(con, "research_execution", node["id"])
         return keys[node["id"]]
 
     task = asyncio.create_task(
@@ -846,7 +781,7 @@ async def test_clarification_drains_running_sibling_without_starting_pending_nod
             await asyncio.sleep(0.002)
         assert started == [a["id"], b["id"]]
         runs.set_node(con, a["id"], status="waiting_input")
-        runs.release_runner(con, "research_branches", a["id"], keys[a["id"]])
+        runs.release_runner(con, "research_execution", a["id"], keys[a["id"]])
         await asyncio.sleep(0.02)
         assert not task.done()
         assert runs.get(con, run["id"])["status"] == "active"
@@ -861,7 +796,7 @@ async def test_clarification_drains_running_sibling_without_starting_pending_nod
             tool_call_id="sibling-plan",
         )
         runs.set_node(con, b["id"], status="closed")
-        runs.release_runner(con, "research_branches", b["id"], keys[b["id"]])
+        runs.release_runner(con, "research_execution", b["id"], keys[b["id"]])
         result = await asyncio.wait_for(task, 1)
         assert result["reason"] == "waiting_input"
         assert runs.get(con, run["id"])["status"] == "waiting_input"
@@ -887,28 +822,26 @@ def test_derived_index_ignores_io_failure_but_not_stop(state, monkeypatch, failu
 @pytest.mark.parametrize("stop_block", [False, True])
 @pytest.mark.parametrize("raw", ["not-json", "{}"])
 def test_bedrock_validates_closed_and_unclosed_blocks(stop_block, raw):
-    from misaka.ai.providers import amazon_bedrock as bedrock
+    from misaka.ai.api import bedrock_converse_stream as bedrock
 
     output = message([ToolCall(id="call", name="probe", arguments={})])
-    buffers = {0: StreamingArgs(raw)}
+    blocks = bedrock._Blocks(output)
+    blocks.scratch[0] = bedrock._BlockScratch(index=0, partialJson=StreamingArgs(raw))
     if stop_block:
-        bedrock.handle_content_block_stop(
-            {"contentBlockIndex": 0},
-            {0: 0},
-            buffers,
-            output,
-            SimpleNamespace(push=lambda e: None),
-        )
+        bedrock._handleContentBlockStop({"contentBlockIndex": 0}, blocks, output, SimpleNamespace(push=lambda e: None))
     else:
-        bedrock.finish_open_tool_arguments(buffers, output)
+        bedrock._finalizeStreamingBlock(blocks, 0)
     assert bool(output.content[0].argumentsError) == (raw != "{}")
-    assert not buffers
+    assert blocks.scratch[0].partialJson is None
 
 
 @pytest.mark.parametrize("provider", ["mistral", "openai-completions"])
 @pytest.mark.parametrize("raw", ["not-json", "{}"])
 async def test_chat_completion_finalization(provider, raw, monkeypatch):
-    from misaka.ai.providers import mistral, openai_completions
+    import httpx
+
+    from misaka.ai.api import _openai_sdk, openai_completions
+    from misaka.ai.api import mistral_conversations as mistral
 
     async def incoming():
         yield {
@@ -930,21 +863,26 @@ async def test_chat_completion_finalization(provider, raw, monkeypatch):
         }
 
     if provider == "mistral":
+        async def events():
+            async for chunk in incoming():
+                yield {"data": chunk}
+
         output = message()
-        assert await mistral.consume_chat_stream(
+        await mistral._consumeChatStream(
             model("mistral-conversations"),
             output,
             SimpleNamespace(push=lambda e: None),
-            incoming(),
+            events(),
+            None,
         )
     else:
         monkeypatch.setattr(
-            openai_completions,
-            "_create_completion_stream",
-            AsyncMock(return_value=incoming()),
+            _openai_sdk,
+            "_create_with_response",
+            AsyncMock(return_value=_openai_sdk._WithResponse(incoming(), httpx.Response(200))),
         )
-        stream = openai_completions.stream_openai_completions(
-            model(provider), Context(messages=[]), {"client": object()}
+        stream = openai_completions.stream(
+            model(provider), Context(messages=[]), {"apiKey": "test"}
         )
         async for _event in stream:
             pass
@@ -968,14 +906,14 @@ async def test_stop_or_takeover_during_start_prevents_next_spawn(
     monkeypatch.setattr(workflow, "_settle_stopped_tasks", AsyncMock())
 
     async def start(node):
-        key = runs.prepare_runner(con, "research_branches", node["id"])
+        key = runs.prepare_runner(con, "research_execution", node["id"])
         started.append(node["id"])
         handles[node["id"]] = node["id"]
         if halt == "stop":
             runs.request_stop(con, run["id"])
         else:
             con.execute(
-                "UPDATE research_runs SET driver_lock='successor' WHERE id=?",
+                "UPDATE graphs SET lease_token='successor' WHERE id=?",
                 (run["id"],),
             )
         return key
@@ -1007,32 +945,6 @@ def test_depth_keeps_integer_and_cli_string_compatibility():
         assert runs.normalize_limits({"max_depth": value})["max_depth"] == int(value)
 
 
-@pytest.mark.parametrize("command,reason", [
-    # A bare variable hides a path exactly as ${...} does.
-    ("cat $HOME/.misaka/profiles/last-order/skills/S.md", "dynamic"),
-    ("echo '$HOME is literal here'", None),
-    # A token that is itself a command line hides its paths one level down.
-    ("bash -c 'cat /tmp/live-skills/S.md'", "path"),
-    ("sh -c 'ls ~/nothing'", None),
-])
-def test_the_guard_looks_through_variables_and_nested_command_lines(command, reason):
-    """2026-09-18 (review of B23): the token scan cannot expand, so substitution is what keeps
-    an unattended session out of a tree it could otherwise name indirectly -- and a path inside
-    `bash -c "..."` is a path."""
-    from misaka.core.skills.wiring.skills import _command_touches
-
-    assert _command_touches(command, "/tmp/workspace", {"/tmp/live-skills"}) == reason
-
-
-def test_a_literal_command_is_still_allowed_everywhere():
-    from misaka.core.skills.wiring.skills import _command_touches
-
-    for command in ("ls -la", "git status", "sqlite3 board.db 'select 1'", "printf '%s' ok"):
-        assert _command_touches(command, "/tmp/workspace", {"/tmp/live-skills"}) is None
-        assert _command_touches(command, "/tmp/workspace", {"/tmp/live-skills"},
-                                unattended=False) is None
-
-
 def test_a_failed_node_is_retried_with_its_failed_cards_and_the_loop_is_capped(state, tmp_path):
     """2026-09-28 (user): Last Order retries a failed node herself, without waiting for the level to
     end and the run to be resumed. The retry does what a resume does for that node alone."""
@@ -1045,13 +957,13 @@ def test_a_failed_node_is_retried_with_its_failed_cards_and_the_loop_is_capped(s
         runs.retry_node(con, run, node["id"], session_file=str(tmp_path / "s.jsonl"), tool_call_id="call-0")
     for attempt in range(1, 4):
         con.execute("UPDATE tasks SET status='failed' WHERE id=?", (tid,))
-        con.execute("UPDATE research_branches SET status='failed', last_error='provider refused' WHERE id=?", (node["id"],))
+        con.execute("UPDATE research_execution SET status='failed', last_error='provider refused' WHERE id=?", (node["id"],))
         assert runs.retry_node(con, run, node["id"], session_file=str(tmp_path / "s.jsonl"),
                                tool_call_id=f"call-{attempt}") == attempt
         current = runs.node(con, node["id"])
         assert (current["status"], current["last_error"]) == ("planning", None)
         assert tasks.get(con, tid)["status"] == "ready"           # its failed card went back to its Sister
-    con.execute("UPDATE research_branches SET status='failed' WHERE id=?", (node["id"],))
+    con.execute("UPDATE research_execution SET status='failed' WHERE id=?", (node["id"],))
     with pytest.raises(ValueError, match="already retried 3 times"):
         runs.retry_node(con, run, node["id"], session_file=str(tmp_path / "s.jsonl"), tool_call_id="call-4")
 
@@ -1072,7 +984,7 @@ async def test_a_retried_node_re_enters_its_level_without_a_resume(state, tmp_pa
     async def start(node):
         started.append(node["id"])
         handles[node["id"]] = SimpleNamespace(pid=None)
-        return runs.prepare_runner(con, "research_branches", node["id"])
+        return runs.prepare_runner(con, "research_execution", node["id"])
 
     def answer(node):
         with open(runs.node(con, node["id"])["session_file"], "a", encoding="utf-8") as handle:
@@ -1094,7 +1006,7 @@ async def test_a_retried_node_re_enters_its_level_without_a_resume(state, tmp_pa
         assert await eventually(lambda: started == [a["id"], b["id"]])
         answer(b)
         # a's process ends mid-plan: the level marks it failed and goes on without it.
-        runs.release_runner(con, "research_branches", a["id"], runs.node(con, a["id"])["runner_key"])
+        runs.release_runner(con, "research_execution", a["id"], runs.node(con, a["id"])["runner_key"])
         assert await eventually(lambda: runs.node(con, a["id"])["status"] == "failed")
         assert "its process ended while queued" in runs.node(con, a["id"])["last_error"]
         # Last Order retries it: it is queued again and started, no resume needed.
@@ -1103,7 +1015,7 @@ async def test_a_retried_node_re_enters_its_level_without_a_resume(state, tmp_pa
         assert runs.node(con, a["id"])["status"] == "planning"
         for node in nodes:
             runs.set_node(con, node["id"], status="closed")
-            runs.release_runner(con, "research_branches", node["id"], runs.node(con, node["id"])["runner_key"])
+            runs.release_runner(con, "research_execution", node["id"], runs.node(con, node["id"])["runner_key"])
         assert await asyncio.wait_for(task, 1) == "done"
     finally:
         task.cancel()

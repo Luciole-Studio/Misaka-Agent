@@ -66,7 +66,7 @@ def _install_output_cap(session: Any) -> None:
     agent = session.agent
     if getattr(agent, "_misaka_output_cap", False):
         return
-    inner = agent.streamFn
+    inner = agent.streamFunction
 
     def stream(model: Any, context: Any, options: Any = None) -> Any:
         limit = value(_session_id(session), "max_output_tokens")
@@ -75,7 +75,7 @@ def _install_output_cap(session: Any) -> None:
             options = _capped(options, min(int(limit), own) if own > 0 else int(limit))
         return inner(model, context, options)
 
-    agent.streamFn = stream
+    agent.streamFunction = stream
     agent._misaka_output_cap = True
 
 

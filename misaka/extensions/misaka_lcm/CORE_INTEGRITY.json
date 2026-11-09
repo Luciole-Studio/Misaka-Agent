@@ -356,6 +356,14 @@
     "vendor/dag.py": {
       "sha256": "99cb26f290b209cd2c822e566704f9e366d29f29dc67620a84ee2ca6a49761b7",
       "reason": "2026-09-20: balance LIKE and score SQL expressions to avoid SQLite expression-depth failures without dropping query terms; see PORT_NOTES.md."
+    },
+    "vendor/tokens.py": {
+      "sha256": "4139754edec2f3a556ef1155da07a847841a30abd95c51d0f3e97a09f5565230",
+      "reason": "2026-10-28: U11 price image parts at the per-image cost Hermes' own estimator uses instead of counting their base64 as text, which compacted a 1M-window session at 33% (R44); see PORT_NOTES.md."
+    },
+    "vendor/dependency-contract.json": {
+      "sha256": "4548573472c54aceca9226170fd3f2fddadf1fe345809da07cc24f10c4adb405",
+      "reason": "2026-10-28: declare the native image-pricing API that U11 in tokens.py imports; see PORT_NOTES.md."
     }
   }
 }

@@ -6,12 +6,13 @@ the loop called prompt() a driver turn was streaming, prompt() raised "Agent is 
 processing. Specify streamingBehavior ..." and the text was gone. The loop now asks for the same
 steer that Enter would have queued had it seen the turn."""
 import asyncio
+from types import SimpleNamespace
 
-from misaka.ui.tui.interactive.interactive_mode import InteractiveMode
+from misaka.modes.interactive.interactive_mode import InteractiveMode
 
 
 async def test_input_loop_queues_a_steer_when_a_turn_started_in_between():
-    mode = InteractiveMode.__new__(InteractiveMode)
+    mode = SimpleNamespace()
     loop = asyncio.get_running_loop()
     mode._shutdownFuture = loop.create_future()
     calls, errors = [], []
@@ -37,6 +38,6 @@ async def test_input_loop_queues_a_steer_when_a_turn_started_in_between():
     mode.getUserInput = get_user_input
     mode.session = Session()
     mode.showError = errors.append
-    await mode._runInputLoop()
+    await InteractiveMode._runInputLoop(mode)
     assert calls == [("hello", {"streamingBehavior": "steer"})]
     assert errors == []

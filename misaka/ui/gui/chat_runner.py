@@ -26,7 +26,7 @@ import sys
 import threading
 import uuid
 
-from misaka.modes.jsonl import to_json_event, to_jsonable
+from misaka.modes.json_event import toJsonEvent as to_json_event, to_jsonable
 from misaka.core.gui_input_queue import GuiInputQueue
 
 _WRITE_LOCK = threading.Lock()
@@ -199,7 +199,7 @@ class ChatHost:
 
         who = self.spec.get("role") or None
         if self.spec.get("session_path"):
-            from misaka.core.session_manager import read_session_header
+            from misaka.core.session_manager import readSessionHeader as read_session_header
             session_path = os.path.abspath(self.spec["session_path"])
             header = read_session_header(session_path)
             folder = header.get("cwd")
@@ -213,14 +213,14 @@ class ChatHost:
 
     async def start(self):
         from misaka.cli.bootstrap import install
-        from misaka.cli.args import parse_args
+        from misaka.cli.args import parseArgs as parse_args
         from misaka.config import get_agent_dir, sessions
         from misaka.core.http_dispatcher import applyHttpProxySettings
         from misaka.core.settings_manager import SettingsManager
         from misaka.core.wiring import role_session_setup
-        from misaka.core.agent_session_runtime import create_agent_session_runtime
-        from misaka.cli.engine import create_runtime_factory
-        from misaka.core.auth_storage import AuthStorage
+        from misaka.core.agent_session_runtime import createAgentSessionRuntime as create_agent_session_runtime
+        from misaka.cli.engine import createRuntimeFactory as create_runtime_factory
+        from misaka.core.model_registry import ModelRegistry
         from misaka.core.session_manager import SessionManager
 
         install()
@@ -258,16 +258,15 @@ class ChatHost:
             session_manager = SessionManager.create(cwd, session_dir)
         self.cwd = session_manager.getCwd()
 
-        auth_storage = AuthStorage.create()
         runtime_factory = create_runtime_factory(
-            parsed, auth_storage,
-            extension_factories=session_assembly.extension_factories,
-            custom_tools=session_assembly.custom_tools,
+            parsed,
+            extensionFactories=session_assembly.extension_factories,
+            customTools=session_assembly.custom_tools,
             parts=session_assembly.parts,
-            model_profile=session_assembly.model_profile,
-            model_defaults_read_only=session_assembly.model_defaults_read_only,
-            app_mode="print",   # headless trust resolution, like print mode
-            startup_settings_manager=startup_settings,
+            modelProfile=session_assembly.model_profile,
+            modelDefaultsReadOnly=session_assembly.model_defaults_read_only,
+            appMode="print",   # headless trust resolution, like print mode
+            startupSettingsManager=startup_settings,
         )
         self.runtime = await create_agent_session_runtime(
             runtime_factory,
@@ -275,7 +274,7 @@ class ChatHost:
         )
         self.session = self.runtime.session
         self._create_input_queue()
-        self.registry = self.runtime.services.modelRegistry
+        self.registry = ModelRegistry(self.runtime.services.modelRuntime)
         errors = [d for d in self.runtime.diagnostics if d.type == "error"]
         if errors:
             fatal(errors[0].message)
@@ -531,7 +530,7 @@ class ChatHost:
         return Agent({
             "initialState": {"systemPrompt": "", "model": main.state.model, "thinkingLevel": main.state.thinkingLevel,
                              "tools": list(main.state.tools), "messages": _settled_messages(main.state.messages)},
-            "convertToLlm": main.convertToLlm, "streamFn": main.streamFn, "beforeToolCall": read_only,
+            "convertToLlm": main.convertToLlm, "streamFn": main.streamFunction, "beforeToolCall": read_only,
             # Its own routing id: the main session's cache warmer must not adopt this context.
             "sessionId": f"{self.session.sessionId}-side", "transport": main.transport,
             "thinkingBudgets": main.thinkingBudgets, "maxRetryDelayMs": main.maxRetryDelayMs,

@@ -8,9 +8,9 @@ there, from a copy; any other unknown key still fails, so real shape bugs stay v
 import pytest
 from pydantic import ValidationError
 
-from misaka.agent.agent import _normalize_standard_message
-from misaka.agent.harness.messages import convert_to_llm
+from misaka.agent.agent import _normalizeStandardMessage
 from misaka.ai.types import validate_message
+from misaka.core.messages import convertToLlm
 from misaka.core.session_manager import _copy_context_messages
 
 
@@ -27,8 +27,8 @@ def test_the_validator_drops_the_retired_key_without_touching_the_input():
 
 
 @pytest.mark.parametrize("entry", [
-    lambda m: convert_to_llm([m])[0],                   # the LLM wire
-    lambda m: _normalize_standard_message(m),           # agent state
+    lambda m: convertToLlm([m])[0],                   # the LLM wire
+    lambda m: _normalizeStandardMessage(m),           # agent state
     lambda m: validate_message(_copy_context_messages([m])[0]),   # a compaction snapshot, then the wire
 ])
 def test_every_entry_accepts_a_legacy_tool_result(entry):

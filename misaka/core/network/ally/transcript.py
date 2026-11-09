@@ -1,8 +1,8 @@
 """An ally's turns, written as a pi session file.
 
 The same file a Sister card leaves, in the same place (the card's session folder): whatever
-reads a card's conversation -- ``misaka_sister_peek``, the sidebar, the read-only viewer, the
-research workspace's list of conversations -- reads an ally's too. It is a record only: the
+reads a card's conversation -- ``misaka_sister_peek``, the sidebar, the read-only viewer, a
+workflow's list of conversations -- reads an ally's too. It is a record only: the
 ally's own agent keeps the conversation it continues from; nothing replays this file to a model.
 
 An ACP turn arrives as a stream of updates. Text and thought accumulate until a tool call

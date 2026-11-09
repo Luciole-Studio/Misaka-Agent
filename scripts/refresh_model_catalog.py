@@ -1,131 +1,111 @@
 #!/usr/bin/env python3
-"""Regenerate ``misaka/ai/models_generated.py`` from upstream pi-ai's shipped catalog.
+"""Update misaka's built-in model data from upstream pi-ai's published catalog.
 
-The catalog is data, not code: pi-ai publishes one JSON file per provider under
-``dist/providers/data`` plus a ``.manifest.json`` carrying the schema version and the
-timestamp upstream generated it. This script transcribes those files and nothing else.
+pi-ai ships its catalog as data: one JSON file per provider under ``dist/providers/data`` and a
+``.manifest.json`` carrying the schema version, the generation time and every file's sha256.
+misaka reads those files the way pi does, so an update copies them unchanged into
+``misaka/ai/providers/data`` and rewrites the modules that read them with the renderers of
+``scripts/generate_models.py`` (pi's ``scripts/generate-models.ts``):
+``misaka/ai/providers/<provider>_models.py`` per provider (pi's ``providers/<provider>.models.ts``)
+and ``misaka/ai/models_generated.py`` gathering them (``models.generated.ts``).
 
-It exists because the previous refresh was done by hand and drifted badly -- measured
-against 0.84.3 the hand port was missing 497 models, carried 218 upstream had dropped and
-priced 253 wrong -- and no amount of reading would have caught that. A transcription that
-runs is checkable; one that is typed is not.
-
-    python scripts/refresh_model_catalog.py --version 0.85.1
+    python scripts/refresh_model_catalog.py --version 0.99.1
     python scripts/refresh_model_catalog.py --data-dir path/to/dist/providers/data
 
-Prints what changed, so the commit message can name it. ``--check`` rebuilds and reports
-whether the committed file already matches, without writing.
+``--check`` reports whether the committed data and modules already match, and writes nothing.
+
+The data is refused unless every file matches the manifest, and unless its schema version is
+the one ``misaka/ai/model_catalog.py`` was ported against: a newer schema means pi changed how
+its catalog is laid out, and the loader has to be compared with pi's again first.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import pprint
-import subprocess
+import shutil
 import sys
 import tarfile
 import tempfile
 import urllib.request
 from pathlib import Path
 
-TARGET = Path(__file__).resolve().parent.parent / "misaka" / "ai" / "models_generated.py"
+# The generated modules are the generator's.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from generate_models import renderAggregator, renderShard
+from model_data import (
+    MODEL_DATA_MANIFEST_FILE,
+    MODEL_DATA_SCHEMA_VERSION,
+    providerModule,
+    validateGeneratedModelData,
+)
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / "misaka" / "ai" / "providers" / "data"
+PROVIDERS = ROOT / "misaka" / "ai" / "providers"
+TARGET = ROOT / "misaka" / "ai" / "models_generated.py"
 PACKAGE = "@earendil-works/pi-ai"
-
-# pprint's settings are part of the file's identity: they are what makes a refresh a
-# reviewable diff instead of one 20,000-line line.
-WIDTH = 100
-
-PREAMBLE = '''"""The model catalog, regenerated from upstream (pi) ``packages/ai/src/providers/data``.
-
-Every entry is a straight transcription of what pi-ai ships, so a refresh means re-running
-``scripts/refresh_model_catalog.py`` rather than editing entries here. The table was
-originally ported by hand and drifted: measured against ``@earendil-works/pi-ai@0.84.3`` it
-was missing 497 models, carried 218 upstream had dropped, priced 253 wrong, and silently
-discarded 739 ``compat`` values whose keys no compat model declared (``extra="forbid"``
-rejects the entry rather than ignoring the key).
-
-Excluded from lint as generated-shaped code.
-"""
-
-from __future__ import annotations
-
-from typing import Final
-
-from misaka.ai.types import Model
-
-# Provenance of the transcription. Upstream ships these in `providers/data/.manifest.json`
-# and reads `generatedAt` back through `getBuiltinModelDataGeneratedAt`, so a remote
-# catalog overlay can tell whether what it fetched is newer than what shipped.
-#
-# `CONTENT_HASH` is this file's own, not upstream's: sha256 over `_RAW_MODELS` serialised as
-# compact JSON with sorted keys. It covers the table as transcribed, so a hand edit to an
-# entry is visible -- which is the point, because the previous drift was undetectable for
-# exactly the reason that nothing but a full re-comparison would have found it.
-BUILTIN_MODEL_DATA_GENERATED_AT = {generated_at!r}
-BUILTIN_MODEL_DATA_SCHEMA_VERSION = {schema_version}
-BUILTIN_MODEL_DATA_CONTENT_HASH = {content_hash!r}
-
-_RAW_MODELS: Final[dict[str, dict[str, dict[str, object]]]] = '''
-
-EPILOGUE = '''
-
-MODELS: Final[dict[str, dict[str, Model]]] = {
-    provider: {model_id: Model.model_validate(model_data) for model_id, model_data in models.items()}
-    for provider, models in _RAW_MODELS.items()
-}
-'''
+MANIFEST = MODEL_DATA_MANIFEST_FILE
+SCHEMA_VERSION = MODEL_DATA_SCHEMA_VERSION
 
 
 def fetch(version: str) -> Path:
-    """npm-pack the published package into a temporary directory and return its data dir."""
+    """Download the published package into a temporary directory and return its data dir."""
     out = Path(tempfile.mkdtemp(prefix="pi-ai-"))
-    url = subprocess.run(["npm", "view", f"{PACKAGE}@{version}", "dist.tarball"],
-                         capture_output=True, text=True, check=True).stdout.strip()
+    with urllib.request.urlopen(f"https://registry.npmjs.org/{PACKAGE}/{version}") as response:
+        tarball = json.load(response)["dist"]["tarball"]
     archive = out / "package.tgz"
-    urllib.request.urlretrieve(url, archive)
+    urllib.request.urlretrieve(tarball, archive)
     with tarfile.open(archive) as tar:
         tar.extractall(out, filter="data")
     return out / "package" / "dist" / "providers" / "data"
 
 
-def transcribe(data_dir: Path) -> tuple[dict, dict]:
-    """``(models by provider, the manifest)``. A provider file keys its models by api; the
-    catalog keys them by provider, so the api layer is merged away exactly as upstream's own
-    loader does."""
-    manifest = json.loads((data_dir / ".manifest.json").read_text())
-    catalog: dict[str, dict[str, dict]] = {}
-    # By provider name, not by file name: "google.json" sorts after "google-vertex.json"
-    # because '-' precedes '.', and the committed catalog is ordered by the provider key.
-    for path in sorted(data_dir.glob("*.json"), key=lambda entry: entry.stem):
-        if path.name.startswith("."):
-            continue
-        models: dict[str, dict] = {}
-        for entries in json.loads(path.read_text()).values():
-            if isinstance(entries, dict):
-                models.update(entries)
-        # By model id. A provider file groups its models by api, and several providers serve
-        # the same catalogue over two or three of them; keeping the file's grouping would put
-        # the same model in a different place every time upstream adds an api.
-        catalog[path.stem] = {model_id: models[model_id] for model_id in sorted(models)}
-    return catalog, manifest
+def provider_files(data_dir: Path) -> list[Path]:
+    """The provider files, without the manifest (a dotfile that ``*.json`` also matches)."""
+    return sorted(path for path in data_dir.glob("*.json") if not path.name.startswith("."))
 
 
-def content_hash(catalog: dict) -> str:
-    return hashlib.sha256(json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+def verified(data_dir: Path) -> dict:
+    """The manifest, once the directory is exactly what it lists."""
+    manifest = json.loads((data_dir / MANIFEST).read_text(encoding="utf-8"))
+    if manifest.get("schemaVersion") != SCHEMA_VERSION:
+        raise SystemExit(f"{data_dir}: schema {manifest.get('schemaVersion')}, but the loader follows schema "
+                         f"{SCHEMA_VERSION}. Compare misaka/ai/model_catalog.py with pi-ai's model-catalog.ts "
+                         "and models.generated.ts first, then raise SCHEMA_VERSION.")
+    present = {path.name for path in provider_files(data_dir)}
+    if present != set(manifest["files"]):
+        raise SystemExit(f"{data_dir}: files differ from the manifest: {sorted(present ^ set(manifest['files']))}")
+    for name, digest in manifest["files"].items():
+        if hashlib.sha256((data_dir / name).read_bytes()).hexdigest() != digest:
+            raise SystemExit(f"{data_dir / name}: sha256 differs from the manifest")
+    return manifest
 
 
-def render(catalog: dict, manifest: dict) -> str:
-    head = PREAMBLE.format(generated_at=manifest["generatedAt"],
-                           schema_version=manifest["schemaVersion"],
-                           content_hash=content_hash(catalog))
-    return head + pprint.pformat(catalog, width=WIDTH, sort_dicts=False) + EPILOGUE
+def render(manifest: dict) -> dict[Path, str]:
+    """Every generated module by path: one per provider, in pi's order (sorted by id), and the aggregator."""
+    providers = sorted(Path(name).stem for name in manifest["files"])
+    rendered = {PROVIDERS / f"{providerModule(p)}.py": renderShard(p) for p in providers}
+    rendered[TARGET] = renderAggregator(providers)
+    return rendered
+
+
+def generated_modules() -> list[Path]:
+    """The generated provider modules on disk."""
+    return sorted(PROVIDERS.glob("*_models.py"))
+
+
+def chat_models(data_dir: Path) -> dict[str, list[str]]:
+    return {path.stem: [model["id"] for models in json.loads(path.read_text(encoding="utf-8")).values()
+                        for model in models.values() if model.get("type") == "chat"]
+            for path in provider_files(data_dir)}
 
 
 def report(old: dict, new: dict) -> None:
     added = removed = 0
     for provider in sorted(set(old) | set(new)):
-        before, after = set(old.get(provider, {})), set(new.get(provider, {}))
+        before, after = set(old.get(provider, [])), set(new.get(provider, []))
         fresh, gone = sorted(after - before), sorted(before - after)
         added, removed = added + len(fresh), removed + len(gone)
         if fresh or gone:
@@ -134,41 +114,52 @@ def report(old: dict, new: dict) -> None:
                 print(f"   + {len(fresh):>3}  {', '.join(fresh[:6])}{' ...' if len(fresh) > 6 else ''}")
             if gone:
                 print(f"   - {len(gone):>3}  {', '.join(gone[:6])}{' ...' if len(gone) > 6 else ''}")
-    print(f"\n{added} model(s) added, {removed} removed; "
-          f"{sum(len(v) for v in new.values())} total across {len(new)} providers.")
+    total = sum(len(models) for models in new.values())
+    print(f"\n{added} chat model(s) added, {removed} removed; {total} in total.")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--version", help=f"a published {PACKAGE} version, fetched with npm")
+    source.add_argument("--version", help=f"a published {PACKAGE} version")
     source.add_argument("--data-dir", type=Path, help="an unpacked providers/data directory")
-    parser.add_argument("--check", action="store_true", help="report whether the committed file matches; write nothing")
+    parser.add_argument("--check", action="store_true", help="report whether the committed files match; write nothing")
     args = parser.parse_args()
 
     data_dir = args.data_dir or fetch(args.version)
-    if not (data_dir / ".manifest.json").is_file():
-        print(f"No .manifest.json under {data_dir}", file=sys.stderr)
-        return 2
-    catalog, manifest = transcribe(data_dir)
-
-    sys.path.insert(0, str(TARGET.parent.parent.parent))
-    try:
-        from misaka.ai.models_generated import _RAW_MODELS as current
-    except Exception:  # noqa: BLE001 - a file that will not import is exactly what a refresh fixes
-        current = {}
-
-    rendered = render(catalog, manifest)
+    manifest = verified(data_dir)
+    rendered = render(manifest)
+    files = [MANIFEST, *manifest["files"]]
     if args.check:
-        same = TARGET.read_text(encoding="utf-8") == rendered
+        same = (all(path.is_file() and path.read_text(encoding="utf-8") == text for path, text in rendered.items())
+                and set(generated_modules()) == {path for path in rendered if path != TARGET}
+                and all((DATA / name).is_file() and (DATA / name).read_bytes() == (data_dir / name).read_bytes()
+                        for name in files)
+                and {path.name for path in provider_files(DATA)} == set(manifest["files"]))
+        if same:
+            # The committed files are the published ones; they must also be what the loader accepts.
+            validateGeneratedModelData(ROOT)
         print("up to date" if same else "OUT OF DATE")
         if not same:
-            report(current, catalog)
+            report(chat_models(DATA), chat_models(data_dir))
         return 0 if same else 1
 
-    report(current, catalog)
-    TARGET.write_text(rendered, encoding="utf-8")
-    print(f"\nwrote {TARGET}  (upstream generatedAt {manifest['generatedAt']}, schema {manifest['schemaVersion']})")
+    old = chat_models(DATA)
+    if data_dir.resolve() != DATA.resolve():   # rewriting the list from the committed data copies nothing
+        for stale in [*provider_files(DATA), DATA / MANIFEST]:
+            stale.unlink(missing_ok=True)
+        DATA.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            shutil.copyfile(data_dir / name, DATA / name)
+    for stale in generated_modules():
+        if stale not in rendered:
+            stale.unlink()
+    for path, text in rendered.items():
+        path.write_text(text, encoding="utf-8", newline="\n")  # LF on Windows too
+    validateGeneratedModelData(ROOT)
+    report(old, chat_models(DATA))
+    print(f"\nwrote {DATA}, {len(rendered) - 1} provider modules and {TARGET.name}  "
+          f"(upstream generatedAt {manifest['generatedAt']}, schema {manifest['schemaVersion']})")
     return 0
 
 

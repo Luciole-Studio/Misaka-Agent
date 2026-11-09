@@ -1,35 +1,36 @@
-"""Bounded undo history."""
+"""Translated from pi-tui's ``packages/tui/src/undo-stack.ts`` (v1.1.0)."""
 
 from __future__ import annotations
 
-from collections import deque
-
-MAX_UNDO_STEPS = 100
+import copy
 
 
 class UndoStack[S]:
-    """Keeps the last ``MAX_UNDO_STEPS`` snapshots and stores exactly what it is given.
+    """Generic undo stack with clone-on-push semantics.
 
-    Cloning here used to be this class's job, which meant a deep copy of the caller's whole
-    state on every keystroke -- for the editor that included every paste payload in the
-    buffer. The caller knows which parts of its state get rebound and copies just those.
+    Stores deep clones of state snapshots. Popped snapshots are returned
+    directly (no re-cloning) since they are already detached.
     """
 
-    def __init__(self, limit: int = MAX_UNDO_STEPS) -> None:
-        self._stack: deque[S] = deque(maxlen=max(1, limit))
+    def __init__(self) -> None:
+        self.stack: list[S] = []
 
     def push(self, state: S) -> None:
-        self._stack.append(state)
+        """Push a deep clone of the given state onto the stack."""
+        # `structuredClone`; strings are immutable and shared, as a clone of them would read.
+        self.stack.append(copy.deepcopy(state))
 
     def pop(self) -> S | None:
-        return self._stack.pop() if self._stack else None
+        """Pop and return the most recent snapshot, or undefined if empty."""
+        return self.stack.pop() if self.stack else None
 
     def clear(self) -> None:
-        self._stack.clear()
+        """Remove all snapshots."""
+        self.stack.clear()
 
     @property
     def length(self) -> int:
-        return len(self._stack)
+        return len(self.stack)
 
 
-__all__ = ["MAX_UNDO_STEPS", "UndoStack"]
+__all__ = ["UndoStack"]

@@ -6,13 +6,14 @@ import asyncio
 import inspect
 import sys
 import traceback
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import copy, deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, NotRequired, TypedDict
 
-from misaka.ai.types import ImageContent, Model
-from misaka.ai.utils.transcript import get_current_system_message
+from misaka.agent.types import AgentToolCallOutcome, AgentToolResult
+from misaka.ai.types import ImageContent, Model, TextContent, ToolCall
+from misaka.ai.utils.transcript import getCurrentSystemMessage
 from misaka.core.diagnostics import ResourceDiagnostic
 from misaka.core.extensions.types import (
     EntryRenderer,
@@ -31,14 +32,17 @@ from misaka.core.extensions.types import (
     RegisteredCommand,
     RegisteredTool,
     ResolvedCommand,
+    ToolDefinition,
+    ToolRenderers,
     UIPromptKind,
 )
 from misaka.core.system_prompt import (
     BuildSystemPromptOptions,
-    build_system_prompt,
-    normalize_build_system_prompt_options,
+    buildSystemPrompt,
+    normalizeBuildSystemPromptOptions,
 )
-from misaka.ui.tui.interactive.theme.theme import theme
+from misaka.core.virtual_models import VirtualModelDefinition
+from misaka.modes.interactive.theme.theme import theme
 from misaka.utils.values import maybe_await
 
 RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = (
@@ -72,7 +76,7 @@ type ShutdownHandler = Any
 _MISSING = object()
 
 
-def _is_user_bash_event_result(value: Any) -> bool:
+def isUserBashEventResult(value: Any) -> bool:
     if not isinstance(value, Mapping) and not hasattr(value, "__dict__"):
         return False
     operations = _result_flag(value, "operations", None)
@@ -96,13 +100,35 @@ def _is_user_bash_event_result(value: Any) -> bool:
     )
 
 
+class _BeforeAgentStartUserTrigger(TypedDict):
+    """``Pick<BeforeAgentStartUserEvent, "messageType" | "prompt" | "images">``."""
+
+    messageType: Literal["user"]
+    prompt: str
+    images: NotRequired[list[ImageContent] | None]
+
+
+class _BeforeAgentStartCustomTrigger(TypedDict):
+    """``Pick<BeforeAgentStartCustomEvent, "messageType" | "message">``."""
+
+    messageType: Literal["custom"]
+    message: Any
+
+
+# The message that starts a run: the before_agent_start event without its prompt fields.
+type BeforeAgentStartTrigger = _BeforeAgentStartUserTrigger | _BeforeAgentStartCustomTrigger
+
+
 class _BeforeAgentStartEvent(dict[str, Any]):
     """The `before_agent_start` event: `systemPrompt` renders the current options on every
     read (pi's `get systemPrompt()`), so a handler that edited `systemPromptOptions` sees the
     result. Mapping-shaped like every other event, so handlers read it the same way."""
 
-    def __init__(self, *, prompt: str, images: Any, systemPromptOptions: Any, render: Any) -> None:
-        super().__init__(type="before_agent_start", prompt=prompt, images=images, systemPromptOptions=systemPromptOptions)
+    def __init__(self, *, trigger: BeforeAgentStartTrigger, systemPromptOptions: Any, render: Any) -> None:
+        # `{ ...trigger, type, systemPrompt, systemPromptOptions }`
+        super().__init__(trigger)
+        self["type"] = "before_agent_start"
+        self["systemPromptOptions"] = systemPromptOptions
         self._render = render
 
     def __getitem__(self, key: str) -> Any:
@@ -127,25 +153,25 @@ class _BeforeAgentStartEvent(dict[str, Any]):
             raise AttributeError(name) from None
 
 
-def _snapshot_event_handlers(extensions: list[Any], event: str) -> list[tuple[Any, list[Any]]]:
+def snapshotEventHandlers(extensions: list[Any], event: str) -> list[tuple[Any, list[Any]]]:
     """Handlers added or removed during a dispatch apply to later dispatches, not the current one."""
     return [(extension, list(extension.handlers.get(event) or [])) for extension in extensions]
 
 
-def _same_messages(left: list[Any], right: list[Any]) -> bool:
+def sameMessages(left: list[Any], right: list[Any]) -> bool:
     return len(left) == len(right) and all(message is right[index] for index, message in enumerate(left))
 
 
-def _restore_system_messages(current: list[Any], visible: list[Any], returned: list[Any]) -> list[Any]:
+def restoreSystemMessages(current: list[Any], visible: list[Any], returned: list[Any]) -> list[Any]:
     """Re-attach the prompt and tool state after a `context` handler. Handlers only see the
     conversation; the system messages belong to Pi. An unchanged conversation keeps every
     system message in place, so models with mid-conversation support keep their cached
     prefix. A changed one gets the replayed prompt sections and tool declarations as one
     leading system message, so pruning, windowing, or slicing from a compaction summary
     cannot drop them."""
-    if _same_messages(returned, visible):
+    if sameMessages(returned, visible):
         return current
-    head = get_current_system_message(current)
+    head = getCurrentSystemMessage(current)
     return [head, *returned] if head else returned
 
 
@@ -279,66 +305,66 @@ class _ContextBase:
 
     @property
     def ui(self) -> Any:
-        self._runner._assert_active()
+        self._runner.assertActive()
         return self._extra("ui", self._runner.uiContext)
 
     @property
     def mode(self) -> Any:
-        self._runner._assert_active()
+        self._runner.assertActive()
         return self._extra("mode", self._runner.mode)
 
     @property
     def hasUI(self) -> bool:
-        self._runner._assert_active()
-        return self._extra("hasUI", self._runner.has_ui())
+        self._runner.assertActive()
+        return self._extra("hasUI", self._runner.hasUI())
 
     @property
     def cwd(self) -> str:
-        self._runner._assert_active()
+        self._runner.assertActive()
         return self._extra("cwd", self._runner.cwd)
 
     @property
     def sessionManager(self) -> Any:
-        self._runner._assert_active()
+        self._runner.assertActive()
         return self._extra("sessionManager", self._runner.sessionManager)
 
     @property
     def modelRegistry(self) -> Any:
-        self._runner._assert_active()
+        self._runner.assertActive()
         return self._extra("modelRegistry", self._runner.modelRegistry)
 
     @property
     def model(self) -> Model[Any] | None:
-        self._runner._assert_active()
+        self._runner.assertActive()
         return self._extra("model", self._runner.getModel())
 
     @property
     def scopedModels(self) -> list[Any]:
         """Read-only snapshot of the session's scoped models (pi runner.ts:756)."""
-        self._runner._assert_active()
+        self._runner.assertActive()
         return self._extra("scopedModels", self._runner.getScopedModels())
 
     @property
     def thinkingLevel(self) -> Any:
         """The session's current thinking level (pi runner.ts:760)."""
-        self._runner._assert_active()
+        self._runner.assertActive()
         return self._extra("thinkingLevel", self._runner.runtime.getThinkingLevel())
 
     @property
     def signal(self) -> Any | None:
-        self._runner._assert_active()
+        self._runner.assertActive()
         return self._extra("signal", self._runner.getSignalFn())
 
     def isIdle(self) -> bool:
-        self._runner._assert_active()
+        self._runner.assertActive()
         return self._extra("isIdle", self._runner.isIdleFn())  # type: ignore[no-any-return]
 
     def isProjectTrusted(self) -> bool:
-        self._runner._assert_active()
+        self._runner.assertActive()
         return self._runner.isProjectTrustedFn()  # type: ignore[no-any-return]
 
     def abort(self) -> None:
-        self._runner._assert_active()
+        self._runner.assertActive()
         abort = self._extras.get("abort")
         if callable(abort):
             abort()
@@ -346,11 +372,11 @@ class _ContextBase:
         self._runner.abortFn()
 
     def hasPendingMessages(self) -> bool:
-        self._runner._assert_active()
+        self._runner.assertActive()
         return self._extra("hasPendingMessages", self._runner.hasPendingMessagesFn())  # type: ignore[no-any-return]
 
     def shutdown(self) -> None:
-        self._runner._assert_active()
+        self._runner.assertActive()
         shutdown = self._extras.get("shutdown")
         if callable(shutdown):
             shutdown()
@@ -358,14 +384,14 @@ class _ContextBase:
         self._runner.shutdownHandler()
 
     def getContextUsage(self) -> Any:
-        self._runner._assert_active()
+        self._runner.assertActive()
         get_context_usage = self._extras.get("getContextUsage")
         if callable(get_context_usage):
             return get_context_usage()
         return self._runner.getContextUsageFn()
 
     def compact(self, options: dict[str, Any] | None = None) -> None:
-        self._runner._assert_active()
+        self._runner.assertActive()
         compact = self._extras.get("compact")
         if callable(compact):
             compact(options)
@@ -373,40 +399,72 @@ class _ContextBase:
         self._runner.compactFn(options)
 
     def getSystemPrompt(self) -> str:
-        self._runner._assert_active()
+        self._runner.assertActive()
         get_system_prompt = self._extras.get("getSystemPrompt")
         if callable(get_system_prompt):
             return get_system_prompt()
         return self._runner.getSystemPromptFn()
 
 
+class _ToolContextView(_ContextBase):
+    """The context for executing one tool call: the extension context plus ``tools`` and
+    ``executeTool()``. ``signal`` is the default signal of nested calls."""
+
+    def __init__(self, runner: ExtensionRunner, toolCallId: str, signal: Any) -> None:
+        super().__init__(runner)
+        self._toolCallId = toolCallId
+        self._toolSignal = signal
+
+    @property
+    def tools(self) -> Any:
+        self._runner.assertActive()
+        return self._runner.getCallableToolsFn()
+
+    async def executeTool(self, name: str, args: Any, options: Mapping[str, Any] | None = None) -> AgentToolCallOutcome:
+        runner = self._runner
+        runner.assertActive()
+        if runner.executeToolFn is None:
+            return AgentToolCallOutcome(
+                toolCall=ToolCall(id=f"{self._toolCallId}/0", name=name, arguments={}),
+                result=AgentToolResult(
+                    content=[TextContent(text="Nested tool calls are not available in this context")], details={}
+                ),
+                isError=True,
+            )
+        options = dict(options or {})
+        signal = options.get("signal")
+        return await runner.executeToolFn(
+            self._toolCallId, name, args, {**options, "signal": signal if signal is not None else self._toolSignal}
+        )
+
+
 class _CommandContextView(_ContextBase):
     def getSystemPromptOptions(self) -> BuildSystemPromptOptions:
-        self._runner._assert_active()
+        self._runner.assertActive()
         return self._runner.getSystemPromptOptionsFn()  # type: ignore[no-any-return]
 
     async def waitForIdle(self) -> None:
-        self._runner._assert_active()
+        self._runner.assertActive()
         await self._runner.waitForIdleFn()
 
     async def newSession(self, options: dict[str, Any] | None = None) -> dict[str, bool]:
-        self._runner._assert_active()
+        self._runner.assertActive()
         return await self._runner.newSessionHandler(options)
 
     async def fork(self, entryId: str, options: dict[str, Any] | None = None) -> dict[str, bool]:
-        self._runner._assert_active()
+        self._runner.assertActive()
         return await self._runner.forkHandler(entryId, options)
 
     async def navigateTree(self, targetId: str, options: dict[str, Any] | None = None) -> dict[str, bool]:
-        self._runner._assert_active()
+        self._runner.assertActive()
         return await self._runner.navigateTreeHandler(targetId, options)
 
     async def switchSession(self, sessionPath: str, options: dict[str, Any] | None = None) -> dict[str, bool]:
-        self._runner._assert_active()
+        self._runner.assertActive()
         return await self._runner.switchSessionHandler(sessionPath, options)
 
     async def reload(self) -> None:
-        self._runner._assert_active()
+        self._runner.assertActive()
         await self._runner.reloadHandler()
 
 
@@ -473,7 +531,7 @@ def _invoke_handler(handler: Any, event: Any, ctx: Any) -> Any:
     return handler()
 
 
-def _build_builtin_keybindings(resolvedKeybindings: Mapping[str, str | list[str] | None]) -> dict[str, dict[str, Any]]:
+def buildBuiltinKeybindings(resolvedKeybindings: Mapping[str, str | list[str] | None]) -> dict[str, dict[str, Any]]:
     builtin: dict[str, dict[str, Any]] = {}
     for keybinding, keys in resolvedKeybindings.items():
         if keys is None:
@@ -492,13 +550,13 @@ def _build_builtin_keybindings(resolvedKeybindings: Mapping[str, str | list[str]
     return builtin
 
 
-async def emit_project_trust_event(
+async def emitProjectTrustEvent(
     extensions_result: LoadExtensionsResult,
     event: ProjectTrustEvent,
     ctx: ProjectTrustContext,
 ) -> dict[str, Any]:
     errors: list[ExtensionError] = []
-    for extension, handlers in _snapshot_event_handlers(extensions_result.extensions, "project_trust"):
+    for extension, handlers in snapshotEventHandlers(extensions_result.extensions, "project_trust"):
         for handler in handlers:
             try:
                 handler_result = _invoke_handler(handler, event, ctx)
@@ -548,6 +606,9 @@ class ExtensionRunner:
     compactFn: Any = field(default=lambda _options=None: None)
     getSystemPromptFn: Any = field(default=lambda: "")
     getSystemPromptOptionsFn: Any = field(init=False, repr=False)
+    executeToolFn: Any = None
+    getCallableToolsFn: Any = field(default=list)
+    reportedMcpServers: set[str] = field(default_factory=set)
     newSessionHandler: Any = field(default=lambda _options=None: _result_future({"cancelled": False}))
     forkHandler: Any = field(default=lambda _entry_id, _options=None: _result_future({"cancelled": False}))
     navigateTreeHandler: Any = field(default=lambda _target_id, _options=None: _result_future({"cancelled": False}))
@@ -568,9 +629,9 @@ class ExtensionRunner:
         self.getSystemPromptOptionsFn = self._default_system_prompt_options
 
     def _default_system_prompt_options(self) -> BuildSystemPromptOptions:
-        return normalize_build_system_prompt_options({"cwd": self.cwd})  # type: ignore[return-value]
+        return normalizeBuildSystemPromptOptions({"cwd": self.cwd})  # type: ignore[return-value]
 
-    def bind_core(
+    def bindCore(
         self,
         actions: Any,
         context_actions: Any,
@@ -584,12 +645,14 @@ class ExtensionRunner:
         self.runtime.setLabel = _required_action(actions, "setLabel")
         self.runtime.getActiveTools = _required_action(actions, "getActiveTools")
         self.runtime.getAllTools = _required_action(actions, "getAllTools")
+        self.runtime.getSettings = _required_action(actions, "getSettings")
         self.runtime.setActiveTools = _required_action(actions, "setActiveTools")
         self.runtime.refreshTools = _required_action(actions, "refreshTools")
         self.runtime.getCommands = _required_action(actions, "getCommands")
         self.runtime.setModel = _required_action(actions, "setModel")
         self.runtime.getThinkingLevel = _required_action(actions, "getThinkingLevel")
         self.runtime.setThinkingLevel = _required_action(actions, "setThinkingLevel")
+        self.runtime.createContext = lambda: self.createContext()
 
         self.getModel = _required_action(context_actions, "getModel")
         self.getScopedModels = _resolve_action(context_actions, "getScopedModels", self.getScopedModels)
@@ -608,6 +671,27 @@ class ExtensionRunner:
             if get_system_prompt_options is not None
             else self._default_system_prompt_options
         )
+        self.executeToolFn = _resolve_action(context_actions, "executeTool")
+        get_callable_tools = _resolve_action(context_actions, "getCallableTools")
+        self.getCallableToolsFn = get_callable_tools if get_callable_tools is not None else list
+
+        # Servers registered from now on reach the extension that connects them right away.
+        # Servers registered during loading are read on session_start.
+        def on_mcp_servers_change() -> None:
+            # Upstream `void this.emit(...)`: not awaited. With no running loop there is nobody to
+            # deliver it to yet.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                task = loop.create_task(
+                    self.emit({"type": "mcp_servers_change", "servers": self.runtime.mcpServers.list()})
+                )
+                task.add_done_callback(lambda done: done.cancelled() or done.exception())
+            self.reportUnhandledMcpServers()
+
+        self.runtime.mcpServers.setChangeListener(on_mcp_servers_change)
 
         register_provider = _resolve_action(provider_actions, "registerProvider")
         register_native_provider = _resolve_action(
@@ -656,6 +740,21 @@ class ExtensionRunner:
                     registration.extensionPath, "register_provider", error
                 )
         self.runtime.pendingNativeProviderRegistrations.clear()
+        register_virtual_model_action = _resolve_action(provider_actions, "registerVirtualModel")
+        unregister_virtual_model_action = _resolve_action(provider_actions, "unregisterVirtualModel")
+
+        def register_virtual_model(definition: VirtualModelDefinition, _extension_path: str | None = None) -> None:
+            if callable(register_virtual_model_action):
+                register_virtual_model_action(definition)
+                return
+            self.modelRegistry.registerVirtualModel(definition)
+
+        for virtual in list(self.runtime.pendingVirtualModelRegistrations):
+            try:
+                register_virtual_model(virtual.definition)
+            except Exception as error:  # noqa: BLE001 - extension code: reported through the runner
+                self._emit_extension_exception(virtual.extensionPath, "register_virtual_model", error)
+        self.runtime.pendingVirtualModelRegistrations.clear()
 
         def register_provider_now(
             name: str,
@@ -679,11 +778,19 @@ class ExtensionRunner:
                 return
             raise RuntimeError("No provider unregistration handler bound")
 
+        def unregister_virtual_model_now(provider: str, id: str) -> None:
+            if callable(unregister_virtual_model_action):
+                unregister_virtual_model_action(provider, id)
+                return
+            self.modelRegistry.unregisterVirtualModel(provider, id)
+
         self.runtime.registerProvider = register_provider_now
         self.runtime.registerNativeProvider = register_native_provider_now
         self.runtime.unregisterProvider = unregister_provider_now
+        self.runtime.registerVirtualModel = register_virtual_model
+        self.runtime.unregisterVirtualModel = unregister_virtual_model_now
 
-    def bind_command_context(self, actions: Any | None = None) -> None:
+    def bindCommandContext(self, actions: Any | None = None) -> None:
         if actions is None:
             self.waitForIdleFn = lambda: _completed_future()
             self.newSessionHandler = lambda _options=None: _result_future({"cancelled": False})
@@ -700,7 +807,7 @@ class ExtensionRunner:
         self.switchSessionHandler = _required_action(actions, "switchSession")
         self.reloadHandler = _required_action(actions, "reload")
 
-    def set_ui_context(self, uiContext: Any | None = None, mode: ExtensionMode = "print") -> None:
+    def setUIContext(self, uiContext: Any | None = None, mode: ExtensionMode = "print") -> None:
         self.uiContext = (
             _UIPromptUIContext(self, uiContext) if uiContext is not None else _NoUIContext()
         )
@@ -750,21 +857,21 @@ class ExtensionRunner:
         task = asyncio.create_task(dispatch())
         task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
 
-    def get_ui_context(self) -> Any:
+    def getUIContext(self) -> Any:
         return self.uiContext
 
-    def has_ui(self) -> bool:
+    def hasUI(self) -> bool:
         return not isinstance(self.uiContext, _NoUIContext)
 
-    def get_extension_paths(self) -> list[str]:
+    def getExtensionPaths(self) -> list[str]:
         return [extension.path for extension in self.extensions]
 
-    def get_active_tools(self) -> list[str]:
+    def getActiveTools(self) -> list[str]:
         """Names of the tools the agent currently exposes (pi runner.ts:714)."""
-        self._assert_active()
+        self.assertActive()
         return self.runtime.getActiveTools()
 
-    def get_all_registered_tools(self) -> list[RegisteredTool]:
+    def getAllRegisteredTools(self) -> list[RegisteredTool]:
         tools_by_name: dict[str, RegisteredTool] = {}
         for extension in self.extensions:
             for tool in extension.tools.values():
@@ -772,14 +879,14 @@ class ExtensionRunner:
                     tools_by_name[tool.definition.name] = tool
         return list(tools_by_name.values())
 
-    def get_tool_definition(self, toolName: str) -> Any:
+    def getToolDefinition(self, toolName: str) -> Any:
         for extension in self.extensions:
             tool = extension.tools.get(toolName)
             if tool is not None:
                 return tool.definition
         return None
 
-    def get_flags(self) -> dict[str, ExtensionFlag]:
+    def getFlags(self) -> dict[str, ExtensionFlag]:
         flags: dict[str, ExtensionFlag] = {}
         for extension in self.extensions:
             for name, flag in extension.flags.items():
@@ -787,20 +894,20 @@ class ExtensionRunner:
                     flags[name] = flag
         return flags
 
-    def set_flag_value(self, name: str, value: bool | str) -> None:
+    def setFlagValue(self, name: str, value: bool | str) -> None:
         self.runtime.flagValues[name] = value
 
-    def get_flag_values(self) -> dict[str, bool | str]:
+    def getFlagValues(self) -> dict[str, bool | str]:
         return dict(self.runtime.flagValues)
 
-    def get_shortcuts(self, resolvedKeybindings: Mapping[str, str | list[str] | None]) -> dict[str, ExtensionShortcut]:
+    def getShortcuts(self, resolvedKeybindings: Mapping[str, str | list[str] | None]) -> dict[str, ExtensionShortcut]:
         self.shortcutDiagnostics = []
-        builtin_keybindings = _build_builtin_keybindings(resolvedKeybindings)
+        builtin_keybindings = buildBuiltinKeybindings(resolvedKeybindings)
         extension_shortcuts: dict[str, ExtensionShortcut] = {}
 
         def add_diagnostic(message: str, extensionPath: str) -> None:
             self.shortcutDiagnostics.append(ResourceDiagnostic(type="warning", message=message, path=extensionPath))
-            if not self.has_ui():
+            if not self.hasUI():
                 print(message, file=sys.stderr)
 
         for extension in self.extensions:
@@ -838,7 +945,7 @@ class ExtensionRunner:
                 extension_shortcuts[normalized_key] = shortcut
         return extension_shortcuts
 
-    def get_shortcut_diagnostics(self) -> list[ResourceDiagnostic]:
+    def getShortcutDiagnostics(self) -> list[ResourceDiagnostic]:
         return self.shortcutDiagnostics
 
     def invalidate(self, message: str | None = None) -> None:
@@ -848,7 +955,7 @@ class ExtensionRunner:
             message
             or (
                 "This extension ctx is stale after session replacement or reload. "
-                "Do not use a captured harn or command ctx after ctx.newSession(), ctx.fork(), "
+                "Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), "
                 "ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, "
                 "move post-replacement work into withSession and use the ctx passed to withSession. "
                 "For reload, do not use the old ctx after await ctx.reload()."
@@ -856,11 +963,11 @@ class ExtensionRunner:
         )
         self.runtime.invalidate(self.staleMessage)
 
-    def _assert_active(self) -> None:
+    def assertActive(self) -> None:
         if self.staleMessage:
             raise RuntimeError(self.staleMessage)
 
-    def on_error(self, listener: ExtensionErrorListener) -> Any:
+    def onError(self, listener: ExtensionErrorListener) -> Any:
         if listener not in self.errorListeners:
             self.errorListeners.append(listener)
 
@@ -870,12 +977,12 @@ class ExtensionRunner:
 
         return unsubscribe
 
-    def emit_error(self, error: ExtensionError) -> None:
+    def emitError(self, error: ExtensionError) -> None:
         for listener in list(self.errorListeners):
             listener(error)
 
     def _emit_extension_exception(self, extension_path: str, event: str, error: Exception) -> None:
-        self.emit_error(
+        self.emitError(
             ExtensionError(
                 extensionPath=extension_path,
                 event=event,
@@ -884,31 +991,63 @@ class ExtensionRunner:
             )
         )
 
-    def has_handlers(self, eventType: str) -> bool:
+    def reportUnhandledMcpServers(self) -> None:
+        """Report registered MCP servers when no extension handles ``mcp_servers_change``, which
+        means nothing connects them (for example when another MCP extension replaced the built-in
+        one)."""
+        if self.hasHandlers("mcp_servers_change"):
+            return
+        for server in self.runtime.mcpServers.list():
+            if server.name in self.reportedMcpServers:
+                continue
+            self.reportedMcpServers.add(server.name)
+            self.emitError(
+                ExtensionError(
+                    extensionPath=server.extensionPath,
+                    event="register_mcp_server",
+                    error=(
+                        f'MCP server "{server.name}" is registered, but no loaded extension connects MCP '
+                        "servers; another extension may have replaced the built-in MCP support"
+                    ),
+                )
+            )
+
+    def hasHandlers(self, eventType: str) -> bool:
         return any(extension.handlers.get(eventType) for extension in self.extensions)
 
-    def get_message_renderer(self, customType: str) -> Any:
+    def getMessageRenderer(self, customType: str) -> Any:
         for extension in self.extensions:
             renderer = extension.messageRenderers.get(customType)
             if renderer is not None:
                 return renderer
         return None
 
-    def get_markdown_transformers(self) -> list[MarkdownTransformer]:
+    def getMarkdownTransformers(self) -> list[MarkdownTransformer]:
         return [
             transformer
             for extension in self.extensions
             if (transformer := extension.markdownTransformer) is not None
         ]
 
-    def get_entry_renderer(self, customType: str) -> EntryRenderer[Any] | None:
+    def resolveToolRenderers(
+        self, toolName: str, base: Callable[[], ToolRenderers | ToolDefinition[Any, Any] | None]
+    ) -> ToolRenderers | ToolDefinition[Any, Any] | None:
+        """Renderers of calls to `toolName`: extension resolvers in load order, then `base`."""
+        resolvers = [resolver for extension in self.extensions for resolver in extension.toolRenderers or []]
+
+        def resolve(index: int) -> ToolRenderers | ToolDefinition[Any, Any] | None:
+            return resolvers[index](toolName, lambda: resolve(index + 1)) if index < len(resolvers) else base()
+
+        return resolve(0)
+
+    def getEntryRenderer(self, customType: str) -> EntryRenderer[Any] | None:
         for extension in self.extensions:
             renderer = extension.entryRenderers.get(customType)
             if renderer is not None:
                 return renderer
         return None
 
-    def _resolve_registered_commands(self) -> list[ResolvedCommand]:
+    def resolveRegisteredCommands(self) -> list[ResolvedCommand]:
         commands: list[RegisteredCommand] = []
         counts: dict[str, int] = {}
         for extension in self.extensions:
@@ -940,15 +1079,15 @@ class ExtensionRunner:
             )
         return resolved
 
-    def get_registered_commands(self) -> list[ResolvedCommand]:
+    def getRegisteredCommands(self) -> list[ResolvedCommand]:
         self.commandDiagnostics = []
-        return self._resolve_registered_commands()
+        return self.resolveRegisteredCommands()
 
-    def get_command_diagnostics(self) -> list[ResourceDiagnostic]:
+    def getCommandDiagnostics(self) -> list[ResourceDiagnostic]:
         return self.commandDiagnostics
 
-    def get_command(self, name: str) -> ResolvedCommand | None:
-        for command in self._resolve_registered_commands():
+    def getCommand(self, name: str) -> ResolvedCommand | None:
+        for command in self.resolveRegisteredCommands():
             if command.invocationName == name:
                 return command
         return None
@@ -956,17 +1095,22 @@ class ExtensionRunner:
     def shutdown(self) -> None:
         self.shutdownHandler()
 
-    def create_context(self) -> Any:
+    def createContext(self) -> Any:
         return _ContextBase(self)
 
-    def create_command_context(self) -> Any:
+    def createToolContext(self, toolCallId: str, signal: Any) -> Any:
+        """Create the context for executing the tool call ``toolCallId``: the extension context
+        plus ``tools`` and ``executeTool()``. ``signal`` is the default signal of nested calls."""
+        return _ToolContextView(self, toolCallId, signal)
+
+    def createCommandContext(self) -> Any:
         return _CommandContextView(self)
 
     async def emit(self, event: Any) -> Any:
         event_type = _event_type(event)
-        ctx = self.create_context()
+        ctx = self.createContext()
         result: Any = None
-        for extension, handlers in _snapshot_event_handlers(self.extensions, event_type):
+        for extension, handlers in snapshotEventHandlers(self.extensions, event_type):
             for handler in handlers:
                 try:
                     handler_result = _invoke_handler(handler, event, ctx)
@@ -989,11 +1133,11 @@ class ExtensionRunner:
                         raise
         return result
 
-    async def emit_message_end(self, event: Any) -> Any:
-        ctx = self.create_context()
+    async def emitMessageEnd(self, event: Any) -> Any:
+        ctx = self.createContext()
         current_message = _event_field(event, "message")
         modified = False
-        for extension, handlers in _snapshot_event_handlers(self.extensions, "message_end"):
+        for extension, handlers in snapshotEventHandlers(self.extensions, "message_end"):
             for handler in handlers:
                 try:
                     current_event = _clone_with(event, message=current_message)
@@ -1004,7 +1148,7 @@ class ExtensionRunner:
                     if message is None:
                         continue
                     if _event_field(message, "role") != _event_field(current_message, "role"):
-                        self.emit_error(
+                        self.emitError(
                             ExtensionError(
                                 extensionPath=extension.path,
                                 event="message_end",
@@ -1018,11 +1162,11 @@ class ExtensionRunner:
                     self._emit_extension_exception(extension.path, "message_end", error)
         return current_message if modified else None
 
-    async def emit_tool_result(self, event: Any) -> Any:
-        ctx = self.create_context()
+    async def emitToolResult(self, event: Any) -> Any:
+        ctx = self.createContext()
         current_event = _clone_with(event)
         modified = False
-        for extension, handlers in _snapshot_event_handlers(self.extensions, "tool_result"):
+        for extension, handlers in snapshotEventHandlers(self.extensions, "tool_result"):
             for handler in handlers:
                 try:
                     handler_result = _invoke_handler(handler, current_event, ctx)
@@ -1030,7 +1174,7 @@ class ExtensionRunner:
                         handler_result = await handler_result
                     if handler_result is None:
                         continue
-                    for field_name in ("content", "details", "isError", "usage"):
+                    for field_name in ("content", "details", "structuredContent", "isError", "usage"):
                         value = _result_flag(handler_result, field_name, _MISSING)
                         if value is not _MISSING:
                             if isinstance(current_event, Mapping):
@@ -1038,6 +1182,16 @@ class ExtensionRunner:
                             else:
                                 setattr(current_event, field_name, value)
                             modified = True
+                            if (
+                                field_name == "content"
+                                and _result_flag(handler_result, "structuredContent", _MISSING) is _MISSING
+                            ):
+                                # Structured content that is not replaced along with the content may
+                                # no longer match it.
+                                if isinstance(current_event, Mapping):
+                                    current_event.pop("structuredContent", None)
+                                else:
+                                    current_event.structuredContent = None
                 except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, "tool_result", error)
         if not modified:
@@ -1045,14 +1199,15 @@ class ExtensionRunner:
         return {
             "content": _event_field(current_event, "content"),
             "details": _event_field(current_event, "details"),
+            "structuredContent": _event_field(current_event, "structuredContent"),
             "isError": _event_field(current_event, "isError"),
             "usage": _event_field(current_event, "usage"),
         }
 
-    async def emit_tool_call(self, event: Any) -> Any:
-        ctx = self.create_context()
+    async def emitToolCall(self, event: Any) -> Any:
+        ctx = self.createContext()
         result: Any = None
-        for extension, handlers in _snapshot_event_handlers(self.extensions, "tool_call"):
+        for extension, handlers in snapshotEventHandlers(self.extensions, "tool_call"):
             for handler in handlers:
                 try:
                     handler_result = _invoke_handler(handler, event, ctx)
@@ -1071,11 +1226,11 @@ class ExtensionRunner:
                         return result
         return result
 
-    async def emit_user_bash(self, event: Any) -> Any:
+    async def emitUserBash(self, event: Any) -> Any:
         """`user_bash` fails closed: an error or an invalid defined result aborts the command
         without invoking later handlers or executing locally (pi #9068)."""
-        ctx = self.create_context()
-        for extension, handlers in _snapshot_event_handlers(self.extensions, "user_bash"):
+        ctx = self.createContext()
+        for extension, handlers in snapshotEventHandlers(self.extensions, "user_bash"):
             for handler in handlers:
                 try:
                     handler_result = _invoke_handler(handler, event, ctx)
@@ -1083,7 +1238,7 @@ class ExtensionRunner:
                         handler_result = await handler_result
                     if handler_result is None:
                         continue
-                    if not _is_user_bash_event_result(handler_result):
+                    if not isUserBashEventResult(handler_result):
                         raise ValueError(
                             "Invalid user_bash handler result: return undefined for local execution "
                             "or exactly one valid { operations } or { result } object"
@@ -1094,13 +1249,13 @@ class ExtensionRunner:
                     raise
         return None
 
-    async def emit_context(self, messages: list[Any]) -> list[Any]:
+    async def emitContext(self, messages: list[Any]) -> list[Any]:
         """Run the request-time transforms in two phases. `context` handlers see the conversation
         only and Pi restores the prompt and tool state after each; `context_with_system`
         handlers then see the full transcript and their output is used as returned."""
-        ctx = self.create_context()
+        ctx = self.createContext()
         current_messages = deepcopy(messages)
-        for extension, handlers in _snapshot_event_handlers(self.extensions, "context"):
+        for extension, handlers in snapshotEventHandlers(self.extensions, "context"):
             for handler in handlers:
                 try:
                     visible_messages = [m for m in current_messages if _event_field(m, "role") != "system"]
@@ -1115,13 +1270,13 @@ class ExtensionRunner:
                     # Handlers may return a new list or edit event.messages in place.
                     returned = _result_flag(handler_result, "messages")
                     if returned is None:
-                        returned = None if _same_messages(visible_messages, visible_snapshot) else visible_messages
+                        returned = None if sameMessages(visible_messages, visible_snapshot) else visible_messages
                     if returned is None:
                         continue
-                    current_messages = _restore_system_messages(current_messages, visible_snapshot, returned)
+                    current_messages = restoreSystemMessages(current_messages, visible_snapshot, returned)
                 except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception
                     self._emit_extension_exception(extension.path, "context", error)
-        for extension, handlers in _snapshot_event_handlers(self.extensions, "context_with_system"):
+        for extension, handlers in snapshotEventHandlers(self.extensions, "context_with_system"):
             for handler in handlers:
                 try:
                     had_leading_system_message = bool(current_messages) and _event_field(current_messages[0], "role") == "system"
@@ -1139,7 +1294,7 @@ class ExtensionRunner:
                     if had_leading_system_message and (
                         not current_messages or _event_field(current_messages[0], "role") != "system"
                     ):
-                        self.emit_error(
+                        self.emitError(
                             ExtensionError(
                                 extensionPath=extension.path,
                                 event="context_with_system",
@@ -1154,10 +1309,10 @@ class ExtensionRunner:
                     self._emit_extension_exception(extension.path, "context_with_system", error)
         return current_messages
 
-    async def emit_before_provider_request(self, payload: Any) -> Any:
-        ctx = self.create_context()
+    async def emitBeforeProviderRequest(self, payload: Any) -> Any:
+        ctx = self.createContext()
         current_payload = payload
-        for extension, handlers in _snapshot_event_handlers(self.extensions, "before_provider_request"):
+        for extension, handlers in snapshotEventHandlers(self.extensions, "before_provider_request"):
             for handler in handlers:
                 try:
                     handler_result = _invoke_handler(
@@ -1173,13 +1328,13 @@ class ExtensionRunner:
                     self._emit_extension_exception(extension.path, "before_provider_request", error)
         return current_payload
 
-    async def emit_before_provider_headers(self, headers: dict[str, str | None]) -> dict[str, str | None]:
+    async def emitBeforeProviderHeaders(self, headers: dict[str, str | None]) -> dict[str, str | None]:
         """Let extensions mutate the assembled request headers in place (pi runner.ts:1100-1127).
 
         The handler return value is ignored; a ``None`` value deletes that header.
         """
-        ctx = self.create_context()
-        for extension, handlers in _snapshot_event_handlers(self.extensions, "before_provider_headers"):
+        ctx = self.createContext()
+        for extension, handlers in snapshotEventHandlers(self.extensions, "before_provider_headers"):
             for handler in handlers:
                 try:
                     handler_result = _invoke_handler(
@@ -1193,28 +1348,26 @@ class ExtensionRunner:
                     self._emit_extension_exception(extension.path, "before_provider_headers", error)
         return headers
 
-    async def emit_before_agent_start(
+    async def emitBeforeAgentStart(
         self,
-        prompt: str,
-        images: list[ImageContent] | None,
+        trigger: BeforeAgentStartTrigger,
         systemPromptOptions: Any,
     ) -> dict[str, Any]:
         """Handlers see and may edit the mutable prompt options; a returned `systemPrompt`
         becomes `forceSystemPrompt`. Always returns `{messages, systemPromptOptions}`, or
         `{block, reason}` when a MISAKA hook blocked the turn (# MISAKA fork: pi has no block)."""
-        current_options = normalize_build_system_prompt_options(systemPromptOptions)
+        current_options = normalizeBuildSystemPromptOptions(systemPromptOptions)
 
         def render_current_system_prompt() -> str:
-            return build_system_prompt(current_options)
+            return buildSystemPrompt(current_options)
 
         ctx = _ContextBase(self, {"getSystemPrompt": render_current_system_prompt})
         messages: list[Any] = []
-        for extension, handlers in _snapshot_event_handlers(self.extensions, "before_agent_start"):
+        for extension, handlers in snapshotEventHandlers(self.extensions, "before_agent_start"):
             for handler in handlers:
                 try:
                     event = _BeforeAgentStartEvent(
-                        prompt=prompt,
-                        images=images,
+                        trigger=trigger,
                         systemPromptOptions=current_options,
                         render=render_current_system_prompt,
                     )
@@ -1239,17 +1392,17 @@ class ExtensionRunner:
                     self._emit_extension_exception(extension.path, "before_agent_start", error)
         return {"messages": messages, "systemPromptOptions": current_options}
 
-    async def emit_boundary(self, base_event: Mapping[str, Any], build_context: Any) -> dict[str, Any]:
+    async def emitBoundary(self, base_event: Mapping[str, Any], build_context: Any) -> dict[str, Any]:
         """Dispatch an actionable boundary (`turn_end`, `agent_before_settle`): each handler sees
         the entries and continuation decision so far plus a context built from them, and may
         return replacements for either."""
-        ctx = self.create_context()
+        ctx = self.createContext()
         entries: list[Any] = []
         should_continue = False
         context = await maybe_await(build_context(entries))
         valid = True
         event_type = str(base_event["type"])
-        for extension, handlers in _snapshot_event_handlers(self.extensions, event_type):
+        for extension, handlers in snapshotEventHandlers(self.extensions, event_type):
             for handler in handlers:
                 event = {**base_event, "entries": entries, "continue": should_continue, "context": context}
                 try:
@@ -1269,7 +1422,7 @@ class ExtensionRunner:
                     valid = True
                 except Exception as error:  # noqa: BLE001 - the drafts, not the runner, are what failed
                     valid = False
-                    self.emit_error(
+                    self.emitError(
                         ExtensionError(
                             extensionPath=extension.path,
                             event=event_type,
@@ -1281,11 +1434,11 @@ class ExtensionRunner:
             return {"entries": entries, "continue": should_continue, "context": context, "valid": True}
         return {"entries": [], "continue": False, "context": context, "valid": False}
 
-    async def emit_cache_warming_decision(self, event: Mapping[str, Any]) -> Any:
+    async def emitCacheWarmingDecision(self, event: Mapping[str, Any]) -> Any:
         """Returns the event's own action unless a handler overrides it; the last override wins."""
-        ctx = self.create_context()
+        ctx = self.createContext()
         action = event.get("action")
-        for extension, handlers in _snapshot_event_handlers(self.extensions, str(event["type"])):
+        for extension, handlers in snapshotEventHandlers(self.extensions, str(event["type"])):
             for handler in handlers:
                 try:
                     result = _invoke_handler(handler, event, ctx)
@@ -1298,7 +1451,7 @@ class ExtensionRunner:
                     self._emit_extension_exception(extension.path, str(event["type"]), error)
         return action
 
-    async def emit_agent_end(self, event: Any) -> dict[str, Any] | None:
+    async def emitAgentEnd(self, event: Any) -> dict[str, Any] | None:
         """Emit ``agent_end`` while preserving a stop-hook decision.
 
         Most lifecycle events are observational, but Claude-compatible Stop
@@ -1307,8 +1460,8 @@ class ExtensionRunner:
         so this event needs an explicit decision channel.
         """
 
-        ctx = self.create_context()
-        for extension, handlers in _snapshot_event_handlers(self.extensions, "agent_end"):
+        ctx = self.createContext()
+        for extension, handlers in snapshotEventHandlers(self.extensions, "agent_end"):
             for handler in handlers:
                 try:
                     handler_result = _invoke_handler(handler, event, ctx)
@@ -1327,12 +1480,12 @@ class ExtensionRunner:
                     self._emit_extension_exception(extension.path, "agent_end", error)
         return None
 
-    async def emit_resources_discover(self, cwd: str, reason: str) -> dict[str, list[dict[str, str]]]:
-        ctx = self.create_context()
+    async def emitResourcesDiscover(self, cwd: str, reason: str) -> dict[str, list[dict[str, str]]]:
+        ctx = self.createContext()
         prompt_paths: list[dict[str, str]] = []
         theme_paths: list[dict[str, str]] = []
         skill_paths: list[dict[str, str]] = []
-        for extension, handlers in _snapshot_event_handlers(self.extensions, "resources_discover"):
+        for extension, handlers in snapshotEventHandlers(self.extensions, "resources_discover"):
             for handler in handlers:
                 try:
                     handler_result = _invoke_handler(
@@ -1357,17 +1510,17 @@ class ExtensionRunner:
             "skillPaths": skill_paths,
         }
 
-    async def emit_input(
+    async def emitInput(
         self,
         text: str,
         images: list[ImageContent] | None,
         source: InputSource,
         streamingBehavior: Literal["steer", "followUp"] | None = None,
     ) -> dict[str, Any]:
-        ctx = self.create_context()
+        ctx = self.createContext()
         current_text = text
         current_images = images
-        for extension, handlers in _snapshot_event_handlers(self.extensions, "input"):
+        for extension, handlers in snapshotEventHandlers(self.extensions, "input"):
             for handler in handlers:
                 try:
                     event = {
@@ -1394,46 +1547,10 @@ class ExtensionRunner:
             return {"action": "transform", "text": current_text, "images": current_images}
         return {"action": "continue"}
 
-    bindCore = bind_core
-    bindCommandContext = bind_command_context
-    setUIContext = set_ui_context
-    getUIContext = get_ui_context
-    hasUI = has_ui
-    getExtensionPaths = get_extension_paths
-    getAllRegisteredTools = get_all_registered_tools
-    get_registered_tools = get_all_registered_tools
-    getToolDefinition = get_tool_definition
-    getFlags = get_flags
-    setFlagValue = set_flag_value
-    getFlagValues = get_flag_values
-    getShortcuts = get_shortcuts
-    getShortcutDiagnostics = get_shortcut_diagnostics
-    onError = on_error
-    emitError = emit_error
-    hasHandlers = has_handlers
-    getMessageRenderer = get_message_renderer
-    getMarkdownTransformers = get_markdown_transformers
-    getEntryRenderer = get_entry_renderer
-    getRegisteredCommands = get_registered_commands
-    getCommandDiagnostics = get_command_diagnostics
-    getCommand = get_command
-    createContext = create_context
-    createCommandContext = create_command_context
-    emitMessageEnd = emit_message_end
-    emitToolResult = emit_tool_result
-    emitToolCall = emit_tool_call
-    emitUserBash = emit_user_bash
-    emitContext = emit_context
-    emitBeforeProviderRequest = emit_before_provider_request
-    emitBeforeProviderHeaders = emit_before_provider_headers
-    emitBeforeAgentStart = emit_before_agent_start
-    emitAgentEnd = emit_agent_end
-    emitResourcesDiscover = emit_resources_discover
-    emitInput = emit_input
 
 
-async def emit_session_shutdown_event(extensionRunner: ExtensionRunner, event: Any) -> bool:
-    if extensionRunner.has_handlers("session_shutdown"):
+async def emitSessionShutdownEvent(extensionRunner: ExtensionRunner, event: Any) -> bool:
+    if extensionRunner.hasHandlers("session_shutdown"):
         await extensionRunner.emit(event)
         return True
     return False
@@ -1454,6 +1571,7 @@ def _result_future(value: Any) -> Any:
 
 
 __all__ = [
+    "BeforeAgentStartTrigger",
     "ExtensionErrorListener",
     "ExtensionRunner",
     "ForkHandler",
@@ -1462,5 +1580,5 @@ __all__ = [
     "ReloadHandler",
     "ShutdownHandler",
     "SwitchSessionHandler",
-    "emit_project_trust_event",
+    "emitProjectTrustEvent",
 ]

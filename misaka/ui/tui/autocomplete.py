@@ -1,191 +1,189 @@
-"""Autocomplete helpers for slash commands and file paths."""
+"""Translated from pi-tui's ``autocomplete.ts`` (v1.1.0).
+
+MISAKA forks, each marked where it happens: Node's ``path`` functions come from ``misaka.utils.node_path`` (Node's
+own semantics, so completions match upstream's on Windows too); the TS object literals are TypedDicts; fd's stderr is
+read and dropped (Node leaves the pipe unread).
+"""
 
 from __future__ import annotations
 
-import asyncio
-import inspect
+import functools
 import os
 import re
-from collections.abc import Awaitable, Callable, Mapping
+import stat
+import sys
+from collections import abc
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TypedDict
 
 from misaka.ui.tui.fuzzy import fuzzyFilter
-from misaka.utils.values import signal_aborted
+from misaka.ui.tui.utils import autocompleteBoundaryRegex, autocompleteSeparatorRegex
+from misaka.utils import js_regexp, node_path
+from misaka.utils.child_process import spawn_child_process
+from misaka.utils.collation import localeCompare
+from misaka.utils.js import Utf8Decoder, awaitValue, jsIndex, jsTrim, jsTrimStart
+from misaka.utils.js_regexp import RegExp
+from misaka.utils.paths import homedir
 
 PATH_DELIMITERS = {" ", "\t", '"', "'", "="}
-_MISSING = object()
+tokenStartRegex = RegExp(f"{autocompleteBoundaryRegex.source}$", "u")
+# Opening wrappers that may precede a path in prose, mapped to their closing counterpart.
+PATH_WRAPPERS: dict[str, str] = {"(": ")", "[": "]", "{": "}", "<": ">", "`": "`"}
 
 
-def to_display_path(value: str) -> str:
+def toDisplayPath(value: str) -> str:
     return value.replace("\\", "/")
 
 
-def escape_regex(value: str) -> str:
-    # PORT-NOTE: escape only this set, as upstream does; re.escape also escapes spaces etc.,
-    # which older fd versions reject when parsing the regex
-    return re.sub(r"[.*+?^${}()|\[\]\\]", lambda m: "\\" + m.group(0), value)
+def escapeRegex(value: str) -> str:
+    return js_regexp.replace(value, RegExp(r"[.*+?^${}()|[\]\\]", "g"), "\\$&")
 
 
-def build_fd_path_query(query: str) -> str:
-    normalized = to_display_path(query)
+def buildFdPathQuery(query: str) -> str:
+    normalized = toDisplayPath(query)
     if "/" not in normalized:
         return normalized
 
-    has_trailing_separator = normalized.endswith("/")
-    trimmed = normalized.strip("/")
+    hasTrailingSeparator = normalized.endswith("/")
+    trimmed = js_regexp.replace(normalized, RegExp(r"^\/+|\/+$", "g"), "")
     if not trimmed:
         return normalized
 
-    segments = [escape_regex(segment) for segment in trimmed.split("/") if segment]
-    if not segments:
+    separatorPattern = "[\\\\/]"
+    segments = [escapeRegex(segment) for segment in trimmed.split("/") if segment]
+    if len(segments) == 0:
         return normalized
 
-    pattern = r"[\\/]"
-    result = pattern.join(segments)
-    if has_trailing_separator:
-        result += pattern
+    pattern = separatorPattern.join(segments)
+    if hasTrailingSeparator:
+        pattern += separatorPattern
+    return pattern
+
+
+def findLastDelimiter(text: str) -> int:
+    lastDelimiter = -1
+    index = 0
+    for character in text:
+        index += len(character)
+        if character in PATH_DELIMITERS or autocompleteSeparatorRegex.test(character):
+            lastDelimiter = index - 1
+    return lastDelimiter
+
+
+# Strip opening wrappers before a path, e.g. "(~/Dev" -> "~/Dev" or "`src/ma" -> "src/ma".
+# Keep a wrapper if the token also contains its closer, e.g. "app/[slug]/pa" or "(group)/pa".
+def stripLeadingWrappers(token: str) -> str:
+    result = token
+    while len(result) > 0:
+        closer = PATH_WRAPPERS.get(result[0])
+        if not closer or result.find(closer, 1) != -1:
+            break
+        result = result[1:]
     return result
 
 
-def find_last_delimiter(text: str) -> int:
-    for index in range(len(text) - 1, -1, -1):
-        if text[index] in PATH_DELIMITERS:
-            return index
-    return -1
+def findUnclosedQuoteStart(text: str) -> int | None:
+    inQuotes = False
+    quoteStart = -1
+
+    for i in range(len(text)):
+        if text[i] == '"':
+            inQuotes = not inQuotes
+            if inQuotes:
+                quoteStart = i
+
+    return quoteStart if inQuotes else None
 
 
-def find_unclosed_quote_start(text: str) -> int | None:
-    in_quotes = False
-    quote_start = -1
-    for index, char in enumerate(text):
-        if char == '"':
-            in_quotes = not in_quotes
-            if in_quotes:
-                quote_start = index
-    return quote_start if in_quotes else None
+def isTokenStart(text: str, index: int) -> bool:
+    start = index
+    while start > 0 and PATH_WRAPPERS.get(text[start - 1]):
+        start -= 1
+    return (text[start - 1] if start > 0 else "") in PATH_DELIMITERS or tokenStartRegex.test(text[:start])
 
 
-def is_token_start(text: str, index: int) -> bool:
-    return index == 0 or text[index - 1] in PATH_DELIMITERS
-
-
-def extract_quoted_prefix(text: str) -> str | None:
-    quote_start = find_unclosed_quote_start(text)
-    if quote_start is None:
+def extractQuotedPrefix(text: str) -> str | None:
+    quoteStart = findUnclosedQuoteStart(text)
+    if quoteStart is None:
         return None
 
-    if quote_start > 0 and text[quote_start - 1] == "@":
-        if not is_token_start(text, quote_start - 1):
+    if quoteStart > 0 and text[quoteStart - 1] == "@":
+        if not isTokenStart(text, quoteStart - 1):
             return None
-        return text[quote_start - 1 :]
+        return text[quoteStart - 1 :]
 
-    if not is_token_start(text, quote_start):
+    if not isTokenStart(text, quoteStart):
         return None
 
-    return text[quote_start:]
+    return text[quoteStart:]
 
 
-@dataclass(slots=True)
-class PathPrefix:
+def _isRooted(path: str) -> bool:
+    """MISAKA fork: a path from the root, which upstream tests as a leading ``/``; on Windows a drive path
+    (``C:/`` or ``C:\\``) too, which ``path.join`` would otherwise put under the base directory."""
+    return path.startswith("/") or (sys.platform == "win32" and re.match(r"[A-Za-z]:[\\/]", path) is not None)
+
+
+class _PathPrefix(TypedDict):
+    """MISAKA fork: a name for the inline result type of ``parsePathPrefix``."""
+
     rawPrefix: str
     isAtPrefix: bool
     isQuotedPrefix: bool
 
 
-def parse_path_prefix(prefix: str) -> PathPrefix:
+def parsePathPrefix(prefix: str) -> _PathPrefix:
     if prefix.startswith('@"'):
-        return PathPrefix(rawPrefix=prefix[2:], isAtPrefix=True, isQuotedPrefix=True)
+        return {"rawPrefix": prefix[2:], "isAtPrefix": True, "isQuotedPrefix": True}
     if prefix.startswith('"'):
-        return PathPrefix(rawPrefix=prefix[1:], isAtPrefix=False, isQuotedPrefix=True)
+        return {"rawPrefix": prefix[1:], "isAtPrefix": False, "isQuotedPrefix": True}
     if prefix.startswith("@"):
-        return PathPrefix(rawPrefix=prefix[1:], isAtPrefix=True, isQuotedPrefix=False)
-    return PathPrefix(rawPrefix=prefix, isAtPrefix=False, isQuotedPrefix=False)
+        return {"rawPrefix": prefix[1:], "isAtPrefix": True, "isQuotedPrefix": False}
+    return {"rawPrefix": prefix, "isAtPrefix": False, "isQuotedPrefix": False}
 
 
-def build_completion_value(path: str, *, is_directory: bool, is_at_prefix: bool, is_quoted_prefix: bool) -> str:
-    needs_quotes = is_quoted_prefix or " " in path
-    prefix = "@" if is_at_prefix else ""
-    if not needs_quotes:
+class _CompletionValueOptions(TypedDict):
+    """MISAKA fork: a name for the inline ``options`` type of ``buildCompletionValue``."""
+
+    isDirectory: bool
+    isAtPrefix: bool
+    isQuotedPrefix: bool
+
+
+def buildCompletionValue(path: str, options: _CompletionValueOptions) -> str:
+    needsQuotes = options["isQuotedPrefix"] or autocompleteSeparatorRegex.test(path)
+    prefix = "@" if options["isAtPrefix"] else ""
+
+    if not needsQuotes:
         return f"{prefix}{path}"
-    return f'{prefix}"{path}"'
+
+    openQuote = f'{prefix}"'
+    closeQuote = '"'
+    return f"{openQuote}{path}{closeQuote}"
 
 
-def _get_prop(value: object, key: str, default: object = None) -> object:
-    if isinstance(value, Mapping):
-        return value.get(key, default)
-    return getattr(value, key, default)
+class _FdEntry(TypedDict):
+    """MISAKA fork: a name for the inline ``{ path; isDirectory }`` type."""
+
+    path: str
+    isDirectory: bool
 
 
-def _get_command_name(command: object) -> str:
-    name = _get_prop(command, "name", _MISSING)
-    if name is not _MISSING:
-        return str(name)
-    return str(_get_prop(command, "value", ""))
-
-
-async def _wait_for_abort(signal: Any) -> None:
-    if signal is None:
-        await asyncio.Future()
-        return
-    if signal_aborted(signal):
-        return
-
-    wait = getattr(signal, "wait", None)
-    if callable(wait) and inspect.iscoroutinefunction(wait):
-        await wait()
-        return
-
-    add_event_listener = getattr(signal, "addEventListener", None)
-    remove_event_listener = getattr(signal, "removeEventListener", None)
-    if callable(add_event_listener):
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[None] = loop.create_future()
-
-        def on_abort() -> None:
-            if not future.done():
-                future.set_result(None)
-
-        add_event_listener("abort", on_abort, {"once": True})
-        try:
-            await future
-        finally:
-            if callable(remove_event_listener):
-                remove_event_listener("abort", on_abort)
-        return
-
-    await asyncio.Future()
-
-
-async def _read_stream(stream: asyncio.StreamReader | None) -> str:
-    if stream is None:
-        return ""
-
-    chunks: list[str] = []
-    while True:
-        chunk = await stream.read(65536)
-        if not chunk:
-            break
-        chunks.append(chunk.decode("utf-8"))
-    return "".join(chunks)
-
-
-async def walk_directory_with_fd(
-    base_dir: str,
-    fd_path: str,
+# Use fd to walk directory tree (fast, respects .gitignore)
+async def walkDirectoryWithFd(
+    baseDir: str,
+    fdPath: str,
     query: str,
-    max_results: int,
+    maxResults: int,
     signal: Any,
-) -> list[dict[str, object]]:
-    if signal_aborted(signal):
-        return []
-
+    maxDepth: int | None = None,
+) -> list[_FdEntry]:
     args = [
         "--base-directory",
-        base_dir,
+        baseDir,
         "--max-results",
-        str(max_results),
+        str(maxResults),
         "--type",
         "f",
         "--type",
@@ -199,57 +197,63 @@ async def walk_directory_with_fd(
         "--exclude",
         ".git/**",
     ]
-    if "/" in to_display_path(query):
+
+    if maxDepth is not None:
+        args.extend(["--max-depth", str(maxDepth)])
+
+    if "/" in toDisplayPath(query):
         args.append("--full-path")
+
     if query:
-        args.append(build_fd_path_query(query))
+        args.append(buildFdPathQuery(query))
 
-    try:
-        process = await asyncio.create_subprocess_exec(
-            fd_path,
-            *args,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except Exception:  # noqa: BLE001 - no fd binary or a spawn failure: no suggestions
+    if signal.aborted:
         return []
 
-    stdout_task = asyncio.create_task(_read_stream(process.stdout))
-    stderr_task = asyncio.create_task(_read_stream(process.stderr))
-    wait_task = asyncio.create_task(process.wait())
-    abort_task = asyncio.create_task(_wait_for_abort(signal))
+    # `child.stdout.setEncoding("utf-8")`: a string decoder, which keeps a leading BOM.
+    decoder = Utf8Decoder(ignoreBOM=True)
+    stdout = ""
+
+    def onData(fd: int, data: bytes) -> None:
+        nonlocal stdout
+        # MISAKA fork: stderr is read and dropped; Node leaves that pipe unread.
+        if fd == 1:
+            stdout += decoder.decode(data)
 
     try:
-        done, _pending = await asyncio.wait({wait_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
-        if abort_task in done and not wait_task.done():
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-        return_code = await wait_task
-        stdout = await stdout_task
-        await stderr_task
+        child = await spawn_child_process(fdPath, *args, cwd=os.getcwd(), on_data=onData)
+    except Exception:  # noqa: BLE001 - `child.on("error")`: no suggestions
+        return []
+
+    def onAbort() -> None:
+        if child.returncode is None:
+            child.kill()
+
+    signal.addEventListener("abort", onAbort, True)
+    try:
+        code = await child.wait()
+    except Exception:  # noqa: BLE001 - `child.on("error")`: no suggestions
+        return []
     finally:
-        abort_task.cancel()
-        try:
-            await abort_task
-        except asyncio.CancelledError:
-            pass
+        signal.removeEventListener("abort", onAbort)
+    stdout += decoder.decode(b"", True)
 
-    if signal_aborted(signal) or return_code != 0 or not stdout:
+    if signal.aborted or code != 0 or not stdout:
         return []
 
-    lines = [line for line in stdout.strip().splitlines() if line]
-    entries: list[dict[str, object]] = []
+    lines = [line for line in jsTrim(stdout).split("\n") if line]
+    results: list[_FdEntry] = []
+
     for line in lines:
-        display_line = to_display_path(line)
-        has_trailing_separator = display_line.endswith("/")
-        normalized_path = display_line[:-1] if has_trailing_separator else display_line
-        if normalized_path == ".git" or normalized_path.startswith(".git/") or "/.git/" in normalized_path:
+        displayLine = toDisplayPath(line)
+        hasTrailingSeparator = displayLine.endswith("/")
+        normalizedPath = displayLine[:-1] if hasTrailingSeparator else displayLine
+        if normalizedPath == ".git" or normalizedPath.startswith(".git/") or "/.git/" in normalizedPath:
             continue
-        entries.append({"path": display_line, "isDirectory": has_trailing_separator})
-    return entries
+
+        results.append({"path": displayLine, "isDirectory": hasTrailingSeparator})
+
+    return results
 
 
 @dataclass(slots=True)
@@ -259,31 +263,52 @@ class AutocompleteItem:
     description: str | None = None
 
 
+type Awaitable[T] = T | abc.Awaitable[T]
+
+
 @dataclass(slots=True)
 class SlashCommand:
     name: str
     description: str | None = None
     argumentHint: str | None = None
-    getArgumentCompletions: (
-        Callable[[str], Awaitable[list[AutocompleteItem] | None] | list[AutocompleteItem] | None] | None
-    ) = None
+    # Function to get argument completions for this command
+    # Returns null if no argument completion is available
+    getArgumentCompletions: Callable[[str], Awaitable[list[AutocompleteItem] | None]] | None = None
 
 
 @dataclass(slots=True)
 class AutocompleteSuggestions:
     items: list[AutocompleteItem]
-    prefix: str
+    prefix: str  # What we're matching against (e.g., "/" or "src/")
+
+
+class AppliedCompletion(TypedDict):
+    """MISAKA fork: a name for the inline result type of ``AutocompleteProvider.applyCompletion``."""
+
+    lines: list[str]
+    cursorLine: int
+    cursorCol: int
 
 
 class AutocompleteProvider(Protocol):
+    """MISAKA fork: a Protocol cannot mark members optional, so the two optional ones are not declared and callers read
+    them with ``getattr``: ``triggerCharacters`` (characters that should naturally trigger this provider at token
+    boundaries) and ``shouldTriggerFileCompletion(lines, cursorLine, cursorCol)`` (whether file completion should
+    trigger for explicit Tab completion). ``getSuggestions``'s ``options`` holds ``signal`` and an optional ``force``.
+    """
+
+    # Get autocomplete suggestions for current text/cursor position
+    # Returns null if no suggestions available
     async def getSuggestions(
         self,
         lines: list[str],
         cursorLine: int,
         cursorCol: int,
-        options: dict[str, object],
+        options: dict[str, Any],
     ) -> AutocompleteSuggestions | None: ...
 
+    # Apply the selected item
+    # Returns the new text and cursor position
     def applyCompletion(
         self,
         lines: list[str],
@@ -291,19 +316,39 @@ class AutocompleteProvider(Protocol):
         cursorCol: int,
         item: AutocompleteItem,
         prefix: str,
-    ) -> dict[str, object]: ...
-
-    def shouldTriggerFileCompletion(self, lines: list[str], cursorLine: int, cursorCol: int) -> bool: ...
+    ) -> AppliedCompletion: ...
 
 
+class _CommandItem(TypedDict):
+    name: str
+    label: str
+    description: str | None
+
+
+class _ScopedFuzzyQuery(TypedDict):
+    baseDir: str
+    query: str
+    displayBase: str
+
+
+class _FuzzyFileOptions(TypedDict):
+    isQuotedPrefix: bool
+    signal: Any
+
+
+class _ScoredEntry(_FdEntry):
+    score: int
+
+
+# Combined provider that handles both slash commands and file paths
 class CombinedAutocompleteProvider:
     def __init__(
         self,
-        commands: list[SlashCommand | AutocompleteItem] | None = None,
-        basePath: str = ".",
+        commands: Sequence[SlashCommand | AutocompleteItem] | None,
+        basePath: str,
         fdPath: str | None = None,
     ) -> None:
-        self.commands = commands or []
+        self.commands: Sequence[SlashCommand | AutocompleteItem] = commands if commands is not None else []
         self.basePath = basePath
         self.fdPath = fdPath
 
@@ -312,84 +357,85 @@ class CombinedAutocompleteProvider:
         lines: list[str],
         cursorLine: int,
         cursorCol: int,
-        options: dict[str, object],
+        options: dict[str, Any],
     ) -> AutocompleteSuggestions | None:
-        current_line = lines[cursorLine] if cursorLine < len(lines) else ""
-        text_before_cursor = current_line[:cursorCol]
-        force = bool(options.get("force", False))
-        signal = options.get("signal")
+        currentLine = jsIndex(lines, cursorLine) or ""
+        textBeforeCursor = currentLine[:cursorCol]
 
-        at_prefix = self.extractAtPrefix(text_before_cursor)
-        if at_prefix:
-            parsed = parse_path_prefix(at_prefix)
+        atPrefix = self.extractAtPrefix(textBeforeCursor)
+        if atPrefix:
+            parsed = parsePathPrefix(atPrefix)
             suggestions = await self.getFuzzyFileSuggestions(
-                parsed.rawPrefix,
-                isQuotedPrefix=parsed.isQuotedPrefix,
-                signal=signal,
+                parsed["rawPrefix"],
+                {"isQuotedPrefix": parsed["isQuotedPrefix"], "signal": options["signal"]},
             )
-            if not suggestions:
+            if len(suggestions) == 0:
                 return None
-            return AutocompleteSuggestions(items=suggestions, prefix=at_prefix)
 
-        if not force and text_before_cursor.startswith("/"):
-            space_index = text_before_cursor.find(" ")
-            if space_index == -1:
-                prefix = text_before_cursor[1:]
-                command_items: list[dict[str, str | None]] = []
-                for command in self.commands:
-                    name = _get_command_name(command)
-                    hint = _get_prop(command, "argumentHint", None)
-                    description = str(_get_prop(command, "description", "") or "")
-                    full_description = (
-                        f"{hint} — {description}" if hint and description else str(hint) if hint else description or None
-                    )
-                    command_items.append({"name": name, "label": name, "description": full_description})
+            return AutocompleteSuggestions(items=suggestions, prefix=atPrefix)
 
-                filtered = fuzzyFilter(command_items, prefix, lambda item: str(item["name"]))
-                if not filtered:
-                    return None
-                return AutocompleteSuggestions(
-                    items=[
-                        AutocompleteItem(
-                            value=str(item["name"]),
-                            label=str(item["label"]),
-                            description=item["description"] if isinstance(item["description"], str) else None,
-                        )
-                        for item in filtered
-                    ],
-                    prefix=text_before_cursor,
+        commandText = jsTrimStart(textBeforeCursor)
+        if not options.get("force") and commandText.startswith("/"):
+            spaceIndex = commandText.find(" ")
+
+            if spaceIndex == -1:
+                prefix = commandText[1:]
+                commandItems: list[_CommandItem] = []
+                for cmd in self.commands:
+                    name = _commandName(cmd)
+                    hint = getattr(cmd, "argumentHint", None) or None
+                    desc = cmd.description if cmd.description is not None else ""
+                    fullDesc = (f"{hint} — {desc}" if desc else hint) if hint else desc
+                    commandItems.append({"name": name, "label": name, "description": fullDesc or None})
+
+                bareNameMatches = fuzzyFilter(
+                    commandItems,
+                    prefix,
+                    lambda item: item["name"].removeprefix("skill:"),
                 )
+                bareNameMatchSet = {id(item) for item in bareNameMatches}
+                fullNameOnlyMatches = fuzzyFilter(
+                    [item for item in commandItems if item["name"].startswith("skill:") and id(item) not in bareNameMatchSet],
+                    prefix,
+                    lambda item: item["name"],
+                )
+                filtered = [
+                    AutocompleteItem(
+                        value=item["name"],
+                        label=item["label"],
+                        description=item["description"] if item["description"] else None,
+                    )
+                    for item in [*bareNameMatches, *fullNameOnlyMatches]
+                ]
 
-            command_name = text_before_cursor[1:space_index]
-            argument_text = text_before_cursor[space_index + 1 :]
-            command_match = next(
-                (
-                    command
-                    for command in self.commands
-                    if _get_command_name(command) == command_name
-                ),
-                None,
-            )
-            if command_match is None:
-                return None
-            get_argument_completions = _get_prop(command_match, "getArgumentCompletions", None)
-            if not callable(get_argument_completions):
-                return None
-            completions = get_argument_completions(argument_text)
-            if inspect.isawaitable(completions):
-                completions = await completions
-            if not isinstance(completions, list) or len(completions) == 0:
-                return None
-            return AutocompleteSuggestions(items=completions, prefix=argument_text)
+                if len(filtered) == 0:
+                    return None
 
-        path_match = self.extractPathPrefix(text_before_cursor, forceExtract=force)
-        if path_match is None:
+                return AutocompleteSuggestions(items=filtered, prefix=commandText)
+
+            commandName = commandText[1:spaceIndex]
+            argumentText = commandText[spaceIndex + 1 :]
+
+            command = next((cmd for cmd in self.commands if _commandName(cmd) == commandName), None)
+            getArgumentCompletions = getattr(command, "getArgumentCompletions", None) if command else None
+            if not command or not getArgumentCompletions:
+                return None
+
+            argumentSuggestions = await awaitValue(getArgumentCompletions(argumentText))
+            if not isinstance(argumentSuggestions, list) or len(argumentSuggestions) == 0:
+                return None
+
+            return AutocompleteSuggestions(items=argumentSuggestions, prefix=argumentText)
+
+        pathMatch = self.extractPathPrefix(textBeforeCursor, bool(options.get("force")))
+        if pathMatch is None:
             return None
 
-        suggestions = self.getFileSuggestions(path_match)
-        if not suggestions:
+        fileSuggestions = self.getFileSuggestions(pathMatch)
+        if len(fileSuggestions) == 0:
             return None
-        return AutocompleteSuggestions(items=suggestions, prefix=path_match)
+
+        return AutocompleteSuggestions(items=fileSuggestions, prefix=pathMatch)
 
     def applyCompletion(
         self,
@@ -398,271 +444,424 @@ class CombinedAutocompleteProvider:
         cursorCol: int,
         item: AutocompleteItem,
         prefix: str,
-    ) -> dict[str, object]:
-        current_line = lines[cursorLine] if cursorLine < len(lines) else ""
-        before_prefix = current_line[: cursorCol - len(prefix)]
-        after_cursor = current_line[cursorCol:]
-        is_quoted_prefix = prefix.startswith(('"', '@"'))
-        has_leading_quote_after_cursor = after_cursor.startswith('"')
-        has_trailing_quote_in_item = item.value.endswith('"')
-        adjusted_after_cursor = (
-            after_cursor[1:]
-            if is_quoted_prefix and has_trailing_quote_in_item and has_leading_quote_after_cursor
-            else after_cursor
+    ) -> AppliedCompletion:
+        currentLine = jsIndex(lines, cursorLine) or ""
+        beforePrefix = currentLine[: cursorCol - len(prefix)]
+        afterCursor = currentLine[cursorCol:]
+        isQuotedPrefix = prefix.startswith('"') or prefix.startswith('@"')  # noqa: PIE810 - upstream test
+        hasLeadingQuoteAfterCursor = afterCursor.startswith('"')
+        hasTrailingQuoteInItem = item.value.endswith('"')
+        adjustedAfterCursor = (
+            afterCursor[1:] if isQuotedPrefix and hasTrailingQuoteInItem and hasLeadingQuoteAfterCursor else afterCursor
         )
 
-        is_slash_command = prefix.startswith("/") and before_prefix.strip() == "" and "/" not in prefix[1:]
-        if is_slash_command:
-            new_line = f"{before_prefix}/{item.value} {adjusted_after_cursor}"
-            new_lines = list(lines)
-            new_lines[cursorLine] = new_line
-            return {"lines": new_lines, "cursorLine": cursorLine, "cursorCol": len(before_prefix) + len(item.value) + 2}
+        # Check if we're completing a slash command (prefix starts with "/" but NOT a file path)
+        # Slash commands are at the start of the line and don't contain path separators after the first /
+        isSlashCommand = prefix.startswith("/") and jsTrim(beforePrefix) == "" and "/" not in prefix[1:]
+        if isSlashCommand:
+            # This is a command name completion
+            newLine = f"{beforePrefix}/{item.value} {adjustedAfterCursor}"
+            newLines = [*lines]
+            newLines[cursorLine] = newLine
 
-        if prefix.startswith("@"):
-            is_directory = item.label.endswith("/")
-            suffix = "" if is_directory else " "
-            new_line = f"{before_prefix}{item.value}{suffix}{adjusted_after_cursor}"
-            new_lines = list(lines)
-            new_lines[cursorLine] = new_line
-            has_trailing_quote = item.value.endswith('"')
-            cursor_offset = len(item.value) - 1 if is_directory and has_trailing_quote else len(item.value)
             return {
-                "lines": new_lines,
+                "lines": newLines,
                 "cursorLine": cursorLine,
-                "cursorCol": len(before_prefix) + cursor_offset + len(suffix),
+                "cursorCol": len(beforePrefix) + len(item.value) + 2,  # +2 for "/" and space
             }
 
-        text_before_cursor = current_line[:cursorCol]
-        if "/" in text_before_cursor and " " in text_before_cursor:
-            new_line = f"{before_prefix}{item.value}{adjusted_after_cursor}"
-            new_lines = list(lines)
-            new_lines[cursorLine] = new_line
-            is_directory = item.label.endswith("/")
-            has_trailing_quote = item.value.endswith('"')
-            cursor_offset = len(item.value) - 1 if is_directory and has_trailing_quote else len(item.value)
-            return {"lines": new_lines, "cursorLine": cursorLine, "cursorCol": len(before_prefix) + cursor_offset}
+        # Check if we're completing a file attachment (prefix starts with "@")
+        if prefix.startswith("@"):
+            # This is a file attachment completion
+            # Don't add space after directories so user can continue autocompleting
+            isDirectory = item.label.endswith("/")
+            suffix = "" if isDirectory else " "
+            newLine = f"{beforePrefix + item.value}{suffix}{adjustedAfterCursor}"
+            newLines = [*lines]
+            newLines[cursorLine] = newLine
 
-        new_line = f"{before_prefix}{item.value}{adjusted_after_cursor}"
-        new_lines = list(lines)
-        new_lines[cursorLine] = new_line
-        is_directory = item.label.endswith("/")
-        has_trailing_quote = item.value.endswith('"')
-        cursor_offset = len(item.value) - 1 if is_directory and has_trailing_quote else len(item.value)
-        return {"lines": new_lines, "cursorLine": cursorLine, "cursorCol": len(before_prefix) + cursor_offset}
+            hasTrailingQuote = item.value.endswith('"')
+            cursorOffset = len(item.value) - 1 if isDirectory and hasTrailingQuote else len(item.value)
 
+            return {
+                "lines": newLines,
+                "cursorLine": cursorLine,
+                "cursorCol": len(beforePrefix) + cursorOffset + len(suffix),
+            }
+
+        # Check if we're in a slash command context (beforePrefix contains "/command ")
+        textBeforeCursor = currentLine[:cursorCol]
+        if "/" in textBeforeCursor and " " in textBeforeCursor:
+            # This is likely a command argument completion
+            newLine = beforePrefix + item.value + adjustedAfterCursor
+            newLines = [*lines]
+            newLines[cursorLine] = newLine
+
+            isDirectory = item.label.endswith("/")
+            hasTrailingQuote = item.value.endswith('"')
+            cursorOffset = len(item.value) - 1 if isDirectory and hasTrailingQuote else len(item.value)
+
+            return {
+                "lines": newLines,
+                "cursorLine": cursorLine,
+                "cursorCol": len(beforePrefix) + cursorOffset,
+            }
+
+        # For file paths, complete the path
+        newLine = beforePrefix + item.value + adjustedAfterCursor
+        newLines = [*lines]
+        newLines[cursorLine] = newLine
+
+        isDirectory = item.label.endswith("/")
+        hasTrailingQuote = item.value.endswith('"')
+        cursorOffset = len(item.value) - 1 if isDirectory and hasTrailingQuote else len(item.value)
+
+        return {
+            "lines": newLines,
+            "cursorLine": cursorLine,
+            "cursorCol": len(beforePrefix) + cursorOffset,
+        }
+
+    # Extract @ prefix for fuzzy file suggestions
     def extractAtPrefix(self, text: str) -> str | None:
-        quoted_prefix = extract_quoted_prefix(text)
-        if quoted_prefix and quoted_prefix.startswith('@"'):
-            return quoted_prefix
+        quotedPrefix = extractQuotedPrefix(text)
+        if quotedPrefix is not None and quotedPrefix.startswith('@"'):
+            return quotedPrefix
 
-        last_delimiter_index = find_last_delimiter(text)
-        token_start = 0 if last_delimiter_index == -1 else last_delimiter_index + 1
-        if token_start < len(text) and text[token_start] == "@":
-            return text[token_start:]
+        lastDelimiterIndex = findLastDelimiter(text)
+        token = stripLeadingWrappers(text if lastDelimiterIndex == -1 else text[lastDelimiterIndex + 1 :])
+
+        if token.startswith("@"):
+            return token
+
         return None
 
+    # Extract a path-like prefix from the text before cursor
     def extractPathPrefix(self, text: str, forceExtract: bool = False) -> str | None:
-        quoted_prefix = extract_quoted_prefix(text)
-        if quoted_prefix is not None:
-            return quoted_prefix
+        quotedPrefix = extractQuotedPrefix(text)
+        if quotedPrefix:
+            return quotedPrefix
 
-        last_delimiter_index = find_last_delimiter(text)
-        path_prefix = text if last_delimiter_index == -1 else text[last_delimiter_index + 1 :]
+        lastDelimiterIndex = findLastDelimiter(text)
+        pathPrefix = stripLeadingWrappers(text if lastDelimiterIndex == -1 else text[lastDelimiterIndex + 1 :])
 
+        # For forced extraction (Tab key), always return something
         if forceExtract:
-            return path_prefix
-        if "/" in path_prefix or path_prefix.startswith((".", "~/")):
-            return path_prefix
-        if path_prefix == "" and text.endswith(" "):
-            return path_prefix
+            return pathPrefix
+
+        # For natural triggers, return if it looks like a path, ends with /, starts with ~/, .
+        # Only return empty string if the text looks like it's starting a path context
+        if "/" in pathPrefix or pathPrefix.startswith(".") or pathPrefix.startswith("~/"):  # noqa: PIE810 - upstream test
+            return pathPrefix
+
+        # Return an empty prefix after whitespace or CJK punctuation, but not for empty text.
+        # Empty text should not trigger file suggestions - that's for forced Tab completion
+        if pathPrefix == "" and text != "" and tokenStartRegex.test(text):
+            return pathPrefix
+
         return None
 
+    # Expand home directory (~/) to actual home path
     def expandHomePath(self, path: str) -> str:
         if path.startswith("~/"):
-            expanded = os.path.join(str(Path.home()), path[2:])
-            return f"{expanded}/" if path.endswith("/") and not expanded.endswith("/") else expanded
-        if path == "~":
-            return str(Path.home())
+            expandedPath = node_path.join(_homedir(), path[2:])
+            # Preserve trailing slash if original path had one
+            return f"{expandedPath}/" if path.endswith("/") and not expandedPath.endswith("/") else expandedPath
+        elif path == "~":
+            return _homedir()
         return path
 
-    def resolveScopedFuzzyQuery(self, raw_query: str) -> dict[str, str] | None:
-        normalized_query = to_display_path(raw_query)
-        slash_index = normalized_query.rfind("/")
-        if slash_index == -1:
+    def resolveScopedFuzzyQuery(self, rawQuery: str) -> _ScopedFuzzyQuery | None:
+        normalizedQuery = toDisplayPath(rawQuery)
+        slashIndex = normalizedQuery.rfind("/")
+        if slashIndex == -1:
             return None
 
-        display_base = normalized_query[: slash_index + 1]
-        query = normalized_query[slash_index + 1 :]
-        if display_base.startswith("~/"):
-            base_dir = self.expandHomePath(display_base)
-        elif display_base.startswith("/"):
-            base_dir = display_base
+        displayBase = normalizedQuery[: slashIndex + 1]
+        query = normalizedQuery[slashIndex + 1 :]
+
+        baseDir: str
+        if displayBase.startswith("~/"):
+            baseDir = self.expandHomePath(displayBase)
+        elif _isRooted(displayBase):
+            baseDir = displayBase
         else:
-            base_dir = os.path.join(self.basePath, display_base)
+            baseDir = node_path.join(self.basePath, displayBase)
 
         try:
-            if not os.path.isdir(base_dir):
+            if not stat.S_ISDIR(os.stat(baseDir).st_mode):
                 return None
-        except OSError:
+        except Exception:  # noqa: BLE001 - `statSync` throwing: not a directory
             return None
 
-        return {"baseDir": base_dir, "query": query, "displayBase": display_base}
+        return {"baseDir": baseDir, "query": query, "displayBase": displayBase}
 
-    def scopedPathForDisplay(self, display_base: str, relative_path: str) -> str:
-        normalized_relative_path = to_display_path(relative_path)
-        if display_base == "/":
-            return f"/{normalized_relative_path}"
-        return f"{to_display_path(display_base)}{normalized_relative_path}"
+    def scopedPathForDisplay(self, displayBase: str, relativePath: str) -> str:
+        normalizedRelativePath = toDisplayPath(relativePath)
+        if displayBase == "/":
+            return f"/{normalizedRelativePath}"
+        return f"{toDisplayPath(displayBase)}{normalizedRelativePath}"
 
+    # Get file/directory suggestions for a given path prefix
     def getFileSuggestions(self, prefix: str) -> list[AutocompleteItem]:
         try:
-            parsed = parse_path_prefix(prefix)
-            raw_prefix = parsed.rawPrefix
-            expanded_prefix = self.expandHomePath(raw_prefix) if raw_prefix.startswith("~") else raw_prefix
+            searchDir: str
+            searchPrefix: str
+            parsed = parsePathPrefix(prefix)
+            rawPrefix, isAtPrefix, isQuotedPrefix = parsed["rawPrefix"], parsed["isAtPrefix"], parsed["isQuotedPrefix"]
+            expandedPrefix = rawPrefix
 
-            is_root_prefix = raw_prefix in {"", "./", "../", "~", "~/", "/"} or (parsed.isAtPrefix and raw_prefix == "")
-            if is_root_prefix or raw_prefix.endswith("/"):
-                search_dir = (
-                    expanded_prefix
-                    if raw_prefix.startswith("~") or expanded_prefix.startswith("/")
-                    else os.path.join(self.basePath, expanded_prefix)
-                )
-                search_prefix = ""
+            # Handle home directory expansion
+            if expandedPrefix.startswith("~"):
+                expandedPrefix = self.expandHomePath(expandedPrefix)
+
+            isRootPrefix = (
+                rawPrefix == ""
+                or rawPrefix == "./"
+                or rawPrefix == "../"
+                or rawPrefix == "~"
+                or rawPrefix == "~/"
+                or rawPrefix == "/"
+                or (isAtPrefix and rawPrefix == "")
+            )
+
+            if isRootPrefix:
+                # Complete from specified position
+                if rawPrefix.startswith("~") or _isRooted(expandedPrefix):
+                    searchDir = expandedPrefix
+                else:
+                    searchDir = node_path.join(self.basePath, expandedPrefix)
+                searchPrefix = ""
+            elif rawPrefix.endswith("/"):
+                # If prefix ends with /, show contents of that directory
+                if rawPrefix.startswith("~") or _isRooted(expandedPrefix):
+                    searchDir = expandedPrefix
+                else:
+                    searchDir = node_path.join(self.basePath, expandedPrefix)
+                searchPrefix = ""
             else:
-                directory = os.path.dirname(expanded_prefix)
-                file_prefix = os.path.basename(expanded_prefix)
-                search_dir = (
-                    directory
-                    if raw_prefix.startswith("~") or expanded_prefix.startswith("/")
-                    else os.path.join(self.basePath, directory)
-                )
-                search_prefix = file_prefix
+                # Split into directory and file prefix
+                dir = node_path.dirname(expandedPrefix)
+                file = node_path.basename(expandedPrefix)
+                if rawPrefix.startswith("~") or _isRooted(expandedPrefix):
+                    searchDir = dir
+                else:
+                    searchDir = node_path.join(self.basePath, dir)
+                searchPrefix = file
 
-            entries = list(os.scandir(search_dir))
+            with os.scandir(searchDir) as entries:
+                entryList = list(entries)
             suggestions: list[AutocompleteItem] = []
-            for entry in entries:
-                if not entry.name.lower().startswith(search_prefix.lower()):
+
+            for entry in entryList:
+                if not entry.name.lower().startswith(searchPrefix.lower()):
                     continue
 
-                is_directory = entry.is_dir(follow_symlinks=False)
-                if not is_directory and entry.is_symlink():
+                # Check if entry is a directory (or a symlink pointing to a directory)
+                isDirectory = entry.is_dir(follow_symlinks=False)
+                if not isDirectory and entry.is_symlink():
                     try:
-                        is_directory = os.path.isdir(os.path.join(search_dir, entry.name))
-                    except OSError:
-                        is_directory = False
+                        fullPath = node_path.join(searchDir, entry.name)
+                        isDirectory = stat.S_ISDIR(os.stat(fullPath).st_mode)
+                    except Exception:  # noqa: BLE001, S110 - upstream ignores the error
+                        # Broken symlink or permission error - treat as file
+                        pass
 
-                display_prefix = raw_prefix
-                if display_prefix.endswith("/"):
-                    relative_path = display_prefix + entry.name
-                elif "/" in display_prefix or "\\" in display_prefix:
-                    if display_prefix.startswith("~/"):
-                        home_relative_dir = display_prefix[2:]
-                        directory = os.path.dirname(home_relative_dir)
-                        relative_path = (
-                            f"~/{entry.name}"
-                            if directory in {"", "."}
-                            else f"~/{to_display_path(os.path.join(directory, entry.name))}"
-                        )
-                    elif display_prefix.startswith("/"):
-                        directory = os.path.dirname(display_prefix)
-                        relative_path = f"/{entry.name}" if directory == "/" else f"{directory}/{entry.name}"
+                relativePath: str
+                name = entry.name
+                displayPrefix = rawPrefix
+
+                if displayPrefix.endswith("/"):
+                    # If prefix ends with /, append entry to the prefix
+                    relativePath = displayPrefix + name
+                elif "/" in displayPrefix or "\\" in displayPrefix:
+                    # Preserve ~/ format for home directory paths
+                    if displayPrefix.startswith("~/"):
+                        homeRelativeDir = displayPrefix[2:]  # Remove ~/
+                        dir = node_path.dirname(homeRelativeDir)
+                        relativePath = f"~/{name if dir == '.' else node_path.join(dir, name)}"
+                    elif displayPrefix.startswith("/"):
+                        # Absolute path - construct properly
+                        dir = node_path.dirname(displayPrefix)
+                        if dir == "/":
+                            relativePath = f"/{name}"
+                        else:
+                            relativePath = f"{dir}/{name}"
                     else:
-                        relative_path = os.path.join(os.path.dirname(display_prefix), entry.name)
-                        if display_prefix.startswith("./") and not relative_path.startswith("./"):
-                            relative_path = f"./{relative_path}"
+                        relativePath = node_path.join(node_path.dirname(displayPrefix), name)
+                        # path.join normalizes away ./ prefix, preserve it
+                        if displayPrefix.startswith("./") and not relativePath.startswith("./"):
+                            relativePath = f"./{relativePath}"
                 else:
-                    relative_path = f"~/{entry.name}" if display_prefix.startswith("~") else entry.name
+                    # For standalone entries, preserve ~/ if original prefix was ~/
+                    if displayPrefix.startswith("~"):
+                        relativePath = f"~/{name}"
+                    else:
+                        relativePath = name
 
-                relative_path = to_display_path(relative_path)
-                path_value = f"{relative_path}/" if is_directory else relative_path
-                value = build_completion_value(
-                    path_value,
-                    is_directory=is_directory,
-                    is_at_prefix=parsed.isAtPrefix,
-                    is_quoted_prefix=parsed.isQuotedPrefix,
-                )
-                suggestions.append(
-                    AutocompleteItem(value=value, label=f"{entry.name}/" if is_directory else entry.name)
+                relativePath = toDisplayPath(relativePath)
+                pathValue = f"{relativePath}/" if isDirectory else relativePath
+                value = buildCompletionValue(
+                    pathValue,
+                    {"isDirectory": isDirectory, "isAtPrefix": isAtPrefix, "isQuotedPrefix": isQuotedPrefix},
                 )
 
-            suggestions.sort(key=lambda item: (0 if item.value.endswith("/") else 1, item.label.casefold(), item.label))
+                suggestions.append(AutocompleteItem(value=value, label=name + ("/" if isDirectory else "")))
+
+            # Sort directories first, then alphabetically
+            def compare(a: AutocompleteItem, b: AutocompleteItem) -> int:
+                aIsDir = a.label.endswith("/")
+                bIsDir = b.label.endswith("/")
+                if aIsDir and not bIsDir:
+                    return -1
+                if not aIsDir and bIsDir:
+                    return 1
+                return localeCompare(a.label, b.label)
+
+            suggestions.sort(key=_comparator(compare))
+
             return suggestions
-        except OSError:
+        except Exception:  # noqa: BLE001 - upstream catches everything
+            # Directory doesn't exist or not accessible
             return []
 
+    # Score an entry against the query (higher = better match)
+    # isDirectory adds bonus to prioritize folders
     def scoreEntry(self, filePath: str, query: str, isDirectory: bool) -> int:
-        file_name = os.path.basename(filePath)
-        lower_file_name = file_name.lower()
-        lower_query = query.lower()
+        fileName = node_path.basename(filePath)
+        lowerFileName = fileName.lower()
+        lowerQuery = query.lower()
 
         score = 0
-        if lower_file_name == lower_query:
+
+        # Exact filename match (highest)
+        if lowerFileName == lowerQuery:
             score = 100
-        elif lower_file_name.startswith(lower_query):
+        # Filename starts with query
+        elif lowerFileName.startswith(lowerQuery):
             score = 80
-        elif lower_query in lower_file_name:
+        # Substring match in filename
+        elif lowerQuery in lowerFileName:
             score = 50
-        elif lower_query in filePath.lower():
+        # Substring match in full path
+        elif lowerQuery in filePath.lower():
             score = 30
+
+        # Directories get a bonus to appear first
         if isDirectory and score > 0:
             score += 10
+
         return score
 
-    async def getFuzzyFileSuggestions(self, query: str, *, isQuotedPrefix: bool, signal: Any) -> list[AutocompleteItem]:
-        if not self.fdPath or signal_aborted(signal):
+    async def getBaseDirSuggestions(self, baseDir: str, query: str, signal: Any) -> list[_FdEntry]:
+        if not self.fdPath or signal.aborted:
             return []
+
+        return await walkDirectoryWithFd(baseDir, self.fdPath, query, 100, signal, 1)
+
+    # Fuzzy file search using fd (fast, respects .gitignore)
+    async def getFuzzyFileSuggestions(self, query: str, options: _FuzzyFileOptions) -> list[AutocompleteItem]:
+        if not self.fdPath or options["signal"].aborted:
+            return []
+
         try:
-            scoped_query = self.resolveScopedFuzzyQuery(query)
-            fd_base_dir = scoped_query["baseDir"] if scoped_query is not None else self.basePath
-            fd_query = scoped_query["query"] if scoped_query is not None else query
-            entries = await walk_directory_with_fd(fd_base_dir, self.fdPath, fd_query, 100, signal)
-            if signal_aborted(signal):
+            scopedQuery = self.resolveScopedFuzzyQuery(query)
+            fdBaseDir = scopedQuery["baseDir"] if scopedQuery is not None else self.basePath
+            fdQuery = scopedQuery["query"] if scopedQuery is not None else query
+            baseDirEntries = await self.getBaseDirSuggestions(fdBaseDir, fdQuery, options["signal"])
+            recursiveEntries = await walkDirectoryWithFd(fdBaseDir, self.fdPath, fdQuery, 100, options["signal"])
+            seenPaths = {entry["path"] for entry in baseDirEntries}
+            entries: list[_FdEntry] = [*baseDirEntries]
+            for entry in recursiveEntries:
+                if entry["path"] in seenPaths:
+                    continue
+                seenPaths.add(entry["path"])
+                entries.append(entry)
+            if options["signal"].aborted:
                 return []
 
-            scored_entries = []
+            scoredEntries: list[_ScoredEntry] = []
             for entry in entries:
-                score = self.scoreEntry(str(entry["path"]), fd_query, bool(entry["isDirectory"])) if fd_query else 1
-                if score > 0:
-                    scored_entries.append({**entry, "score": score})
+                scored: _ScoredEntry = {
+                    **entry,
+                    "score": self.scoreEntry(entry["path"], fdQuery, entry["isDirectory"]) if fdQuery else 1,
+                }
+                if scored["score"] > 0:
+                    scoredEntries.append(scored)
 
-            scored_entries.sort(key=lambda entry: int(entry["score"]), reverse=True)
-            top_entries = scored_entries[:20]
+            def compare(a: _ScoredEntry, b: _ScoredEntry) -> int:
+                scoreDiff = b["score"] - a["score"]
+                if scoreDiff != 0:
+                    return scoreDiff
+
+                aDepth = len([segment for segment in toDisplayPath(a["path"]).split("/") if segment])
+                bDepth = len([segment for segment in toDisplayPath(b["path"]).split("/") if segment])
+                depthDiff = aDepth - bDepth
+                if depthDiff != 0:
+                    return depthDiff
+
+                lengthDiff = len(a["path"]) - len(b["path"])
+                if lengthDiff != 0:
+                    return lengthDiff
+
+                return localeCompare(a["path"], b["path"])
+
+            scoredEntries.sort(key=_comparator(compare))
+            topEntries = scoredEntries[:20]
+
             suggestions: list[AutocompleteItem] = []
-            for entry in top_entries:
-                entry_path = str(entry["path"])
-                is_directory = bool(entry["isDirectory"])
-                path_without_slash = entry_path[:-1] if is_directory else entry_path
-                display_path = (
-                    self.scopedPathForDisplay(scoped_query["displayBase"], path_without_slash)
-                    if scoped_query is not None
-                    else path_without_slash
+            for topEntry in topEntries:
+                entryPath, isDirectory = topEntry["path"], topEntry["isDirectory"]
+                pathWithoutSlash = entryPath[:-1] if isDirectory else entryPath
+                displayPath = (
+                    self.scopedPathForDisplay(scopedQuery["displayBase"], pathWithoutSlash)
+                    if scopedQuery is not None
+                    else pathWithoutSlash
                 )
-                entry_name = os.path.basename(path_without_slash)
-                completion_path = f"{display_path}/" if is_directory else display_path
-                value = build_completion_value(
-                    completion_path,
-                    is_directory=is_directory,
-                    is_at_prefix=True,
-                    is_quoted_prefix=isQuotedPrefix,
+                entryName = node_path.basename(pathWithoutSlash)
+                completionPath = f"{displayPath}/" if isDirectory else displayPath
+                value = buildCompletionValue(
+                    completionPath,
+                    {"isDirectory": isDirectory, "isAtPrefix": True, "isQuotedPrefix": options["isQuotedPrefix"]},
                 )
+
                 suggestions.append(
-                    AutocompleteItem(
-                        value=value,
-                        label=f"{entry_name}/" if is_directory else entry_name,
-                        description=display_path,
-                    )
+                    AutocompleteItem(value=value, label=entryName + ("/" if isDirectory else ""), description=displayPath)
                 )
+
             return suggestions
-        except Exception:  # noqa: BLE001 - any filesystem failure: no suggestions
+        except Exception:  # noqa: BLE001 - upstream catches everything
             return []
 
+    # Check if we should trigger file completion (called on Tab key)
     def shouldTriggerFileCompletion(self, lines: list[str], cursorLine: int, cursorCol: int) -> bool:
-        current_line = lines[cursorLine] if cursorLine < len(lines) else ""
-        text_before_cursor = current_line[:cursorCol]
-        return not (text_before_cursor.strip().startswith("/") and " " not in text_before_cursor.strip())
+        currentLine = jsIndex(lines, cursorLine) or ""
+        textBeforeCursor = currentLine[:cursorCol]
+
+        # Don't trigger if we're typing a slash command at the start of the line
+        if jsTrim(textBeforeCursor).startswith("/") and " " not in jsTrim(textBeforeCursor):  # noqa: SIM103 - upstream if
+            return False
+
+        return True
+
+
+def _commandName(cmd: SlashCommand | AutocompleteItem) -> str:
+    """MISAKA fork: upstream's inline ``"name" in cmd ? cmd.name : cmd.value``."""
+    return cmd.name if hasattr(cmd, "name") else cmd.value  # type: ignore[union-attr]
+
+
+def _homedir() -> str:
+    """MISAKA fork: ``os.homedir()``."""
+    return homedir()
+
+
+def _comparator[T](compare: Callable[[T, T], int]) -> Callable[[T], Any]:
+    """MISAKA fork: ``Array.prototype.sort(compare)`` as a sort key (both sorts are stable)."""
+    return functools.cmp_to_key(compare)
 
 
 __all__ = [
+    "AppliedCompletion",
     "AutocompleteItem",
     "AutocompleteProvider",
     "AutocompleteSuggestions",

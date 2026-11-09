@@ -10,6 +10,7 @@ from misaka.agent.types import (
     MessageEndEvent,
     MessageStartEvent,
 )
+from misaka.ai.compat import streamSimple
 from misaka.ai.types import AssistantMessage, TextContent, ToolCall, Usage, UserMessage
 
 USAGE = Usage(
@@ -71,9 +72,9 @@ async def test_length_truncated_tool_calls_are_failed_without_execution(monkeypa
         await emit(MessageEndEvent(message=message))
         return message
 
-    monkeypatch.setattr(agent_loop, "stream_assistant_response", fake_stream)
+    monkeypatch.setattr(agent_loop, "_streamAssistantResponse", fake_stream)
     config = AgentLoopConfig(
-        model=Agent().state.model,
+        model=Agent(streamFn=streamSimple).state.model,
         convertToLlm=lambda messages: messages,
         beforeToolCall=hook,
         afterToolCall=hook,
@@ -82,11 +83,13 @@ async def test_length_truncated_tool_calls_are_failed_without_execution(monkeypa
     async def emit(event):
         events.append(event)
 
-    messages = await agent_loop.run_agent_loop(
+    messages = await agent_loop.runAgentLoop(
         [UserMessage(content="fixture", timestamp=1)],
         AgentContext(messages=[], tools=[tool]),
         config,
         emit,
+        None,
+        streamSimple,
     )
 
     tool_results = [

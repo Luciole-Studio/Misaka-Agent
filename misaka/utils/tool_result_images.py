@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from misaka.ai.types import ImageContent, TextContent
-from misaka.utils.image_process import ProcessImageOptions, process_image
+from misaka.utils.image_process import ProcessImageOptions, processImage
 from misaka.utils.image_resize import ImageResizeOptions
 from misaka.utils.values import read_field
 
@@ -19,7 +19,7 @@ class NormalizeToolResultImagesOptions:
     resizeOptions: ImageResizeOptions | None = None
 
 
-async def normalize_tool_result_images(
+async def normalizeToolResultImages(
     content: list[Any],
     options: NormalizeToolResultImagesOptions | None = None,
 ) -> list[Any]:
@@ -48,7 +48,7 @@ async def normalize_tool_result_images(
             normalized.append(block)
             continue
 
-        processed = await process_image(
+        processed = await processImage(
             image_bytes,
             mime_type,
             ProcessImageOptions(
@@ -78,4 +78,4 @@ async def normalize_tool_result_images(
     return normalized if changed else content
 
 
-__all__ = ["NormalizeToolResultImagesOptions", "normalize_tool_result_images"]
+__all__ = ["NormalizeToolResultImagesOptions", "normalizeToolResultImages"]

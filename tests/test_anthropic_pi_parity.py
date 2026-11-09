@@ -1,21 +1,20 @@
 """Anthropic reasoning/error contracts from Pi b03a367a4fbc02df81bfd96702d7a12c2d79aa45."""
 
 import json
-from unittest.mock import AsyncMock
 
 import pytest
 
-from misaka.ai.models import (
-    clamp_thinking_level,
-    get_model,
-    get_supported_thinking_levels,
-)
-from misaka.ai.models_store import InMemoryModelsStore
-from misaka.ai.providers import anthropic
+from misaka.ai.api import anthropic_messages as anthropic
+from misaka.ai.api.simple_options import clampMaxTokensToContext
+from misaka.ai.compat import getModel
+from misaka.ai.models import clampThinkingLevel, getSupportedThinkingLevels
 from misaka.ai.types import AssistantMessage, Context, SimpleStreamOptions
-from misaka.ai.utils.estimate import clamp_max_tokens_to_context
 from misaka.core.auth_storage import AuthStorage
-from misaka.core.model_registry import ModelRegistry, _validate_models_config
+from misaka.core.model_config import ModelConfig
+from misaka.core.model_registry import ModelRegistry
+from misaka.core.model_runtime import ModelRuntime
+from misaka.core.models_store import InMemoryCodingAgentModelsStore
+from tests.anthropic_sse import patchRawResponse
 
 
 @pytest.mark.asyncio
@@ -44,9 +43,9 @@ async def test_stream_preserves_upstream_stop_reason(monkeypatch, reason, detail
                 "delta": {"stop_reason": reason, "stop_details": details},
             }
 
-    monkeypatch.setattr(anthropic, "_create_raw_response", AsyncMock(return_value=incoming()))
-    stream = anthropic.stream_anthropic(
-        get_model("anthropic", "claude-haiku-4-5"), Context(messages=[]), {"client": object()}
+    patchRawResponse(monkeypatch, incoming())
+    stream = anthropic.stream(
+        getModel("anthropic", "claude-haiku-4-5"), Context(messages=[]), {"client": object()}
     )
     initial_reason = None
     async for event in stream:
@@ -65,8 +64,8 @@ async def test_stream_preserves_upstream_stop_reason(monkeypatch, reason, detail
 
 @pytest.mark.parametrize("off_map", [None, {}, {"off": None}, {"off": "none"}])
 def test_disabled_thinking_respects_model_map(off_map):
-    model = get_model("anthropic", "claude-haiku-4-5").model_copy(update={"thinkingLevelMap": off_map})
-    payload = anthropic.build_params(model, Context(messages=[]), False, {"thinkingEnabled": False})
+    model = getModel("anthropic", "claude-haiku-4-5").model_copy(update={"thinkingLevelMap": off_map})
+    payload = anthropic._buildParams(model, Context(messages=[]), False, {"thinkingEnabled": False}).params
     if off_map == {"off": None}:
         assert "thinking" not in payload
     else:
@@ -76,36 +75,39 @@ def test_disabled_thinking_respects_model_map(off_map):
 @pytest.mark.parametrize("window", [5000, 6500, 200000])
 @pytest.mark.parametrize("level", ["minimal", "low", "medium", "high", "xhigh", "max"])
 def test_thinking_budget_reclamps_to_context(monkeypatch, window, level):
-    model = get_model("anthropic", "claude-haiku-4-5").model_copy(update={"contextWindow": window})
+    model = getModel("anthropic", "claude-haiku-4-5").model_copy(update={"contextWindow": window})
     context = Context(messages=[])
-    monkeypatch.setattr(anthropic, "stream_anthropic", lambda _m, _c, options: options)
-    options = anthropic.stream_simple_anthropic(
+    monkeypatch.setattr(anthropic, "stream", lambda _m, _c, options: options)
+    options = anthropic.streamSimple(
         model, context, SimpleStreamOptions(apiKey="fixture", reasoning=level, maxTokens=2048)
     )
     budget = {"minimal": 1024, "low": 2048, "medium": 8192}.get(level, 16384)
-    expected_max = clamp_max_tokens_to_context(model, context, min(2048 + budget, model.maxTokens))
+    expected_max = clampMaxTokensToContext(model, context, min(2048 + budget, model.maxTokens))
     assert options["maxTokens"] == expected_max
     assert options["thinkingBudgetTokens"] == min(budget, max(0, expected_max - 1024))
 
 
 @pytest.mark.parametrize("value", ["max", None, 123, [], {}])
-def test_max_map_schema_matches_other_levels(value):
+async def test_max_map_schema_matches_other_levels(value, tmp_path):
     config = {"providers": {"fixture": {"models": [{"id": "model", "thinkingLevelMap": {"max": value}}]}}}
-    assert bool(_validate_models_config(config)) == (value not in ("max", None))
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    assert bool((await ModelConfig.load(str(path))).getError()) == (value not in ("max", None))
 
 
-def test_custom_models_load_pi_thinking_metadata(tmp_path, monkeypatch):
+async def test_custom_models_load_pi_thinking_metadata(tmp_path, monkeypatch):
     ids = (
         "claude-fable-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5",
         "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5",
     )
     models = []
     for ident in ids:
-        native = get_model("anthropic", ident)
+        native = getModel("anthropic", ident)
         models.append({
             "id": ident,
             "reasoning": native.reasoning,
-            "thinkingLevelMap": native.thinkingLevelMap,
+            # An absent map is left out, as JSON.stringify drops `undefined`: the schema refuses null.
+            **({"thinkingLevelMap": native.thinkingLevelMap} if native.thinkingLevelMap is not None else {}),
             "compat": {"forceAdaptiveThinking": native.compat.forceAdaptiveThinking is True},
             "maxTokens": 32000,
         })
@@ -113,17 +115,17 @@ def test_custom_models_load_pi_thinking_metadata(tmp_path, monkeypatch):
     path.write_text(json.dumps({"providers": {"fixture": {
         "api": "anthropic-messages", "apiKey": "TEST_ONLY", "baseUrl": "http://localhost:1", "models": models,
     }}}), encoding="utf-8")
-    registry = ModelRegistry(AuthStorage.inMemory(), str(path), InMemoryModelsStore())
+    registry = ModelRegistry(await ModelRuntime.create({"authStorage": AuthStorage.inMemory(), "modelsPath": str(path), "modelsStore": InMemoryCodingAgentModelsStore()}))
     monkeypatch.setattr(
-        anthropic, "stream_anthropic", lambda m, c, o: anthropic.build_params(m, c, False, o)
+        anthropic, "stream", lambda m, c, o: anthropic._buildParams(m, c, False, o).params
     )
     for ident in ids:
         model = registry.find("fixture", ident)
-        native = get_model("anthropic", ident)
-        assert get_supported_thinking_levels(model) == get_supported_thinking_levels(native)
-        assert clamp_thinking_level(model, "max") == ("high" if "haiku" in ident else "max")
-        for level in get_supported_thinking_levels(model):
-            payload = anthropic.stream_simple_anthropic(
+        native = getModel("anthropic", ident)
+        assert getSupportedThinkingLevels(model) == getSupportedThinkingLevels(native)
+        assert clampThinkingLevel(model, "max") == ("high" if "haiku" in ident else "max")
+        for level in getSupportedThinkingLevels(model):
+            payload = anthropic.streamSimple(
                 model, Context(messages=[]),
                 SimpleStreamOptions(apiKey="fixture", reasoning=None if level == "off" else level),
             )
@@ -138,10 +140,10 @@ def test_custom_models_load_pi_thinking_metadata(tmp_path, monkeypatch):
 
 
 def test_thinking_selector_uses_pi_descriptions():
-    from misaka.ui.tui.interactive.components.settings_selector import (
+    from misaka.modes.interactive.components.settings_selector import (
         THINKING_DESCRIPTIONS,
     )
-    from misaka.ui.tui.interactive.components.thinking_selector import (
+    from misaka.modes.interactive.components.thinking_selector import (
         LEVEL_DESCRIPTIONS,
     )
 
@@ -153,14 +155,14 @@ def test_thinking_selector_uses_pi_descriptions():
 @pytest.mark.parametrize("managed", [True, False])
 @pytest.mark.parametrize("level", ["minimal", "low", "medium", "high", "xhigh", "max"])
 def test_managed_and_proxy_effort_keep_requested_level(monkeypatch, managed, level):
-    native = get_model("anthropic", "claude-fable-5-1")
+    native = getModel("anthropic", "claude-fable-5-1")
     model = native.model_copy(update={
         "compat": native.compat.model_copy(update={"supportsMidConvoEffort": managed}),
     })
     monkeypatch.setattr(
-        anthropic, "stream_anthropic", lambda m, c, o: anthropic.build_params(m, c, False, o)
+        anthropic, "stream", lambda m, c, o: anthropic._buildParams(m, c, False, o).params
     )
-    payload = anthropic.stream_simple_anthropic(
+    payload = anthropic.streamSimple(
         model, Context(messages=[]), SimpleStreamOptions(apiKey="fixture", reasoning=level)
     )
     effort = "low" if level == "minimal" else level

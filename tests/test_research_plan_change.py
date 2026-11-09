@@ -31,7 +31,7 @@ def executing(tmp_path, monkeypatch):
     run = runs.create(con, workspace=str(tmp_path), question="How was the salt monopoly run?")
     root = runs.nodes(con, run["id"])[0]
     assert runs.acquire_driver(con, run["id"], "driver")
-    runs.prepare_runner(con, "research_branches", root["id"])
+    runs.prepare_runner(con, "research_execution", root["id"])
     run, root = runs.get(con, run["id"]), runs.node(con, root["id"])
     session_file = str(Path(run["workspace"]) / "session.jsonl")
     plan = planner.validate_plan({"status": "ready", "plan_markdown": "design",

@@ -128,7 +128,7 @@ def test_the_home_is_never_a_project(tmp_path, monkeypatch):
 
 
 def test_project_scope_is_absent_when_the_working_directory_is_the_users_home(tmp_path, monkeypatch):
-    from misaka.core import project_trust
+    from misaka.core import trust_manager as project_trust
     from misaka.core.settings_manager import SettingsManager
     from misaka.core.subagent.agents import _project_agent_dirs
     from misaka.core.subagent.configuration import project_settings
@@ -141,8 +141,8 @@ def test_project_scope_is_absent_when_the_working_directory_is_the_users_home(tm
     monkeypatch.setenv(home.ENV_HOME, str(real))
     monkeypatch.setenv("HOME", str(user))
 
-    assert not project_trust.has_trust_requiring_project_resources(str(user))
-    assert not project_trust.has_trust_requiring_project_resources(str(real / "tasks" / "t_1"))
+    assert not project_trust.hasTrustRequiringProjectResources(str(user))
+    assert not project_trust.hasTrustRequiringProjectResources(str(real / "tasks" / "t_1"))
     assert _project_agent_dirs(real / "tasks") == []
     assert project_settings(str(user)) == {}
     manager = SettingsManager.create(str(user), str(real), {"projectTrusted": True})
@@ -152,7 +152,7 @@ def test_project_scope_is_absent_when_the_working_directory_is_the_users_home(tm
     # An ordinary project beside it still has its scope.
     repo = tmp_path / "repo"
     (repo / home.DIR_NAME / home.SUBAGENTS_DIR).mkdir(parents=True)
-    assert project_trust.has_trust_requiring_project_resources(str(repo))
+    assert project_trust.hasTrustRequiringProjectResources(str(repo))
     assert _project_agent_dirs(repo) == [(repo / home.DIR_NAME / home.SUBAGENTS_DIR).resolve()]
 
 
@@ -283,6 +283,27 @@ def test_ensure_narrows_a_credential_file_that_was_left_readable(tmp_path, monke
     assert home.path("auth").stat().st_mode & 0o777 == 0o600
 
 
+def test_a_v9_board_is_carried_forward(tmp_path, monkeypatch):
+    import sqlite3
+
+    from misaka.core.platform import tasks
+
+    monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
+    tasks.connect(CFG["db"]).close()
+    raw = sqlite3.connect(CFG["db"])
+    raw.execute("UPDATE schema_migrations SET version=9 WHERE component='tasks'")
+    raw.execute("INSERT INTO events(task_id,kind,payload,created_at) VALUES('t_1','research_evidence','{}',0)")
+    raw.commit()
+    raw.close()
+    con = tasks.connect(CFG["db"])
+    try:
+        assert [row[0] for row in con.execute("SELECT kind FROM events")] == ["card_evidence"]
+        assert con.execute("SELECT MAX(version) FROM schema_migrations WHERE component='tasks'").fetchone()[0] == 10
+    finally:
+        con.close()
+    tasks.connect(CFG["db"]).close()                                                # current: a no-op
+
+
 def test_a_board_written_by_another_build_is_refused_by_version_and_left_alone(tmp_path, monkeypatch):
     import sqlite3
 
@@ -299,13 +320,14 @@ def test_a_board_written_by_another_build_is_refused_by_version_and_left_alone(t
     finally:
         con.close()
     raw = sqlite3.connect(CFG["db"])
-    raw.execute("UPDATE schema_migrations SET version=version-1 WHERE component='tasks'")
+    # Older than the first release (v9 is carried forward; anything before it is pre-release).
+    raw.execute("UPDATE schema_migrations SET version=8 WHERE component='tasks'")
     raw.commit()
     raw.close()
-    with pytest.raises(RuntimeError, match=f"pre-release MISAKA .v{tasks.TASK_SCHEMA_VERSION - 1}"):
+    with pytest.raises(RuntimeError, match="pre-release MISAKA .v8"):
         tasks.connect(CFG["db"])
     raw = sqlite3.connect(CFG["db"])                                                # nothing was reshaped
-    assert raw.execute("SELECT version FROM schema_migrations WHERE component='tasks'").fetchone()[0] == tasks.TASK_SCHEMA_VERSION - 1
+    assert raw.execute("SELECT version FROM schema_migrations WHERE component='tasks'").fetchone()[0] == 8
     # A newer build's board: the way out is an update, not a new home.
     raw.execute("UPDATE schema_migrations SET version=? WHERE component='tasks'", (tasks.TASK_SCHEMA_VERSION + 1,))
     raw.commit()
@@ -325,7 +347,7 @@ def test_a_board_written_by_another_build_is_refused_by_version_and_left_alone(t
 
 
 def test_a_role_session_writes_its_own_keys_to_its_file_and_everything_else_globally(tmp_path, monkeypatch):
-    from misaka.core.settings_manager import ROLE_KEYS, SettingsManager
+    from misaka.core.settings_manager import ROLE_SETTING_KEYS, SettingsManager
 
     monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
     home.path("settings").parent.mkdir(parents=True)
@@ -349,7 +371,28 @@ def test_a_role_session_writes_its_own_keys_to_its_file_and_everything_else_glob
     other = home.path("profiles_root") / "10036"
     other.mkdir()
     assert SettingsManager.forRole(str(other)).getSection("web") == {"search_backend": "exa", "cache_ttl_minutes": 5}
-    assert {"defaultProvider", "defaultModel", "defaultThinkingLevel", "mcpServers", "web"} == set(ROLE_KEYS)
+    assert {"defaultProvider", "defaultModel", "defaultThinkingLevel", "web"} == set(ROLE_SETTING_KEYS)
+
+
+def test_a_new_home_gives_last_order_a_soul_she_can_go_without(tmp_path, monkeypatch):
+    """Hermes seeds SOUL.md into a new home and ``misaka create`` writes a Sister's; Last Order's
+    comes with her folder. Taken out afterwards, it stays out, and her charter holds either way."""
+    from misaka.config import identity, layout
+
+    monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
+    role = home.path("roles_root") / "last_order"
+    layout.ensure()
+    soul = role / "SOUL.md"
+    assert soul.read_text(encoding="utf-8") == layout.LAST_ORDER_SOUL
+    assert identity.prompt_sections(str(role), "last_order") == [
+        layout.LAST_ORDER_SOUL.strip(), identity.COMMON_CHARTER, identity.COORDINATOR_ROLE]
+    soul.write_text("Answer with the conclusion first.", encoding="utf-8")
+    layout.ensure()
+    assert soul.read_text(encoding="utf-8") == "Answer with the conclusion first."    # never overwritten
+    soul.unlink()
+    layout.ensure()
+    assert not soul.exists()                                                      # taken out on purpose
+    assert identity.prompt_sections(str(role), "last_order") == [identity.COMMON_CHARTER, identity.COORDINATOR_ROLE]
 
 
 def test_the_role_scope_survives_the_manager_and_the_home_alike(tmp_path, monkeypatch):
@@ -363,9 +406,9 @@ def test_the_role_scope_survives_the_manager_and_the_home_alike(tmp_path, monkey
     assert profiles.pinned_model(str(role)) == "anthropic/claude-sonnet-5"
     manager = SettingsManager.forRole(str(role))
     assert manager.getDefaultModelPair() == ("anthropic", "claude-sonnet-5")
-    manager.updateSection("mcpServers", lambda s: s.update({"camofox": {"command": "npx"}}))
+    manager.updateSection("web", lambda s: s.update({"search_backend": "exa"}))
     assert json.loads((role / "settings.json").read_text(encoding="utf-8")) == {
-        "defaultProvider": "anthropic", "defaultModel": "claude-sonnet-5", "mcpServers": {"camofox": {"command": "npx"}}}
+        "defaultProvider": "anthropic", "defaultModel": "claude-sonnet-5", "web": {"search_backend": "exa"}}
 
 
 def test_a_section_write_edits_the_file_as_it_is_now_not_this_managers_stale_copy(tmp_path, monkeypatch):

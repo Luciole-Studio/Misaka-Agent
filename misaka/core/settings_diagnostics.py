@@ -8,7 +8,7 @@ from misaka.core.agent_session_services import AgentSessionRuntimeDiagnostic
 from misaka.core.settings_manager import SettingsManager
 
 
-def collect_settings_diagnostics(
+def collectSettingsDiagnostics(
     settings_manager: SettingsManager,
 ) -> list[AgentSessionRuntimeDiagnostic]:
     return [
@@ -24,7 +24,7 @@ def collect_settings_diagnostics(
     ]
 
 
-def deduplicate_diagnostics(
+def deduplicateDiagnostics(
     diagnostics: Sequence[AgentSessionRuntimeDiagnostic],
 ) -> list[AgentSessionRuntimeDiagnostic]:
     seen: set[tuple[str, str]] = set()
@@ -38,4 +38,4 @@ def deduplicate_diagnostics(
     return result
 
 
-__all__ = ["collect_settings_diagnostics", "deduplicate_diagnostics"]
+__all__ = ["collectSettingsDiagnostics", "deduplicateDiagnostics"]

@@ -1,14 +1,12 @@
-"""Transcript-carried system prompt and tool declarations, translated from pi's
-``utils/transcript.ts``.
+"""Translated from pi's ``packages/ai/src/utils/transcript.ts`` (v1.1.0).
 
-The prompt and the tool set are not request fields: they are system messages in the
-transcript. The leading one holds the base prompt and the initial tools, later ones change
-them, and replaying every system message in order yields the current state.
+MISAKA fork: messages and tools may be plain mappings as well as models (hand-built histories, extensions, durable
+records); an already-normalized ``TranscriptContext`` passes ``normalizeContext`` unchanged (the class is the brand);
+a tool whose ``parameters`` is a pydantic class is declared with its JSON schema.
 """
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -20,82 +18,81 @@ from misaka.ai.types import (
     ToolReference,
     TranscriptContext,
 )
-from misaka.ai.utils.text import content_text, get_system_message_text
+from misaka.ai.utils.text import contentText, getSystemMessageText
+from misaka.utils.js import jsonParse, jsonStringify
 
 
-def create_initial_system_message(system_prompt: str | None, tools: Sequence[Tool] | None) -> SystemMessage | None:
-    """Build the leading system message for a prompt and tool set. Returns None when
+def createInitialSystemMessage(systemPrompt: str | None, tools: Sequence[Tool] | None) -> SystemMessage | None:
+    """Build the leading system message for a prompt and tool set. Returns undefined when
     both are empty, so an empty transcript stays empty."""
-    has_system_prompt = system_prompt is not None and len(system_prompt) > 0
-    has_tools = tools is not None and len(tools) > 0
-    if not has_system_prompt and not has_tools:
+    hasSystemPrompt = systemPrompt is not None and len(systemPrompt) > 0
+    hasTools = tools is not None and len(tools) > 0
+    if not hasSystemPrompt and not hasTools:
         return None
     return SystemMessage(
-        content=system_prompt if system_prompt is not None else "",
-        toolsAdded=list(tools) if has_tools else None,
+        content=systemPrompt if systemPrompt is not None else "",
+        toolsAdded=list(tools) if hasTools else None,  # type: ignore[arg-type]
         timestamp=0,
     )
 
 
-def normalize_context(context: Context | TranscriptContext | Mapping[str, Any]) -> TranscriptContext:
-    """Fold ``Context.systemPrompt`` and ``Context.tools`` into a leading system message.
-    This is the only entry point that produces a :class:`TranscriptContext`; every
+def normalizeContext(context: Context | TranscriptContext | Mapping[str, Any]) -> TranscriptContext:
+    """Fold `Context.systemPrompt` and `Context.tools` into a leading system message.
+    This is the only entry point that produces a `TranscriptContext`; every
     provider-facing function expects the result."""
     if isinstance(context, TranscriptContext):
-        # pi's branded type makes a second normalization a no-op at the type level; here the
-        # class is the brand, so an already-normalized context passes through unchanged.
         return context
-    system_prompt = _field(context, "systemPrompt")
-    tools = _field(context, "tools")
+    initialMessage = createInitialSystemMessage(_field(context, "systemPrompt"), _field(context, "tools"))
     messages = list(_field(context, "messages") or [])
-    initial_message = create_initial_system_message(system_prompt, tools)
-    return TranscriptContext(messages=[initial_message, *messages] if initial_message else messages)
+    return TranscriptContext(messages=[initialMessage, *messages] if initialMessage else messages)
 
 
-def is_system_message(message: Any) -> bool:
+# Any message list. The replay helpers only read entries whose role is `"system"`, so
+# agent transcripts that carry custom message roles can be passed without filtering.
+type TranscriptMessages = Sequence[Any]
+
+
+def _isSystemMessage(message: Any) -> bool:
     return _field(message, "role") == "system"
 
 
-def get_initial_system_message(messages: Sequence[Any]) -> Any | None:
+def getInitialSystemMessage(messages: TranscriptMessages) -> Any | None:
     """Return the leading system message, if the transcript starts with one."""
     first = messages[0] if messages else None
-    return first if first is not None and is_system_message(first) else None
+    return first if first is not None and _isSystemMessage(first) else None
 
 
-def without_initial_system_message(messages: Sequence[Any]) -> list[Any]:
+def withoutInitialSystemMessage(messages: Sequence[Any]) -> list[Any]:
     """Drop the leading system message for APIs that carry the prompt outside the message list."""
-    return list(messages[1:]) if get_initial_system_message(messages) else list(messages)
+    return list(messages[1:]) if getInitialSystemMessage(messages) else list(messages)
 
 
-def get_current_tools(messages: Sequence[Any]) -> list[Tool]:
+def getCurrentTools(messages: TranscriptMessages) -> list[Tool]:
     """Resolve the tools available after applying every transcript delta in order."""
     tools: dict[str, Tool] = {}
     for message in messages:
-        if not is_system_message(message):
+        if not _isSystemMessage(message):
             continue
         for tool in _field(message, "toolsRemoved") or []:
             tools.pop(_field(tool, "name"), None)
         for tool in _field(message, "toolsAdded") or []:
-            name = _field(tool, "name")
-            # A dict keeps insertion order, but re-setting an existing key keeps the old
-            # position; JS `Map.set` does the same, so no reordering is needed here.
-            tools[name] = tool
+            tools[_field(tool, "name")] = tool
     return list(tools.values())
 
 
-def get_current_system_message(messages: Sequence[Any]) -> SystemMessage | None:
+def getCurrentSystemMessage(messages: TranscriptMessages) -> SystemMessage | None:
     """Replay every system message into one leading system message holding the current
-    prompt and tools. Later ``content`` is appended to the base prompt, ``sections`` are
-    patched by name, and tools are resolved with :func:`get_current_tools`."""
+    prompt and tools. Later `content` is appended to the base prompt, `sections` are
+    patched by name, and tools are resolved with `getCurrentTools`."""
     content: list[str] = []
     sections: dict[str, str] = {}
     timestamp: int | None = None
     for message in messages:
-        if not is_system_message(message):
+        if not _isSystemMessage(message):
             continue
         if timestamp is None:
             timestamp = _field(message, "timestamp")
-        text = content_text(_field(message, "content"))
+        text = contentText(_field(message, "content"))
         if len(text) > 0:
             content.append(text)
         for name, value in (_field(message, "sections") or {}).items():
@@ -103,7 +100,7 @@ def get_current_system_message(messages: Sequence[Any]) -> SystemMessage | None:
                 sections.pop(name, None)
             else:
                 sections[name] = value
-    tools = get_current_tools(messages)
+    tools = getCurrentTools(messages)
     if timestamp is None and len(tools) == 0:
         return None
     return SystemMessage(
@@ -114,45 +111,45 @@ def get_current_system_message(messages: Sequence[Any]) -> SystemMessage | None:
     )
 
 
-def get_current_system_prompt(messages: Sequence[Any]) -> str:
+def getCurrentSystemPrompt(messages: TranscriptMessages) -> str:
     """Render the current system prompt text after replaying every system message."""
-    message = get_current_system_message(messages)
-    return get_system_message_text(message) if message else ""
+    message = getCurrentSystemMessage(messages)
+    return getSystemMessageText(message) if message else ""
 
 
-def collapse_system_messages(context: TranscriptContext) -> TranscriptContext:
+def collapseSystemMessages(context: TranscriptContext) -> TranscriptContext:
     """Rebuild the transcript for APIs without mid-conversation system messages: the replayed
     system message leads, and every later system message is dropped."""
-    head = get_current_system_message(context.messages)
+    head = getCurrentSystemMessage(context.messages)
     messages = [message for message in context.messages if _field(message, "role") != "system"]
     return TranscriptContext(messages=[head, *messages] if head else messages)
 
 
-def resolve_transcript(context: TranscriptContext, supports_mid_convo_system_messages: bool | None) -> TranscriptContext:
+def resolveTranscript(context: TranscriptContext, supportsMidConvoSystemMessages: bool | None) -> TranscriptContext:
     """Keep later system messages in place when the model accepts them; otherwise collapse them."""
-    return context if supports_mid_convo_system_messages else collapse_system_messages(context)
+    return context if supportsMidConvoSystemMessages else collapseSystemMessages(context)
 
 
-def to_tool_declaration(tool: Any) -> Tool:
+def toToolDeclaration(tool: Any) -> Tool:
     """Strip executable and display-only fields from a tool before transcript comparison or persistence."""
-    constrained_sampling = _field(tool, "constrainedSampling")
+    constrainedSampling = _field(tool, "constrainedSampling")
     return Tool(
         name=_field(tool, "name"),
         description=_field(tool, "description"),
-        parameters=json.loads(json.dumps(_parameters_json_schema(tool))),
-        **({} if constrained_sampling is None else {"constrainedSampling": constrained_sampling}),
+        parameters=jsonParse(jsonStringify(_parameters_json_schema(tool))),
+        **({} if constrainedSampling is None else {"constrainedSampling": constrainedSampling}),
     )
 
 
-def declarations_equal(left: Any, right: Any) -> bool:
+def declarationsEqual(left: Any, right: Any) -> bool:
     """Whether two tools declare the same interface to the model.
 
-    Both sides go through :func:`to_tool_declaration` first: its JSON round-trip drops the
-    typebox symbol keys and ``undefined`` fields that a structural comparison would see, and
+    Both sides go through `toToolDeclaration` first: its JSON round-trip drops the
+    typebox symbol keys and `undefined` fields that a structural comparison would see, and
     builds both objects with the same key order, so comparing the serialized declarations
     is exact. This avoids a deep-equal dependency in a browser-safe package.
     """
-    return _serialize(to_tool_declaration(left)) == _serialize(to_tool_declaration(right))
+    return _serialize(toToolDeclaration(left)) == _serialize(toToolDeclaration(right))
 
 
 @dataclass(slots=True)
@@ -161,58 +158,61 @@ class ToolStateChanges:
     toolsRemoved: list[ToolReference]
 
 
-def get_tool_state_changes(previous: Sequence[Any], current: Sequence[Any]) -> ToolStateChanges:
+def getToolStateChanges(previous: Sequence[Any], current: Sequence[Any]) -> ToolStateChanges:
     """Compare two complete tool states. A changed definition is a removal followed by an addition."""
-    previous_tools = {_field(tool, "name"): tool for tool in previous}
-    current_tools = {_field(tool, "name"): tool for tool in current}
+    previousTools = {_field(tool, "name"): tool for tool in previous}
+    currentTools = {_field(tool, "name"): tool for tool in current}
 
     def added(tool: Any) -> bool:
-        previous_tool = previous_tools.get(_field(tool, "name"))
-        return previous_tool is None or not declarations_equal(previous_tool, tool)
+        previousTool = previousTools.get(_field(tool, "name"))
+        return previousTool is None or not declarationsEqual(previousTool, tool)
 
     def removed(tool: Any) -> bool:
-        current_tool = current_tools.get(_field(tool, "name"))
-        return current_tool is None or not declarations_equal(tool, current_tool)
+        currentTool = currentTools.get(_field(tool, "name"))
+        return currentTool is None or not declarationsEqual(tool, currentTool)
 
     return ToolStateChanges(
-        toolsAdded=[to_tool_declaration(tool) for tool in current if added(tool)],
+        toolsAdded=[toToolDeclaration(tool) for tool in current if added(tool)],
         toolsRemoved=[ToolReference(name=_field(tool, "name")) for tool in previous if removed(tool)],
     )
 
 
-def get_declared_tools(messages: Sequence[Any]) -> list[Tool]:
+def getDeclaredTools(messages: TranscriptMessages) -> list[Tool]:
     """Every definition referenced by transcript tool state, in first-declaration order."""
     definitions: dict[str, Tool] = {}
     for message in messages:
-        if not is_system_message(message):
+        if not _isSystemMessage(message):
             continue
         for tool in _field(message, "toolsAdded") or []:
             definitions[_field(tool, "name")] = tool
     return list(definitions.values())
 
 
-def has_tool_redefinitions(messages: Sequence[Any]) -> bool:
-    """Whether a tool name was declared twice with different definitions. Transports that
-    reference tools by name (Anthropic ``tool_addition``/``tool_removal``) cannot express that."""
+def hasToolRedefinitions(messages: TranscriptMessages) -> bool:
+    """Whether a tool name was declared twice with different definitions. A transport that can
+    only reference previously declared tools by name cannot replay such a history.
+
+    Deprecated: no built-in transport needs this anymore: Anthropic expresses redefinitions with
+    inline `tool_definition` blocks. Kept for API compatibility and will be removed in a future release.
+    """
     declared: dict[str, Any] = {}
     for message in messages:
-        if not is_system_message(message):
+        if not _isSystemMessage(message):
             continue
         for tool in _field(message, "toolsAdded") or []:
             name = _field(tool, "name")
             previous = declared.get(name)
-            if previous is not None and not declarations_equal(previous, tool):
+            if previous is not None and not declarationsEqual(previous, tool):
                 return True
             declared[name] = tool
     return False
 
 
-def has_non_additive_tool_changes(messages: Sequence[Any]) -> bool:
-    """Whether tool history contains a removal or same-name redeclaration that an addition-only
-    transport cannot replay."""
+def hasNonAdditiveToolChanges(messages: TranscriptMessages) -> bool:
+    """Whether tool history contains a removal or same-name redeclaration that an addition-only transport cannot replay."""
     declared: set[str] = set()
     for message in messages:
-        if not is_system_message(message):
+        if not _isSystemMessage(message):
             continue
         if len(_field(message, "toolsRemoved") or []) > 0:
             return True
@@ -226,30 +226,32 @@ def has_non_additive_tool_changes(messages: Sequence[Any]) -> bool:
 
 @dataclass(slots=True)
 class TranscriptTools:
+    # Tools sent in the top-level request field.
     requestTools: list[Tool]
+    # Whether later system messages carry their own `toolsAdded` as in-place additions.
+    # When false, `requestTools` already holds the complete current tool set.
     anchorsAdditions: bool
 
 
-def resolve_transcript_tools(messages: Sequence[Any], supports_tool_additions: bool | None) -> TranscriptTools:
+def resolveTranscriptTools(messages: TranscriptMessages, supportsToolAdditions: bool | None) -> TranscriptTools:
     """Split tool declarations between the top-level request field and in-place additions.
-
     Transports that can anchor additions at a system message keep the initial tools at the
     top and load later ones where they appear; that only works when no tool was removed or
-    redeclared, so everything else sends the current tool list.
-    """
-    anchors_additions = bool(supports_tool_additions) and not has_non_additive_tool_changes(messages)
-    initial = get_initial_system_message(messages)
+    redeclared, so everything else sends the current tool list."""
+    anchorsAdditions = bool(supportsToolAdditions) and not hasNonAdditiveToolChanges(messages)
+    initial = getInitialSystemMessage(messages)
     return TranscriptTools(
         requestTools=(
             list((_field(initial, "toolsAdded") if initial else None) or [])
-            if anchors_additions
-            else get_current_tools(messages)
+            if anchorsAdditions
+            else getCurrentTools(messages)
         ),
-        anchorsAdditions=anchors_additions,
+        anchorsAdditions=anchorsAdditions,
     )
 
 
 def _parameters_json_schema(tool: Any) -> Any:
+    """MISAKA fork: a pydantic `parameters` class as its JSON schema."""
     schema = getattr(tool, "parameters_json_schema", None)
     if callable(schema):
         return schema()
@@ -257,12 +259,14 @@ def _parameters_json_schema(tool: Any) -> Any:
 
 
 def _serialize(tool: Tool) -> str:
-    return json.dumps(tool.model_dump(exclude_none=True), sort_keys=False, separators=(",", ":"))
+    """MISAKA fork: ``JSON.stringify`` of a declaration; 0.0 and 0 print as one value, as a declaration read back from
+    storage has it."""
+    return jsonStringify(tool.model_dump(exclude_none=True))
 
 
 def _field(value: Any, name: str) -> Any:
-    # Messages and tools arrive as models from the pipeline and as plain mappings from
-    # hand-built histories and extensions, the same two shapes ``content_text`` accepts.
+    """MISAKA fork: messages and tools arrive as models from the pipeline and as plain mappings from hand-built
+    histories and extensions."""
     if isinstance(value, Mapping):
         return value.get(name)
     return getattr(value, name, None)
@@ -270,22 +274,23 @@ def _field(value: Any, name: str) -> Any:
 
 __all__ = [
     "ToolStateChanges",
+    "TranscriptContext",
+    "TranscriptMessages",
     "TranscriptTools",
-    "collapse_system_messages",
-    "create_initial_system_message",
-    "declarations_equal",
-    "get_current_system_message",
-    "get_current_system_prompt",
-    "get_current_tools",
-    "get_declared_tools",
-    "get_initial_system_message",
-    "get_tool_state_changes",
-    "has_non_additive_tool_changes",
-    "has_tool_redefinitions",
-    "is_system_message",
-    "normalize_context",
-    "resolve_transcript",
-    "resolve_transcript_tools",
-    "to_tool_declaration",
-    "without_initial_system_message",
+    "collapseSystemMessages",
+    "createInitialSystemMessage",
+    "declarationsEqual",
+    "getCurrentSystemMessage",
+    "getCurrentSystemPrompt",
+    "getCurrentTools",
+    "getDeclaredTools",
+    "getInitialSystemMessage",
+    "getToolStateChanges",
+    "hasNonAdditiveToolChanges",
+    "hasToolRedefinitions",
+    "normalizeContext",
+    "resolveTranscript",
+    "resolveTranscriptTools",
+    "toToolDeclaration",
+    "withoutInitialSystemMessage",
 ]

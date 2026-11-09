@@ -94,7 +94,7 @@ def snapshot_path(task: Any) -> Path:
 def capture(task: Any, session: Any, *, seed: bool) -> None:
     from misaka.core.session_manager import SessionManager
     from misaka.core.subagent.runtime import _atomic_text
-    from misaka.modes.jsonl import to_jsonable
+    from misaka.modes.json_event import to_jsonable
 
     if seed and task.transcript.exists():
         raise ValueError("Fork seed transcript already exists")
@@ -143,9 +143,9 @@ def capture(task: Any, session: Any, *, seed: bool) -> None:
 
 def install(session: Any, snapshot: dict[str, Any]) -> None:
     """Keep rendered prompt/schema bytes; resolve implementations in THIS worker."""
-    from misaka.agent.stream_fn import get_default_stream_fn
+    from misaka.agent.stream_fn import getDefaultStreamFn
     from misaka.ai.types import SystemMessage, Tool, TranscriptContext
-    from misaka.ai.utils.transcript import get_current_system_message
+    from misaka.ai.utils.transcript import getCurrentSystemMessage
 
     wire_tools = [Tool.model_validate(item) for item in snapshot["tools"]]
     names = [tool.name for tool in wire_tools]
@@ -156,7 +156,7 @@ def install(session: Any, snapshot: dict[str, Any]) -> None:
     missing = set(names) - assembled.keys()
     if missing:
         raise ValueError(f"Fork parent tools are unavailable in this worker: {', '.join(sorted(missing))}")
-    previous = session.agent.streamFn or get_default_stream_fn()
+    previous = session.agent.streamFunction or getDefaultStreamFn()
     session.agent._subagent_base_stream_fn = previous
 
     def stream(model, context, options):
@@ -171,7 +171,7 @@ def install(session: Any, snapshot: dict[str, Any]) -> None:
         # The request context is a transcript: its system messages carry the prompt and
         # the tool declarations (the parent's copied head plus whatever this worker
         # patched in). They collapse into one head holding the parent's rendered bytes.
-        current = get_current_system_message(context.messages)
+        current = getCurrentSystemMessage(context.messages)
         head = SystemMessage(
             content=snapshot["systemPrompt"], toolsAdded=wire_tools,
             timestamp=current.timestamp if current else int(time.time() * 1000),
@@ -180,4 +180,4 @@ def install(session: Any, snapshot: dict[str, Any]) -> None:
             head, *(message for message in context.messages if read_field(message, "role") != "system")])
         return previous(model, exact, options)
 
-    session.agent.streamFn = stream
+    session.agent.streamFunction = stream

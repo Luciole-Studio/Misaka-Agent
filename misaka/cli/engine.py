@@ -1,1088 +1,988 @@
-"""Minimal Phase 9 CLI entry orchestration."""
+"""Translated from pi's ``packages/coding-agent/src/main.ts`` (v1.1.0): the engine's CLI entry.
+
+MISAKA forks:
+- ``misaka.cli.app`` routes the product's subcommands (``mcp`` among them) before this runs; there is no package
+  manager (install / remove / update / list), no ``config`` command, no RPC mode, no first-time setup, no version
+  check, no managed-install or Windows self-update cleanup, no migrations (nothing older ships) and no startup
+  benchmark.
+- Skills are MISAKA's own subsystem (``core/skills``), so ``--skill`` / ``--no-skills`` are not offered.
+- Bundled extensions arrive through ``bootstrap.bundled`` rather than ``builtInExtensions``; role-bound settings
+  (``modelProfile``), read-only model defaults, core ``parts`` and ``customTools`` are MISAKA's options.
+- The session store is the product tree (``sessions_root_of``); there is no session-directory environment variable.
+- ``main`` returns the exit code where pi calls ``process.exit()`` or sets ``process.exitCode``, so the runtime and
+  the terminal are released on every path; the helpers that pi lets ``process.exit()`` raise ``SystemExit``.
+- The runtime factory is a module function (``createRuntimeFactory``) because headless sessions
+  (``core/platform/session.py``) build their runtime through it too; pi keeps it as a closure inside ``main``.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import os
-import re
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
-from misaka.ai.models import models_are_equal
-from misaka.ai.types import ImageContent
-from misaka.cli import session_picker
-from misaka.cli.args import Args, parse_args, print_help
-from misaka.cli.file_processor import ProcessFileOptions, process_file_arguments
-from misaka.cli.initial_message import build_initial_message
-from misaka.cli.list_models import list_models
-from misaka.config import VERSION, get_agent_dir
+from misaka.ai.auth.types import AuthOperationOptions
+from misaka.ai.models import modelsAreEqual
+from misaka.cli.args import Args, normalizeSessionName, parseArgs, printHelp
+from misaka.cli.file_processor import ProcessFileOptions, processFileArguments
+from misaka.cli.initial_message import InitialMessageResult, buildInitialMessage
+from misaka.cli.list_models import listModels
+from misaka.cli.project_trust import createProjectTrustContext
+from misaka.cli.session_picker import selectSession
+from misaka.cli.startup_ui import StartupOption, showStartupSelector
+from misaka.config import APP_NAME, VERSION, get_agent_dir
 from misaka.core.agent_session_runtime import (
     CreateAgentSessionRuntimeResult,
-    create_agent_session_runtime,
+    createAgentSessionRuntime,
 )
 from misaka.core.agent_session_services import (
     AgentSessionRuntimeDiagnostic,
-    create_agent_session_from_services,
-    create_agent_session_services,
+    createAgentSessionFromServices,
+    createAgentSessionServices,
 )
 from misaka.core.auth_guidance import formatNoModelsAvailableMessage
-from misaka.core.auth_storage import AuthStorage
-from misaka.core.export_html import export_from_file
-from misaka.core.http_dispatcher import applyHttpProxySettings
-from misaka.core.keybindings import KeybindingsManager
-from misaka.core.model_registry import ModelRegistry
+from misaka.core.export_html import exportFromFile
+from misaka.core.http_dispatcher import applyHttpProxySettings, configureHttpDispatcher
 from misaka.core.model_resolver import ScopedModel, resolveCliModel, resolveModelScope
+from misaka.core.model_runtime import ModelRuntime
 from misaka.core.output_guard import isStdoutTakenOver, restoreStdout, takeOverStdout
-from misaka.core.project_trust import (
-    ProjectTrustStore,
-    has_trust_requiring_project_resources,
-    resolve_project_trusted,
-)
+from misaka.core.project_trust import AppMode, resolveProjectTrusted
 from misaka.core.session_cwd import (
     MissingSessionCwdError,
     SessionCwdIssue,
-    format_missing_session_cwd_prompt,
-    get_missing_session_cwd_issue,
+    formatMissingSessionCwdPrompt,
+    getMissingSessionCwdIssue,
 )
 from misaka.core.session_manager import (
     NewSessionOptions,
     SessionManager,
+    assertValidSessionId,
     sessions_root_of,
 )
 from misaka.core.settings_diagnostics import (
-    collect_settings_diagnostics,
-    deduplicate_diagnostics,
+    collectSettingsDiagnostics,
+    deduplicateDiagnostics,
 )
 from misaka.core.settings_manager import SettingsManager
 from misaka.core.timings import printTimings, resetTimings, time
-from misaka.modes import runPrintMode as run_print_mode
-from misaka.ui.tui import TUI, ProcessTerminal, setCapabilityOverrides, setKeybindings
-from misaka.ui.tui.interactive import InteractiveMode
-from misaka.ui.tui.interactive.components.extension_input import (
-    ExtensionInputComponent,
+from misaka.core.trust_manager import (
+    ProjectTrustStore,
+    hasTrustRequiringProjectResources,
 )
-from misaka.ui.tui.interactive.components.extension_selector import (
-    ExtensionSelectorComponent,
+from misaka.modes import InteractiveMode, runPrintMode
+from misaka.modes.interactive.theme.theme import (
+    initTheme,
+    setThemeJsonValidator,
+    stopThemeWatcher,
 )
-from misaka.ui.tui.interactive.theme.theme import init_theme, stop_theme_watcher
+from misaka.modes.interactive.theme.theme_schema import validateThemeJson
+from misaka.ui.tui import (
+    setCapabilityOverrides,
+)
+from misaka.utils._abort_signal import TimeoutAbortSignal
+from misaka.utils.chalk import chalk
+from misaka.utils.js import errorMessage, jsTrim
 from misaka.utils.paths import (
-    canonicalize_path,
-    is_local_path,
-    normalize_path,
-    resolve_path,
+    isLocalPath,
+    normalizePath,
+    resolvePath,
 )
 
-AppMode = Literal["interactive", "print", "json"]
 PrintOutputMode = Literal["text", "json"]
 
-_RED = "\x1b[31m"
-_YELLOW = "\x1b[33m"
-_DIM = "\x1b[2m"
-_RESET = "\x1b[0m"
+EXTENSION_LOAD_FAILURE_HINT = f'Hint: Start without extensions using "{APP_NAME} -ne".'
 
 
-@dataclass(slots=True)
-class RuntimeDiagnostic:
-    type: Literal["warning", "error", "info"]
-    message: str
+async def readPipedStdin() -> str | None:
+    """Read all content from piped stdin.
+    Returns undefined if stdin is a TTY (interactive terminal)."""
+    # If stdin is a TTY, we're running interactively - don't read stdin
+    if sys.stdin.isatty():
+        return None
+
+    data = await asyncio.to_thread(sys.stdin.read)
+    return jsTrim(data) or None
+
+
+def reportDiagnostics(diagnostics: Sequence[AgentSessionRuntimeDiagnostic]) -> None:
+    for diagnostic in diagnostics:
+        color = chalk.red if diagnostic.type == "error" else chalk.yellow if diagnostic.type == "warning" else chalk.dim
+        prefix = "Error: " if diagnostic.type == "error" else "Warning: " if diagnostic.type == "warning" else ""
+        print(color(f"{prefix}{diagnostic.message}"), file=sys.stderr)
+
+
+def isTruthyEnvFlag(value: str | None) -> bool:
+    if not value:
+        return False
+    return value == "1" or value.lower() == "true" or value.lower() == "yes"
+
+
+def resolveAppMode(parsed: Args, stdinIsTTY: bool, stdoutIsTTY: bool) -> AppMode:
+    # MISAKA fork: there is no RPC mode.
+    if parsed.mode == "json":
+        return "json"
+    if parsed.print or not stdinIsTTY or not stdoutIsTTY:
+        return "print"
+    return "interactive"
+
+
+def toPrintOutputMode(appMode: AppMode) -> PrintOutputMode:
+    return "json" if appMode == "json" else "text"
+
+
+def isPlainRuntimeMetadataCommand(parsed: Args) -> bool:
+    return not parsed.print and parsed.mode is None and (parsed.help is True or parsed.listModels is not None)
+
+
+async def runAuthCommand(args: list[str]) -> int | None:
+    """pi's ``runAuthCommand``: the exit code of an ``auth`` command, or None when ``args`` is not one.
+
+    MISAKA fork: the exit code is returned, where pi sets ``process.exitCode`` and returns true.
+    """
+    from misaka.cli.auth_check import (
+        AuthCheckResult,
+        checkProviderAuth,
+        createAuthCheckModelRuntime,
+        getProviderCredential,
+    )
+    from misaka.cli.auth_command import (
+        AuthCommandError,
+        getAuthCommandName,
+        getAuthCommandUsage,
+        isAuthCommandHelp,
+        parseAuthCommand,
+        printAuthCommandHelp,
+        validateAuthCommandArgs,
+    )
+    from misaka.cli.credential_print import resolveCredentialForPrint
+    from misaka.core.auth_storage import AuthStorage, ReadOnlyAuthStorage
+    from misaka.utils.js import jsonStringify
+
+    if isAuthCommandHelp(args):
+        printAuthCommandHelp()
+        return 0
+
+    try:
+        command = parseAuthCommand(args)
+    except Exception as error:  # noqa: BLE001 - upstream reports any parse failure
+        message = str(error) if isinstance(error, AuthCommandError) else "Failed to parse auth command"
+        print(chalk.red(f"Error: {message}"), file=sys.stderr)
+        return 1
+    if not command:
+        return None
+
+    parsed = parseArgs(command.args)
+    if len(parsed.unknownFlags) > 0:
+        option = next(iter(parsed.unknownFlags))
+        print(chalk.red(f'Unknown option --{option} for "{getAuthCommandName(command.kind)}".'), file=sys.stderr)
+        print(chalk.dim(f'Use "{APP_NAME} --help" or "{getAuthCommandUsage(command.kind)}".'), file=sys.stderr)
+        return 1
+    try:
+        if len(parsed.diagnostics) > 0:
+            raise AuthCommandError("\n".join(diagnostic.message for diagnostic in parsed.diagnostics))
+        if command.kind != "check":
+            signal = TimeoutAbortSignal(15_000)
+            modelRuntime = await ModelRuntime.create({"allowModelNetwork": False, "signal": signal})
+            credential = await resolveCredentialForPrint(parsed, modelRuntime, command.kind, command.minExpiryMs, signal)
+            sys.stdout.write(f"{credential}\n")
+            return 0
+
+        # MISAKA fork: a bare `auth check` prints MISAKA's provider overview, where pi rejects it.
+        if not command.json and not command.credentials and not jsTrim(parsed.provider or "") and not jsTrim(parsed.model or ""):
+            from misaka.cli.auth_overview import print_provider_overview
+
+            return await print_provider_overview()
+        requestedAuth = validateAuthCommandArgs(parsed, command.kind)
+        credential = None
+        try:
+            credentials = ReadOnlyAuthStorage() if command.noRefresh else AuthStorage.create()
+            modelRuntime = await createAuthCheckModelRuntime(credentials)
+            result = await checkProviderAuth(parsed, modelRuntime, {"refresh": not command.noRefresh})
+            if command.credentials and result.status == "ready":
+                credential = await getProviderCredential(
+                    result.provider, modelRuntime, credentials, {"refresh": not command.noRefresh}
+                )
+                if not credential:
+                    result = AuthCheckResult(status="not_ready", provider=result.provider, reason="credential_not_available")
+        except Exception:  # noqa: BLE001 - upstream's catch-all: an invalid state
+            result = AuthCheckResult(
+                status="invalid",
+                provider=requestedAuth["provider"] if requestedAuth["provider"] is not None else requestedAuth["model"],
+                reason="invalid_state",
+            )
+        record = {"status": result.status, "provider": result.provider}
+        if result.reason is not None:
+            record["reason"] = result.reason
+        if result.authType is not None:
+            record["authType"] = result.authType
+        output = jsonStringify({**record, **({"credentials": credential} if credential else {})}) if command.json else (
+            credential if credential is not None else result.status
+        )
+        sys.stdout.write(f"{output}\n")
+        return 0 if result.status == "ready" else 1 if result.status == "not_ready" else 2
+    except Exception as error:  # noqa: BLE001 - upstream reports any failure
+        message = str(error) if isinstance(error, AuthCommandError) else "Failed to resolve credential"
+        print(chalk.red(f"Error: {message}"), file=sys.stderr)
+        return 2 if command.kind == "check" else 1
+
+
+async def prepareInitialMessage(
+    parsed: Args,
+    stdinContent: str | None = None,
+) -> InitialMessageResult:
+    if len(parsed.fileArgs) == 0:
+        return buildInitialMessage(parsed=parsed, stdinContent=stdinContent)
+
+    # AgentSession resizes these after extension hooks select the request model.
+    processed = await processFileArguments(parsed.fileArgs, options=ProcessFileOptions(autoResizeImages=False))
+    return buildInitialMessage(
+        parsed=parsed,
+        fileText=processed.text,
+        fileImages=processed.images,
+        stdinContent=stdinContent,
+    )
 
 
 @dataclass(slots=True)
 class ResolvedSession:
+    """Result from resolving a session argument"""
+
     type: Literal["path", "local", "global", "not_found"]
     path: str | None = None
     cwd: str | None = None
     arg: str | None = None
 
 
-@dataclass(slots=True)
-class BuildSessionOptionsResult:
-    options: dict[str, Any] = field(default_factory=dict)
-    cliThinkingFromModel: bool = False
-    diagnostics: list[RuntimeDiagnostic] = field(default_factory=list)
-
-
-class MainOptions(TypedDict, total=False):
-    extensionFactories: list[Any]
-    modelProfile: str
-    modelDefaultsReadOnly: bool
-
-
-SelectSessionFn = Callable[
-    [Callable[..., Awaitable[list[Any]]], Callable[..., Awaitable[list[Any]]]],
-    Awaitable[str | None],
-]
-ConfirmFn = Callable[[str], Awaitable[bool]]
-
-
-async def read_piped_stdin() -> str | None:
-    if sys.stdin.isatty():
-        return None
-    content = await asyncio.to_thread(sys.stdin.read)
-    return content.strip() or None
-
-
-def resolve_app_mode(parsed: Args, stdin_is_tty: bool, stdout_is_tty: bool = True) -> AppMode:
-    if parsed.mode == "json":
-        return "json"
-    if parsed.print or not stdin_is_tty or not stdout_is_tty:
-        return "print"
-    return "interactive"
-
-
-def is_plain_runtime_metadata_command(parsed: Args) -> bool:
-    """pi main.ts:127-129: help and list-models answer on the real stdout unless a wire mode was asked for."""
-    return not parsed.print and parsed.mode is None and (parsed.help or parsed.listModels is not None)
-
-
-def to_print_output_mode(app_mode: AppMode) -> PrintOutputMode:
-    return "json" if app_mode == "json" else "text"
-
-
-def report_diagnostics(
-    diagnostics: Sequence[AgentSessionRuntimeDiagnostic],
-    *,
-    stream: Any | None = None,
-) -> None:
-    output = stream or sys.stderr
-    for diagnostic in diagnostics:
-        color = _RED if diagnostic.type == "error" else _YELLOW if diagnostic.type == "warning" else _DIM
-        prefix = "Error: " if diagnostic.type == "error" else "Warning: " if diagnostic.type == "warning" else ""
-        output.write(f"{color}{prefix}{diagnostic.message}{_RESET}\n")
-
-
-def _format_colored_message(text: str, color: str) -> str:
-    return f"{color}{text}{_RESET}"
-
-
-async def prepare_initial_message(
-    parsed: Args,
-    stdin_content: str | None = None,
-) -> tuple[str | None, list[ImageContent] | None]:
-    if not parsed.fileArgs:
-        result = build_initial_message(parsed=parsed, stdinContent=stdin_content)
-        return result.initialMessage, result.initialImages
-
-    # AgentSession resizes these after extension hooks select the request model.
-    processed = await process_file_arguments(
-        parsed.fileArgs,
-        options=ProcessFileOptions(autoResizeImages=False),
-    )
-    result = build_initial_message(
-        parsed=parsed,
-        fileText=processed.text,
-        fileImages=processed.images,
-        stdinContent=stdin_content,
-    )
-    return result.initialMessage, result.initialImages
-
-
-def _find_local_session_by_exact_id(session_id: str, cwd: str, session_dir: str | None) -> ResolvedSession | None:
-    path = SessionManager.findById(cwd, session_id, session_dir)
+def findLocalSessionByExactId(
+    sessionId: str,
+    cwd: str,
+    sessionDir: str | None = None,
+) -> ResolvedSession | None:
+    """Resolve a session argument to a file path.
+    If it looks like a path, use as-is. Otherwise try to match as session ID prefix."""
+    path = SessionManager.findById(cwd, sessionId, sessionDir)
     return ResolvedSession(type="local", path=path) if path else None
 
 
-async def resolve_session_path(session_arg: str, cwd: str, session_dir: str | None = None) -> ResolvedSession:
-    if "/" in session_arg or "\\" in session_arg or session_arg.endswith(".jsonl"):
-        return ResolvedSession(type="path", path=resolve_path(session_arg, cwd))
+async def resolveSessionPath(sessionArg: str, cwd: str, sessionDir: str | None = None) -> ResolvedSession:
+    # If it looks like a file path, resolve it before handing it to the session manager.
+    if "/" in sessionArg or "\\" in sessionArg or sessionArg.endswith(".jsonl"):
+        return ResolvedSession(type="path", path=resolvePath(sessionArg, cwd))
 
     # Exact IDs only require reading session headers. Fall back to the full
     # metadata listing for prefix matches.
-    exact_local_match = _find_local_session_by_exact_id(session_arg, cwd, session_dir)
-    if exact_local_match is not None:
-        return exact_local_match
-    local_sessions = await SessionManager.list(cwd, session_dir)
-    local_match = next(
-        (
-            session
-            for session in local_sessions
-            if session.id.startswith(session_arg)
-        ),
-        None,
-    )
-    if local_match is not None:
-        return ResolvedSession(type="local", path=local_match.path)
+    exactLocalMatch = findLocalSessionByExactId(sessionArg, cwd, sessionDir)
+    if exactLocalMatch:
+        return exactLocalMatch
 
-    global_sessions = await SessionManager.listAll(sessions_root_of(session_dir))
-    global_match = next(
-        (session for session in global_sessions if session.id == session_arg), None
-    )
-    if global_match is None:
-        global_match = next(
-            (
-                session
-                for session in global_sessions
-                if session.id.startswith(session_arg)
-            ),
-            None,
-        )
-    if global_match is not None:
-        return ResolvedSession(
-            type="global", path=global_match.path, cwd=global_match.cwd
-        )
+    localSessions = await SessionManager.list(cwd, sessionDir)
+    localMatch = next((s for s in localSessions if s.id.startswith(sessionArg)), None)
 
-    return ResolvedSession(type="not_found", arg=session_arg)
+    if localMatch:
+        return ResolvedSession(type="local", path=localMatch.path)
+
+    # Try global search across all projects
+    # MISAKA fork: "all projects" is the root of this run's store (a window's own store), not a flat directory.
+    allSessions = await SessionManager.listAll(sessions_root_of(sessionDir))
+    globalMatch = next((s for s in allSessions if s.id == sessionArg), None)
+    if globalMatch is None:
+        globalMatch = next((s for s in allSessions if s.id.startswith(sessionArg)), None)
+
+    if globalMatch:
+        return ResolvedSession(type="global", path=globalMatch.path, cwd=globalMatch.cwd)
+
+    # Not found anywhere
+    return ResolvedSession(type="not_found", arg=sessionArg)
 
 
-async def prompt_confirm(message: str, *, input_stream: Any | None = None, output_stream: Any | None = None) -> bool:
-    input_handle = input_stream or sys.stdin
-    output_handle = output_stream or sys.stdout
-    output_handle.write(f"{message} [y/N] ")
-    flush = getattr(output_handle, "flush", None)
-    if callable(flush):
-        flush()
-    answer = await asyncio.to_thread(input_handle.readline)
-    return answer.strip().lower() in {"y", "yes"}
+async def promptConfirm(message: str) -> bool:
+    """Prompt user for yes/no confirmation"""
+    sys.stdout.write(f"{message} [y/N] ")
+    sys.stdout.flush()
+    # readline's answer carries no line terminator; Python's readline() keeps it.
+    answer = (await asyncio.to_thread(sys.stdin.readline)).rstrip("\r\n")
+    return answer.lower() == "y" or answer.lower() == "yes"
 
 
-async def _show_startup_component(
-    settings_manager: SettingsManager,
-    builder: Callable[[Callable[[Any], None], TUI], tuple[Any, Any]],
-) -> Any:
-    """Run one modal before InteractiveMode owns the terminal."""
-    init_theme(settings_manager.getTheme())
-    setKeybindings(KeybindingsManager.create())
-    try:
-        ui = TUI(
-            ProcessTerminal(),
-            bool(getattr(settings_manager, "getShowHardwareCursor", lambda: False)()),
-        )
-    except TypeError:
-        ui = TUI(ProcessTerminal())
-    if hasattr(ui, "setClearOnShrink"):
-        ui.setClearOnShrink(bool(getattr(settings_manager, "getClearOnShrink", lambda: False)()))
-
-    done: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
-    closed = False
-
-    def finish(result: Any) -> None:
-        nonlocal closed
-        if closed:
-            return
-        closed = True
-        ui.stop()
-        done.set_result(result)
-
-    component, focus = builder(finish, ui)
-    ui.addChild(component)
-    ui.setFocus(focus)
-    try:
-        ui.start()
-        return await done
-    finally:
-        if not closed:
-            closed = True
-            ui.stop()
-
-
-async def _show_startup_selector(
-    settings_manager: SettingsManager,
-    title: str,
-    options: list[tuple[str, Any]],
-) -> Any:
-    labels = [label for label, _value in options]
-
-    def build(finish: Callable[[Any], None], ui: TUI) -> tuple[Any, Any]:
-        def select(label: str) -> None:
-            selected = next((value for candidate, value in options if candidate == label), None)
-            finish(selected)
-
-        selector = ExtensionSelectorComponent(
-            title,
-            labels,
-            select,
-            lambda: finish(None),
-            {"tui": ui},
-        )
-        return selector, selector
-
-    return await _show_startup_component(settings_manager, build)
-
-
-async def _show_startup_input(
-    settings_manager: SettingsManager,
-    title: str,
-    placeholder: str | None,
-) -> str | None:
-    def build(finish: Callable[[Any], None], ui: TUI) -> tuple[Any, Any]:
-        component = ExtensionInputComponent(
-            title,
-            placeholder,
-            finish,
-            lambda: finish(None),
-            {"tui": ui},
-        )
-        return component, component
-
-    result = await _show_startup_component(settings_manager, build)
-    return str(result) if result is not None else None
-
-
-def create_project_trust_context(
-    *,
-    cwd: str,
-    mode: AppMode,
-    settings_manager: SettingsManager,
-    has_ui: bool,
-) -> dict[str, Any]:
-    async def select(title: str, options: list[str], _opts: Any = None) -> str | None:
-        if not has_ui or mode != "interactive":
-            return None
-        result = await _show_startup_selector(
-            settings_manager,
-            title,
-            [(option, option) for option in options],
-        )
-        return str(result) if result is not None else None
-
-    async def confirm(title: str, message: str, _opts: Any = None) -> bool:
-        if not has_ui or mode != "interactive":
-            return False
-        result = await _show_startup_selector(
-            settings_manager,
-            f"{title}\n{message}",
-            [("Yes", True), ("No", False)],
-        )
-        return bool(result)
-
-    async def input_value(
-        title: str,
-        placeholder: str | None = None,
-        _opts: Any = None,
-    ) -> str | None:
-        if not has_ui or mode != "interactive":
-            return None
-        return await _show_startup_input(settings_manager, title, placeholder)
-
-    def notify(message: str, type: str = "info") -> None:
-        if mode == "interactive":
-            return
-        color = _RED if type == "error" else _YELLOW if type == "warning" else _DIM
-        print(_format_colored_message(message, color), file=sys.stderr)
-
-    return {
-        "cwd": cwd,
-        "mode": "tui" if mode == "interactive" else mode,
-        "hasUI": has_ui,
-        "ui": {
-            "select": select,
-            "confirm": confirm,
-            "input": input_value,
-            "notify": notify,
-        },
-    }
-
-
-async def prompt_for_missing_session_cwd(
-    issue: SessionCwdIssue,
-    settings_manager: SettingsManager,
-    *,
-    terminal_factory: type[ProcessTerminal] = ProcessTerminal,
-    ui_factory: type[TUI] = TUI,
-    component_factory: type[ExtensionSelectorComponent] = ExtensionSelectorComponent,
-    keybindings_factory: Callable[[], KeybindingsManager] = KeybindingsManager.create,
-    set_keybindings_fn: Callable[[KeybindingsManager], None] = setKeybindings,
-) -> str | None:
-    init_theme(settings_manager.getTheme())
-    keybindings = keybindings_factory()
-    set_keybindings_fn(keybindings)
-    try:
-        ui = ui_factory(
-            terminal_factory(),
-            bool(getattr(settings_manager, "getShowHardwareCursor", lambda: False)()),
-        )
-    except TypeError:
-        ui = ui_factory(terminal_factory())
-    if hasattr(ui, "setClearOnShrink"):
-        ui.setClearOnShrink(bool(getattr(settings_manager, "getClearOnShrink", lambda: False)()))
-
-    done: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
-    closed = False
-
-    def finish(result: str | None) -> None:
-        nonlocal closed
-        if closed:
-            return
-        closed = True
-        ui.stop()
-        done.set_result(result)
-
-    selector = component_factory(
-        format_missing_session_cwd_prompt(issue),
-        ["Continue", "Cancel"],
-        lambda option: finish(issue.fallbackCwd if option == "Continue" else None),
-        lambda: finish(None),
-        {"tui": ui},
-    )
-    ui.addChild(selector)
-    ui.setFocus(selector)
-    try:
-        ui.start()
-        return await done
-    finally:
-        if not closed:
-            closed = True
-            ui.stop()
-
-
-def validate_fork_flags(parsed: Args) -> None:
+def validateForkFlags(parsed: Args) -> None:
     if not parsed.fork:
         return
-    conflicting_flags = [
-        "--session" if parsed.session else None,
-        "--continue" if parsed.continue_ else None,
-        "--resume" if parsed.resume else None,
-        "--no-session" if parsed.noSession else None,
+
+    conflictingFlags = [
+        flag
+        for flag in (
+            "--session" if parsed.session else None,
+            "--continue" if parsed.continue_ else None,
+            "--resume" if parsed.resume else None,
+            "--no-session" if parsed.noSession else None,
+        )
+        if flag is not None
     ]
-    conflicts = [flag for flag in conflicting_flags if flag is not None]
-    if conflicts:
-        raise ValueError(f"--fork cannot be combined with {', '.join(conflicts)}")
+
+    if len(conflictingFlags) > 0:
+        print(chalk.red(f"Error: --fork cannot be combined with {', '.join(conflictingFlags)}"), file=sys.stderr)
+        raise SystemExit(1)
 
 
-_SESSION_ID = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")   # pi session-manager.ts:212-218
-
-
-def validate_session_id_flags(parsed: Args) -> None:
+def validateSessionIdFlags(parsed: Args) -> None:
     if parsed.sessionId is None:
         return
-    conflicts = [
+
+    conflictingFlags = [
         flag
-        for flag, given in (("--session", parsed.session), ("--continue", parsed.continue_), ("--resume", parsed.resume))
-        if given
+        for flag in (
+            "--session" if parsed.session else None,
+            "--continue" if parsed.continue_ else None,
+            "--resume" if parsed.resume else None,
+        )
+        if flag is not None
     ]
-    if conflicts:
-        raise ValueError(f"--session-id cannot be combined with {', '.join(conflicts)}")
-    if not _SESSION_ID.match(parsed.sessionId):
-        raise ValueError(
-            "Session id must be non-empty, contain only alphanumeric characters, '-', '_', and '.', "
-            "and start and end with an alphanumeric character"
+
+    if len(conflictingFlags) > 0:
+        print(chalk.red(f"Error: --session-id cannot be combined with {', '.join(conflictingFlags)}"), file=sys.stderr)
+        raise SystemExit(1)
+
+    try:
+        assertValidSessionId(parsed.sessionId)
+    except Exception as error:
+        print(chalk.red(f"Error: {errorMessage(error)}"), file=sys.stderr)
+        raise SystemExit(1) from error
+
+
+def openSessionOrExit(path: str, sessionDir: str | None = None) -> SessionManager:
+    try:
+        return SessionManager.open(path, sessionDir)
+    except Exception as error:
+        print(chalk.red(f"Error: {errorMessage(error)}"), file=sys.stderr)
+        raise SystemExit(1) from error
+
+
+def forkSessionOrExit(sourcePath: str, cwd: str, sessionDir: str | None = None, sessionId: str | None = None) -> SessionManager:
+    try:
+        return SessionManager.forkFrom(sourcePath, cwd, sessionDir, NewSessionOptions(id=sessionId))
+    except Exception as error:
+        print(chalk.red(f"Error: {errorMessage(error)}"), file=sys.stderr)
+        raise SystemExit(1) from error
+
+
+async def createSessionManager(
+    parsed: Args,
+    cwd: str,
+    sessionDir: str | None,
+    settingsManager: SettingsManager,
+) -> SessionManager:
+    if parsed.noSession or parsed.help or parsed.listModels is not None:
+        return SessionManager.inMemory(cwd, NewSessionOptions(id=parsed.sessionId) if parsed.sessionId is not None else None)
+
+    if parsed.fork:
+        if parsed.sessionId:
+            existingTarget = findLocalSessionByExactId(parsed.sessionId, cwd, sessionDir)
+            if existingTarget:
+                print(chalk.red(f"Session already exists with id '{parsed.sessionId}'"), file=sys.stderr)
+                raise SystemExit(1)
+
+        resolved = await resolveSessionPath(parsed.fork, cwd, sessionDir)
+
+        match resolved.type:
+            case "path" | "local" | "global":
+                return forkSessionOrExit(resolved.path, cwd, sessionDir, parsed.sessionId)
+
+            case "not_found":
+                print(chalk.red(f"No session found matching '{resolved.arg}'"), file=sys.stderr)
+                raise SystemExit(1)
+
+    if parsed.session:
+        resolved = await resolveSessionPath(parsed.session, cwd, sessionDir)
+
+        match resolved.type:
+            case "path" | "local":
+                return openSessionOrExit(resolved.path, sessionDir)
+
+            case "global":
+                print(chalk.yellow(f"Session found in different project: {resolved.cwd}"))
+                shouldFork = await promptConfirm("Fork this session into current directory?")
+                if not shouldFork:
+                    print(chalk.dim("Aborted."))
+                    raise SystemExit(0)
+                return forkSessionOrExit(resolved.path, cwd, sessionDir)
+
+            case "not_found":
+                print(chalk.red(f"No session found matching '{resolved.arg}'"), file=sys.stderr)
+                raise SystemExit(1)
+
+    if parsed.resume:
+        try:
+            selectedPath = await selectSession(
+                lambda onProgress=None, signal=None: SessionManager.list(cwd, sessionDir, onProgress, signal),
+                # MISAKA fork: the all-sessions tab lists the root of this run's store (a window's own store).
+                lambda onProgress=None, signal=None: SessionManager.listAll(sessions_root_of(sessionDir), onProgress, signal),
+                settingsManager,
+            )
+            if not selectedPath:
+                print(chalk.dim("No session selected"))
+                raise SystemExit(0)
+            return SessionManager.open(selectedPath, sessionDir)
+        finally:
+            stopThemeWatcher()
+
+    if parsed.continue_:
+        return SessionManager.continueRecent(cwd, sessionDir)
+
+    if parsed.sessionId:
+        existingSession = findLocalSessionByExactId(parsed.sessionId, cwd, sessionDir)
+        if existingSession:
+            return SessionManager.open(existingSession.path, sessionDir)
+        print(
+            chalk.yellow(
+                f"Warning: No project session found with id '{parsed.sessionId}'; creating a new session with that id.",
+            ),
+            file=sys.stderr,
         )
 
-
-def resolve_cli_paths(cwd: str, paths: list[str] | None) -> list[str] | None:
-    if paths is None:
-        return None
-    return [resolve_path(value, cwd) if is_local_path(value) else value for value in paths]
+    return SessionManager.create(cwd, sessionDir, NewSessionOptions(id=parsed.sessionId))
 
 
-def build_session_options(
+@dataclass(slots=True)
+class BuildSessionOptionsResult:
+    """The object literal ``buildSessionOptions`` returns."""
+
+    options: dict[str, Any] = field(default_factory=dict)
+    cliThinkingFromModel: bool = False
+    diagnostics: list[AgentSessionRuntimeDiagnostic] = field(default_factory=list)
+
+
+def buildSessionOptions(
     parsed: Args,
-    scoped_models: list[ScopedModel],
-    has_existing_session: bool,
-    model_registry: ModelRegistry,
-    settings_manager: SettingsManager,
+    scopedModels: list[ScopedModel],
+    hasExistingSession: bool,
+    modelRuntime: ModelRuntime,
+    settingsManager: SettingsManager,
 ) -> BuildSessionOptionsResult:
     options: dict[str, Any] = {}
-    diagnostics: list[RuntimeDiagnostic] = []
-    cli_thinking_from_model = False
+    diagnostics: list[AgentSessionRuntimeDiagnostic] = []
+    cliThinkingFromModel = False
 
+    # Model from CLI
+    # - supports --provider <name> --model <pattern>
+    # - supports --model <provider>/<pattern>
+    if parsed.provider and not parsed.model:
+        diagnostics.append(AgentSessionRuntimeDiagnostic(
+            type="error",
+            message=f"--provider requires --model (for example: --provider {parsed.provider} --model <pattern>)",
+        ))
     if parsed.model:
         resolved = resolveCliModel(
             {
                 "cliProvider": parsed.provider,
                 "cliModel": parsed.model,
                 "cliThinking": parsed.thinking,
-                "modelRegistry": model_registry,
+                "inlineApiKey": bool(parsed.apiKey),
+                "modelRuntime": modelRuntime,
             }
         )
         if resolved.warning:
-            diagnostics.append(RuntimeDiagnostic(type="warning", message=resolved.warning))
+            diagnostics.append(AgentSessionRuntimeDiagnostic(type="warning", message=resolved.warning))
         if resolved.error:
-            diagnostics.append(RuntimeDiagnostic(type="error", message=resolved.error))
-        if resolved.model is not None:
+            diagnostics.append(AgentSessionRuntimeDiagnostic(type="error", message=resolved.error))
+        if resolved.model:
             options["model"] = resolved.model
-            if parsed.thinking is None and resolved.thinkingLevel:
+            # Allow "--model <pattern>:<thinking>" as a shorthand.
+            # Explicit --thinking still takes precedence (applied later).
+            if not parsed.thinking and resolved.thinkingLevel:
                 options["thinkingLevel"] = resolved.thinkingLevel
-                cli_thinking_from_model = True
+                cliThinkingFromModel = True
 
-    role_default = bool(
-        "model" not in options and scoped_models and not has_existing_session and not parsed.models
-        and getattr(settings_manager, "hasPinnedModelDefault", lambda: False)()
+    # MISAKA fork: a role that pins its default model starts on it; scoped models do not override the pin unless
+    # --models names them.
+    roleDefault = bool(
+        "model" not in options and scopedModels and not hasExistingSession and not parsed.models
+        and settingsManager.hasPinnedModelDefault()
     )
-    if "model" not in options and scoped_models and not has_existing_session and (parsed.models or not role_default):
-        saved_provider, saved_model_id = settings_manager.getDefaultModelPair()
-        saved_model = model_registry.find(saved_provider, saved_model_id) if saved_provider and saved_model_id else None
-        saved_in_scope = (
-            next(
-                (scoped for scoped in scoped_models if saved_model and models_are_equal(scoped.model, saved_model)),
-                None,
-            )
-            if saved_model
-            else None
-        )
-        selected = saved_in_scope or scoped_models[0]
-        options["model"] = selected.model
-        if parsed.thinking is None and selected.thinkingLevel:
-            options["thinkingLevel"] = selected.thinkingLevel
+    if not options.get("model") and len(scopedModels) > 0 and not hasExistingSession and not roleDefault:
+        # Check if saved default is in scoped models - use it if so, otherwise first scoped model
+        savedProvider = settingsManager.getDefaultProvider()
+        savedModelId = settingsManager.getDefaultModel()
+        savedModel = modelRuntime.getModel(savedProvider, savedModelId) if savedProvider and savedModelId else None
+        savedInScope = next((sm for sm in scopedModels if modelsAreEqual(sm.model, savedModel)), None) if savedModel else None
 
-    if parsed.thinking is not None:
+        if savedInScope:
+            options["model"] = savedInScope.model
+            # Use thinking level from scoped model config if explicitly set
+            if not parsed.thinking and savedInScope.thinkingLevel:
+                options["thinkingLevel"] = savedInScope.thinkingLevel
+        else:
+            options["model"] = scopedModels[0].model
+            # Use thinking level from first scoped model if explicitly set
+            if not parsed.thinking and scopedModels[0].thinkingLevel:
+                options["thinkingLevel"] = scopedModels[0].thinkingLevel
+
+    # Thinking level from CLI (takes precedence over scoped model thinking levels set above)
+    if parsed.thinking:
         options["thinkingLevel"] = parsed.thinking
 
-    if scoped_models:
-        options["scopedModels"] = [
-            {"model": scoped_model.model, "thinkingLevel": scoped_model.thinkingLevel}
-            for scoped_model in scoped_models
-        ]
+    # Scoped models for Ctrl+P cycling
+    # Keep thinking level undefined when not explicitly set in the model pattern.
+    # Undefined means "inherit current session thinking level" during cycling.
+    if len(scopedModels) > 0:
+        options["scopedModels"] = [{"model": sm.model, "thinkingLevel": sm.thinkingLevel} for sm in scopedModels]
 
+    # API key from CLI - set as a non-persistent runtime override
+    # (handled by caller before createAgentSession)
+
+    # Tools
     if parsed.noTools:
         options["noTools"] = "all"
     elif parsed.noBuiltinTools:
         options["noTools"] = "builtin"
-    if parsed.tools:
-        options["tools"] = list(parsed.tools)
-    if parsed.excludeTools:
-        options["excludeTools"] = list(parsed.excludeTools)
+    if parsed.tools is not None:
+        options["tools"] = [*parsed.tools]
+    if parsed.excludeTools is not None:
+        options["excludeTools"] = [*parsed.excludeTools]
 
-    return BuildSessionOptionsResult(
-        options=options,
-        cliThinkingFromModel=cli_thinking_from_model,
-        diagnostics=diagnostics,
-    )
+    return BuildSessionOptionsResult(options=options, cliThinkingFromModel=cliThinkingFromModel, diagnostics=diagnostics)
 
 
-def _to_agent_runtime_diagnostics(diagnostics: list[RuntimeDiagnostic]) -> list[AgentSessionRuntimeDiagnostic]:
-    return [AgentSessionRuntimeDiagnostic(type=item.type, message=item.message) for item in diagnostics]
+def resolveCliPaths(cwd: str, paths: list[str] | None) -> list[str] | None:
+    return [resolvePath(value, cwd) if isLocalPath(value) else value for value in paths] if paths is not None else None
 
 
-def create_runtime_factory(
+async def promptForMissingSessionCwd(
+    issue: SessionCwdIssue,
+    settingsManager: SettingsManager,
+) -> str | None:
+    return await showStartupSelector(settingsManager, formatMissingSessionCwdPrompt(issue), [
+        StartupOption(label="Continue", value=issue.fallbackCwd),
+        StartupOption(label="Cancel", value=None),
+    ])
+
+
+def createRuntimeFactory(
     parsed: Args,
-    auth_storage: AuthStorage,
     *,
-    resolved_extension_paths: list[str] | None = None,
-    resolved_prompt_template_paths: list[str] | None = None,
-    resolved_theme_paths: list[str] | None = None,
-    extension_factories: list[Any] | None = None,
-    custom_tools: list[Any] | None = None,
+    resolvedExtensionPaths: list[str] | None = None,
+    resolvedPromptTemplatePaths: list[str] | None = None,
+    resolvedThemePaths: list[str] | None = None,
+    extensionFactories: list[Any] | None = None,
+    customTools: list[Any] | None = None,
     parts: list[Any] | None = None,
-    model_profile: str | None = None,
-    model_defaults_read_only: bool = False,
-    app_mode: AppMode = "print",
-    startup_settings_manager: SettingsManager | None = None,
+    modelProfile: str | None = None,
+    modelDefaultsReadOnly: bool = False,
+    appMode: AppMode = "print",
+    trustPromptMode: AppMode = "print",
+    startupSettingsManager: SettingsManager | None = None,
 ) -> Callable[[dict[str, Any]], Awaitable[CreateAgentSessionRuntimeResult]]:
+    """pi's ``createRuntime`` closure in ``main``, hoisted so headless sessions share it (see the module docstring).
+    The keyword options are the values that closure captures from ``main``."""
+    # MISAKA fork: `--agents` configures the core parts that host subagents.
     if parsed.agents is not None:
         for part in parts or ():
             configure = getattr(part, "configure_agents", None)
             if configure is not None:
                 configure(parsed.agents)
-    project_trust_by_cwd: dict[str, bool] = {}
+    projectTrustByCwd: dict[str, bool] = {}
 
-    async def _factory(runtime_options: dict[str, Any]) -> CreateAgentSessionRuntimeResult:
-        runtime_cwd = str(runtime_options["cwd"])
-        agent_dir = str(runtime_options["agentDir"])
-        trust_key = canonicalize_path(resolve_path(runtime_cwd))
-        trust_store = ProjectTrustStore(agent_dir)
-        has_trust_resources = has_trust_requiring_project_resources(runtime_cwd)
-        has_cached_trust = trust_key in project_trust_by_cwd
-        should_resolve_trust = (
-            parsed.projectTrustOverride is None
-            and not has_cached_trust
-            and has_trust_resources
+    async def createRuntime(runtimeOptions: dict[str, Any]) -> CreateAgentSessionRuntimeResult:
+        cwd = str(runtimeOptions["cwd"])
+        agentDir = str(runtimeOptions["agentDir"])
+        sessionManager = runtimeOptions["sessionManager"]
+        sessionStartEvent = runtimeOptions.get("sessionStartEvent")
+        projectTrustContext = runtimeOptions.get("projectTrustContext")
+        trustStore = ProjectTrustStore(agentDir)
+        # MISAKA fork: a headless session has no startup settings manager; it reads global settings the same way.
+        trustSettingsManager = startupSettingsManager or SettingsManager.create(cwd, agentDir, {"projectTrusted": False})
+        isInitialRuntime = sessionStartEvent is None
+        projectTrustDiagnostics: list[AgentSessionRuntimeDiagnostic] = []
+        cachedProjectTrust = projectTrustByCwd.get(cwd)
+        hasTrustRequiringResources = hasTrustRequiringProjectResources(cwd)
+        shouldResolveProjectTrust = (
+            parsed.projectTrustOverride is None and cachedProjectTrust is None and hasTrustRequiringResources
         )
-        if should_resolve_trust:
-            project_trusted = False
-        elif has_cached_trust:
-            project_trusted = project_trust_by_cwd[trust_key]
-        elif parsed.projectTrustOverride is not None:
-            project_trusted = parsed.projectTrustOverride
-        else:
-            # Reaching this branch means `should_resolve_trust` was false with no cached
-            # decision and no override, which -- given how it is computed above -- can only
-            # happen when `has_trust_resources` is false. There is nothing to trust, so
-            # there is nothing to look up: the saved decisions are read by `resolve_trust`
-            # below, via `resolve_project_trusted`.
-            project_trusted = True
-
-        settings_manager = SettingsManager.create(
-            runtime_cwd,
-            agent_dir,
-            {"projectTrusted": project_trusted},
+        projectTrusted = (
+            False
+            if shouldResolveProjectTrust
+            else cachedProjectTrust
+            if cachedProjectTrust is not None
+            else parsed.projectTrustOverride
+            if parsed.projectTrustOverride is not None
+            # pi v1.5.0 (#10947): a saved decision before auto-trust.
+            else savedProjectTrust
+            if (savedProjectTrust := trustStore.get(cwd)) is not None
+            else not hasTrustRequiringResources
         )
-        project_trust_diagnostics: list[AgentSessionRuntimeDiagnostic] = []
+        runtimeSettingsManager = SettingsManager.create(cwd, agentDir, {"projectTrusted": projectTrusted})
 
-        async def resolve_trust(payload: dict[str, Any]) -> bool:
-            nonlocal project_trusted
-            context = runtime_options.get("projectTrustContext")
-            if context is None:
-                context_settings = startup_settings_manager or SettingsManager.create(
-                    runtime_cwd,
-                    agent_dir,
-                    {"projectTrusted": False},
-                )
-                context = create_project_trust_context(
-                    cwd=runtime_cwd,
-                    mode=app_mode,
-                    settings_manager=context_settings,
-                    has_ui=(
-                        runtime_options.get("sessionStartEvent") is None
-                        and app_mode == "interactive"
-                    ),
-                )
-            project_trusted = await resolve_project_trusted(
+        async def resolveProjectTrust(payload: dict[str, Any]) -> bool:
+            trusted = await resolveProjectTrusted(
                 {
-                    "cwd": runtime_cwd,
-                    "trustStore": trust_store,
+                    "cwd": cwd,
+                    "trustStore": trustStore,
                     "trustOverride": parsed.projectTrustOverride,
-                    "defaultProjectTrust": (
-                        startup_settings_manager.getDefaultProjectTrust()
-                        if startup_settings_manager is not None
-                        else settings_manager.getDefaultProjectTrust()
-                    ),
+                    "defaultProjectTrust": trustSettingsManager.getDefaultProjectTrust(),
                     "extensionsResult": payload["extensionsResult"],
-                    "projectTrustContext": context,
-                    "onExtensionError": lambda message: project_trust_diagnostics.append(
+                    "projectTrustContext": (
+                        projectTrustContext
+                        if projectTrustContext is not None
+                        else createProjectTrustContext({"cwd": cwd, "mode": trustPromptMode if isInitialRuntime else appMode, "settingsManager": trustSettingsManager, "hasUI": isInitialRuntime and trustPromptMode == "interactive"})
+                    ),
+                    "onExtensionError": lambda message: projectTrustDiagnostics.append(
                         AgentSessionRuntimeDiagnostic(type="warning", message=message)
                     ),
                 }
             )
-            project_trust_by_cwd[trust_key] = project_trusted
-            return project_trusted
+            projectTrustByCwd[cwd] = trusted
+            return trusted
 
-        resource_loader_options: dict[str, Any] = {
+        resourceLoaderOptions: dict[str, Any] = {
             "noExtensions": parsed.noExtensions,
+            "disabledBuiltinExtensions": ["mcp"] if parsed.noMcp else None,
             "noPromptTemplates": parsed.noPromptTemplates,
             "noThemes": parsed.noThemes,
             "noContextFiles": parsed.noContextFiles,
             "systemPrompt": parsed.systemPrompt,
             "appendSystemPrompt": parsed.appendSystemPrompt,
         }
-        if resolved_extension_paths is not None:
-            resource_loader_options["additionalExtensionPaths"] = resolved_extension_paths
-        if resolved_prompt_template_paths is not None:
-            resource_loader_options["additionalPromptTemplatePaths"] = resolved_prompt_template_paths
-        if resolved_theme_paths is not None:
-            resource_loader_options["additionalThemePaths"] = resolved_theme_paths
-        if extension_factories is not None:
-            resource_loader_options["extensionFactories"] = extension_factories
+        # Absent keys stand for pi's `undefined` values.
+        if resolvedExtensionPaths is not None:
+            resourceLoaderOptions["additionalExtensionPaths"] = resolvedExtensionPaths
+        if resolvedPromptTemplatePaths is not None:
+            resourceLoaderOptions["additionalPromptTemplatePaths"] = resolvedPromptTemplatePaths
+        if resolvedThemePaths is not None:
+            resourceLoaderOptions["additionalThemePaths"] = resolvedThemePaths
+        if extensionFactories is not None:
+            resourceLoaderOptions["extensionFactories"] = extensionFactories
 
-        services = await create_agent_session_services(
+        services = await createAgentSessionServices(
             {
-                "cwd": runtime_cwd,
-                "agentDir": agent_dir,
-                "authStorage": auth_storage,
-                "settingsManager": settings_manager,
+                "cwd": cwd,
+                "agentDir": agentDir,
+                "settingsManager": runtimeSettingsManager,
+                "modelRuntimeSignal": TimeoutAbortSignal(15_000),
                 "extensionFlagValues": parsed.unknownFlags,
-                "resourceLoaderOptions": resource_loader_options,
                 **(
-                    {
-                        "resourceLoaderReloadOptions": {
-                            "resolveProjectTrust": resolve_trust,
-                        }
-                    }
-                    if should_resolve_trust
+                    {"resourceLoaderReloadOptions": {"resolveProjectTrust": resolveProjectTrust}}
+                    if shouldResolveProjectTrust
                     else {}
                 ),
+                "resourceLoaderOptions": resourceLoaderOptions,
             }
         )
-        settings_manager = services.settingsManager
-        if parsed.useTheme is not None:   # Override for this run only; never written back to settings (pi #7722).
-            settings_manager.applyOverrides({"theme": parsed.useTheme})
-        model_registry = services.modelRegistry
-        if model_profile:
-            settings_manager.bindModelProfile(model_profile, model_registry)
-        if model_defaults_read_only:
-            settings_manager.restrictModelDefaults()
-        resource_loader = services.resourceLoader
-
+        settingsManager = services.settingsManager
+        modelRuntime = services.modelRuntime
+        resourceLoader = services.resourceLoader
+        # MISAKA fork: role-bound model defaults.
+        if modelProfile:
+            settingsManager.bindModelProfile(modelProfile, modelRuntime)
+        if modelDefaultsReadOnly:
+            settingsManager.restrictModelDefaults()
         diagnostics: list[AgentSessionRuntimeDiagnostic] = [
-            *project_trust_diagnostics,
+            *projectTrustDiagnostics,
             *services.diagnostics,
-            *collect_settings_diagnostics(settings_manager),
+            *collectSettingsDiagnostics(settingsManager),
+            *(
+                AgentSessionRuntimeDiagnostic(
+                    type="error", message=f'Failed to load extension "{_field(item, "path")}": {_field(item, "error")}'
+                )
+                for item in resourceLoader.getExtensions().errors
+            ),
+            *(
+                AgentSessionRuntimeDiagnostic(
+                    type="warning", message=f'Extension package "{_field(item, "path")}": {_field(item, "warning")}'
+                )
+                for item in (resourceLoader.getExtensions().warnings or [])
+            ),
         ]
-        for item in resource_loader.getExtensions().errors:
-            path = item.get("path", "") if isinstance(item, dict) else getattr(item, "path", "")
-            error = item.get("error", "") if isinstance(item, dict) else getattr(item, "error", "")
-            diagnostics.append(
-                AgentSessionRuntimeDiagnostic(type="error", message=f'Failed to load extension "{path}": {error}')
-            )
 
-        model_patterns = parsed.models or settings_manager.getEnabledModels()
-        scoped_models = (
-            await resolveModelScope(model_patterns, model_registry)
-            if model_patterns and len(model_patterns) > 0
+        modelPatterns = parsed.models if parsed.models is not None else settingsManager.getEnabledModels()
+        scopedModels = (
+            await resolveModelScope(modelPatterns, modelRuntime, AuthOperationOptions(signal=TimeoutAbortSignal(15_000)))
+            if modelPatterns and len(modelPatterns) > 0
             else []
         )
-        session_options = build_session_options(
+        sessionOptionsResult = buildSessionOptions(
             parsed,
-            scoped_models,
-            len(runtime_options["sessionManager"].buildSessionContext().messages) > 0,
-            model_registry,
-            settings_manager,
+            scopedModels,
+            len(sessionManager.buildSessionContext().messages) > 0,
+            modelRuntime,
+            settingsManager,
         )
-        diagnostics.extend(_to_agent_runtime_diagnostics(session_options.diagnostics))
+        sessionOptions = sessionOptionsResult.options
+        cliThinkingFromModel = sessionOptionsResult.cliThinkingFromModel
+        diagnostics.extend(sessionOptionsResult.diagnostics)
 
         if parsed.apiKey:
-            selected_model = session_options.options.get("model")
-            if selected_model is None:
+            if not sessionOptions.get("model"):
                 diagnostics.append(
                     AgentSessionRuntimeDiagnostic(
                         type="error",
-                        message=(
-                            "--api-key requires a model to be specified via --model, "
-                            "--provider/--model, or --models"
-                        ),
+                        message="--api-key requires a model to be specified via --model, --provider/--model, or --models",
                     )
                 )
             else:
-                auth_storage.setRuntimeApiKey(selected_model.provider, parsed.apiKey)
+                await modelRuntime.setRuntimeApiKey(sessionOptions["model"].provider, parsed.apiKey)
 
-        created = await create_agent_session_from_services(
+        created = await createAgentSessionFromServices(
             {
                 "services": services,
-                "sessionManager": runtime_options["sessionManager"],
-                "sessionStartEvent": runtime_options.get("sessionStartEvent"),
-                "model": session_options.options.get("model"),
-                "thinkingLevel": session_options.options.get("thinkingLevel"),
-                "scopedModels": session_options.options.get("scopedModels"),
-                "tools": session_options.options.get("tools"),
-                "excludeTools": session_options.options.get("excludeTools"),
-                "noTools": session_options.options.get("noTools"),
-                "customTools": custom_tools,
+                "sessionManager": sessionManager,
+                "sessionStartEvent": sessionStartEvent,
+                "model": sessionOptions.get("model"),
+                "thinkingLevel": sessionOptions.get("thinkingLevel"),
+                "scopedModels": sessionOptions.get("scopedModels"),
+                "tools": sessionOptions.get("tools"),
+                "excludeTools": sessionOptions.get("excludeTools"),
+                "noTools": sessionOptions.get("noTools"),
+                # MISAKA fork: the product's own tools and core parts.
+                "customTools": customTools,
                 "parts": parts,
             }
         )
-        session = created["session"] if isinstance(created, dict) else created.session
-        if session.model and (parsed.thinking is not None or session_options.cliThinkingFromModel):
-            session.setThinkingLevel(session.thinkingLevel)
+        cliThinkingOverride = parsed.thinking is not None or cliThinkingFromModel
+        if created["session"].model and cliThinkingOverride:
+            created["session"].setThinkingLevel(created["session"].thinkingLevel)
 
         return CreateAgentSessionRuntimeResult(
-            session=session,
+            session=created["session"],
             services=services,
             diagnostics=diagnostics,
-            extensionsResult=created.get("extensionsResult") if isinstance(created, dict) else created.extensionsResult,
-            modelFallbackMessage=(
-                created.get("modelFallbackMessage") if isinstance(created, dict) else created.modelFallbackMessage
-            ),
+            extensionsResult=created.get("extensionsResult"),
+            modelFallbackMessage=created.get("modelFallbackMessage"),
         )
 
-    return _factory
+    return createRuntime
 
 
-async def create_session_manager(
-    parsed: Args,
-    cwd: str,
-    session_dir: str | None,
-    settings_manager: SettingsManager,
-    *,
-    prompt_confirm_fn: ConfirmFn = prompt_confirm,
-    select_session_fn: SelectSessionFn | None = None,
-    output_stream: Any | None = None,
-    error_stream: Any | None = None,
-) -> SessionManager:
-    out = output_stream or sys.stdout
-    err = error_stream or sys.stderr
-    selector = select_session_fn or session_picker.select_session
+def _field(item: Any, name: str) -> Any:
+    """``{ path, error }`` destructuring of a loader error or warning, which arrives as a mapping or an object."""
+    return item.get(name, "") if isinstance(item, dict) else getattr(item, name, "")
 
-    def fork_session_or_exit(source_path: str, session_id: str | None = None) -> SessionManager:
-        try:
-            return SessionManager.forkFrom(
-                source_path, cwd, session_dir, NewSessionOptions(id=session_id) if session_id else None
-            )
-        except Exception as error:
-            err.write(_format_colored_message(f"Error: {error}", _RED) + "\n")
-            raise SystemExit(1) from error
 
-    async def find_local_session_by_exact_id(session_id: str) -> str | None:
-        match = _find_local_session_by_exact_id(session_id, cwd, session_dir)
-        return match.path if match else None
-
-    if parsed.noSession or parsed.help or parsed.listModels is not None:
-        manager = SessionManager.inMemory(cwd)
-        if parsed.sessionId:
-            manager.newSession(NewSessionOptions(id=parsed.sessionId))
-        return manager
-
-    if parsed.fork:
-        if parsed.sessionId and await find_local_session_by_exact_id(parsed.sessionId):
-            err.write(_format_colored_message(f"Session already exists with id '{parsed.sessionId}'", _RED) + "\n")
-            raise SystemExit(1)
-        resolved = await resolve_session_path(parsed.fork, cwd, session_dir)
-        if resolved.type in {"path", "local", "global"} and resolved.path:
-            return fork_session_or_exit(resolved.path, parsed.sessionId)
-        err.write(_format_colored_message(f"No session found matching '{resolved.arg}'", _RED) + "\n")
-        raise SystemExit(1)
-
-    if parsed.session:
-        resolved = await resolve_session_path(parsed.session, cwd, session_dir)
-        if resolved.type in {"path", "local"} and resolved.path:
-            return SessionManager.open(resolved.path, session_dir)
-        if resolved.type == "global" and resolved.path:
-            out.write(_format_colored_message(f"Session found in different project: {resolved.cwd}", _YELLOW) + "\n")
-            should_fork = await prompt_confirm_fn("Fork this session into current directory?")
-            if not should_fork:
-                out.write(_format_colored_message("Aborted.", _DIM) + "\n")
-                raise SystemExit(0)
-            return fork_session_or_exit(resolved.path)
-        err.write(_format_colored_message(f"No session found matching '{resolved.arg}'", _RED) + "\n")
-        raise SystemExit(1)
-
-    if parsed.resume:
-        init_theme(settings_manager.getTheme(), True)
-        try:
-            selected_path = await selector(
-                lambda onProgress=None: SessionManager.list(cwd, session_dir, onProgress),
-                lambda onProgress=None: SessionManager.listAll(sessions_root_of(session_dir), onProgress),
-            )
-            if not selected_path:
-                out.write(_format_colored_message("No session selected", _DIM) + "\n")
-                raise SystemExit(0)
-            return SessionManager.open(selected_path, session_dir)
-        finally:
-            stop_theme_watcher()
-
-    if parsed.continue_:
-        return SessionManager.continueRecent(cwd, session_dir)
-
-    if parsed.sessionId:   # pi main.ts:430-442: an exact project session id reopens it, otherwise it is created
-        existing = await find_local_session_by_exact_id(parsed.sessionId)
-        if existing:
-            return SessionManager.open(existing, session_dir)
-        err.write(_format_colored_message(
-            f"Warning: No project session found with id '{parsed.sessionId}'; creating a new session with that id.",
-            _YELLOW,
-        ) + "\n")
-        manager = SessionManager.create(cwd, session_dir)
-        manager.newSession(NewSessionOptions(id=parsed.sessionId))
-        return manager
-
-    return SessionManager.create(cwd, session_dir)
+class MainOptions(TypedDict, total=False):
+    extensionFactories: list[Any]
+    # MISAKA fork: the product's own options.
+    customTools: list[Any]
+    parts: list[Any]
+    modelProfile: str
+    modelDefaultsReadOnly: bool
 
 
 async def main(args: list[str], options: MainOptions | None = None) -> int:
     resetTimings()
-    parsed = parse_args(args)
-    for diagnostic in parsed.diagnostics:
-        prefix = "Error" if diagnostic.type == "error" else "Warning"
-        color = _RED if diagnostic.type == "error" else _YELLOW
-        print(_format_colored_message(f"{prefix}: {diagnostic.message}", color), file=sys.stderr)
-    if any(diagnostic.type == "error" for diagnostic in parsed.diagnostics):
-        return 1
+    # Commands and startup selectors can load user-authored themes before runtime creation.
+    setThemeJsonValidator(validateThemeJson)
+    extensionFactories = (options or {}).get("extensionFactories")
+    # MISAKA fork: `MISAKA_OFFLINE`, where upstream reads `PI_OFFLINE`; misaka has no version check to skip.
+    offlineMode = "--offline" in args or isTruthyEnvFlag(os.environ.get("MISAKA_OFFLINE"))
+    if offlineMode:
+        os.environ["MISAKA_OFFLINE"] = "1"
+
+    authExitCode = await runAuthCommand(args)
+    if authExitCode is not None:
+        return authExitCode
+
+    cwd = os.getcwd()
+    agentDir = get_agent_dir()
+    bootstrapSettingsManager = SettingsManager.create(cwd, agentDir, {"projectTrusted": False})
+    applyHttpProxySettings(bootstrapSettingsManager.getGlobalSettings().get("httpProxy"))
+    configureHttpDispatcher()
+
+    parsed = parseArgs(args)
+    if len(parsed.diagnostics) > 0:
+        for d in parsed.diagnostics:
+            color = chalk.red if d.type == "error" else chalk.yellow
+            print(color(f"{'Error' if d.type == 'error' else 'Warning'}: {d.message}"), file=sys.stderr)
+        if any(d.type == "error" for d in parsed.diagnostics):
+            return 1
     time("parseArgs")
 
-    # pi main.ts:614-637: version and export answer on the real stdout before any takeover.
     if parsed.version:
         print(VERSION)
         return 0
 
     if parsed.export:
-        output_path = parsed.messages[0] if parsed.messages else None
         try:
-            result = await export_from_file(parsed.export, output_path)
+            outputPath = parsed.messages[0] if len(parsed.messages) > 0 else None
+            result = await exportFromFile(parsed.export, outputPath)
         except Exception as error:  # noqa: BLE001 - any export failure is reported to the user and exits 1
-            print(_format_colored_message(f"Error: {error}", _RED), file=sys.stderr)
+            print(chalk.red(f"Error: {errorMessage(error)}"), file=sys.stderr)
             return 1
         print(f"Exported to: {result}")
         return 0
 
-    app_mode = resolve_app_mode(parsed, sys.stdin.isatty(), sys.stdout.isatty())
-    took_over_stdout = app_mode != "interactive" and not is_plain_runtime_metadata_command(parsed)
-    if took_over_stdout:
+    appMode = resolveAppMode(parsed, sys.stdin.isatty(), sys.stdout.isatty())
+    shouldTakeOverStdout = appMode != "interactive" and not isPlainRuntimeMetadataCommand(parsed)
+    if shouldTakeOverStdout:
         takeOverStdout()
 
-    def finish(code: int) -> int:
-        if took_over_stdout and isStdoutTakenOver():
-            restoreStdout()
-        return code
-
-    try:
-        validate_fork_flags(parsed)
-        validate_session_id_flags(parsed)
-    except ValueError as error:
-        print(_format_colored_message(f"Error: {error}", _RED), file=sys.stderr)
-        return finish(1)
-
-    cwd = os.getcwd()
-    agent_dir = get_agent_dir()
-    # Session lookup and the pre-runtime trust prompt may use global settings,
-    # but project settings are precisely what the trust decision protects.
-    startup_settings_manager = SettingsManager.create(
-        cwd,
-        agent_dir,
-        {"projectTrusted": False},
-    )
-    applyHttpProxySettings(startup_settings_manager.getGlobalSettings().get("httpProxy"))
-    startup_settings_diagnostics = deduplicate_diagnostics(
-        collect_settings_diagnostics(startup_settings_manager)
-    )
-    report_diagnostics(startup_settings_diagnostics)
-    session_dir = (
-        normalize_path(parsed.sessionDir)
-        if parsed.sessionDir
-        else startup_settings_manager.getSessionDir()
-    )
-    try:
-        session_manager = await create_session_manager(parsed, cwd, session_dir, startup_settings_manager)
-    except SystemExit as exit_signal:
-        code = exit_signal.code
-        return finish(int(code) if isinstance(code, int) else 1)
-    missing_session_cwd_issue = None
-    if hasattr(session_manager, "getSessionFile") and hasattr(session_manager, "getCwd"):
-        missing_session_cwd_issue = get_missing_session_cwd_issue(session_manager, cwd)
-    if missing_session_cwd_issue is not None:
-        if resolve_app_mode(parsed, sys.stdin.isatty(), sys.stdout.isatty()) == "interactive":
-            selected_cwd = await prompt_for_missing_session_cwd(missing_session_cwd_issue, startup_settings_manager)
-            if selected_cwd is None:
-                return finish(0)
-            if not missing_session_cwd_issue.sessionFile:
-                print(
-                    _format_colored_message(f"Error: {MissingSessionCwdError(missing_session_cwd_issue)}", _RED),
-                    file=sys.stderr,
-                )
-                return finish(1)
-            session_manager = SessionManager.open(
-                missing_session_cwd_issue.sessionFile,
-                session_dir,
-                selected_cwd,
-            )
-        else:
-            print(
-                _format_colored_message(f"Error: {MissingSessionCwdError(missing_session_cwd_issue)}", _RED),
-                file=sys.stderr,
-            )
-            return finish(1)
-    if parsed.name is not None:   # pi main.ts:689-696
-        name = parsed.name.strip()
-        if not name:
-            print(_format_colored_message("Error: --name requires a non-empty value", _RED), file=sys.stderr)
-            return finish(1)
-        session_manager.appendSessionInfo(name)
-
-    time("createSessionManager")
-    resolved_extension_paths = resolve_cli_paths(cwd, parsed.extensions)
-    resolved_prompt_template_paths = resolve_cli_paths(cwd, parsed.promptTemplates)
-    resolved_theme_paths = resolve_cli_paths(cwd, parsed.themes)
-    session_cwd = session_manager.getCwd()
-    auto_trust_on_reload_cwd = (
-        session_cwd
-        if parsed.projectTrustOverride is None
-        and not has_trust_requiring_project_resources(session_cwd)
-        else None
-    )
-    auth_storage = AuthStorage.create()
     runtime = None
-    runtime_handed_off = False   # set once a mode is running: the mode disposes the runtime itself
+    runtimeHandedOff = False   # MISAKA fork: set once a mode is running; the mode disposes the runtime itself
     try:
-        runtime_factory = create_runtime_factory(
+        try:
+            validateForkFlags(parsed)
+            validateSessionIdFlags(parsed)
+
+            startupSettingsManager = SettingsManager.create(cwd, agentDir)
+            startupSettingsDiagnostics = collectSettingsDiagnostics(startupSettingsManager)
+
+            if appMode == "interactive" and parsed.useTheme is not None:
+                startupSettingsManager.applyOverrides({"theme": parsed.useTheme})
+
+            # Decide the final runtime cwd before creating cwd-bound runtime services.
+            # --session and --resume may select a session from another project, so project-local
+            # settings, resources, provider registrations, and models must be resolved only after
+            # the target session cwd is known. The startup-cwd settings manager is used only for
+            # sessionDir lookup during session selection.
+            sessionDir = normalizePath(parsed.sessionDir) if parsed.sessionDir else startupSettingsManager.getSessionDir()
+            sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager)
+            missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd)
+            if missingSessionCwdIssue:
+                if appMode == "interactive":
+                    selectedCwd = await promptForMissingSessionCwd(missingSessionCwdIssue, startupSettingsManager)
+                    if not selectedCwd:
+                        return 0
+                    sessionManager = SessionManager.open(missingSessionCwdIssue.sessionFile, sessionDir, selectedCwd)
+                else:
+                    print(chalk.red(str(MissingSessionCwdError(missingSessionCwdIssue))), file=sys.stderr)
+                    return 1
+            if parsed.name is not None:
+                name = normalizeSessionName(parsed.name)
+                if name is None:
+                    print(chalk.red("Error: --name requires a non-empty value"), file=sys.stderr)
+                    return 1
+                try:
+                    sessionManager.appendSessionInfo(name)
+                except ValueError as refusal:   # a role's canonical Bot Chat keeps its name
+                    print(chalk.red(f"Error: {refusal}"), file=sys.stderr)
+                    return 1
+        except SystemExit as exitSignal:
+            return int(exitSignal.code) if isinstance(exitSignal.code, int) else 1
+        time("createSessionManager")
+
+        sessionCwd = sessionManager.getCwd()
+        autoTrustOnReloadCwd = (
+            sessionCwd
+            if parsed.projectTrustOverride is None and not hasTrustRequiringProjectResources(sessionCwd)
+            else None
+        )
+        trustPromptMode: AppMode = "print" if parsed.help or parsed.listModels is not None else appMode
+
+        createRuntime = createRuntimeFactory(
             parsed,
-            auth_storage,
-            resolved_extension_paths=resolved_extension_paths,
-            resolved_prompt_template_paths=resolved_prompt_template_paths,
-            resolved_theme_paths=resolved_theme_paths,
-            extension_factories=options.get("extensionFactories") if options else None,
-            custom_tools=options.get("customTools") if options else None,
-            parts=options.get("parts") if options else None,
-            model_profile=options.get("modelProfile") if options else None,
-            model_defaults_read_only=bool(options.get("modelDefaultsReadOnly")) if options else False,
-            app_mode=(
-                "print"
-                if parsed.help or parsed.listModels is not None
-                else app_mode
-            ),
-            startup_settings_manager=startup_settings_manager,
+            resolvedExtensionPaths=resolveCliPaths(cwd, parsed.extensions),
+            resolvedPromptTemplatePaths=resolveCliPaths(cwd, parsed.promptTemplates),
+            resolvedThemePaths=resolveCliPaths(cwd, parsed.themes),
+            extensionFactories=extensionFactories,
+            customTools=(options or {}).get("customTools"),
+            parts=(options or {}).get("parts"),
+            modelProfile=(options or {}).get("modelProfile"),
+            modelDefaultsReadOnly=bool((options or {}).get("modelDefaultsReadOnly")),
+            appMode=appMode,
+            trustPromptMode=trustPromptMode,
+            startupSettingsManager=startupSettingsManager,
         )
         time("createRuntime")
-        runtime = await create_agent_session_runtime(
-            runtime_factory,
+        runtime = await createAgentSessionRuntime(
+            createRuntime,
             {
-                "cwd": session_manager.getCwd(),
-                "agentDir": agent_dir,
-                "sessionManager": session_manager,
+                "cwd": sessionManager.getCwd(),
+                "agentDir": agentDir,
+                "sessionManager": sessionManager,
             },
         )
         time("createAgentSessionRuntime")
         services = runtime.services
         session = runtime.session
-        settings_manager = services.settingsManager
-        setCapabilityOverrides(settings_manager.getTerminalCapabilityOverrides())
-        model_registry = services.modelRegistry
+        modelFallbackMessage = runtime.modelFallbackMessage
+        settingsManager = services.settingsManager
+        modelRuntime = services.modelRuntime
+        resourceLoader = services.resourceLoader
+        setCapabilityOverrides(settingsManager.getTerminalCapabilityOverrides())
+        applyHttpProxySettings(settingsManager.getGlobalSettings().get("httpProxy"))
+        configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs())
 
         if parsed.help:
-            extension_flags = [
-                flag
-                for extension in services.resourceLoader.getExtensions().extensions
-                for flag in extension.flags.values()
-            ]
-            print_help(extension_flags)
+            reportDiagnostics(startupSettingsDiagnostics)
+            extensionFlags = [flag for extension in resourceLoader.getExtensions().extensions for flag in extension.flags.values()]
+            printHelp(extensionFlags)
             return 0
 
         if parsed.listModels is not None:
-            await list_models(
-                model_registry,
-                parsed.listModels if isinstance(parsed.listModels, str) else None,
-            )
+            reportDiagnostics(startupSettingsDiagnostics)
+            searchPattern = parsed.listModels if isinstance(parsed.listModels, str) else None
+            await listModels(modelRuntime, searchPattern, TimeoutAbortSignal(15_000))
             return 0
 
-        # No downgrade to "print" here, unlike upstream `main.ts:867-872`: piped stdin
-        # already forced `resolve_app_mode` to "print" (`read_piped_stdin` returns None on
-        # a tty), so the downgrade was unreachable -- and `took_over_stdout` was computed
-        # from the pre-downgrade mode, so a reachable version of it would have run print
-        # mode with stdout never taken over.
-        stdin_content = await read_piped_stdin()
+        # Read piped stdin content (if any)
+        stdinContent = await readPipedStdin()
+        if stdinContent is not None and appMode == "interactive":
+            appMode = "print"
         time("readPipedStdin")
 
-        initial_message, initial_images = await prepare_initial_message(parsed, stdin_content)
+        initial = await prepareInitialMessage(parsed, stdinContent)
+        initialMessage, initialImages = initial.initialMessage, initial.initialImages
         time("prepareInitialMessage")
-        init_theme(settings_manager.getTheme(), app_mode == "interactive")
+        initTheme(settingsManager.getTheme(), appMode == "interactive")
         time("initTheme")
+
         time("resolveModelScope")
-        display_diagnostics = deduplicate_diagnostics(
-            [*startup_settings_diagnostics, *runtime.diagnostics]
-        )
-        report_diagnostics(display_diagnostics[len(startup_settings_diagnostics) :])
-        if any(item.type == "error" for item in runtime.diagnostics):
+        startupDiagnostics = deduplicateDiagnostics([*startupSettingsDiagnostics, *runtime.diagnostics])
+        hasRuntimeErrors = any(diagnostic.type == "error" for diagnostic in runtime.diagnostics)
+        if appMode != "interactive" or hasRuntimeErrors:
+            reportDiagnostics(startupDiagnostics)
+        if hasRuntimeErrors:
+            if any("Failed to load extension" in diagnostic.message for diagnostic in runtime.diagnostics):
+                print(chalk.yellow(EXTENSION_LOAD_FAILURE_HINT), file=sys.stderr)
             return 1
         time("createAgentSession")
 
-        if app_mode != "interactive" and session.model is None:
-            print(_format_colored_message(formatNoModelsAvailableMessage(), _RED), file=sys.stderr)
+        if appMode != "interactive" and not session.model:
+            print(chalk.red(formatNoModelsAvailableMessage()), file=sys.stderr)
             return 1
 
-        if app_mode == "interactive":
-            interactive_mode = InteractiveMode(
+        if appMode == "interactive":
+            interactiveMode = InteractiveMode(
                 runtime,
                 {
-                    "modelFallbackMessage": runtime.modelFallbackMessage,
-                    "initialMessage": initial_message,
-                    "initialImages": initial_images,
+                    "startupDiagnostics": startupDiagnostics,
+                    "modelFallbackMessage": modelFallbackMessage,
+                    "autoTrustOnReloadCwd": autoTrustOnReloadCwd,
+                    "initialMessage": initialMessage,
+                    "initialImages": initialImages,
                     "initialMessages": list(parsed.messages),
                     "verbose": parsed.verbose,
-                    "autoTrustOnReloadCwd": auto_trust_on_reload_cwd,
+                    "initialThemeSetting": parsed.useTheme,
                 },
             )
             printTimings()
-            runtime_handed_off = True
-            return await interactive_mode.run()
+            runtimeHandedOff = True
+            return await interactiveMode.run()
         printTimings()
-        runtime_handed_off = True
-        return await run_print_mode(
+        runtimeHandedOff = True
+        return await runPrintMode(
             runtime,
             {
-                "mode": to_print_output_mode(app_mode),
+                "mode": toPrintOutputMode(appMode),
                 "messages": list(parsed.messages),
-                "initialMessage": initial_message,
-                "initialImages": initial_images,
+                "initialMessage": initialMessage,
+                "initialImages": initialImages,
             },
         )
     finally:
-        # pi main.ts:858/865 leaves via process.exit() right after --help / --list-models, which
-        # releases everything by definition. Returning instead means every early return above
-        # (help, list-models, an error diagnostic from the runtime, no model in a non-interactive
-        # run) has to release explicitly, or the extensions registered on session_shutdown -- MCP
-        # server subprocesses, the LCM context flush, subagent and research teardown -- never get
-        # their event. Both modes dispose the runtime themselves (print_mode.py:189,
-        # interactive_mode.py:5604), so a handed-off runtime is left alone rather than being sent
-        # session_shutdown twice.
-        if runtime is not None and not runtime_handed_off:
+        # MISAKA fork: pi leaves via process.exit() right after --help / --list-models, which releases everything by
+        # definition. Returning instead means every early return above has to release explicitly, or the extensions
+        # registered on session_shutdown -- MCP server subprocesses, the LCM context flush, subagent and research
+        # teardown -- never get their event. Both modes dispose the runtime themselves, so a handed-off runtime is
+        # left alone rather than being sent session_shutdown twice.
+        if runtime is not None and not runtimeHandedOff:
             try:
                 await runtime.dispose()
             except Exception as error:  # noqa: BLE001 - shutdown must not replace the command's own result
-                print(
-                    _format_colored_message(f"Warning: session shutdown failed: {error}", _YELLOW),
-                    file=sys.stderr,
-                )
-        stop_theme_watcher()   # pi main.ts:971-972 stops it beside restoreStdout()
-        if took_over_stdout and isStdoutTakenOver():
+                print(chalk.yellow(f"Warning: session shutdown failed: {errorMessage(error)}"), file=sys.stderr)
+        stopThemeWatcher()
+        if shouldTakeOverStdout and isStdoutTakenOver():
             restoreStdout()
 
-__all__ = ["MainOptions", "main"]
+
+__all__ = ["MainOptions", "createSessionManager", "main"]

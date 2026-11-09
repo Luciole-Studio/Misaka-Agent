@@ -7,7 +7,7 @@ and she sat idle until someone typed "继续"."""
 import pytest
 
 from misaka.ai.types import AssistantMessage
-from misaka.ai.utils.retry import is_retryable_assistant_error
+from misaka.ai.utils.retry import isRetryableAssistantError
 
 
 def _error(text):
@@ -23,9 +23,9 @@ def _error(text):
     "read: unexpected EOF",
 ])
 def test_gateway_stream_drop_is_retryable(text):
-    assert is_retryable_assistant_error(_error(text))
+    assert isRetryableAssistantError(_error(text))
 
 
 def test_quota_walls_are_still_not_retryable():
-    assert not is_retryable_assistant_error(_error("You have hit your usage limit: quota exceeded"))
-    assert not is_retryable_assistant_error(_error("insufficient_quota"))
+    assert not isRetryableAssistantError(_error("You have hit your usage limit: quota exceeded"))
+    assert not isRetryableAssistantError(_error("insufficient_quota"))

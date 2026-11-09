@@ -1,5 +1,22 @@
-"""The filename part of a card contract, separate from its prose requirements."""
+"""What a card contract holds besides its prose: its deliverable's filename, and the findings a card
+declares as it works."""
 import re
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class Finding(BaseModel):
+    """One finding a card declares (``misaka_card_note``): what it found, what kind of claim that is,
+    and where it comes from."""
+
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(min_length=1)
+    claim_type: Literal["fact", "inference", "interpretation", "normative"] = "fact"
+    quote: str = ""
+    source_file: str | None = Field(None, description="Source path or locator, if applicable.")
+    doc_id: str | None = None
+    page: int | None = Field(None, ge=1, strict=True)
 
 
 def split_deliverable(value):
@@ -27,6 +44,24 @@ def split_deliverable(value):
         raise ValueError("Invalid deliverable: its first line must be the file's name, such as `memo.md`, with the "
                          f"requirements on the lines after it; the first line reads {name[:60]!r}.")
     return name, "\n".join(([detail] if detail else []) + rest).strip()
+
+
+# A file extension where a name ends: a dot and a letter, not followed by more of a filename.
+# `v1.2 计划.md` and `archive.tar.gz` have one; `credential-sim.md 与 credential-sim.py` has two.
+_EXTENSION = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,15}(?![A-Za-z0-9_.-])")
+
+
+def one_file(name):
+    """Refuse a deliverable name that names several files. ``split_deliverable`` takes a backticked
+    line whole, so `credential-sim.md 与 credential-sim.py` was one name no file could match, and
+    eleven cards could never complete (2026-10-24, R52). Checked where a contract is written, not
+    where it is read: a card reworked or reopened completes again under the contract it already
+    has."""
+    if len(_EXTENSION.findall(name)) > 1:
+        raise ValueError(f"Invalid deliverable: {name[:80]!r} names more than one file. A card delivers one file: "
+                         "put its name on the first line, and the other files it writes (a script, data) on the "
+                         "lines after it.")
+    return name
 
 
 def format_deliverable(value):

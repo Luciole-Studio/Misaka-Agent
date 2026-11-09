@@ -97,9 +97,9 @@ def test_a_helper_script_is_not_warned_about_but_a_refused_document_is(tmp_path,
     ({"prompt_tokens": 100, "completion_tokens": 80, "cached_tokens": 25}, 0, 25),  # Kimi
 ])
 def test_reasoning_tokens_are_recorded_as_part_of_the_output(raw, reasoning, cache_read):
-    from misaka.ai.models import get_model
-    from misaka.ai.providers.openai_completions import parse_chunk_usage
-    usage = parse_chunk_usage(raw, get_model("openai", "gpt-4o"))
+    from misaka.ai.api.openai_completions import _parseChunkUsage as parse_chunk_usage
+    from misaka.ai.compat import getModel
+    usage = parse_chunk_usage(raw, getModel("openai", "gpt-4o"))
     assert usage.output == 80, "completion_tokens already include the reasoning: not added again"
     assert usage.reasoning == reasoning and usage.cacheRead == cache_read
 

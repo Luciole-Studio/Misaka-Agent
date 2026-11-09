@@ -1,147 +1,162 @@
-"""Command-line interface for OAuth provider login."""
+"""Translated from pi's ``packages/ai/src/cli.ts`` (v1.1.0): a command-line interface for OAuth provider login.
+
+MISAKA fork: credentials go to misaka's credential store, not ``./auth.json``; ``run()`` is the entry
+(``python -m misaka.ai``), because a Python module must not run on import.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
+import threading
+import uuid
 from typing import Any
 
-from misaka.ai.utils.oauth import get_oauth_provider, get_oauth_providers
+from misaka.ai.auth.types import LoginOptions
+from misaka.ai.providers.all import builtinProviders
 from misaka.config import get_auth_path
 from misaka.core.auth_storage import (
     AuthStorage,  # the one credential store: 0600, locked, never clobbers
 )
+from misaka.core.provider_attribution import CLIENT_NAME
+from misaka.utils.js import AbortController
 
-PROVIDERS = get_oauth_providers()
-
-
-async def _prompt(question: str) -> str:
-    return await asyncio.to_thread(input, question)
+_PROVIDERS = [provider for provider in builtinProviders() if provider.auth.oauth is not None]
 
 
-async def login(provider_id: str) -> None:
-    provider = get_oauth_provider(provider_id)
-    if provider is None:
-        print(f"Unknown provider: {provider_id}", file=sys.stderr)
-        raise SystemExit(1)
+def _prompt(question: str) -> asyncio.Future[str]:
+    """``rl.question``.
 
-    async def on_prompt(prompt: Any) -> str:
-        placeholder = f" ({prompt.placeholder})" if getattr(prompt, "placeholder", None) else ""
-        return await _prompt(f"{prompt.message}{placeholder}: ")
+    MISAKA fork: answered from a daemon thread. A browser sign-in races the loopback callback
+    against a paste prompt, and a question the callback made moot is never answered;
+    ``input()`` cannot be interrupted, and a thread from ``asyncio.to_thread`` left in it
+    would keep ``asyncio.run`` from returning. A daemon thread ends with the process, as
+    upstream's question ends with ``rl.close()``.
+    """
+    loop = asyncio.get_running_loop()
+    answer: asyncio.Future[str] = loop.create_future()
 
-    async def on_select(prompt: Any) -> str | None:
-        print(f"\n{prompt.message}")
-        for index, option in enumerate(prompt.options, start=1):
-            print(f"  {index}. {option.label}")
-        choice = await _prompt(f"Enter number (1-{len(prompt.options)}): ")
+    def settle(value: str | None, error: BaseException | None) -> None:
+        if answer.done():
+            return
+        if error is not None:
+            answer.set_exception(error)
+        else:
+            answer.set_result(value or "")
+
+    def read() -> None:
         try:
-            selected_index = int(choice, 10) - 1
-        except ValueError:
-            return None
-        if 0 <= selected_index < len(prompt.options):
-            return prompt.options[selected_index].id
-        return None
+            value = input(question)
+        except BaseException as error:  # noqa: BLE001 - handed to the awaiting coroutine
+            result: tuple[str | None, BaseException | None] = (None, error)
+        else:
+            result = (value, None)
+        # The loop is gone once the login no longer waits for this answer.
+        try:
+            loop.call_soon_threadsafe(settle, *result)
+        except RuntimeError:
+            pass
 
-    class _Callbacks:
-        signal = None
-        onProgress = staticmethod(print)
-        onDeviceCode = staticmethod(
-            lambda info: print(
-                f"\nOpen this URL in your browser:\n{info.verificationUri}\n"
-                f"Enter code: {info.userCode}\n"
-            )
-        )
-        onAuth = staticmethod(
-            lambda info: print(
-                f"\nOpen this URL in your browser:\n{info.url}"
-                + (f"\n{info.instructions}" if getattr(info, "instructions", None) else "")
-                + "\n"
-            )
-        )
-        onPrompt = staticmethod(on_prompt)
-        onSelect = staticmethod(on_select)
-        onManualCodeInput = None
+    threading.Thread(target=read, daemon=True).start()
+    return answer
 
-    credentials = await provider.login(_Callbacks())
+
+def _parseInt(value: str) -> int | None:
+    """``Number.parseInt(value, 10)``, with ``None`` for ``NaN``."""
+    match = re.match(r"\s*([+-]?\d+)", value)
+    return int(match.group(1)) if match else None
+
+
+async def _answerPrompt(authPrompt: Any) -> str:
+    if authPrompt.type == "select":
+        print(f"\n{authPrompt.message}")
+        for index in range(len(authPrompt.options)):
+            print(f"  {index + 1}. {authPrompt.options[index].label}")
+        number = _parseInt(await _prompt(f"Enter number (1-{len(authPrompt.options)}): "))
+        choice = number - 1 if number is not None else -1
+        selected = authPrompt.options[choice] if 0 <= choice < len(authPrompt.options) else None
+        if not selected:
+            raise RuntimeError("Invalid selection")
+        return selected.id
+    return await _prompt(f"{authPrompt.message}{f' ({authPrompt.placeholder})' if authPrompt.placeholder else ''}: ")
+
+
+def _notify(event: Any) -> None:
+    if event.type == "auth_url":
+        print(f"\nOpen this URL in your browser:\n{event.url}")
+        if event.instructions:
+            print(event.instructions)
+    elif event.type == "device_code":
+        print(f"\nOpen this URL in your browser:\n{event.verificationUri}")
+        print(f"Enter code: {event.userCode}")
+    elif event.type in ("info", "progress"):
+        print(event.message)
+
+
+class _Interaction:
+    def __init__(self) -> None:
+        self.signal = AbortController().signal
+
+    def prompt(self, authPrompt: Any) -> Any:
+        return _answerPrompt(authPrompt)
+
+    def notify(self, event: Any) -> None:
+        _notify(event)
+
+
+async def _login(providerId: str) -> None:
+    provider = next((entry for entry in _PROVIDERS if entry.id == providerId), None)
+    if provider is None or provider.auth.oauth is None:
+        raise RuntimeError(f"Unknown provider: {providerId}")
+    # This dev CLI does not persist an installation ID; apps should reuse one across logins.
+    # MISAKA fork: misaka introduces itself by its own name.
+    credential = await provider.auth.oauth.login(
+        _Interaction(), LoginOptions(getDeviceId=lambda: str(uuid.uuid4()), agentName=CLIENT_NAME)
+    )
+    # MISAKA fork: stored in misaka's credential store, not in `auth.json` under the
+    # working directory.
     storage = AuthStorage.create()
-    if storage.loadError is not None:
-        print(f"Cannot read {get_auth_path()}: {storage.loadError}", file=sys.stderr)
-        raise SystemExit(1)
-    try:
-        storage.set(provider_id, {"type": "oauth", **credentials.model_dump(mode="json")})
-    except (OSError, RuntimeError) as error:
-        print(f"Credentials were NOT saved to {get_auth_path()}: {error}", file=sys.stderr)
-        raise SystemExit(1) from None
+
+    async def store(_current: Any) -> Any:
+        return credential
+
+    await storage.modify(providerId, store)
     print(f"\nCredentials saved to {get_auth_path()}")
 
 
-def _format_provider_list() -> str:
-    return "\n".join(f"  {provider.id.ljust(20)} {provider.name}" for provider in PROVIDERS)
-
-
-async def main() -> None:
+async def _main() -> None:
     args = sys.argv[1:]
     command = args[0] if args else None
-
-    if command is None or command in {"help", "--help", "-h"}:
-        provider_list = _format_provider_list()
+    if not command or command in ("help", "--help", "-h"):
+        providerList = "\n".join(f"  {provider.id.ljust(20)} {provider.name}" for provider in _PROVIDERS)
         print(
-            "Usage: python -m misaka.ai <command> [provider]\n\n"
-            "Commands:\n"
-            "  login [provider]  Login to an OAuth provider\n"
-            "  list              List available providers\n\n"
-            "Providers:\n"
-            f"{provider_list}\n\n"
-            "Examples:\n"
-            "  python -m misaka.ai login              # interactive provider selection\n"
-            "  python -m misaka.ai login anthropic    # login to specific provider\n"
-            "  python -m misaka.ai list               # list providers\n"
+            "Usage: python -m misaka.ai <command> [provider]\n\nCommands:\n  login [provider]  Login to an OAuth "
+            f"provider\n  list              List available providers\n\nProviders:\n{providerList}"
         )
         return
-
     if command == "list":
-        print("Available OAuth providers:\n")
-        for provider in PROVIDERS:
-            print(f"  {provider.id.ljust(20)} {provider.name}")
+        for provider in _PROVIDERS:
+            print(f"{provider.id.ljust(20)} {provider.name}")
         return
-
     if command == "login":
-        provider_id = args[1] if len(args) > 1 else None
-
-        if provider_id is None:
-            print("Select a provider:\n")
-            for index, provider in enumerate(PROVIDERS, start=1):
-                print(f"  {index}. {provider.name}")
-            print()
-
-            choice = await _prompt(f"Enter number (1-{len(PROVIDERS)}): ")
-            try:
-                selected_index = int(choice, 10) - 1
-            except ValueError:
-                selected_index = -1
-
-            if selected_index < 0 or selected_index >= len(PROVIDERS):
-                print("Invalid selection", file=sys.stderr)
-                raise SystemExit(1)
-            provider_id = PROVIDERS[selected_index].id
-
-        if not any(provider.id == provider_id for provider in PROVIDERS):
-            print(f"Unknown provider: {provider_id}", file=sys.stderr)
-            print("Use 'python -m misaka.ai list' to see available providers", file=sys.stderr)
-            raise SystemExit(1)
-
-        print(f"Logging in to {provider_id}...")
-        await login(provider_id)
+        providerId = args[1] if len(args) > 1 else None
+        if not providerId:
+            for index in range(len(_PROVIDERS)):
+                print(f"  {index + 1}. {_PROVIDERS[index].name}")
+            number = _parseInt(await _prompt(f"Enter number (1-{len(_PROVIDERS)}): "))
+            index = number - 1 if number is not None else -1
+            providerId = _PROVIDERS[index].id if 0 <= index < len(_PROVIDERS) else None
+        if not providerId or not any(provider.id == providerId for provider in _PROVIDERS):
+            raise RuntimeError(f"Unknown provider: {providerId if providerId is not None else ''}")
+        await _login(providerId)
         return
-
-    print(f"Unknown command: {command}", file=sys.stderr)
-    print("Use 'python -m misaka.ai --help' for usage", file=sys.stderr)
-    raise SystemExit(1)
+    raise RuntimeError(f"Unknown command: {command}")
 
 
 def run() -> None:
     try:
-        asyncio.run(main())
+        asyncio.run(_main())
     except Exception as error:
-        print(f"Error: {error}", file=sys.stderr)
+        print("Error:", str(error), file=sys.stderr)
         raise SystemExit(1) from error

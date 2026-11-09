@@ -7,6 +7,7 @@ then grabbed it a second time to read it.
 import asyncio
 import threading
 
+from misaka.ui.tui import native_platform
 from misaka.utils import clipboard_image
 
 
@@ -15,10 +16,7 @@ class _Clipboard:
         self.data = data
         self.grabs = []
 
-    def has_image(self):
-        raise AssertionError("has_image must not be consulted: it grabs the image on the event loop")
-
-    async def get_image_binary(self):
+    async def getImage(self):
         def grab():
             self.grabs.append(threading.current_thread() is threading.main_thread())
             return self.data
@@ -27,14 +25,14 @@ class _Clipboard:
 
 async def test_an_image_is_grabbed_once_off_the_loop(monkeypatch):
     fake = _Clipboard(b"\x89PNG\r\n\x1a\n")
-    monkeypatch.setattr(clipboard_image, "_get_native_clipboard", lambda: fake)
-    image = await clipboard_image.read_clipboard_image_via_native_clipboard()
+    monkeypatch.setattr(native_platform, "getNativeClipboard", lambda: fake)
+    image = await clipboard_image.readClipboardImageViaNativeClipboard()
     assert image is not None and image.bytes.startswith(b"\x89PNG")
     assert fake.grabs == [False]
 
 
 async def test_an_empty_clipboard_reads_as_no_image(monkeypatch):
     fake = _Clipboard(None)
-    monkeypatch.setattr(clipboard_image, "_get_native_clipboard", lambda: fake)
-    assert await clipboard_image.read_clipboard_image_via_native_clipboard() is None
+    monkeypatch.setattr(native_platform, "getNativeClipboard", lambda: fake)
+    assert not await clipboard_image.readClipboardImageViaNativeClipboard()
     assert fake.grabs == [False]

@@ -101,7 +101,6 @@ EXCLUDED_DIRS = {
 HERMES_DERIVED = (
     "misaka/cli/dm.py",
     "misaka/config/env.py",
-    "misaka/core/mcp.py",
     "misaka/core/moa/",
     "misaka/core/skills/",
     "misaka/core/web/",

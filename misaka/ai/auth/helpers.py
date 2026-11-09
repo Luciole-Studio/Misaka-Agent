@@ -1,130 +1,97 @@
-"""Auth-method constructors, translated from pi's ``packages/ai/src/auth/helpers.ts``.
+"""Translated from pi's ``packages/ai/src/auth/helpers.ts`` (v1.1.0).
 
-``envApiKeyAuth`` is the shape most providers use verbatim; providers with non-standard
-resolution (provider env, ambient files, IAM) write their own ``ApiKeyAuth`` instead.
-``lazyOAuth`` wraps an ``OAuthAuth`` whose implementation is produced by a ``load``
-callable, run on the first ``login``/``refresh``/``toAuth`` call rather than when the
-provider definition is built.
+MISAKA fork: ``lazyOAuth`` takes keyword parameters for upstream's single ``input`` object, and the shared load is
+shielded, so a first caller whose task is cancelled cannot cancel the load every later caller waits on (a JavaScript
+promise cannot be cancelled by an awaiter).
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 from misaka.ai.auth.types import (
     ApiKeyAuth,
     ApiKeyCredential,
     AuthResult,
+    LoginOptions,
     ModelAuth,
     OAuthAuth,
     OAuthCredential,
     ProviderAuthInteraction,
     SecretPrompt,
 )
-from misaka.utils.values import signal_aborted
-
-
-def _throwIfAborted(signal: Any) -> None:
-    """pi calls ``signal.throwIfAborted()``; this is misaka's spelling of it.
-
-    The message matches ``ai/providers/_common.py`` so an abort raised here is
-    indistinguishable from one raised on the request path.
-    """
-    if signal_aborted(signal):
-        raise RuntimeError("Request was aborted")
+from misaka.utils.js import throwIfAborted
 
 
 def envApiKeyAuth(name: str, envVars: list[str] | tuple[str, ...]) -> ApiKeyAuth:
-    """Standard api-key auth: a stored credential key wins, else the first set env var.
-
-    The order matters and is upstream's: someone who ran ``/login`` and typed a key meant
-    that key, even on a machine where an older variable is still exported.
+    """Standard api-key auth: a stored credential key wins, otherwise the first
+    set env var resolves. Includes a `login` that prompts for the key.
+    Providers with non-standard resolution (provider env, ambient files, IAM)
+    write their own `ApiKeyAuth`.
     """
 
     async def login(interaction: ProviderAuthInteraction) -> ApiKeyCredential:
-        _throwIfAborted(interaction.signal)
+        throwIfAborted(interaction.signal)
         key = await interaction.prompt(SecretPrompt(message=f"Enter {name}"))
-        _throwIfAborted(interaction.signal)
-        return ApiKeyCredential(key=key)
+        throwIfAborted(interaction.signal)
+        return ApiKeyCredential(type="api_key", key=key)
 
-    async def resolve(*, ctx: Any, credential: ApiKeyCredential | None, signal: Any) -> AuthResult | None:
-        _throwIfAborted(signal)
-        # A stored credential ends resolution here whether or not it carries a key.
-        # Upstream (``auth/helpers.ts:20-26``) falls through to ``envVars`` when the key is
-        # empty; misaka deliberately does not -- see the header of
-        # ``tests/test_ai_auth_resolve.py``: falling through would sign a user who is
-        # logged in as one account silently in as whichever account the ambient
-        # ``*_API_KEY`` belongs to. "Stored but broken" is a login to redo, not a licence
-        # to pick another identity.
-        if credential is not None:
-            if credential.key:
-                return AuthResult(
-                    auth=ModelAuth(apiKey=credential.key),
-                    env=credential.env,
-                    source="stored credential",
-                )
-            return None
+    async def resolve(*, ctx: Any, credential: ApiKeyCredential | None = None, signal: Any) -> AuthResult | None:
+        throwIfAborted(signal)
+        if credential is not None and credential.key:
+            return AuthResult(auth=ModelAuth(apiKey=credential.key), env=credential.env, source="stored credential")
         for envVar in envVars:
             value = await ctx.env(envVar)
-            _throwIfAborted(signal)
+            throwIfAborted(signal)
             if value:
                 return AuthResult(auth=ModelAuth(apiKey=value), source=envVar)
         return None
 
-    return ApiKeyAuth(name=name, resolve=resolve, login=login)
+    return ApiKeyAuth(name=name, login=login, resolve=resolve)
 
 
-def lazyOAuth(
-    *,
-    name: str,
-    load: Callable[[], Awaitable[OAuthAuth]],
-    isSubscription: bool | None = None,
-    loginLabel: str | None = None,
-) -> OAuthAuth:
-    """Wrap an ``OAuthAuth`` that is imported on first use.
+class LazyOAuthInput(TypedDict):
+    """The object ``lazyOAuth`` takes."""
 
-    ``load`` runs at most once even under concurrent first calls. Upstream writes
-    ``promise ??= input.load()`` in a non-async ``loaded()``, so the assignment lands
-    before anything awaits and every concurrent caller awaits the one promise. Caching
-    the awaited *result* instead of the pending future loses that: four simultaneous
-    first calls each find the cache still empty and start their own load.
-    ``tests/test_ai_auth_stack.py::test_a_lazy_oauth_flow_loads_once_under_concurrent_first_use``
-    pins the difference.
+    name: str
+    isSubscription: NotRequired[bool]
+    loginLabel: NotRequired[str]
+    load: Callable[[], Awaitable[OAuthAuth]]
 
-    The ``shield`` is the other half of matching upstream. A JavaScript promise cannot
-    be cancelled by a caller who walks away, but an awaited asyncio Task can: without
-    the shield, the first caller being task-cancelled (Esc, ``race_with_abort_signal``)
-    cancels the shared load and leaves a cancelled Task in ``pending`` forever, so every
-    later OAuth call on that provider raises ``CancelledError`` until the process
-    restarts. Shielded, the abandoned caller still sees its own cancellation while the
-    load runs to completion for whoever comes next.
+
+def lazyOAuth(input: LazyOAuthInput) -> OAuthAuth:
+    """Wraps a dynamically imported `OAuthAuth` so provider definitions can
+    advertise OAuth without importing the implementation. The flow loads on
+    first `login`/`refresh`/`toAuth` call; callers keep Node-only flow code out
+    of bundles by loading through a bundler-opaque dynamic import (variable
+    specifier, see the bedrock lazy wrapper).
     """
-    pending: asyncio.Future[OAuthAuth] | None = None
+    promise: asyncio.Future[OAuthAuth] | None = None
 
-    async def _loaded() -> OAuthAuth:
-        nonlocal pending
-        if pending is None:
-            pending = asyncio.ensure_future(load())
-        return await asyncio.shield(pending)
+    def loaded() -> Awaitable[OAuthAuth]:
+        nonlocal promise
+        if promise is None:
+            promise = asyncio.ensure_future(input["load"]())
+        return asyncio.shield(promise)
 
-    async def login(interaction: ProviderAuthInteraction) -> OAuthCredential:
-        return await (await _loaded()).login(interaction)
+    async def login(interaction: ProviderAuthInteraction, options: LoginOptions | None = None) -> OAuthCredential:
+        return await (await loaded()).login(interaction, options)
 
     async def refresh(credential: OAuthCredential, signal: Any) -> OAuthCredential:
-        return await (await _loaded()).refresh(credential, signal)
+        return await (await loaded()).refresh(credential, signal)
 
     async def toAuth(credential: OAuthCredential) -> ModelAuth:
-        return await (await _loaded()).toAuth(credential)
+        return await (await loaded()).toAuth(credential)
 
     return OAuthAuth(
-        name=name,
+        name=input["name"],
+        isSubscription=input.get("isSubscription"),
+        loginLabel=input.get("loginLabel"),
         login=login,
         refresh=refresh,
         toAuth=toAuth,
-        isSubscription=isSubscription,
-        loginLabel=loginLabel,
     )
 
 

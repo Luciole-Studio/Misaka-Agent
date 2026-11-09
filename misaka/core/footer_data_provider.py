@@ -1,76 +1,80 @@
-"""Footer data provider for git branch and extension footer state."""
+"""Translated from pi coding-agent's ``src/core/footer-data-provider.ts`` (v1.1.0)."""
 
 from __future__ import annotations
 
+import asyncio
 import os
+import re
 import subprocess
-import threading
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Protocol
 
 from misaka.utils.fs_watch import (
     FS_WATCH_RETRY_DELAY_MS,
     FSWatcher,
-    close_watcher,
-    watch_with_error_handler,
+    Stats,
+    closeWatcher,
+    unwatchFile,
+    watchFile,
+    watchWithErrorHandler,
 )
-
-_TABLES_LIST_POLL_INTERVAL_SECONDS = 0.25
-_UNSET = object()
+from misaka.utils.js import UNDEFINED, Timeout, clearTimeout, jsTrim, setTimeout, spawn
 
 
 @dataclass(slots=True)
-class _GitPaths:
+class GitPaths:
     repoDir: str
     commonGitDir: str
     headPath: str
 
 
-def find_git_paths(cwd: str) -> _GitPaths | None:
-    dir_path = cwd
+def findGitPaths(cwd: str) -> GitPaths | None:
+    """Find git metadata paths by walking up from cwd.
+    Handles both regular git repos (.git is a directory) and worktrees (.git is a file).
+    """
+    dir = cwd
     while True:
-        git_path = os.path.join(dir_path, ".git")
-        if os.path.exists(git_path):
+        gitPath = os.path.join(dir, ".git")
+        if os.path.exists(gitPath):
             try:
-                if os.path.isfile(git_path):
-                    content = Path(git_path).read_text(encoding="utf-8").strip()
+                if os.path.isfile(gitPath):
+                    content = jsTrim(Path(gitPath).read_text(encoding="utf-8"))
                     if content.startswith("gitdir: "):
-                        git_dir = os.path.abspath(os.path.join(dir_path, content[8:].strip()))
-                        head_path = os.path.join(git_dir, "HEAD")
-                        if not os.path.exists(head_path):
+                        gitDir = os.path.abspath(os.path.join(dir, jsTrim(content[8:])))
+                        headPath = os.path.join(gitDir, "HEAD")
+                        if not os.path.exists(headPath):
                             return None
-                        common_dir_path = os.path.join(git_dir, "commondir")
-                        common_git_dir = (
-                            os.path.abspath(
-                                os.path.join(
-                                    git_dir,
-                                    Path(common_dir_path).read_text(encoding="utf-8").strip(),
-                                )
-                            )
-                            if os.path.exists(common_dir_path)
-                            else git_dir
+                        commonDirPath = os.path.join(gitDir, "commondir")
+                        commonGitDir = (
+                            os.path.abspath(os.path.join(gitDir, jsTrim(Path(commonDirPath).read_text(encoding="utf-8"))))
+                            if os.path.exists(commonDirPath)
+                            else gitDir
                         )
-                        return _GitPaths(repoDir=dir_path, commonGitDir=common_git_dir, headPath=head_path)
-                elif os.path.isdir(git_path):
-                    head_path = os.path.join(git_path, "HEAD")
-                    if not os.path.exists(head_path):
+                        return GitPaths(repoDir=dir, commonGitDir=commonGitDir, headPath=headPath)
+                elif os.path.isdir(gitPath):
+                    headPath = os.path.join(gitPath, "HEAD")
+                    if not os.path.exists(headPath):
                         return None
-                    return _GitPaths(repoDir=dir_path, commonGitDir=git_path, headPath=head_path)
-            except OSError:
+                    return GitPaths(repoDir=dir, commonGitDir=gitPath, headPath=headPath)
+            except (OSError, ValueError):
                 return None
-        parent = os.path.dirname(dir_path)
-        if parent == dir_path:
+        parent = os.path.dirname(dir)
+        if parent == dir:
             return None
-        dir_path = parent
+        dir = parent
 
 
-def _resolve_branch_with_git_sync(repo_dir: str) -> str | None:
+def resolveBranchWithGitSync(repoDir: str) -> str | None:
+    """Ask git for the current branch. Returns None on detached HEAD or if git is unavailable."""
     try:
         result = subprocess.run(
             ["git", "--no-optional-locks", "symbolic-ref", "--quiet", "--short", "HEAD"],
-            cwd=repo_dir,
+            cwd=repoDir,
             encoding="utf-8",
+            errors="replace",
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -78,273 +82,328 @@ def _resolve_branch_with_git_sync(repo_dir: str) -> str | None:
         )
     except OSError:
         return None
-    branch = result.stdout.strip() if result.returncode == 0 else ""
+    branch = jsTrim(result.stdout) if result.returncode == 0 else ""
     return branch or None
 
 
+async def resolveBranchWithGitAsync(repoDir: str) -> str | None:
+    """Ask git for the current branch asynchronously. Returns None on detached HEAD or if git is unavailable."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            "--no-optional-locks",
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "HEAD",
+            cwd=repoDir,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        stdout, _ = await process.communicate()
+    except OSError:
+        return None
+    if process.returncode != 0:
+        return None
+    branch = jsTrim(stdout.decode("utf-8", errors="replace"))
+    return branch or None
+
+
+def isWslEnvironment() -> bool:
+    return sys.platform == "linux" and bool(os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"))
+
+
+def isWindowsMountedRepoPath(repoDir: str) -> bool:
+    return re.match(r"^/mnt/[a-z](?:/|$)", repoDir, re.IGNORECASE) is not None
+
+
+def shouldPollGitHead(repoDir: str) -> bool:
+    return isWslEnvironment() and isWindowsMountedRepoPath(repoDir)
+
+
 class FooterDataProvider:
+    """Provides git branch and extension statuses - data not otherwise accessible to extensions.
+    Context usage on ctx.getContextUsage(), token stats on ctx.sessionManager.getEntries(), model info on ctx.model.
+    """
+
     WATCH_DEBOUNCE_MS = 500
 
     def __init__(self, cwd: str) -> None:
-        self.cwd = cwd
-        self.extensionStatuses: dict[str, str] = {}
-        self.cachedBranch: object | str | None = _UNSET
-        self.gitPaths: _GitPaths | None = find_git_paths(cwd)
-        self.headWatcher: FSWatcher | None = None
-        self.reftableWatcher: FSWatcher | None = None
-        self.reftableTablesListWatcher: FSWatcher | None = None
-        self.reftableTablesListPath: str | None = None
-        self.branchChangeCallbacks: set[Callable[[], None]] = set()
-        self.availableProviderCount = 0
-        self.refreshTimer: threading.Timer | None = None
-        self.gitWatcherRetryTimer: threading.Timer | None = None
-        self.refreshInFlight = False
-        self.refreshPending = False
-        self.disposed = False
-        self._lock = threading.RLock()
-        self._tablesListPollStop = threading.Event()
-        self._tablesListPollThread: threading.Thread | None = None
-        self.setupGitWatcher()
+        self._cwd = cwd
+        self._extensionStatuses: dict[str, str] = {}
+        self._cachedBranch: Any = UNDEFINED
+        self._gitPaths: GitPaths | None = None
+        self._headWatcher: FSWatcher | None = None
+        self._headWatchFilePath: str | None = None
+        self._headWatchFileListener: Callable[[Stats, Stats], None] | None = None
+        self._reftableWatcher: FSWatcher | None = None
+        self._reftableTablesListWatcher: FSWatcher | None = None
+        self._reftableTablesListPath: str | None = None
+        self._branchChangeCallbacks: dict[Callable[[], None], None] = {}
+        self._availableProviderCount = 0
+        self._refreshTimer: Timeout | None = None
+        self._gitWatcherRetryTimer: Timeout | None = None
+        self._refreshInFlight = False
+        self._refreshPending = False
+        self._disposed = False
+        # MISAKA fork: holds the refresh tasks `void refreshGitBranchAsync()` starts (asyncio keeps tasks weakly).
+        self._backgroundTasks: set[asyncio.Task[Any]] = set()
+        self._gitPaths = findGitPaths(cwd)
+        self._setupGitWatcher()
 
     def getGitBranch(self) -> str | None:
-        with self._lock:
-            if self.cachedBranch is _UNSET:
-                self.cachedBranch = self.resolveGitBranchSync()
-            return None if self.cachedBranch is _UNSET else self.cachedBranch
+        """Current git branch, None if not in repo, "detached" if detached HEAD"""
+        if self._cachedBranch is UNDEFINED:
+            self._cachedBranch = self._resolveGitBranchSync()
+        return self._cachedBranch
 
     def getExtensionStatuses(self) -> Mapping[str, str]:
-        return self.extensionStatuses
+        """Extension status texts set via ctx.ui.setStatus()"""
+        return self._extensionStatuses
 
-    def onBranchChange(self, callback: Callable[[], None]) -> Callable[[], None]:
-        with self._lock:
-            self.branchChangeCallbacks.add(callback)
+    def onBranchChange(self, callback: Callable[[], None]) -> Callable[[], bool]:
+        """Subscribe to git branch changes. Returns unsubscribe function."""
+        self._branchChangeCallbacks[callback] = None
 
-        def unsubscribe() -> None:
-            with self._lock:
-                self.branchChangeCallbacks.discard(callback)
+        def unsubscribe() -> bool:
+            return self._branchChangeCallbacks.pop(callback, UNDEFINED) is not UNDEFINED
 
         return unsubscribe
 
     def setExtensionStatus(self, key: str, text: str | None) -> None:
+        """Internal: set extension status"""
         if text is None:
-            self.extensionStatuses.pop(key, None)
+            self._extensionStatuses.pop(key, None)
         else:
-            self.extensionStatuses[key] = text
+            self._extensionStatuses[key] = text
 
     def clearExtensionStatuses(self) -> None:
-        self.extensionStatuses.clear()
+        """Internal: clear extension statuses"""
+        self._extensionStatuses.clear()
 
     def getAvailableProviderCount(self) -> int:
-        return self.availableProviderCount
+        """Number of unique providers with available models (for footer display)"""
+        return self._availableProviderCount
 
     def setAvailableProviderCount(self, count: int) -> None:
-        self.availableProviderCount = count
+        """Internal: update available provider count"""
+        self._availableProviderCount = count
 
     def setCwd(self, cwd: str) -> None:
-        if self.cwd == cwd:
+        if self._cwd == cwd:
             return
 
-        self.cwd = cwd
-        with self._lock:
-            if self.refreshTimer is not None:
-                self.refreshTimer.cancel()
-                self.refreshTimer = None
-        self.clearGitWatchers()
-        self.cachedBranch = _UNSET
-        self.gitPaths = find_git_paths(cwd)
-        self.setupGitWatcher()
-        self.notifyBranchChange()
+        self._cwd = cwd
+        if self._refreshTimer:
+            clearTimeout(self._refreshTimer)
+            self._refreshTimer = None
+        self._clearGitWatchers()
+        self._cachedBranch = UNDEFINED
+        self._gitPaths = findGitPaths(cwd)
+        self._setupGitWatcher()
+        self._notifyBranchChange()
 
     def dispose(self) -> None:
-        with self._lock:
-            self.disposed = True
-            if self.refreshTimer is not None:
-                self.refreshTimer.cancel()
-                self.refreshTimer = None
-        self.clearGitWatchers()
-        with self._lock:
-            self.branchChangeCallbacks.clear()
+        """Internal: cleanup"""
+        self._disposed = True
+        if self._refreshTimer:
+            clearTimeout(self._refreshTimer)
+            self._refreshTimer = None
+        self._clearGitWatchers()
+        self._branchChangeCallbacks.clear()
 
-    def notifyBranchChange(self) -> None:
-        with self._lock:
-            callbacks = list(self.branchChangeCallbacks)
-        for callback in callbacks:
-            callback()
+    def _notifyBranchChange(self) -> None:
+        # MISAKA fork: iterates a copy (a dict cannot change size while iterated; pi walks its Set live).
+        for cb in list(self._branchChangeCallbacks):
+            cb()
 
-    def scheduleRefresh(self) -> None:
-        with self._lock:
-            if self.disposed or self.refreshTimer is not None:
-                return
-            if self.refreshInFlight:
-                self.refreshPending = True
-                return
-            self.refreshTimer = threading.Timer(self.WATCH_DEBOUNCE_MS / 1000, self.refreshGitBranchAsync)
-            self.refreshTimer.daemon = True
-            self.refreshTimer.start()
+    def _scheduleRefresh(self) -> None:
+        if self._disposed or self._refreshTimer:
+            return
+        if self._refreshInFlight:
+            self._refreshPending = True
+            return
 
-    def refreshGitBranchAsync(self) -> None:
-        with self._lock:
-            if self.disposed:
-                return
-            self.refreshTimer = None
-            if self.refreshInFlight:
-                self.refreshPending = True
-                return
-            self.refreshInFlight = True
+        def fire() -> None:
+            self._refreshTimer = None
+            spawn(self._refreshGitBranchAsync(), self._backgroundTasks)
+
+        self._refreshTimer = setTimeout(fire, FooterDataProvider.WATCH_DEBOUNCE_MS)
+
+    async def _refreshGitBranchAsync(self) -> None:
+        if self._disposed:
+            return
+        if self._refreshInFlight:
+            self._refreshPending = True
+            return
+
+        self._refreshInFlight = True
         try:
-            next_branch = self.resolveGitBranchAsync()
-            with self._lock:
-                if self.disposed:
-                    return
-                if self.cachedBranch is not _UNSET and self.cachedBranch != next_branch:
-                    self.cachedBranch = next_branch
-                    self.notifyBranchChange()
-                    return
-                self.cachedBranch = next_branch
+            nextBranch = await self._resolveGitBranchAsync()
+            if self._disposed:
+                return
+            if self._cachedBranch is not UNDEFINED and self._cachedBranch != nextBranch:
+                self._cachedBranch = nextBranch
+                self._notifyBranchChange()
+                return
+            self._cachedBranch = nextBranch
         finally:
-            with self._lock:
-                self.refreshInFlight = False
-                if self.refreshPending and not self.disposed:
-                    self.refreshPending = False
-                    self.scheduleRefresh()
+            self._refreshInFlight = False
+            if self._refreshPending and not self._disposed:
+                self._refreshPending = False
+                self._scheduleRefresh()
 
-    def resolveGitBranchSync(self) -> str | None:
+    def _resolveGitBranchSync(self) -> str | None:
         try:
-            if self.gitPaths is None:
+            if not self._gitPaths:
                 return None
-            content = Path(self.gitPaths.headPath).read_text(encoding="utf-8").strip()
+            content = jsTrim(Path(self._gitPaths.headPath).read_text(encoding="utf-8"))
             if content.startswith("ref: refs/heads/"):
                 branch = content[16:]
-                return _resolve_branch_with_git_sync(self.gitPaths.repoDir) or "detached" if branch == ".invalid" else branch
+                return (resolveBranchWithGitSync(self._gitPaths.repoDir) or "detached") if branch == ".invalid" else branch
             return "detached"
-        except OSError:
+        except (OSError, ValueError):
             return None
 
-    def resolveGitBranchAsync(self) -> str | None:
+    async def _resolveGitBranchAsync(self) -> str | None:
         try:
-            if self.gitPaths is None:
+            if not self._gitPaths:
                 return None
-            content = Path(self.gitPaths.headPath).read_text(encoding="utf-8").strip()
+            content = jsTrim(Path(self._gitPaths.headPath).read_text(encoding="utf-8"))
             if content.startswith("ref: refs/heads/"):
                 branch = content[16:]
-                return _resolve_branch_with_git_sync(self.gitPaths.repoDir) or "detached" if branch == ".invalid" else branch
-            return "detached"
-        except OSError:
-            return None
-
-    def clearGitWatchers(self) -> None:
-        close_watcher(self.headWatcher)
-        self.headWatcher = None
-        close_watcher(self.reftableWatcher)
-        self.reftableWatcher = None
-        close_watcher(self.reftableTablesListWatcher)
-        self.reftableTablesListWatcher = None
-        self._stopTablesListPoll()
-        self.reftableTablesListPath = None
-        if self.gitWatcherRetryTimer is not None:
-            self.gitWatcherRetryTimer.cancel()
-            self.gitWatcherRetryTimer = None
-
-    def scheduleGitWatcherRetry(self) -> None:
-        with self._lock:
-            if self.disposed or self.gitWatcherRetryTimer is not None:
-                return
-            self.gitWatcherRetryTimer = threading.Timer(FS_WATCH_RETRY_DELAY_MS / 1000, self._retryGitWatcher)
-            self.gitWatcherRetryTimer.daemon = True
-            self.gitWatcherRetryTimer.start()
-
-    def _retryGitWatcher(self) -> None:
-        with self._lock:
-            self.gitWatcherRetryTimer = None
-        self.setupGitWatcher()
-
-    def handleGitWatcherError(self) -> None:
-        self.clearGitWatchers()
-        self.scheduleGitWatcherRetry()
-
-    def setupGitWatcher(self) -> None:
-        self.clearGitWatchers()
-        if self.gitPaths is None:
-            return
-
-        def on_head_change(_event_type: str, filename: str | None = None) -> None:
-            if filename is None or filename == "HEAD":
-                self.scheduleRefresh()
-
-        # The polling watcher resolves this path again on every tick, so it follows
-        # Git's atomic HEAD replacement without binding to the previous inode.
-        self.headWatcher = watch_with_error_handler(
-            self.gitPaths.headPath,
-            on_head_change,
-            lambda: self.handleGitWatcherError(),
-        )
-        if self.headWatcher is None:
-            return
-
-        reftable_dir = os.path.join(self.gitPaths.commonGitDir, "reftable")
-        if os.path.exists(reftable_dir):
-            self.reftableWatcher = watch_with_error_handler(
-                reftable_dir,
-                lambda _event_type, _filename=None: self.scheduleRefresh(),
-                lambda: self.handleGitWatcherError(),
-            )
-            if self.reftableWatcher is None:
-                return
-
-            tables_list_path = os.path.join(reftable_dir, "tables.list")
-            if os.path.exists(tables_list_path):
-                self.reftableTablesListPath = tables_list_path
-                self.reftableTablesListWatcher = watch_with_error_handler(
-                    tables_list_path,
-                    lambda _event_type, _filename=None: self.scheduleRefresh(),
-                    lambda: self.handleGitWatcherError(),
+                return (
+                    ((await resolveBranchWithGitAsync(self._gitPaths.repoDir)) or "detached")
+                    if branch == ".invalid"
+                    else branch
                 )
-                if self.reftableTablesListWatcher is None:
-                    return
-                self._startTablesListPoll(tables_list_path)
-
-    def _startTablesListPoll(self, path: str) -> None:
-        self._stopTablesListPoll()
-        stop = threading.Event()
-        self._tablesListPollStop = stop
-        previous = self._tables_list_stat(path)
-
-        # `stop` is captured, not read back off `self`: _stopTablesListPoll replaces the
-        # attribute after its join times out, and a thread that read the attribute each
-        # round would then see a fresh un-set Event and poll `os.stat` at 4 Hz until the
-        # process died. Every thread now watches the one Event it was started with.
-        def watch() -> None:
-            nonlocal previous
-            while not stop.wait(_TABLES_LIST_POLL_INTERVAL_SECONDS):
-                current = self._tables_list_stat(path)
-                if current != previous:
-                    previous = current
-                    self.scheduleRefresh()
-
-        self._tablesListPollThread = threading.Thread(
-            target=watch,
-            name="footer-tables-list-watch",
-            daemon=True,
-        )
-        self._tablesListPollThread.start()
-
-    def _stopTablesListPoll(self) -> None:
-        self._tablesListPollStop.set()
-        if self._tablesListPollThread is not None and threading.current_thread() is not self._tablesListPollThread:
-            self._tablesListPollThread.join(timeout=0.5)
-        self._tablesListPollThread = None
-        # Not replaced with a fresh Event: the thread that was just told to stop keeps
-        # its own reference, and _startTablesListPoll installs a new one anyway.
-
-    def _tables_list_stat(self, path: str) -> tuple[int, int, int] | None:
-        try:
-            stat_result = os.stat(path)
-        except OSError:
+            return "detached"
+        except (OSError, ValueError):
             return None
-        return (stat_result.st_mtime_ns, stat_result.st_ctime_ns, stat_result.st_size)
+
+    def _clearGitWatchers(self) -> None:
+        closeWatcher(self._headWatcher)
+        self._headWatcher = None
+        if self._headWatchFilePath and self._headWatchFileListener:
+            unwatchFile(self._headWatchFilePath, self._headWatchFileListener)
+            self._headWatchFilePath = None
+            self._headWatchFileListener = None
+        closeWatcher(self._reftableWatcher)
+        self._reftableWatcher = None
+        closeWatcher(self._reftableTablesListWatcher)
+        self._reftableTablesListWatcher = None
+        if self._reftableTablesListPath:
+            unwatchFile(self._reftableTablesListPath)
+            self._reftableTablesListPath = None
+        if self._gitWatcherRetryTimer:
+            clearTimeout(self._gitWatcherRetryTimer)
+            self._gitWatcherRetryTimer = None
+
+    def _scheduleGitWatcherRetry(self) -> None:
+        if self._disposed or self._gitWatcherRetryTimer:
+            return
+
+        def retry() -> None:
+            self._gitWatcherRetryTimer = None
+            self._setupGitWatcher()
+
+        self._gitWatcherRetryTimer = setTimeout(retry, FS_WATCH_RETRY_DELAY_MS)
+
+    def _handleGitWatcherError(self) -> None:
+        self._clearGitWatchers()
+        self._scheduleGitWatcherRetry()
+
+    def _setupGitWatcher(self) -> None:
+        self._clearGitWatchers()
+        if not self._gitPaths:
+            return
+        # MISAKA fork: the debounce timer and the async git call need an event loop; a provider made outside one
+        # reads the branch on demand (getGitBranch) and is not refreshed by watchers.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        pollGitHead = shouldPollGitHead(self._gitPaths.repoDir)
+
+        # Watch the directory containing HEAD, not HEAD itself.
+        # Git uses atomic writes (write temp, rename over HEAD), which changes the inode.
+        # fs.watch on a file stops working after the inode changes.
+        def onHeadDirectoryChange(_eventType: str, filename: str | None) -> None:
+            if not filename or filename == "HEAD":
+                self._scheduleRefresh()
+
+        self._headWatcher = watchWithErrorHandler(
+            os.path.dirname(self._gitPaths.headPath),
+            onHeadDirectoryChange,
+            lambda: self._handleGitWatcherError(),
+        )
+        if pollGitHead:
+            self._headWatchFilePath = self._gitPaths.headPath
+
+            def onHeadStat(current: Stats, previous: Stats) -> None:
+                if (
+                    current.mtimeMs != previous.mtimeMs
+                    or current.ctimeMs != previous.ctimeMs
+                    or current.size != previous.size
+                ):
+                    self._scheduleRefresh()
+
+            self._headWatchFileListener = onHeadStat
+            watchFile(self._headWatchFilePath, {"interval": 1000}, self._headWatchFileListener)
+        if not self._headWatcher and not pollGitHead:
+            return
+
+        # In reftable repos, branch switches update files in the reftable directory
+        # instead of HEAD. Watch it separately so the footer picks up those changes.
+        reftableDir = os.path.join(self._gitPaths.commonGitDir, "reftable")
+        if os.path.exists(reftableDir):
+            self._reftableWatcher = watchWithErrorHandler(
+                reftableDir,
+                lambda *_: self._scheduleRefresh(),
+                lambda: self._handleGitWatcherError(),
+            )
+            if not self._reftableWatcher:
+                return
+
+            tablesListPath = os.path.join(reftableDir, "tables.list")
+            if os.path.exists(tablesListPath):
+                self._reftableTablesListPath = tablesListPath
+                self._reftableTablesListWatcher = watchWithErrorHandler(
+                    tablesListPath,
+                    lambda *_: self._scheduleRefresh(),
+                    lambda: self._handleGitWatcherError(),
+                )
+                if not self._reftableTablesListWatcher:
+                    return
+
+                def onTablesListStat(current: Stats, previous: Stats) -> None:
+                    if (
+                        current.mtimeMs != previous.mtimeMs
+                        or current.ctimeMs != previous.ctimeMs
+                        or current.size != previous.size
+                    ):
+                        self._scheduleRefresh()
+
+                watchFile(tablesListPath, {"interval": 250}, onTablesListStat)
+
+
+class ReadonlyFooterDataProvider(Protocol):
+    """Read-only view for extensions - excludes setExtensionStatus, setAvailableProviderCount and dispose"""
+
+    def getGitBranch(self) -> str | None: ...
+
+    def getExtensionStatuses(self) -> Mapping[str, str]: ...
+
+    def getAvailableProviderCount(self) -> int: ...
+
+    def onBranchChange(self, callback: Callable[[], None]) -> Callable[[], bool]: ...
 
 
 __all__ = [
     "FooterDataProvider",
-    "find_git_paths",
+    "GitPaths",
+    "ReadonlyFooterDataProvider",
+    "findGitPaths",
 ]

@@ -167,6 +167,20 @@ async def test_a_cut_reply_gets_one_more_turn(make):
     assert ally.row["status"] == "done"
 
 
+async def test_in_a_pane_a_card_left_idle_after_the_notice_ends_its_attempt_unsettled(make, monkeypatch):
+    """In process the dispatcher settles what is left (``dispatch._run_ally``); a pane waited for a
+    typed line or mail for good."""
+    monkeypatch.setattr(ally_card, "UNSETTLED_GRACE_SECONDS", 0)
+    ally = make()
+    ally.play([{"say": "Tried."}], [{"say": "Still working."}])
+    await asyncio.wait_for(ally.claim(out=io.StringIO()).run(), 60)
+    row = ally.row
+    assert ally.prompts()[1].startswith("[Card still running]")
+    assert row["status"] == "ready" and row["consecutive_failures"] == 1
+    assert "nothing was left to wake the session" in row["last_failure_error"] and "report.md" in row["last_failure_error"]
+    assert '"failure_kind": "protocol_violation"' in tasks.latest_payload(ally.con, ally.tid, "retry_scheduled")
+
+
 async def test_mail_waits_for_the_running_turn_and_mail_to_an_idle_ally_starts_one(make):
     ally = make()
     ally.play([{"say": "On it."}, {"sleep": 3}], [{"say": "Noted."}], [{"say": "Waiting."}], ally.finish())
@@ -325,3 +339,31 @@ async def test_last_order_without_a_panel_hands_an_ally_card_to_the_daemon(make,
     result = await SisterRuntime(None, lambda: ally.con, current_config).launch(ally.tid, context=None, tool_call_id="c")
     assert calls == ["ensure", ("pane.run_card", {"task_id": ally.tid})]
     assert (result["status"], result["pane"]) == ("running", "p9")
+
+
+async def test_a_finished_allys_card_answers_a_message_and_stays_done(make):
+    """R40: a message to a finished card is a consultation, an ally's as a Sister's. Her runner
+    takes no claim, what the turn changes is declared again in the same generation, and the
+    consultation, not the card, records how it ended."""
+    ally = make()
+    ally.play(ally.finish("First pass."), load=True)
+    await ally.claim().run()
+    consultation = tasks.start_consultation(ally.con, ally.tid, generation=1, lock="consult:pane")
+    finding = {"text": "the decree is No. 226", "claim_type": "fact", "source_file": "out/report.md"}
+    ally.play([{"write": [str(ally.out / "report.md"), "# Report\nwith the decree\n"]},
+               {"call": ["misaka_card_note", {"text": "answered K1a", "findings": [finding]}]},
+               {"say": "It is No. 226."}], load=True)
+    row = ally.row
+    task = {**dict(row), "_handoffs": [], **worker.card_extras(ally.con, row)}
+    attempt = ally_card.Attempt(task, 1, None, db_path=CFG["db"], consult=(consultation["id"], "consult:pane"))
+
+    await attempt.run(say="Which decree?")
+
+    assert ally.prompts()[-1] == "Which decree?"
+    row = ally.row
+    assert (row["status"], row["generation"], row["claim_lock"]) == ("done", 1, None)
+    assert tasks.get_run(ally.con, consultation["id"])["status"] == "done"
+    declared = ally.payload("submitted")
+    assert declared["artifact_digests"]["out/report.md"] and tasks.latest_payload(ally.con, ally.tid, "redeclared",
+                                                                                   generation=1)
+    assert "the decree is No. 226" in [f["text"] for f in declared["findings"]]

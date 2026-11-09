@@ -10,9 +10,10 @@ import math
 import time
 from urllib.parse import urlsplit
 
-from misaka.ai.utils.oauth import registerOAuthProvider
-from misaka.ai.utils.oauth.device_code import poll_oauth_device_code_flow
-from misaka.ai.utils.oauth.types import OAuthCredentials, OAuthDeviceCodeInfo
+from misaka.ai.auth.oauth.device_code import pollOAuthDeviceCodeFlow
+from misaka.ai.auth.resolve import refreshStoredOAuthCredential
+from misaka.ai.auth.types import DeviceCodeEvent, ModelAuth, OAuthAuth, OAuthCredential
+from misaka.ai.utils.abort import operationSignal
 from misaka.core.auth_storage import AuthStorage
 from misaka.core.tools._common import run_with_abort
 from misaka.core.web import config
@@ -86,57 +87,66 @@ def _credentials(body, base, previous=None):
         raise ValueError('Nous token expires_in must be positive and finite')
     config.remember_secret(access)
     config.remember_secret(refresh)
-    return OAuthCredentials(access=access, refresh=refresh, expires=int((time.time() + seconds) * 1000),
-                            portal_base_url=base, client_id=CLIENT_ID)
+    return OAuthCredential(access=access, refresh=refresh, expires=int((time.time() + seconds) * 1000),
+                           portal_base_url=base, client_id=CLIENT_ID)
 
 
-class NousOAuth:
-    id, name, usesCallbackServer, modifyModels = 'nous', 'Nous Tool Gateway', False, None
-
-    def getApiKey(self, credentials):
-        return credentials.access
-
-    async def login(self, callbacks):
-        base, signal = portal(), getattr(callbacks, 'signal', None)
-        response, body = await _form(base, '/api/oauth/device/code',
-            {'client_id': CLIENT_ID, 'scope': 'inference:invoke'}, signal=signal)
+async def _login(interaction, options=None):
+    base, signal = portal(), interaction.signal
+    response, body = await _form(base, '/api/oauth/device/code',
+        {'client_id': CLIENT_ID, 'scope': 'inference:invoke'}, signal=signal)
+    response.raise_for_status()
+    for name in ('device_code', 'user_code', 'verification_uri'):
+        if not isinstance(body.get(name), str) or not body[name]:
+            raise ValueError('Nous device response is missing ' + name)
+    verification = _endpoint(body['verification_uri'])
+    if urlsplit(verification).netloc != urlsplit(base).netloc:
+        raise ValueError('Nous device verification changed the configured portal origin')
+    seconds, interval = body.get('expires_in'), body.get('interval', 5)
+    if any(type(value) not in {int, float} or not math.isfinite(value) or value <= 0 for value in (seconds, interval)):
+        raise ValueError('Nous device response expiry/interval must be positive and finite')
+    interaction.notify(DeviceCodeEvent(userCode=body['user_code'], verificationUri=verification,
+                                       intervalSeconds=interval, expiresInSeconds=seconds))
+    async def poll():
+        response, token = await _form(base, '/api/oauth/token', {'client_id': CLIENT_ID,
+            'grant_type': 'urn:ietf:params:oauth:grant-type:device_code', 'device_code': body['device_code']}, signal=signal)
+        error = token.get('error')
+        if error == 'authorization_pending':
+            return {'status': 'pending'}
+        if error == 'slow_down':
+            return {'status': 'slow_down'}
         response.raise_for_status()
-        for name in ('device_code', 'user_code', 'verification_uri'):
-            if not isinstance(body.get(name), str) or not body[name]:
-                raise ValueError('Nous device response is missing ' + name)
-        verification = _endpoint(body['verification_uri'])
-        if urlsplit(verification).netloc != urlsplit(base).netloc:
-            raise ValueError('Nous device verification changed the configured portal origin')
-        seconds, interval = body.get('expires_in'), body.get('interval', 5)
-        if any(type(value) not in {int, float} or not math.isfinite(value) or value <= 0 for value in (seconds, interval)):
-            raise ValueError('Nous device response expiry/interval must be positive and finite')
-        callbacks.onDeviceCode(OAuthDeviceCodeInfo(userCode=body['user_code'], verificationUri=verification,
-                                                  intervalSeconds=interval, expiresInSeconds=seconds))
-        async def poll():
-            response, token = await _form(base, '/api/oauth/token', {'client_id': CLIENT_ID,
-                'grant_type': 'urn:ietf:params:oauth:grant-type:device_code', 'device_code': body['device_code']}, signal=signal)
-            error = token.get('error')
-            if error == 'authorization_pending':
-                return {'status': 'pending'}
-            if error == 'slow_down':
-                return {'status': 'slow_down'}
-            response.raise_for_status()
-            if error:
-                raise ValueError('Nous device approval failed: ' + str(error))
-            return {'status': 'complete', 'value': _credentials(token, base)}
-        return await poll_oauth_device_code_flow(poll=poll, intervalSeconds=interval, expiresInSeconds=seconds, signal=signal)
+        if error:
+            raise ValueError('Nous device approval failed: ' + str(error))
+        return {'status': 'complete', 'value': _credentials(token, base)}
+    return await pollOAuthDeviceCodeFlow({'poll': poll, 'intervalSeconds': interval, 'expiresInSeconds': seconds,
+                                          'signal': signal})
 
-    async def refreshToken(self, credentials, signal=None):
-        base = _endpoint(getattr(credentials, 'portal_base_url', None) or portal())
-        config.remember_secret(credentials.refresh)
-        response, body = await _form(base, '/api/oauth/token', {'grant_type': 'refresh_token', 'client_id': CLIENT_ID},
-                                    {'x-nous-refresh-token': credentials.refresh}, signal)
-        response.raise_for_status()
-        return _credentials(body, base, credentials)
+
+async def _refresh(credential, signal):
+    base = _endpoint(getattr(credential, 'portal_base_url', None) or portal())
+    config.remember_secret(credential.refresh)
+    response, body = await _form(base, '/api/oauth/token', {'grant_type': 'refresh_token', 'client_id': CLIENT_ID},
+                                {'x-nous-refresh-token': credential.refresh}, signal)
+    response.raise_for_status()
+    return _credentials(body, base, credential)
+
+
+async def _toAuth(credential):
+    return ModelAuth(apiKey=credential.access)
+
+
+nousOAuth = OAuthAuth(name='Nous Tool Gateway', login=_login, refresh=_refresh, toAuth=_toAuth)
+
+# pi's auth/resolve.ts DEFAULT_OAUTH_MINIMUM_VALIDITY_MS.
+_OAUTH_MINIMUM_VALIDITY_MS = 5 * 60 * 1000
+
+
+def _expires_soon(credential):
+    return time.time() * 1000 + _OAUTH_MINIMUM_VALIDITY_MS >= credential.expires
 
 
 def storage():
-    registerOAuthProvider(NousOAuth())
     return AuthStorage.create(_auth_path())
 
 
@@ -146,12 +156,22 @@ async def token(*, rejected=None):
         if rejected == explicit:
             raise ValueError('Configured Nous gateway token was rejected; replace it or log in')
         return explicit, portal()
-    auth = await run_in_thread(storage)
-    result = await auth.refreshOAuthTokenWithLock('nous', rejected_api_key=rejected)
-    if result is None:
+    store = await run_in_thread(storage)
+    credential = await store.read('nous')
+    if credential is None or credential.type != 'oauth':
         raise ValueError('Nous gateway login is missing; run misaka web gateway-login')
-    config.remember_secret(result['apiKey'])
-    return result['apiKey'], getattr(result['newCredentials'], 'portal_base_url', None) or portal()
+
+    def needs_refresh(current):
+        # Re-checked under the lock: a replacement another session wrote is read back without refreshing.
+        return current.access == rejected or _expires_soon(current)
+
+    if needs_refresh(credential):
+        credential = await refreshStoredOAuthCredential(store, 'nous', nousOAuth, needs_refresh, operationSignal())
+        if credential is None:
+            raise ValueError('Nous gateway login is missing; run misaka web gateway-login')
+    access = (await nousOAuth.toAuth(credential)).apiKey
+    config.remember_secret(access)
+    return access, getattr(credential, 'portal_base_url', None) or portal()
 
 
 async def account(*, force=False):

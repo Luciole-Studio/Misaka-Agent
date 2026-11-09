@@ -23,7 +23,7 @@ def test_a_first_round_whose_cards_were_all_cancelled_fails_the_node(executing, 
     con.execute("UPDATE tasks SET status='ready' WHERE id=?", (cards["a"]["id"],))
     change(tool, ctx, cancel=[{"card": "a", "reason": "x"}, {"card": "b", "reason": "x"}, {"card": "c", "reason": "x"}])
     asyncio.run(workflow._apply_plan_changes(con, run, root, 1, [0], None, (run, root)))
-    con.execute("UPDATE research_branches SET status='failed' WHERE id=?", (root["id"],))
+    con.execute("UPDATE research_execution SET status='failed' WHERE id=?", (root["id"],))
     runs.resume(con, run["id"], driver_lock="driver")
     monkeypatch.setattr(planner, "plan_needs_user", lambda *a, **k: False)
     monkeypatch.setattr(planner, "publish_project_brief", lambda *a, **k: None)

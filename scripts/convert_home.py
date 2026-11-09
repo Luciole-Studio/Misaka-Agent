@@ -50,7 +50,7 @@ MOVES = {
     "agent/themes": "themes", "agent/prompts": "prompts", "agent/extensions": "extensions",
     "agent/agents": "subagents", "agent/auth.json": "auth", "agent/trust.json": "trust",
     "agent/models-store.json": "models_store", "agent/plugins": "plugins", "agent/bin": "bin",
-    "agent/cache": "engine_cache", "agent/mcp": "mcp_logs", "agent/misaka.log": "log",
+    "agent/cache": "engine_cache", "agent/misaka.log": "log",
     "agent/misaka-debug.log": "debug_log", "agent/misaka-crash.log": "crash_log",
     "agent/misaka-warnings.log": "warnings_log",
     "profiles/MISAKA.md": "shared_soul", "profiles/skills": "shared_skills",
@@ -60,7 +60,7 @@ MOVES = {
     "agent-memory": "agent_memory", "worktrees": "worktrees", "pending/skills": "skills_pending",
     "lcm": ("plugins", "misaka-lcm/lcm"), "lcm.gate": ("plugins", "misaka-lcm/lcm.gate"),
     "lcm.activity.sqlite": ("plugins", "misaka-lcm/lcm.activity.sqlite"),
-    "cache/skill_blobs": "skill_blobs", "cache/mcp_schema_cache.json": "mcp_schema_cache",
+    "cache/skill_blobs": "skill_blobs",
     "moa-traces": "moa_traces", "panel-crash.log": "panel_crash_log", "locks": "locks",
 }
 # Configuration files the merge phase folds into settings.json / .env: left where they are

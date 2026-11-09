@@ -3,7 +3,7 @@
 # A user install picks its provider: `pip install 'misaka[anthropic]'` (or `misaka[providers]` for all).
 [project]
 name = "misaka"
-version = "0.18.11"
+version = "0.19.26"
 description = "A research team of AI agents for the humanities and social sciences"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -13,7 +13,7 @@ authors = [{ name = "makiko", email = "nishikinokki@gmail.com" }]
 # and ghostty are all MIT and flow into Apache-2.0. Per-file upstream notices stay where they are and
 # THIRD_PARTY_NOTICES.md indexes them.
 license = "Apache-2.0"
-license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "LICENSES/*.txt"]
 # The name "misaka" on PyPI belongs to an unrelated package: this one installs from the repository (README).
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -26,25 +26,23 @@ dependencies = [
     # engine/ai (formerly harn_ai)
     "pydantic>=2.10",
     "jsonschema>=4.23",
+    # misaka/ai/utils/validation.py catches `referencing.exceptions.Unresolvable` itself (jsonschema's resolver library).
+    "referencing>=0.36",
     "httpx>=0.28",
-    # CCB MCP transport parity: use the official SDK for HTTP/SSE/WebSocket.
+    # The official MCP SDK serves the ally bridge's stdio MCP server; [ws] brings websockets, which
+    # the Codex WebSocket transport and the browser's CDP connection use.
     "mcp[ws]>=1.30,<2",
     # engine/agent (formerly harn_agent)
     "ruamel.yaml>=0.18",
     "pathspec>=0.12",
     # net (pane hosting: one terminal emulator screen per pane)
     "pyte>=0.8.2",
-    # engine/tui (formerly harn_tui)
-    "markdown-it-py>=4.2",
-    "mdit-py-plugins>=0.4",   # dollarmath: LaTeX math detection (parity with pi 05e89b4)
-    "pylatexenc>=2.10",       # LaTeX -> Unicode rendering layer
-    "wcwidth>=0.2",
     # engine/coding_agent (formerly harn_coding_agent)
     "psutil>=6.1",
     "wcmatch>=10.0",
     "filelock>=3.32.3",
     "pygments>=2.18",
-    # MISAKA's own (mcp.py reads config.yaml)
+    # MISAKA's own (the vendored skills and LCM code read YAML)
     "pyyaml>=6.0",
     # documents: PDF page text, and PageIndex's chapter outlines for long PDFs (regex comes with
     # tiktoken). The outline packages were the `pageindex` extra until 2026-10-07 (GitHub issue
@@ -61,16 +59,20 @@ dependencies = [
     "openpyxl>=3.1",
     "python-pptx>=1.0",
     "tiktoken>=0.14.0",
+    # codemode runs quickjs-wasi's QuickJS wasm on wasmtime (misaka/codemode/quickjs_wasi). wasmtime-py changes its
+    # API between major versions, so the major is pinned.
+    "wasmtime>=49,<50",
 ]
 
 [project.optional-dependencies]
 # Provider SDKs are extras: a user install picks the ones it talks to.
-anthropic = ["anthropic>=0.45"]
+# 0.99 is the first SDK whose in-memory workload identity federation `config=` honours `workspace_id`; below 1, as
+# pi pins its SDK to one 0.x release: 1.x moved to httpx2 and 2.x sends an API key as `Authorization: Bearer`.
+anthropic = ["anthropic>=0.99,<1"]
 openai = ["openai>=1.60"]
 google = ["google-genai>=1.0"]
 bedrock = ["boto3>=1.35"]
-mistral = ["mistralai>=1.5"]
-providers = ["misaka[anthropic,openai,google,bedrock,mistral]"]
+providers = ["misaka[anthropic,openai,google,bedrock]"]
 browser = ["websockets>=15,<17", "cryptography>=43"]
 lcm-semantic = ["fastembed"]
 # Outlines come with every install now; the name stays so `misaka[...,pageindex]` still installs.
@@ -93,6 +95,17 @@ skip-excluded-dirs = true
 [tool.hatch.build.targets.wheel]
 # Every importable package at the repo root (exposed by the editable install; replaces a hand-written .pth)
 packages = ["misaka"]
+# The pinned hermes-lcm tree is whole in the repository, where its tests run and its hashes are
+# checked. An install needs its runtime, its operator scripts, its skill and its prose -- not
+# 3.6 MB of tests, the benchmark harnesses, CI files, or 6 MB of documentation images.
+exclude = [
+  "misaka/extensions/misaka_lcm/vendor/tests",
+  "misaka/extensions/misaka_lcm/vendor/benchmarks",
+  "misaka/extensions/misaka_lcm/vendor/benchmarking",
+  "misaka/extensions/misaka_lcm/vendor/bench",
+  "misaka/extensions/misaka_lcm/vendor/.github",
+  "misaka/extensions/misaka_lcm/vendor/docs/*.png",
+]
 
 [tool.ruff]
 # Vendored verbatim from upstream hermes-lcm: linting it would be a diff against the pin.

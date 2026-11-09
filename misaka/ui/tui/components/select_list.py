@@ -1,24 +1,34 @@
-"""Filterable selection list with aligned descriptions."""
+"""Translated from pi-tui's ``components/select-list.ts`` (v1.1.0).
+
+MISAKA fork: no alt screen (D1), so ``mousePressedIndex`` and ``handleMouse`` are not ported; only the alt screen
+produces mouse events.
+"""
 
 from __future__ import annotations
 
-import re
+import builtins
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypedDict
 
 from misaka.ui.tui.keybindings import getKeybindings
+from misaka.ui.tui.tui import Component
 from misaka.ui.tui.utils import truncateToWidth, visibleWidth
+from misaka.utils import js_regexp
+from misaka.utils.js import jsIndex, jsTrim
+from misaka.utils.js_regexp import RegExp
 
 DEFAULT_PRIMARY_COLUMN_WIDTH = 32
 PRIMARY_COLUMN_GAP = 2
 MIN_DESCRIPTION_WIDTH = 10
 
 
-def _normalize_to_single_line(text: str) -> str:
-    return re.sub(r"[\r\n]+", " ", text).strip()
+def normalizeToSingleLine(text: str) -> str:
+    return jsTrim(js_regexp.replace(text, RegExp(r"[\r\n]+", "g"), " "))
 
 
-def _clamp(value: int, minimum: int, maximum: int) -> int:
-    return max(minimum, min(value, maximum))
+def clamp(value: int, min: int, max: int) -> int:
+    return builtins.max(min, builtins.min(value, max))
 
 
 @dataclass(slots=True)
@@ -30,11 +40,11 @@ class SelectItem:
 
 @dataclass(slots=True)
 class SelectListTheme:
-    selectedPrefix: callable
-    selectedText: callable
-    description: callable
-    scrollInfo: callable
-    noMatch: callable
+    selectedPrefix: Callable[[str], str]
+    selectedText: Callable[[str], str]
+    description: Callable[[str], str]
+    scrollInfo: Callable[[str], str]
+    noMatch: Callable[[str], str]
 
 
 @dataclass(slots=True)
@@ -50,10 +60,20 @@ class SelectListTruncatePrimaryContext:
 class SelectListLayoutOptions:
     minPrimaryColumnWidth: int | None = None
     maxPrimaryColumnWidth: int | None = None
-    truncatePrimary: callable | None = None
+    truncatePrimary: Callable[[SelectListTruncatePrimaryContext], str] | None = None
 
 
-class SelectList:
+class _VisibleRange(TypedDict):
+    startIndex: int
+    endIndex: int
+
+
+class _PrimaryColumnBounds(TypedDict):
+    min: int
+    max: int
+
+
+class SelectList(Component):
     def __init__(
         self,
         items: list[SelectItem],
@@ -61,68 +81,91 @@ class SelectList:
         theme: SelectListTheme,
         layout: SelectListLayoutOptions | None = None,
     ) -> None:
+        self.selectedIndex: int = 0
+
+        self.onSelect: Callable[[SelectItem], None] | None = None
+        self.onCancel: Callable[[], None] | None = None
+        self.onSelectionChange: Callable[[SelectItem], None] | None = None
+
         self.items = items
         self.filteredItems = items
-        self.selectedIndex = 0
         self.maxVisible = maxVisible
         self.theme = theme
-        self.layout = layout or SelectListLayoutOptions()
-        self.onSelect = None
-        self.onCancel = None
-        self.onSelectionChange = None
+        self.layout = layout if layout is not None else SelectListLayoutOptions()
 
     def setFilter(self, filter: str) -> None:
-        lowered = filter.lower()
-        self.filteredItems = [item for item in self.items if item.value.lower().startswith(lowered)]
+        self.filteredItems = [item for item in self.items if item.value.lower().startswith(filter.lower())]
+        # Reset selection when filter changes
         self.selectedIndex = 0
 
     def setSelectedIndex(self, index: int) -> None:
         self.selectedIndex = max(0, min(index, len(self.filteredItems) - 1))
 
     def invalidate(self) -> None:
-        return None
+        # No cached state to invalidate currently
+        pass
 
     def render(self, width: int) -> list[str]:
         lines: list[str] = []
+
+        # If no items match filter, show message
         if len(self.filteredItems) == 0:
             lines.append(self.theme.noMatch("  No matching commands"))
             return lines
 
-        primary_column_width = self.getPrimaryColumnWidth()
-        start_index = max(
-            0,
-            min(self.selectedIndex - (self.maxVisible // 2), len(self.filteredItems) - self.maxVisible),
-        )
-        end_index = min(start_index + self.maxVisible, len(self.filteredItems))
+        primaryColumnWidth = self.getPrimaryColumnWidth()
 
-        for index in range(start_index, end_index):
-            item = self.filteredItems[index]
-            description_single_line = _normalize_to_single_line(item.description) if item.description else None
-            lines.append(
-                self.renderItem(item, index == self.selectedIndex, width, description_single_line, primary_column_width)
-            )
+        # Calculate visible range with scrolling
+        visibleRange = self.getVisibleRange()
+        startIndex, endIndex = visibleRange["startIndex"], visibleRange["endIndex"]
 
-        if start_index > 0 or end_index < len(self.filteredItems):
-            scroll_text = f"  ({self.selectedIndex + 1}/{len(self.filteredItems)})"
-            lines.append(self.theme.scrollInfo(truncateToWidth(scroll_text, width - 2, "")))
+        # Render visible items
+        for i in range(startIndex, endIndex):
+            item = jsIndex(self.filteredItems, i)
+            if item is None:
+                continue
+
+            isSelected = i == self.selectedIndex
+            descriptionSingleLine = normalizeToSingleLine(item.description) if item.description else None
+            lines.append(self.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth))
+
+        # Add scroll indicators if needed
+        if startIndex > 0 or endIndex < len(self.filteredItems):
+            scrollText = f"  ({self.selectedIndex + 1}/{len(self.filteredItems)})"
+            # Truncate if too long for terminal
+            lines.append(self.theme.scrollInfo(truncateToWidth(scrollText, width - 2, "")))
 
         return lines
 
     def handleInput(self, keyData: str) -> None:
         kb = getKeybindings()
+        # Up arrow - wrap to bottom when at top
         if kb.matches(keyData, "tui.select.up"):
             self.selectedIndex = len(self.filteredItems) - 1 if self.selectedIndex == 0 else self.selectedIndex - 1
             self.notifySelectionChange()
+        # Down arrow - wrap to top when at bottom
         elif kb.matches(keyData, "tui.select.down"):
             self.selectedIndex = 0 if self.selectedIndex == len(self.filteredItems) - 1 else self.selectedIndex + 1
             self.notifySelectionChange()
+        # Enter
         elif kb.matches(keyData, "tui.select.confirm"):
-            selected_item = self.filteredItems[self.selectedIndex] if self.filteredItems else None
-            if selected_item is not None and callable(self.onSelect):
-                self.onSelect(selected_item)
+            selectedItem = jsIndex(self.filteredItems, self.selectedIndex)
+            if selectedItem is not None and self.onSelect:
+                self.onSelect(selectedItem)
+        # Escape or Ctrl+C
         elif kb.matches(keyData, "tui.select.cancel"):
-            if callable(self.onCancel):
+            if self.onCancel:
                 self.onCancel()
+
+    def getVisibleRange(self) -> _VisibleRange:
+        startIndex = max(
+            0,
+            min(self.selectedIndex - self.maxVisible // 2, len(self.filteredItems) - self.maxVisible),
+        )
+        return {
+            "startIndex": startIndex,
+            "endIndex": min(startIndex + self.maxVisible, len(self.filteredItems)),
+        }
 
     def renderItem(
         self,
@@ -133,80 +176,78 @@ class SelectList:
         primaryColumnWidth: int,
     ) -> str:
         prefix = "→ " if isSelected else "  "
-        prefix_width = visibleWidth(prefix)
+        prefixWidth = visibleWidth(prefix)
 
         if descriptionSingleLine and width > 40:
-            effective_primary_column_width = max(1, min(primaryColumnWidth, width - prefix_width - 4))
-            max_primary_width = max(1, effective_primary_column_width - PRIMARY_COLUMN_GAP)
-            truncated_value = self.truncatePrimary(item, isSelected, max_primary_width, effective_primary_column_width)
-            truncated_value_width = visibleWidth(truncated_value)
-            spacing = " " * max(1, effective_primary_column_width - truncated_value_width)
-            description_start = prefix_width + truncated_value_width + len(spacing)
-            remaining_width = width - description_start - 2
+            effectivePrimaryColumnWidth = max(1, min(primaryColumnWidth, width - prefixWidth - 4))
+            maxPrimaryWidth = max(1, effectivePrimaryColumnWidth - PRIMARY_COLUMN_GAP)
+            truncatedValue = self.truncatePrimary(item, isSelected, maxPrimaryWidth, effectivePrimaryColumnWidth)
+            truncatedValueWidth = visibleWidth(truncatedValue)
+            spacing = " " * max(1, effectivePrimaryColumnWidth - truncatedValueWidth)
+            descriptionStart = prefixWidth + truncatedValueWidth + len(spacing)
+            remainingWidth = width - descriptionStart - 2  # -2 for safety
 
-            if remaining_width > MIN_DESCRIPTION_WIDTH:
-                truncated_desc = truncateToWidth(descriptionSingleLine, remaining_width, "")
+            if remainingWidth > MIN_DESCRIPTION_WIDTH:
+                truncatedDesc = truncateToWidth(descriptionSingleLine, remainingWidth, "")
                 if isSelected:
-                    return self.theme.selectedText(f"{prefix}{truncated_value}{spacing}{truncated_desc}")
-                desc_text = self.theme.description(spacing + truncated_desc)
-                return prefix + truncated_value + desc_text
+                    return self.theme.selectedText(f"{prefix}{truncatedValue}{spacing}{truncatedDesc}")
 
-        max_width = width - prefix_width - 2
-        truncated_value = self.truncatePrimary(item, isSelected, max_width, max_width)
+                descText = self.theme.description(spacing + truncatedDesc)
+                return prefix + truncatedValue + descText
+
+        maxWidth = width - prefixWidth - 2
+        truncatedValue = self.truncatePrimary(item, isSelected, maxWidth, maxWidth)
         if isSelected:
-            return self.theme.selectedText(f"{prefix}{truncated_value}")
-        return prefix + truncated_value
+            return self.theme.selectedText(f"{prefix}{truncatedValue}")
+
+        return prefix + truncatedValue
 
     def getPrimaryColumnWidth(self) -> int:
         bounds = self.getPrimaryColumnBounds()
-        widest_primary = 0
+        widestPrimary = 0
         for item in self.filteredItems:
-            widest_primary = max(widest_primary, visibleWidth(self.getDisplayValue(item)) + PRIMARY_COLUMN_GAP)
-        return _clamp(widest_primary, bounds["min"], bounds["max"])
+            widestPrimary = max(widestPrimary, visibleWidth(self.getDisplayValue(item)) + PRIMARY_COLUMN_GAP)
 
-    def getPrimaryColumnBounds(self) -> dict[str, int]:
-        raw_min = (
-            self.layout.minPrimaryColumnWidth
-            if self.layout.minPrimaryColumnWidth is not None
-            else self.layout.maxPrimaryColumnWidth
-            if self.layout.maxPrimaryColumnWidth is not None
-            else DEFAULT_PRIMARY_COLUMN_WIDTH
-        )
-        raw_max = (
-            self.layout.maxPrimaryColumnWidth
-            if self.layout.maxPrimaryColumnWidth is not None
-            else self.layout.minPrimaryColumnWidth
-            if self.layout.minPrimaryColumnWidth is not None
-            else DEFAULT_PRIMARY_COLUMN_WIDTH
-        )
-        return {"min": max(1, min(raw_min, raw_max)), "max": max(1, max(raw_min, raw_max))}
+        return clamp(widestPrimary, bounds["min"], bounds["max"])
+
+    def getPrimaryColumnBounds(self) -> _PrimaryColumnBounds:
+        minWidth, maxWidth = self.layout.minPrimaryColumnWidth, self.layout.maxPrimaryColumnWidth
+        rawMin = minWidth if minWidth is not None else maxWidth if maxWidth is not None else DEFAULT_PRIMARY_COLUMN_WIDTH
+        rawMax = maxWidth if maxWidth is not None else minWidth if minWidth is not None else DEFAULT_PRIMARY_COLUMN_WIDTH
+
+        return {
+            "min": max(1, min(rawMin, rawMax)),
+            "max": max(1, max(rawMin, rawMax)),
+        }
 
     def truncatePrimary(self, item: SelectItem, isSelected: bool, maxWidth: int, columnWidth: int) -> str:
-        display_value = self.getDisplayValue(item)
-        if self.layout.truncatePrimary is not None:
-            truncated_value = self.layout.truncatePrimary(
+        displayValue = self.getDisplayValue(item)
+        truncatedValue = (
+            self.layout.truncatePrimary(
                 SelectListTruncatePrimaryContext(
-                    text=display_value,
+                    text=displayValue,
                     maxWidth=maxWidth,
                     columnWidth=columnWidth,
                     item=item,
                     isSelected=isSelected,
                 )
             )
-        else:
-            truncated_value = truncateToWidth(display_value, maxWidth, "")
-        return truncateToWidth(truncated_value, maxWidth, "")
+            if self.layout.truncatePrimary
+            else truncateToWidth(displayValue, maxWidth, "")
+        )
+
+        return truncateToWidth(truncatedValue, maxWidth, "")
 
     def getDisplayValue(self, item: SelectItem) -> str:
         return item.label or item.value
 
     def notifySelectionChange(self) -> None:
-        selected_item = self.filteredItems[self.selectedIndex] if self.filteredItems else None
-        if selected_item is not None and callable(self.onSelectionChange):
-            self.onSelectionChange(selected_item)
+        selectedItem = jsIndex(self.filteredItems, self.selectedIndex)
+        if selectedItem is not None and self.onSelectionChange:
+            self.onSelectionChange(selectedItem)
 
     def getSelectedItem(self) -> SelectItem | None:
-        return self.filteredItems[self.selectedIndex] if self.filteredItems else None
+        return jsIndex(self.filteredItems, self.selectedIndex)
 
 
 __all__ = [

@@ -10,7 +10,6 @@ for one card and a tool that refused to close any of them, ended up killing proc
 import asyncio
 import json
 import os
-import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -19,6 +18,7 @@ import pytest
 from misaka.config import sessions as session_roots
 from misaka.core.platform import cards, tasks
 from misaka.ui.panel import daemon as d
+from misaka.utils.prompt_file import readPromptFile
 
 BODY = "## deliverable\nnotes.md\n"
 IDLE = [sys.executable, "-c", "import time; time.sleep(60)"]
@@ -45,8 +45,10 @@ def panel(home, request):
     finally:
         for pane in list(daemon.panes.values()):
             # Only panes with a real child are closed: `close` signals the pane's process
-            # group, and a stand-in pid would aim that at somebody else's.
-            if not isinstance(pane.proc, subprocess.Popen):
+            # group, and a stand-in pid would aim that at somebody else's. On Windows a real
+            # child is a pseudo-console process, not a `Popen`; skipping it left the reader
+            # (`misaka chat --read-only`) running after the test.
+            if pane.proc is None or isinstance(pane.proc, SimpleNamespace):
                 daemon.panes.pop(pane.id, None)
                 continue
             try:
@@ -70,6 +72,13 @@ def _card(panel, workspace, *, status="done", title="T4 crossover", assignee="10
     with open(transcript, "w", encoding="utf-8") as handle:
         handle.write(json.dumps({"type": "session", "id": "fixture", "cwd": str(workspace)}) + "\n")
     return task_id, transcript
+
+
+def _said(argv):
+    """The message a pane's program was started with: never on its command line, in the file
+    ``--say-file`` names (issue #13: a review brief is longer than a Windows command line)."""
+    assert argv[-2] == "--say-file"
+    return readPromptFile(argv[-1])
 
 
 async def _settle(proc, tries=60):
@@ -146,10 +155,47 @@ async def test_continuing_a_card_comes_back_in_its_own_window(panel, home):
     assert len(panel.panes) == 1
     assert pane.proc is not first_proc and pane.alive()
     assert await _settle(first_proc)
-    assert "--say" in pane.argv and pane.argv[-1] == "please redo the ledger"
+    assert _said(pane.argv) == "please redo the ledger"
     row = tasks.get(panel._board(), task_id)
     assert row["status"] == "running"
     assert pane.claim_lock == row["claim_lock"] and pane.generation == row["generation"]
+
+
+async def test_the_message_file_goes_when_the_program_it_started_is_gone(panel, home):
+    """pi's subagent removes its prompt file once the child has exited; a pane's program the
+    same: replaced, or closed with its pane."""
+    task_id, _ = _card(panel, home)
+    pane = await panel.continue_card(task_id, "first")
+    first = pane.argv[-1]
+    assert os.path.exists(first) and pane.prompt_file == (os.path.dirname(first), first)
+    await panel._replace_program(pane, IDLE)
+    assert not os.path.exists(first) and not os.path.exists(os.path.dirname(first))
+    assert pane.prompt_file is None
+
+    other, _ = _card(panel, home, title="other")
+    pane = await panel.continue_card(other, "second")
+    second = pane.argv[-1]
+    assert os.path.exists(second)
+    panel.close(pane.id)
+    assert not os.path.exists(second)
+
+
+async def test_a_pane_that_does_not_start_leaves_no_message_file(panel, home, monkeypatch):
+    task_id, _ = _card(panel, home)
+    written = []
+    real = d.writePromptToTempFile
+    monkeypatch.setattr(d, "writePromptToTempFile", lambda *a: written.append(real(*a)) or written[-1])
+    monkeypatch.setattr(panel, "_card_pane_to_reuse", lambda _task_id: None)
+
+    def refuse(*_args, **_kwargs):
+        raise OSError(206, "The filename or extension is too long")
+
+    monkeypatch.setattr(panel, "create", refuse)
+    with pytest.raises(OSError):
+        await panel.continue_card(task_id, "carry on")
+    [(directory, path)] = written
+    assert not os.path.exists(path) and not os.path.exists(directory)
+    assert tasks.get(panel._board(), task_id)["status"] == "blocked"
 
 
 async def test_continuing_a_card_closes_the_panes_it_is_not_taking_over(panel, home):
@@ -338,7 +384,7 @@ async def test_a_card_that_never_ran_starts_from_its_contract_with_the_note_mail
     os.unlink(transcript)                                   # never got as far as a transcript
     panel._mcon = messages.connect(str(home / "messages.db"))
     pane = await panel.continue_card(task_id, "start with the 1982 edition")
-    assert "--resume" not in pane.argv and "--say" not in pane.argv
+    assert "--resume" not in pane.argv and "--say-file" not in pane.argv and pane.prompt_file is None
     row = db.get(panel._board(), task_id)
     assert row["status"] == "running"
     mail = messages.pending(panel._mcon, "10032", task_id=task_id)
@@ -353,7 +399,7 @@ async def test_a_card_with_a_transcript_is_still_resumed(panel, home):
     task_id, _ = _card(panel, home)
     panel._mcon = None
     pane = await panel.continue_card(task_id, "carry on")
-    assert "--resume" in pane.argv and pane.argv[-1] == "carry on"
+    assert "--resume" in pane.argv and _said(pane.argv) == "carry on"
 
 
 async def test_an_allys_card_runs_in_its_acp_runner_and_is_continued_with_a_message(panel, home, monkeypatch):
@@ -368,7 +414,7 @@ async def test_an_allys_card_runs_in_its_acp_runner_and_is_continued_with_a_mess
 
     done, _ = _card(panel, home, assignee="codex", title="settled")
     pane = await panel.continue_card(done, "one more source")
-    assert pane.argv == [*IDLE, done, "--say", "one more source"]
+    assert pane.argv[:-1] == [*IDLE, done, "--say-file"] and _said(pane.argv) == "one more source"
 
 
 
@@ -423,7 +469,8 @@ async def test_last_order_closes_what_finished_cards_left_in_her_tab_and_nothing
 
 async def test_a_card_woken_to_answer_a_message_leaves_the_cards_built_on_it_alone(panel, home):
     """2026-10-01: Last Order's note woke finished card A; the continuation reopened A, which sent
-    finished card B (built on A) back to todo to redo its whole job. A consultation is not rework."""
+    finished card B (built on A) back to todo to redo its whole job. A consultation is not rework,
+    and since R40 it is not an attempt either: A stays done at her generation."""
     a, _ = _card(panel, home, title="T1 timeline")
     b, _ = _card(panel, home, title="T2 attribution", status="todo")
     con = panel._board()
@@ -433,11 +480,14 @@ async def test_a_card_woken_to_answer_a_message_leaves_the_cards_built_on_it_alo
     con.commit()
     before = tasks.get(con, b)
 
-    await panel.continue_card(a, "a question about your timeline", consult=True)
+    pane, run_id = await panel.consult_card(a, "a question about your timeline")
 
     after = tasks.get(con, b)
     assert after["status"] == "done" and after["generation"] == before["generation"]
-    assert tasks.get(con, a)["status"] == "running"
+    row = tasks.get(con, a)
+    assert (row["status"], row["generation"]) == ("done", 1)
+    assert tasks.live_consultation(con, a)["id"] == run_id and pane.consult[0] == run_id
+    assert "--consult" in pane.argv and pane.claim_lock is None
 
 
 async def test_continuing_a_card_as_rework_still_sends_its_dependents_back(panel, home):
@@ -464,15 +514,15 @@ async def test_a_card_answers_a_message_while_its_parent_is_running(panel, home)
     tasks.link_dependencies(con, [a], b)
     con.execute("UPDATE tasks SET status='done' WHERE id=?", (b,))
     tasks._mirror_status(con, b)
-    con.execute("UPDATE tasks SET status='running' WHERE id=?", (a,))     # A answering B, woken
+    con.execute("UPDATE tasks SET status='running' WHERE id=?", (a,))     # A reworked meanwhile
     tasks._mirror_status(con, a)
     con.commit()
 
     with pytest.raises(ValueError, match="could not be claimed"):
         await panel.continue_card(b, "redo the breakpoints")              # rework: A must be done
 
-    await panel.continue_card(b, "A's answer to your question", consult=True)
-    assert tasks.get(con, b)["status"] == "running"
+    await panel.consult_card(b, "A's answer to your question")
+    assert tasks.get(con, b)["status"] == "done" and tasks.live_consultation(con, b) is not None
 
 
 async def test_a_card_for_a_sister_no_longer_in_the_roster_fails_for_good(panel, home):
@@ -486,3 +536,43 @@ async def test_a_card_for_a_sister_no_longer_in_the_roster_fails_for_good(panel,
         await panel.run_card(tid)
     row = tasks.get(panel._board(), tid)
     assert row["status"] == "failed" and "not in the roster" in row["last_failure_error"]
+
+
+@pytest.mark.parametrize(("command", "module", "extra"), [
+    ("card-shell", "misaka.cli.card_shell", ["--resume"]),
+    ("ally-card", "misaka.core.network.ally.card", []),
+])
+def test_a_panes_card_program_reads_its_message_from_the_file(tmp_path, monkeypatch, command, module, extra):
+    """The two programs a pane runs for a card take the message from the file the daemon wrote,
+    line endings and all."""
+    import importlib
+
+    from misaka.cli import app
+    from misaka.utils.prompt_file import removePromptFile, writePromptToTempFile
+    written = writePromptToTempFile("t_1", "redo the ledger\r\n第二段")
+    seen = []
+    monkeypatch.setattr(importlib.import_module(module), "launch",
+                        lambda task_id, **kwargs: seen.append((task_id, kwargs["say"])))
+    try:
+        args = app._parser().parse_args([command, "t_1", *extra, "--say-file", written[1]])
+        app.COMMANDS[command](args)
+    finally:
+        removePromptFile(written)
+    assert seen == [("t_1", "redo the ledger\r\n第二段")]
+
+
+async def test_a_message_that_cannot_be_written_gives_the_claim_back(panel, home, monkeypatch):
+    """The file is written after the claim; a disk that refuses it must not leave the card
+    claimed by a pane that never started."""
+    task_id, _ = _card(panel, home)
+    panes = dict(panel.panes)
+
+    def full(*_args):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(d, "writePromptToTempFile", full)
+    with pytest.raises(OSError):
+        await panel.continue_card(task_id, "carry on")
+    row = tasks.get(panel._board(), task_id)
+    assert row["status"] == "blocked" and row["claim_lock"] is None
+    assert panel.panes == panes

@@ -206,8 +206,9 @@ Last Order answers every serious objection of the red team, one answer each:
 
 A node settles its own objections and gaps: what it cannot fill, it concedes or parks on the
 record. Before she answers an objection about material a card delivered, Last Order can put it to
-that card's Sister: a finished card is woken in her own session, and Last Order waits for her
-answer before deciding.
+that card's Sister: a finished card answers in her own session without becoming unfinished, and
+Last Order waits for her answer before deciding. The node also waits for such answers before it
+writes its conclusion.
 
 While something is revised and revisions remain, Last Order writes the next version
 (`synthesis-2.md`, …) and the same red-team Sister reviews it in her own conversation, with Last
@@ -246,11 +247,21 @@ Last Order goes through the possibilities not taken, and any objection she answe
 
 - an **option** of a decision, with its premise, to open as a new node;
 - **covered**, when a node or a waiting option already pursues it;
-- **declined**, with her reason. The final report lists declined paths and why.
+- **declined**, with her reason -- also a proposal her own line already takes, saying where. The
+  final report lists declined paths and why.
 
 A fork is a possibility that excludes the node's own line. A presupposition the answer depends
 on becomes one too: the node opened for it researches whether it holds, and what the answer
 becomes if it does not.
+
+Last Order judges "covered" from where she stands. Her own line she knows from the inside: the
+nodes her node descends from decided in the conversation hers continues, and she is shown what
+they decided and where, so she reads why a path went where it went before calling a proposal the
+same. A node of another line she knows only by what it wrote, so a proposal she marks covered by
+it -- or by another node's waiting option -- is a *claim*, which the next reconciliation reviews
+with both lines in view. A path declined or left unopened comes back only as an option that names
+it and answers the reason recorded for it; that holds for a covered path too, since being covered
+is not being answered.
 
 ## How the graph grows
 
@@ -276,13 +287,25 @@ the run in, and rearranges it. With approval on, she presents this to you like a
   Conclusions that simply agree are recorded as converging, which is a finding in itself.
 - **Relations between nodes are recorded**: where they converge or diverge, and where one echoes,
   borrows from or displaces another. The final report draws on them.
+- **Coverage claims across lines are reviewed**: each proposal a node closed as covered by another
+  line is read against that line's conclusion -- as it stands now, and whether it was revised
+  since. The claim holds, or the proposal is reopened as a possibility of its own and opened (as a
+  child of the node that raised it) or left unopened like any option.
+- **An option left unopened names what answers it**, when a node does: the node that already
+  pursues it, the node it complements, or the option opened for it now.
 
 ### The paths list
 
 The run keeps a list of every possibility raised so far, grouped under the node that raised it,
-with what became of it (`final/<run>-paths.md`). Each possibility is opened once: one that a node
+with its premise and what became of it (`final/<run>-paths.md`). Each possibility is opened once: one that a node
 already pursues goes to that node, and a declined path comes back only with an answer to why it
 was declined.
+
+Its second part groups the same possibilities the other way: under what answers each now -- the
+node that pursues it, or the record that leaves it unopened -- through every option it went by,
+so a path reached from another frame shows beside the node that took it up, and a declined path
+shows the option that brought it back. Every step is a judgement some Last Order recorded; the
+list never shortens the chain, and nothing in it decides that two possibilities are the same.
 
 A new node starts from a copy of the conversation of the node it came from, so it knows how its
 question arose. A join starts from what its lines have in common, with a brief on each of them
@@ -354,9 +377,15 @@ explains the tabs, panes and keys.
 | see how a run is doing | `/research status [RUN_ID]` | `misaka board` (its cards) |
 | stop a run and get a partial report | `/research stop [RUN_ID]` | Ctrl+C in the running command |
 | resume a stopped or failed run | `/research resume [RUN_ID] [ANSWER]` | `misaka research --resume RUN_ID` |
+| end research mode in this conversation, leaving its stopped or failed run as it is | `/research close [RUN_ID]` | |
 | resume in a different window | `/research resume RUN_ID --here` | |
 | say something to a running node's Last Order (the root's by default) | `/research tell [RUN_ID] [--to NODE_ID] MESSAGE` | `misaka research --tell RUN_ID [--to NODE_ID] "MESSAGE"` |
 | change a running run's limits | `/research limits [RUN_ID] --sister-parallel 2 …` | `misaka research --limits RUN_ID --sister-parallel 2 …` |
+
+A stopped or failed run keeps the research rules standing in the conversation that started it,
+so its Last Order does not answer the unfinished question in the run's place. `/research close`
+lifts them; `/research resume` takes the run up again. A run whose window closed before its stop
+had finished settles the next time that conversation opens.
 
 Resume a run in the Last Order conversation that started it; from any other window,
 `/research resume` names the conversation to open (the sidebar lists it under sessions).

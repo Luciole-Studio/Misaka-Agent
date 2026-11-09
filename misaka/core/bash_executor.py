@@ -1,137 +1,161 @@
-"""Bash execution helpers shared by interactive and non-interactive modes."""
+"""Bash command execution with streaming support and cancellation.
+
+This module provides a unified bash execution implementation used by:
+- AgentSession.executeBash() for interactive mode
+- Direct calls from modes that need bash execution
+
+Translated from pi's ``packages/coding-agent/src/core/bash-executor.ts`` (v1.1.0).
+"""
 
 from __future__ import annotations
 
 import codecs
-import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, TypedDict
+from typing import Any, BinaryIO, TypedDict
 
 from misaka.core.tools.bash import BashOperations
-from misaka.core.tools.truncate import DEFAULT_MAX_BYTES, truncate_tail
-from misaka.utils.ansi import strip_ansi
-from misaka.utils.shell import sanitize_binary_output
-from misaka.utils.values import signal_aborted
+from misaka.core.tools.truncate import DEFAULT_MAX_BYTES, truncateTail
+from misaka.utils.ansi import splitIncompleteAnsiSuffix, stripAnsi
+from misaka.utils.js import jsLength
+from misaka.utils.output_files import createOutputFileStream
+from misaka.utils.shell import sanitizeBinaryOutput
+from misaka.utils.values import read_field, signal_aborted
+
+# ============================================================================
+# Types
+# ============================================================================
 
 
 class BashExecutorOptions(TypedDict, total=False):
+    # Callback for streaming output chunks (already sanitized)
     onChunk: Callable[[str], None]
+    # AbortSignal for cancellation
     signal: Any
 
 
 @dataclass(slots=True)
 class BashResult:
+    # Combined stdout + stderr output (sanitized, possibly truncated)
     output: str
+    # Process exit code (None if killed/cancelled)
     exitCode: int | None
+    # Whether the command was cancelled via signal
     cancelled: bool
+    # Whether the output was truncated
     truncated: bool
+    # Path to temp file containing full output (if output exceeded truncation threshold)
     fullOutputPath: str | None = None
 
 
-def _js_string_length(value: str) -> int:
-    return len(value.encode("utf-16-le")) // 2
+# ============================================================================
+# Implementation
+# ============================================================================
 
 
-async def execute_bash_with_operations(
+async def executeBashWithOperations(
     command: str,
     cwd: str,
     operations: BashOperations,
     options: BashExecutorOptions | Mapping[str, Any] | None = None,
 ) -> BashResult:
-    resolved_options = dict(options or {})
-    output_chunks: list[str] = []
-    output_bytes = 0
-    max_output_bytes = DEFAULT_MAX_BYTES * 2
-    total_bytes = 0
-    temp_file_path: str | None = None
-    temp_file_handle: Any | None = None
+    """Execute a bash command using custom BashOperations.
+    Used for remote execution (SSH, containers, etc.).
+    """
+    outputChunks: list[str] = []
+    outputBytes = 0
+    maxOutputBytes = DEFAULT_MAX_BYTES * 2
+
+    tempFilePath: str | None = None
+    tempFileStream: BinaryIO | None = None
+    totalBytes = 0
+    signal = read_field(options, "signal")
+
+    def ensureTempFile() -> None:
+        nonlocal tempFilePath, tempFileStream
+        if tempFilePath:
+            return
+        # MISAKA fork: output files are named after misaka (upstream: `pi-bash`); the stream is binary, so text is
+        # written as UTF-8.
+        tempFilePath, tempFileStream = createOutputFileStream("misaka-bash", ".log")
+        for chunk in outputChunks:
+            tempFileStream.write(chunk.encode("utf-8"))
+
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    # Unfinished escape sequence at the end of the previous chunk, completed by the next chunk.
+    pendingAnsi = ""
 
-    def ensure_temp_file() -> None:
-        nonlocal temp_file_path, temp_file_handle
-        if temp_file_path is not None:
+    def appendText(rawText: str) -> None:
+        nonlocal outputBytes
+        # Sanitize: strip ANSI, replace binary garbage, normalize newlines
+        text = sanitizeBinaryOutput(stripAnsi(rawText)).replace("\r", "")
+        if not text:
             return
-        temp_file_handle = tempfile.NamedTemporaryFile(  # noqa: SIM115 - closed after streaming
-            mode="w", encoding="utf-8", prefix="misaka-bash-", suffix=".log", delete=False)
-        temp_file_path = temp_file_handle.name
-        temp_file_handle.writelines(output_chunks)
 
-    def append_text(text: str) -> None:
-        nonlocal output_bytes
-        if temp_file_handle is not None:
-            temp_file_handle.write(text)
-        output_chunks.append(text)
-        output_bytes += _js_string_length(text)
-        while output_bytes > max_output_bytes and len(output_chunks) > 1:
-            removed = output_chunks.pop(0)
-            output_bytes -= _js_string_length(removed)
-        on_chunk = resolved_options.get("onChunk")
-        if callable(on_chunk):
-            on_chunk(text)
+        # Start writing to temp file if exceeds threshold
+        if totalBytes > DEFAULT_MAX_BYTES:
+            ensureTempFile()
 
-    def on_data(data: bytes) -> None:
-        nonlocal total_bytes
-        total_bytes += len(data)
-        text = sanitize_binary_output(strip_ansi(decoder.decode(data, final=False))).replace("\r", "")
-        if total_bytes > DEFAULT_MAX_BYTES:
-            ensure_temp_file()
-        append_text(text)
+        if tempFileStream is not None:
+            tempFileStream.write(text.encode("utf-8"))
 
-    def close_temp_file() -> None:
-        if temp_file_handle is None:
-            return
-        temp_file_handle.flush()
-        temp_file_handle.close()
+        # Keep rolling buffer
+        outputChunks.append(text)
+        outputBytes += jsLength(text)
+        while outputBytes > maxOutputBytes and len(outputChunks) > 1:
+            removed = outputChunks.pop(0)
+            outputBytes -= jsLength(removed)
 
+        # Stream to callback
+        onChunk = read_field(options, "onChunk")
+        if onChunk:
+            onChunk(text)
+
+    def onData(data: bytes) -> None:
+        nonlocal totalBytes, pendingAnsi
+        totalBytes += len(data)
+        complete, pending = splitIncompleteAnsiSuffix(pendingAnsi + decoder.decode(data, final=False))
+        pendingAnsi = pending
+        appendText(complete)
+
+    def flushOutput() -> None:
+        nonlocal pendingAnsi
+        rest = pendingAnsi + decoder.decode(b"", final=True)
+        pendingAnsi = ""
+        appendText(rest)
+
+    def endTempFile() -> None:
+        if tempFileStream is not None and not tempFileStream.closed:
+            tempFileStream.close()
+
+    exitCode: int | None = None
     try:
         try:
-            result = await operations.exec(
-                command,
-                cwd,
-                {
-                    "onData": on_data,
-                    "signal": resolved_options.get("signal"),
-                },
-            )
+            exitCode = read_field(await operations.exec(command, cwd, {"onData": onData, "signal": signal}), "exitCode")
         except Exception:
-            full_output = "".join(output_chunks)
-            truncated = truncate_tail(full_output)
-            if truncated.truncated:
-                ensure_temp_file()
-            close_temp_file()
-            if signal_aborted(resolved_options.get("signal")):
-                return BashResult(
-                    output=truncated.content if truncated.truncated else full_output,
-                    exitCode=None,
-                    cancelled=True,
-                    truncated=truncated.truncated,
-                    fullOutputPath=temp_file_path,
-                )
-            raise
+            # An aborted command still returns the output it produced so far
+            if not signal_aborted(signal):
+                endTempFile()
+                raise
 
-        full_output = "".join(output_chunks)
-        truncated = truncate_tail(full_output)
-        if truncated.truncated:
-            ensure_temp_file()
-        close_temp_file()
-        cancelled = signal_aborted(resolved_options.get("signal"))
+        flushOutput()
+        fullOutput = "".join(outputChunks)
+        truncationResult = truncateTail(fullOutput)
+        if truncationResult.truncated:
+            ensureTempFile()
+        endTempFile()
+        cancelled = signal_aborted(signal)
+
         return BashResult(
-            output=truncated.content if truncated.truncated else full_output,
-            exitCode=None if cancelled else result.get("exitCode"),
+            output=truncationResult.content if truncationResult.truncated else fullOutput,
+            exitCode=None if cancelled else exitCode,
             cancelled=cancelled,
-            truncated=truncated.truncated,
-            fullOutputPath=temp_file_path,
+            truncated=truncationResult.truncated,
+            fullOutputPath=tempFilePath,
         )
     finally:
-        if temp_file_handle is not None and not temp_file_handle.closed:
-            temp_file_handle.close()
+        # MISAKA fork: the stream is also closed when the task is cancelled (a Node stream would stay open).
+        endTempFile()
 
 
-executeBashWithOperations = execute_bash_with_operations
-
-__all__ = [
-    "BashExecutorOptions",
-    "BashResult",
-    "executeBashWithOperations",
-]
+__all__ = ["BashExecutorOptions", "BashResult", "executeBashWithOperations"]

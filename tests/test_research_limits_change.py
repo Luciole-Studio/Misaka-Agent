@@ -41,7 +41,7 @@ def test_a_change_is_saved_and_read_back_where_the_run_uses_it(board, tmp_path):
 
 def test_a_limit_is_never_set_below_what_the_graph_holds(board, tmp_path):
     run = _run(board, tmp_path)
-    root = runs.node(board, board.execute("SELECT id FROM research_branches WHERE run_id=?", (run["id"],)).fetchone()[0])
+    root = runs.node(board, board.execute("SELECT id FROM research_execution WHERE run_id=?", (run["id"],)).fetchone()[0])
     with tasks.write_txn(board):
         child = runs.create_node(board, run["id"], question="Who bought the licences?", parents=[root["id"]])
         runs.create_node(board, run["id"], question="Who smuggled?", parents=[child["id"]])

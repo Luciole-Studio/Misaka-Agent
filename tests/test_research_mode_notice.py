@@ -21,7 +21,8 @@ from misaka.core.research.wiring import research
 def board(tmp_path):
     con = tasks.connect(str(tmp_path / "board.db"))
     runs.init(con)
-    return con
+    yield con
+    con.close()
 
 
 def _run(con, tmp_path, session="s1", status=None):
@@ -39,8 +40,11 @@ def test_no_run_means_no_notice(board):
 
 def test_a_board_without_research_tables_is_not_a_failure(tmp_path):
     con = tasks.connect(str(tmp_path / "plain.db"))
-    assert runs.for_session(con, "s1") == []
-    assert runs.is_active(con, "r_x") is False
+    try:
+        assert runs.for_session(con, "s1") == []
+        assert runs.is_active(con, "r_x") is False
+    finally:
+        con.close()
 
 
 def test_for_session_returns_only_this_conversations_runs(board, tmp_path):

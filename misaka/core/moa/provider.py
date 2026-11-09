@@ -1,4 +1,4 @@
-"""Mixture-of-Agents virtual provider adapted from Hermes MoA."""
+"""Mixture-of-Agents presets (the core provider ``moa``), adapted from Hermes MoA."""
 
 from __future__ import annotations
 
@@ -28,8 +28,8 @@ from misaka.ai.types import (
     UserMessage,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
-from misaka.ai.utils.headers import provider_headers_to_record
-from misaka.ai.utils.text import get_system_message_text
+from misaka.ai.utils.headers import providerHeadersToRecord
+from misaka.ai.utils.text import getSystemMessageText
 from misaka.config import home
 from misaka.config.product import current_config
 from misaka.core.moa.privacy import (
@@ -42,7 +42,7 @@ DEFAULT_MOA_PRESET_NAME = "default"
 
 def _default_slots():
     """Follow the current product model settings; override these in the MoA config file."""
-    from misaka.ai.models import get_providers
+    from misaka.ai.compat import getProviders
 
     cfg = current_config()
     default = {"provider": cfg["provider"], "model": cfg["default_model"]}
@@ -52,9 +52,9 @@ def _default_slots():
         lo["model"] = reference
         provider, slash, model = reference.partition("/")
         if slash and model:
-            # Registry construction calls this function. Read provider names
-            # without constructing another registry (or splitting raw slash IDs).
-            providers = set(get_providers()) | {cfg["provider"]}
+            # Model runtime refreshes call this function. Read provider names
+            # without constructing another runtime (or splitting raw slash IDs).
+            providers = set(getProviders()) | {cfg["provider"]}
             try:
                 with open(home.path("models"), encoding="utf-8-sig") as handle:
                     configured = json.load(handle)
@@ -360,7 +360,7 @@ _AUTH_RESOLVER: Any = None
 
 
 def set_auth_resolver(fn) -> None:
-    """Bind the session's ``modelRegistry.getAuth`` so each slot can be paid for on its own.
+    """Bind the session's ``modelRuntime.getAuth`` so each slot can be paid for on its own.
 
     A mixture calls models from providers the session itself is not using -- the session's
     model *is* ``moa``, whose api key is the virtual provider's placeholder. Sending that
@@ -386,9 +386,18 @@ async def _slot_auth(model: Model) -> tuple[Model, dict[str, Any]]:
         model = model.model_copy(update={"baseUrl": auth.baseUrl})
     return model, {
         "apiKey": auth.apiKey,
-        "headers": provider_headers_to_record(auth.headers),
+        "headers": providerHeadersToRecord(auth.headers),
         "env": resolution.env,
     }
+
+
+def _catalogHint(slot) -> str:
+    """Why a slot's model may be missing, after the slot's label: an OpenRouter model leaves the catalog when the
+    user's key may not use it (pi 1.2 per-key lists). Empty for other providers."""
+    from misaka.core.model_runtime import personalizedCatalogHint
+
+    hint = personalizedCatalogHint(str(slot.get("provider") or ""))
+    return f".{hint}" if hint else ""
 
 
 def _resolve_slot_model(slot) -> Model | None:
@@ -428,12 +437,12 @@ def _message_text(message: AssistantMessage) -> str:
 
 async def _run_reference(slot, view, *, preset, options) -> tuple[str, str, Usage | None, list | None]:
     """Run one advisor and return its label, text, usage, and complete input trace."""
-    from misaka.ai.stream import complete_simple
+    from misaka.ai.compat import completeSimple
 
     label = slot_label(slot)
     m = _resolve_slot_model(slot)
     if m is None:
-        return label, f"[failed: model slot is unavailable: {label}]", None, None
+        return label, f"[failed: model slot is unavailable: {label}{_catalogHint(slot)}]", None, None
     m, auth = await _slot_auth(m)
     reserve = slot.get("max_tokens") or preset.get("reference_max_tokens")
     trimmed = trim_view_for_window(view, m.contextWindow, reserve=reserve)
@@ -452,7 +461,7 @@ async def _run_reference(slot, view, *, preset, options) -> tuple[str, str, Usag
     )
     sent = [{"role": "system", "content": REFERENCE_SYSTEM_PROMPT}, *trimmed]
     try:
-        msg = await complete_simple(m, ctx, opts)
+        msg = await completeSimple(m, ctx, opts)
     except Exception as exc:  # noqa: BLE001 - one advisor failure must not abort the turn
         return label, f"[failed: {exc}]", None, sent
     if msg.stopReason == "error":
@@ -641,7 +650,7 @@ def _serialize_messages(messages) -> list[dict[str, Any]]:
         content = getattr(m, "content", None)
         if role == "system":
             # A system message may carry its prompt as sections rather than `content`.
-            out.append({"role": role, "content": get_system_message_text(m)})
+            out.append({"role": role, "content": getSystemMessageText(m)})
         elif isinstance(content, str):
             out.append({"role": role, "content": content})
         else:
@@ -665,7 +674,7 @@ def _serialize_messages(messages) -> list[dict[str, Any]]:
 
 def _fold_usage(base: Usage, extras: list[Usage | None], advisor_models: list[Model | None]) -> Usage:
     """Add each advisor's usage and model-specific cost to aggregator usage."""
-    from misaka.ai.models import calculate_cost
+    from misaka.ai.models import calculateCost
 
     total = base.model_copy(deep=True)
     for usage, m in zip(extras, advisor_models):
@@ -674,7 +683,7 @@ def _fold_usage(base: Usage, extras: list[Usage | None], advisor_models: list[Mo
         cost = usage.cost
         if m is not None and not (cost.total or 0):
             try:
-                cost = calculate_cost(m, usage.model_copy(deep=True))
+                cost = calculateCost(m, usage.model_copy(deep=True))
             except Exception:  # noqa: BLE001 - retain provider-reported cost on calculation failure
                 cost = usage.cost
         total.input += usage.input
@@ -692,7 +701,7 @@ def _fold_usage(base: Usage, extras: list[Usage | None], advisor_models: list[Mo
 
 def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptions | None = None) -> AssistantMessageEventStream:
     """Run advisor calls, inject their guidance, and stream the aggregator response."""
-    from misaka.ai.stream import stream_simple
+    from misaka.ai.compat import streamSimple
 
     outer = AssistantMessageEventStream()
     opts = options or SimpleStreamOptions()
@@ -777,7 +786,7 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
                 raise RuntimeError("An MoA aggregator cannot itself use the MoA provider.")
             agg_model = _resolve_slot_model(agg_slot)
             if agg_model is None:
-                raise RuntimeError(f"Aggregator model is unavailable: {slot_label(agg_slot)}")
+                raise RuntimeError(f"Aggregator model is unavailable: {slot_label(agg_slot)}{_catalogHint(agg_slot)}")
 
             agg_messages = list(context.messages)
             if guidance:
@@ -798,20 +807,28 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
                 **agg_auth,
             })
 
-            inner = stream_simple(agg_model, agg_ctx, agg_opts)
+            inner = streamSimple(agg_model, agg_ctx, agg_opts)
             usages = [u for _l, _t, u in outputs]
             final_text: str | None = None
             async for event in inner:
                 etype = getattr(event, "type", "")
                 if etype == "start":
                     continue
+                # MISAKA fork: the round is the request: its reply starts when the round did, and `outer`, created
+                # then, times it through the advisors and the aggregator rather than the aggregator alone.
                 if etype == "done":
-                    event = event.model_copy(update={"message": event.message.model_copy(
-                        update={"usage": _fold_usage(event.message.usage, usages, advisor_models)})})
+                    event = event.model_copy(update={"message": event.message.model_copy(update={
+                        "usage": _fold_usage(event.message.usage, usages, advisor_models),
+                        "timestamp": now_ms,
+                        "durationMs": None,
+                    })})
                     final_text = _message_text(event.message)
                 elif etype == "error":
-                    event = event.model_copy(update={"error": event.error.model_copy(
-                        update={"usage": _fold_usage(event.error.usage, usages, advisor_models)})})
+                    event = event.model_copy(update={"error": event.error.model_copy(update={
+                        "usage": _fold_usage(event.error.usage, usages, advisor_models),
+                        "timestamp": now_ms,
+                        "durationMs": None,
+                    })})
                 outer.push(event)
             outer.end()
             if fresh_fanout:
@@ -823,7 +840,7 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
             message = AssistantMessage(
                 content=[], api=model.api, provider=model.provider, model=model.id,
                 usage=_zero_usage(), stopReason="error", errorMessage=str(exc),
-                timestamp=time.time_ns() // 1_000_000)
+                timestamp=now_ms)
             outer.push(ErrorEvent(reason="error", error=message))
             outer.end(message)
 
@@ -831,11 +848,11 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
     return outer
 
 
-# Configured presets exposed as virtual registry models.
+# Configured presets, published as models of the core provider `moa`.
 
 
 def _registry_model(find, slot) -> Model | None:
-    """The model registry's own entry for a slot, when the registry is the one asking."""
+    """The model runtime's own entry for a slot (``runtime.getModel``), when the runtime is the one asking."""
     if find is None:
         return None
     try:
@@ -847,24 +864,22 @@ def _registry_model(find, slot) -> Model | None:
 def _catalog_model(slot) -> Model | None:
     """The builtin catalog's entry for a slot, for sizes a registry lookup cannot supply.
 
-    ``register_provider`` runs while the extension is being registered, which is before
-    any session has injected a model resolver -- so ``_resolve_slot_model`` there is not
-    "usually None", it is always None, and that one call fixes what every ``moa:<preset>``
-    model advertises for the life of the process. The builtin catalog is the same table
-    the registry merges its dynamic and custom models onto, so reading it directly answers
-    for every aggregator that is a catalogued model, resolver or no resolver.
+    The provider's ``refreshModels`` runs on every model runtime refresh, and a refresh may run before the runtime
+    can answer for a slot. The builtin catalog is the same table the runtime merges its dynamic and custom models
+    onto, so reading it directly answers for every aggregator that is a catalogued model.
     """
-    from misaka.ai.models import get_model
+    from misaka.ai.compat import getModel
 
-    return get_model(str(slot.get("provider") or ""), str(slot.get("model") or ""))
+    return getModel(str(slot.get("provider") or ""), str(slot.get("model") or ""))
 
 
 def preset_models(configured=None, find=None) -> list[Model]:
-    """Build one virtual `moa` Model per configured preset, sized from its aggregator.
+    """Build one `moa` Model per configured preset (provider ``moa``, id = the preset's name), sized from its
+    aggregator.
 
-    With ``configured(provider_id) -> bool`` given (the registry's own credential check,
+    With ``configured(provider_id) -> bool`` given (the runtime's own credential check,
     models.json keys included), a preset whose aggregator's provider is not configured is
-    left out: the registry lists what can run, and a bare setup stays empty.
+    left out: the runtime lists what can run, and a bare setup stays empty.
 
     The sizes are not decoration: ``core/agent_session`` reads ``contextWindow`` for the
     auto-compaction threshold, the ``/context`` percentage and the footer. A preset whose
@@ -872,7 +887,7 @@ def preset_models(configured=None, find=None) -> list[Model]:
     turn is already over the provider's limit, and one whose aggregator holds 1M compacts
     long before it needs to.
 
-    ``find(provider, model_id)`` is the registry asking on its own behalf, and it is the
+    ``find(provider, model_id)`` is the runtime asking on its own behalf, and it is the
     only lookup that answers for an aggregator defined in models.json: the builtin catalog
     has never heard of a custom provider, and no session has bound a resolver this early.
     """
@@ -881,7 +896,7 @@ def preset_models(configured=None, find=None) -> list[Model]:
     for name, preset in cfg["presets"].items():
         if configured is not None and not configured(str(preset["aggregator"].get("provider") or "")):
             continue
-        # The registry first (it holds models.json's custom providers), then a
+        # The runtime first (it holds models.json's custom providers), then a
         # session-bound resolver, then the builtin catalog. The literals below stay the
         # last resort for an aggregator none of the three has heard of.
         agg = (_registry_model(find, preset["aggregator"])

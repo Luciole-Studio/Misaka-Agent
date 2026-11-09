@@ -48,7 +48,7 @@ def extract_json(text):
 def _escape_prose_quotes(text):
     """Escape the double quotes a model leaves bare inside JSON string values.
 
-    A research plan came back as one ``{"plan_markdown": "..."}`` whose Markdown quoted a
+    A workflow's plan came back as one ``{"plan_markdown": "..."}`` whose Markdown quoted a
     phrase -- ``默认接受"埃及成功、印度失败"的通行叙事`` -- with the quotes unescaped. The
     object failed to decode, the scan above moved on *into* it and returned the first
     fragment that did decode, ``"clarifying_questions": []`` -- an empty list -- and the
@@ -107,6 +107,16 @@ def validate_cards(obj, sisters):
             errors.append(f"card {i}: missing title")
         if not (isinstance(body, str) and '## acceptance criteria' in body.lower()):
             errors.append(f"card {i}: body must contain a testable `## acceptance criteria` section")
+        else:
+            # A `## deliverable` the completion check cannot satisfy is refused now, not when the
+            # card tries to complete (R52).
+            from misaka.core.network import card_contract, worker
+            try:
+                name = worker.contract_deliverable({"body": body})
+                if name is not None:
+                    card_contract.one_file(name)
+            except ValueError as error:
+                errors.append(f"card {i}: {error}")
         if assignee not in sisters:
             errors.append(f"card {i}: assignee={assignee} not in the roster {sorted(sisters)}")
         cards.append({

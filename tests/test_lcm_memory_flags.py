@@ -3,14 +3,14 @@ reads (core/moments MEMORY, TURN): neither side names the other's message types.
 
 from __future__ import annotations
 
-from misaka.agent.harness.messages import create_custom_message
 from misaka.ai.types import UserMessage
+from misaka.core.messages import createCustomMessage
 from misaka.core.moments import MEMORY, TURN
 from misaka.extensions.misaka_lcm.host import ingest
 
 
 def custom(kind, content, details=None):
-    return create_custom_message(kind, content, True, details, 1_700_000_000_000)
+    return createCustomMessage(kind, content, True, details, 1_700_000_000_000)
 
 
 def create_user_message(text, timestamp):

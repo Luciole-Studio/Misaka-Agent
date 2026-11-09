@@ -57,7 +57,7 @@ def test_persist_refresh_false_values_and_explicit_env(tmp_path, monkeypatch):
     assert settings.path().read_bytes() == saved
     ce.close(ctx)
     ce.release_project(ctx)
-    assert not storage.directory(storage.project(ctx)).exists()
+    assert storage.clear(storage.project(ctx))
     assert settings.path().read_bytes() == saved  # preferences are not task content
 
 
@@ -212,6 +212,23 @@ def test_local_index_skips_cloud_and_off_modes(tmp_path, monkeypatch):
     assert not getattr(built, '_misaka_index_busy', False)
 
 
+def test_ollama_indexes_as_upstream_counts_it_local(tmp_path, monkeypatch):
+    """F14 (2026-10-24): an Ollama model never got its automatic index; MISAKA's own list of
+    local providers named FastEmbed alone, where upstream's (_LOCAL_EMBEDDING_PROVIDERS) has both."""
+    from misaka.extensions.misaka_lcm.vendor import command, embedding_provider
+    monkeypatch.setattr(settings, 'check', lambda config: 2)
+    settings.configure(True)
+    built = ce.bound_engine(context(tmp_path))
+    built._config.embedding_provider, built._config.embedding_model = 'ollama', 'qwen3-embedding:4b'
+    provider = SimpleNamespace(provider_id='ollama', model_id='qwen3-embedding:4b', embed_query=lambda _: [1.0, 0.0])
+    monkeypatch.setattr(embedding_provider, 'resolve_provider', lambda _: provider)
+    observed = []
+    monkeypatch.setattr(command, '_embedding_backfill_text', lambda args, worker: observed.append(args) or 'done')
+    preanswer._local_index(built)
+    assert observed == [['--corpus', 'both', '--apply', '--limit', '32']]
+    settings.configure(False)
+
+
 def test_cached_local_model_indexes_and_recalls_without_network(tmp_path, monkeypatch):
     import importlib.util
     import socket
@@ -253,7 +270,7 @@ def test_cached_local_model_indexes_and_recalls_without_network(tmp_path, monkey
     settings.configure(False)
     assert preanswer.inject({'messages': messages}, current, active_tools=['lcm_recall']) is None
     ce.close_all()
-    assert not storage.directory(tmp_path).exists()
+    assert storage.clear(tmp_path)
     assert settings.path().exists()
 
 
@@ -300,4 +317,4 @@ def test_index_timeout_keeps_owner_and_freezes_worker_config(tmp_path, monkeypat
         closer.join(5)
     assert closed.is_set() and not built._misaka_index_busy
     assert observed == [['--corpus', 'both', '--apply', '--limit', '32'], True]
-    assert not storage.directory(tmp_path).exists()
+    assert storage.clear(tmp_path)

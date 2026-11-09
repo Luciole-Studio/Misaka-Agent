@@ -35,6 +35,7 @@ from pydantic import (
 from misaka.config import home
 from misaka.core.prompt_templates import _ECMASCRIPT_WHITESPACE
 from misaka.core.subagent._frontmatter import split_frontmatter
+from misaka.utils.values import read_field
 
 COLORS = ("red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan")
 _JS_SPACE = "".join(_ECMASCRIPT_WHITESPACE)
@@ -902,6 +903,71 @@ def session_catalog(session: Any, context: Any, *, cwd: str, include_project: bo
 
 
 def has_required_mcp_servers(agent: AgentDefinition, available: Sequence[str]) -> bool:
-    """CCB hasRequiredMcpServers: every pattern matches at least one server."""
-    return all(any(pattern.lower() in name.lower() for name in available)
+    """CCB hasRequiredMcpServers: every pattern matches at least one server (``-`` and ``_`` read
+    alike, since server names reach here spelled as namespaces)."""
+    return all(any(mcp_server_matches(pattern, name) for name in available)
                for pattern in agent.required_mcp_servers)
+
+
+def mcp_server_of(tool: Any) -> str | None:
+    """The MCP server a registered tool belongs to, read from its namespace (``mcp__<server>``, with
+    ``-`` spelled ``_``); for a bare name, such as a fork snapshot's, from its ``mcp__<server>__``
+    segment. None for any other tool."""
+    namespace = None if isinstance(tool, str) else read_field(tool, "namespace")
+    namespace_name = read_field(namespace, "name") if namespace is not None else None
+    if isinstance(namespace_name, str) and namespace_name.startswith("mcp__"):
+        return namespace_name[len("mcp__"):]
+    name = tool if isinstance(tool, str) else read_field(tool, "name", "")
+    name = str(name or "")
+    if name.startswith("mcp__") and name.count("__") >= 2:
+        return name.split("__", 2)[1]
+    return None
+
+
+def mcp_server_matches(pattern: Any, server: Any) -> bool:
+    """Whether a required-server ``pattern`` names ``server``: a case-insensitive substring match that
+    also holds when either side spells ``-`` as ``_``, since tool and namespace names do."""
+    pattern, server = str(pattern or ""), str(server or "")
+    if pattern.casefold() in server.casefold():
+        return True
+    return pattern.replace("-", "_").casefold() in server.replace("-", "_").casefold()
+
+
+def configured_mcp_servers(profile_dir: Any) -> list[str]:
+    """The enabled servers the role reaches through the global ``mcp.json`` and her own (``profiles.mcp_dir``),
+    connected yet or not. A definition that requires one is not refused while it is still connecting or failed
+    its first attempt. Her entry replaces a global one of the same name, or overrides it when it has no
+    ``command``, ``url`` or ``type``, as the MCP extension reads them."""
+    from misaka.config import profiles
+
+    def servers(path: Path) -> dict[str, Any]:
+        try:
+            found = json.loads(path.read_text(encoding="utf-8")).get("mcpServers")
+        except (OSError, ValueError, AttributeError):
+            return {}
+        return found if isinstance(found, dict) else {}
+
+    merged: dict[str, dict[str, Any]] = {}
+    for scope, path in (("global", home.path("mcp_config")), ("role", home.path("mcp_config", profiles.mcp_dir(profile_dir)))):
+        for name, config in servers(path).items():
+            if not isinstance(config, dict):
+                continue
+            if scope == "role" and not {"command", "url", "type"} & config.keys():
+                if name in merged:
+                    merged[name] = {**merged[name], **config}
+                continue
+            merged[name] = config
+    return [name for name, config in merged.items() if config.get("enabled") is not False]
+
+
+def available_mcp_servers(session: Any) -> list[str]:
+    """The MCP servers whose tools the parent session registered, hidden ones aside. A child runs as
+    the same role and connects the same servers, so this is what a definition may require; the
+    runtime learns of MCP only through the tools the extension registers."""
+    get_tools = getattr(session, "getAllTools", None)
+    tools = get_tools() if get_tools is not None else []
+    return [
+        server
+        for tool in tools
+        if read_field(tool, "exposure") != "hidden" and (server := mcp_server_of(tool))
+    ]

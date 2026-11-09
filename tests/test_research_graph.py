@@ -6,8 +6,9 @@ from contextlib import closing
 
 import pytest
 
+from misaka.core import graph as graph_core
 from misaka.core.platform import tasks
-from misaka.core.research import graph, runs, workflow
+from misaka.core.research import runs, views, workflow
 
 
 @pytest.fixture
@@ -23,7 +24,7 @@ def _run(con, tmp_path, **limits):
 
 
 def _finish(con, node, status="closed"):
-    con.execute("UPDATE research_branches SET status=? WHERE id=?", (status, node["id"]))
+    con.execute("UPDATE research_execution SET status=? WHERE id=?", (status, node["id"]))
     return runs.node(con, node["id"])
 
 
@@ -56,8 +57,8 @@ def test_depth_is_one_more_than_the_deepest_parent(board, tmp_path):
     join = runs.create_node(board, run["id"], question="A and B", parents=[root["id"], b["id"]])
     assert (a["depth"], b["depth"], join["depth"]) == (1, 2, 3)
     assert {p["id"] for p in runs.parents(board, join["id"])} == {root["id"], b["id"]}
-    assert graph.kind(board, join) == "join" and graph.kind(board, a) == "alt" and graph.kind(board, root) == "root"
-    assert graph.ancestors(board, join["id"]) == {root["id"], a["id"], b["id"]}
+    assert views.kind(board, join) == "join" and views.kind(board, a) == "alt" and views.kind(board, root) == "root"
+    assert views.ancestors(board, join["id"]) == {root["id"], a["id"], b["id"]}
     assert {c["id"] for c in runs.children(board, root["id"])} == {a["id"], join["id"]}
 
 
@@ -69,14 +70,14 @@ def test_a_node_forks_the_lowest_node_its_parents_share(board, tmp_path):
                                                         parents=[p["id"] for p in parents])
     a, b = make("A", root), make("B", root)
     x = make("X", a)
-    assert graph.fork_source(board, x)["id"] == a["id"]
-    assert graph.fork_source(board, make("A and B", a, b))["id"] == root["id"]
+    assert views.fork_source(board, x)["id"] == a["id"]
+    assert views.fork_source(board, make("A and B", a, b))["id"] == root["id"]
     # A parent that the other descends from is what both lines stand on.
     k = make("K", make("X and B", x, b))
-    assert graph.fork_source(board, make("K and X", k, x))["id"] == x["id"]
+    assert views.fork_source(board, make("K and X", k, x))["id"] == x["id"]
     # P and Q both rest on X and on B, and neither of those on the other: only the root is shared.
     p, q = make("P", x, b), make("Q", x, b)
-    assert graph.fork_source(board, make("P and Q", p, q))["id"] == root["id"]
+    assert views.fork_source(board, make("P and Q", p, q))["id"] == root["id"]
 
 
 def test_depth_and_node_limits_are_enforced_where_nodes_are_made(board, tmp_path):
@@ -113,13 +114,13 @@ def _pending(con, run):
 
 def test_reconcile_is_needed_for_pending_options_or_new_conclusions_only(board, tmp_path):
     run, root = _run(board, tmp_path)
-    assert graph.reconcile_state(board, run) == (False, [])
+    assert views.reconcile_state(board, run) == (False, [])
     root = _finish(board, root)
     _conclude(board, run, root)
     # One concluded node and nothing pending: no join or relation can exist.
-    assert graph.reconcile_state(board, run)[0] is False
+    assert views.reconcile_state(board, run)[0] is False
     _decide(board, run, root, "Fiscal", "Coalition")
-    needed, considered = graph.reconcile_state(board, run)
+    needed, considered = views.reconcile_state(board, run)
     assert needed and considered == [root["id"]]
 
 
@@ -135,16 +136,16 @@ def test_reconciliation_merges_same_question_options_into_one_node_with_two_pare
                "joins": [], "relations": [],
                "not_pursued": [{"option": a_options[1], "reason": "complements node " + b["id"]},
                                {"option": b_options[1], "reason": "the node limit"}]}
-    resolved = graph.resolve_reconcile(board, run, payload)
+    resolved = views.resolve_reconcile(board, run, payload)
     assert resolved["nodes"][0]["parents"] == [a["id"], b["id"]]
     runs.record_reconcile(board, run, 1, {**payload, "summary": "merge"}, session_file=str(tmp_path / "s.jsonl"),
                           tool_call_id="call-1")
     receipt = runs.apply_reconcile(board, run, 1, resolved, considered=[root["id"], a["id"], b["id"]])
     merged = runs.node(board, receipt["nodes"][0])
-    assert merged["depth"] == 2 and graph.kind(board, merged) == "join"
+    assert merged["depth"] == 2 and views.kind(board, merged) == "join"
     assert {o["id"] for o in runs.origin_options(board, merged["id"])} == {a_options[0], b_options[0]}
     # Two edges ending at one node: the paths list sends both options to it.
-    paths = graph.render_paths(graph.snapshot(board, runs.get(board, run["id"])))
+    paths = views.render_paths(views.snapshot(board, runs.get(board, run["id"])))
     assert paths.count(f"→ node `{merged['id']}`") == 2
     assert runs.pending_options(board, run["id"]) == []
     assert runs.option(board, b_options[1])["reason"] == "the node limit"
@@ -173,7 +174,7 @@ def test_reconciliation_structure_is_checked(board, tmp_path, problem):
     elif problem == "unknown":
         payload["not_pursued"] = [{"option": "o_nope", "reason": "?"}]
     with pytest.raises(ValueError, match="Reconciliation not accepted"):
-        graph.resolve_reconcile(board, run, payload)
+        views.resolve_reconcile(board, run, payload)
 
 
 def test_joins_carry_finished_unrelated_nodes_only(board, tmp_path):
@@ -187,18 +188,18 @@ def test_joins_carry_finished_unrelated_nodes_only(board, tmp_path):
                 "joins": [{"parents": list(parents), "question": "Together", "rationale": "Same place"}]}
 
     with pytest.raises(ValueError, match="has not finished its own work"):
-        graph.resolve_reconcile(board, run, join(a["id"], b["id"]))
+        views.resolve_reconcile(board, run, join(a["id"], b["id"]))
     b = _finish(board, b, "closed")
     with pytest.raises(ValueError, match="descends from"):
-        graph.resolve_reconcile(board, run, join(a["id"], root["id"]))
+        views.resolve_reconcile(board, run, join(a["id"], root["id"]))
     with pytest.raises(ValueError, match="fewer than two"):
-        graph.resolve_reconcile(board, run, join(a["id"], a["id"]))
-    resolved = graph.resolve_reconcile(board, run, join(a["id"], b["id"]))
+        views.resolve_reconcile(board, run, join(a["id"], a["id"]))
+    resolved = views.resolve_reconcile(board, run, join(a["id"], b["id"]))
     runs.record_reconcile(board, run, 1, {**join(a["id"], b["id"]), "summary": "join"},
                           session_file=str(tmp_path / "s.jsonl"), tool_call_id="call")
     receipt = runs.apply_reconcile(board, run, 1, resolved, considered=[a["id"], b["id"]])
     joined = runs.node(board, receipt["joins"][0])
-    assert joined["depth"] == 2 and graph.kind(board, joined) == "join"
+    assert joined["depth"] == 2 and views.kind(board, joined) == "join"
     # A closed node that gains a child stays closed: the child runs on its own.
     assert runs.node(board, b["id"])["status"] == "closed"
 
@@ -212,9 +213,9 @@ def test_a_closed_node_is_read_by_document_id_at_the_reconciliation(board, tmp_p
 
     run, root = _run(board, tmp_path)
     _conclude(board, run, root, "# Conclusion\n\nThe reform failed for want of revenue.\n")
-    assert runs.prepare_runner(board, "research_branches", root["id"])
+    assert runs.prepare_runner(board, "research_execution", root["id"])
     workflow._close(board, run, runs.node(board, root["id"]), "closed")
-    path = graph.syntheses(board, run, root)[-1]["path"]
+    path = views.syntheses(board, run, root)[-1]["path"]
     doc_id = corpus.sha256_file(path)[:12]
     assert corpus.resolve_doc(doc_id, workspace=run["workspace"])           # indexed at close
     [finished] = workflow._reconcile_material(board, run)["finished_nodes"]
@@ -222,7 +223,7 @@ def test_a_closed_node_is_read_by_document_id_at_the_reconciliation(board, tmp_p
     # Indexing is derived: when it fails, the node closes all the same.
     monkeypatch.setattr(report, "index_run", lambda *a, **k: 1 / 0)
     child = runs.create_node(board, run["id"], question="A", parents=[root["id"]])
-    assert runs.prepare_runner(board, "research_branches", child["id"])
+    assert runs.prepare_runner(board, "research_execution", child["id"])
     assert workflow._close(board, run, runs.node(board, child["id"]), "closed") == "closed"
 
 
@@ -249,17 +250,17 @@ def test_a_node_closes_when_its_own_work_is_done_and_its_options_wait_for_the_ba
     """2026-09-28 (user): a DAG, not a tree -- a node's status is its own work; its options are the
     reconciliation's and its children run on their own. (Depth 1 showed `closing` for hours.)"""
     run, root = _run(board, tmp_path)
-    assert runs.prepare_runner(board, "research_branches", root["id"])
+    assert runs.prepare_runner(board, "research_execution", root["id"])
     root = runs.node(board, root["id"])
     _did, (first, _second) = _decide(board, run, root, "One", "Two")
     assert workflow._close(board, run, root, "closed") == "closed"
     assert runs.node(board, root["id"])["status"] == "closed"
-    assert {o["id"] for o in graph.reconcilable_options(board, run)} == {first, _second}
+    assert {o["id"] for o in views.reconcilable_options(board, run)} == {first, _second}
     # The barrier waits for the whole level: a node still running keeps the reconciliation off.
     child = runs.create_node(board, run["id"], question="One", parents=[root["id"]])
-    assert graph.reconcile_state(board, run)[0] is False
+    assert views.reconcile_state(board, run)[0] is False
     _finish(board, child)
-    assert graph.reconcile_state(board, run)[0] is True
+    assert views.reconcile_state(board, run)[0] is True
 
 
 def test_views_are_written_from_the_records_and_never_read_back(board, tmp_path):
@@ -267,16 +268,16 @@ def test_views_are_written_from_the_records_and_never_read_back(board, tmp_path)
     _finish(board, root)
     _conclude(board, run, root, "The reform failed for fiscal reasons.")
     _decide(board, run, root, "Fiscal", own=True)
-    graph.write_views(board, run, final=True)
-    view = (tmp_path / graph.graph_path(run)).read_text(encoding="utf-8")
+    views.write_views(board, run, final=True)
+    view = (tmp_path / views.graph_path(run)).read_text(encoding="utf-8")
     assert "```mermaid" in view and root["id"] in view and "this node's own line" in view
-    node_view = (tmp_path / graph.node_view_path(root["id"])).read_text(encoding="utf-8")
+    node_view = (tmp_path / views.node_view_path(root["id"])).read_text(encoding="utf-8")
     assert "synthesis.md" in node_view and "Decisions made here" in node_view
-    snapshot = json.loads((tmp_path / runs.run_path(run, graph.GRAPH_SNAPSHOT)).read_text(encoding="utf-8"))
+    snapshot = json.loads((tmp_path / runs.run_path(run, views.GRAPH_SNAPSHOT)).read_text(encoding="utf-8"))
     assert snapshot["nodes"][0]["id"] == root["id"]
     # A view is rewritten, never trusted: editing it changes nothing the run reads.
-    (tmp_path / graph.graph_path(run)).write_text("tampered", encoding="utf-8")
-    assert graph.snapshot(board, run)["nodes"][0]["question"] == root["question"]
+    (tmp_path / views.graph_path(run)).write_text("tampered", encoding="utf-8")
+    assert views.snapshot(board, run)["nodes"][0]["question"] == root["question"]
 
 
 def test_the_node_view_names_its_red_team_with_both_jobs(board, tmp_path):
@@ -288,8 +289,8 @@ def test_the_node_view_names_its_red_team_with_both_jobs(board, tmp_path):
                        session_file=str(tmp_path / "lo.jsonl"), tool_call_id="plan-1")
     assert runs.red_team(board, run["id"], root["id"])["assignee"] == "10043"
     assert workflow._red_team_assignee(board, run, root) == "10043"
-    graph.write_views(board, run)
-    node_view = (tmp_path / graph.node_view_path(root["id"])).read_text(encoding="utf-8")
+    views.write_views(board, run)
+    node_view = (tmp_path / views.node_view_path(root["id"])).read_text(encoding="utf-8")
     assert "Red team and divergence review: Sister 10043 — critic and finder of the untaken frames" in node_view
 
 
@@ -304,8 +305,8 @@ def test_the_plan_contract_chooses_the_red_team_for_both_jobs():
 
 def test_a_view_failure_is_logged_not_raised(board, tmp_path, monkeypatch, caplog):
     run, _root = _run(board, tmp_path)
-    monkeypatch.setattr(graph, "render_graph", lambda data: (_ for _ in ()).throw(OSError("disk full")))
-    graph.write_views(board, run)
+    monkeypatch.setattr(views, "render_graph", lambda data: (_ for _ in ()).throw(OSError("disk full")))
+    views.write_views(board, run)
     assert "graph views could not be written" in caplog.text
 
 
@@ -313,14 +314,14 @@ def test_an_older_board_is_refused_and_left_as_it_is(tmp_path):
     with closing(tasks.connect(str(tmp_path / "board.db"))) as con:
         runs.init(con)
         con.execute("UPDATE schema_migrations SET version=16 WHERE component='research'")
-        con.execute("DROP TABLE research_edges")
+        con.execute("DROP TABLE research_cards")
         if hasattr(con, "_research_schema_checked"):
             del con._research_schema_checked
     with closing(tasks.connect(str(tmp_path / "board.db"))) as con, pytest.raises(RuntimeError) as error:
         runs.init(con)
     assert "v16" in str(error.value) and "pre-release data is not migrated" in str(error.value)
     with closing(tasks.connect(str(tmp_path / "board.db"))) as con:
-        assert not con.execute("SELECT 1 FROM sqlite_master WHERE name='research_edges'").fetchone()
+        assert not con.execute("SELECT 1 FROM sqlite_master WHERE name='research_cards'").fetchone()
 
 
 def test_relations_keep_their_members_as_rows_in_order(board, tmp_path):
@@ -335,23 +336,26 @@ def test_relations_keep_their_members_as_rows_in_order(board, tmp_path):
     assert runs.add_relations(board, run, items) == 0
     assert [(r["kind"], r["nodes"]) for r in runs.relations(board, run["id"])] == [
         ("converge", [b["id"], a["id"]]), ("diverge", [a["id"], root["id"]])]
-    touching = board.execute("SELECT r.kind FROM research_relations r JOIN research_relation_nodes m "
-                             "ON m.relation_id=r.id WHERE m.node_id=? ORDER BY r.kind", (a["id"],)).fetchall()
-    assert [row["kind"] for row in touching] == ["converge", "diverge"]
+    touching = sorted(r["kind"] for r in runs.relations(board, run["id"]) if a["id"] in r["nodes"])
+    assert touching == ["converge", "diverge"]
 
 
 def test_an_issue_records_where_it_went_in_a_column_of_its_own(board, tmp_path):
     """v18: an issue taken up by an option names the option, one another node covers names the node;
     nothing reads the same column two ways."""
     run, root = _run(board, tmp_path)
+    other = runs.create_node(board, run["id"], question="Other", parents=[root["id"]])["id"]
+    _decision, (option,) = _decide(board, run, root, "path")
     taken, covered, declined = (runs.add_issue(board, run["id"], node=root, task_id="d", round=1,
                                                origin="divergence", kind="k", question=q, rationale="r")
                                 for q in ("taken", "covered", "declined"))
-    runs.dispose(board, taken, "branch", option="o_1")
-    runs.dispose(board, covered, "covered", covered_by="b_other")
+    runs.dispose(board, taken, "branch", option=option)
+    runs.dispose(board, covered, "covered", covered_by=other)
     runs.dispose(board, declined, "decline", reason="no sources")
     rows = {row["question"]: row for row in runs.issues(board, run["id"])}
-    assert (rows["taken"]["option_id"], rows["taken"]["covered_by"]) == ("o_1", None)
-    assert (rows["covered"]["option_id"], rows["covered"]["covered_by"]) == (None, "b_other")
+    assert (rows["taken"]["option_id"], rows["taken"]["covered_by"]) == (option, None)
+    assert (rows["covered"]["option_id"], rows["covered"]["covered_by"]) == (None, other)
     assert [runs.destination(rows[q]) for q in ("taken", "covered", "declined")] == [
-        "option o_1", "node b_other", None]
+        f"option {option}", f"node {other}", None]
+    with pytest.raises(graph_core.ConstraintError):              # an issue goes only where something is
+        runs.dispose(board, declined, "covered", covered_by="b_nowhere")

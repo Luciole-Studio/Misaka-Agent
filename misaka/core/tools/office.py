@@ -31,12 +31,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.tools import render_utils
 from misaka.core.tools._common import abort_race
 from misaka.core.tools._office.schema import OPERATION_CONTRACT
-from misaka.core.tools.file_mutation_queue import with_file_mutation_queue
-from misaka.core.tools.path_utils import resolve_to_cwd
-from misaka.core.tools.render_utils import render_tool_path, str_value
-from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
+from misaka.core.tools.file_mutation_queue import withFileMutationQueue
+from misaka.core.tools.path_utils import resolveToCwd
+from misaka.core.tools.render_utils import renderToolPath
+from misaka.core.tools.tool_definition_wrapper import wrapToolDefinition
 from misaka.ui.tui import Text
 from misaka.utils.values import read_field, signal_aborted
 
@@ -125,7 +126,7 @@ def _load_ops(raw, cwd):
     text = str(raw).strip()
     if text.startswith("@"):
         named = text[1:].strip()
-        source = resolve_to_cwd(named, cwd)
+        source = resolveToCwd(named, cwd)
         root = os.path.realpath(cwd)
         resolved = os.path.realpath(source)
         if resolved != root and not resolved.startswith(root + os.sep):
@@ -180,7 +181,7 @@ def _desugar(parsed):
 def prepare_office_input(params, cwd):
     """Resolve once for authorization and execution, including shorthand and @ops files."""
     parsed = OfficeToolInput.model_validate(params)
-    absolute_path = resolve_to_cwd(parsed.path, cwd)
+    absolute_path = resolveToCwd(parsed.path, cwd)
 
     ops, problem = _desugar(parsed)
     if problem:
@@ -207,7 +208,7 @@ def prepare_office_input(params, cwd):
     return parsed, absolute_path, ops
 
 
-def create_office_tool_definition(
+def createOfficeToolDefinition(
     cwd: str,
     _options: Mapping[str, Any] | None = None,
 ) -> ToolDefinition[OfficeToolInput | dict[str, Any], None]:
@@ -270,14 +271,14 @@ def create_office_tool_definition(
                 if signal_aborted(signal):
                     raise RuntimeError("Operation aborted")
                 return await mutate()
-            return await with_file_mutation_queue(paths[index], lambda: locked(index + 1))
+            return await withFileMutationQueue(paths[index], lambda: locked(index + 1))
 
         return await locked()
 
     def render_call(args: Any, theme_obj: Any, context: Any) -> Text:
         text = context.lastComponent if isinstance(context.lastComponent, Text) else Text("", 0, 0)
-        raw_path = str_value(read_field(args, "path")) or ""
-        shown = render_tool_path(raw_path, theme_obj, context.cwd) if raw_path else ""
+        raw_path = render_utils.str(read_field(args, "path")) or ""
+        shown = renderToolPath(raw_path, theme_obj, context.cwd) if raw_path else ""
         raw_ops = read_field(args, "ops")
         count = len(raw_ops) if isinstance(raw_ops, list) else 0
         suffix = theme_obj.fg("muted", f" ({count} ops)") if count else ""
@@ -327,19 +328,15 @@ def create_office_tool_definition(
     )
 
 
-def create_office_tool(cwd: str, options: Mapping[str, Any] | None = None) -> AgentTool:
-    return wrap_tool_definition(create_office_tool_definition(cwd, options))
+def createOfficeTool(cwd: str, options: Mapping[str, Any] | None = None) -> AgentTool:
+    return wrapToolDefinition(createOfficeToolDefinition(cwd, options))
 
 
-createOfficeTool = create_office_tool
-createOfficeToolDefinition = create_office_tool_definition
 
 __all__ = [
     "OfficeToolInput",
     "createOfficeTool",
     "createOfficeToolDefinition",
-    "create_office_tool",
-    "create_office_tool_definition",
     "officeToolSystemPromptContribution",
     "office_tool_system_prompt_contribution",
 ]

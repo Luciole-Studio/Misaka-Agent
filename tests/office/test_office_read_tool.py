@@ -19,13 +19,13 @@ import importlib
 
 import pytest
 
-from misaka.core.tools.read import create_read_tool_definition
+from misaka.core.tools.read import createReadToolDefinition
 
 openpyxl = importlib.import_module("openpyxl")
 
 
 async def _read(cwd, **params):
-    tool = create_read_tool_definition(str(cwd))
+    tool = createReadToolDefinition(str(cwd))
     result = await tool.execute("call-1", params, None, None, None)
     return "\n".join(part.text for part in result.content if hasattr(part, "text"))
 
@@ -156,15 +156,15 @@ def test_edit_and_write_send_an_office_package_to_the_office_tool():
     import asyncio
     import tempfile
 
-    from misaka.core.tools.edit import create_edit_tool_definition
-    from misaka.core.tools.write import create_write_tool_definition
+    from misaka.core.tools.edit import createEditToolDefinition
+    from misaka.core.tools.write import createWriteToolDefinition
 
     directory = tempfile.mkdtemp()
 
     async def run():
         for factory, tool, params in (
-            (create_write_tool_definition, "write", {"path": "r.docx", "content": "x"}),
-            (create_edit_tool_definition, "edit",
+            (createWriteToolDefinition, "write", {"path": "r.docx", "content": "x"}),
+            (createEditToolDefinition, "edit",
              {"path": "r.docx", "edits": [{"oldText": "a", "newText": "b"}]}),
         ):
             with pytest.raises(RuntimeError) as caught:
@@ -177,8 +177,8 @@ def test_edit_and_write_send_an_office_package_to_the_office_tool():
 
 async def test_a_csv_is_still_written_by_write(tmp_path):
     """Only the zip packages are refused: .csv and .tsv are text and always were."""
-    from misaka.core.tools.write import create_write_tool_definition
+    from misaka.core.tools.write import createWriteToolDefinition
 
-    tool = create_write_tool_definition(str(tmp_path))
+    tool = createWriteToolDefinition(str(tmp_path))
     await tool.execute("c", {"path": "rows.csv", "content": "a,b\n1,2\n"}, None, None, None)
     assert (tmp_path / "rows.csv").read_text(encoding="utf-8") == "a,b\n1,2\n"

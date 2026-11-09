@@ -7,7 +7,7 @@ from io import BytesIO
 from PIL import Image
 
 
-def read_orientation_from_tiff(data: bytes, tiff_start: int) -> int:
+def readOrientationFromTiff(data: bytes, tiff_start: int) -> int:
     if tiff_start + 8 > len(data):
         return 1
 
@@ -50,7 +50,7 @@ def read_orientation_from_tiff(data: bytes, tiff_start: int) -> int:
     return 1
 
 
-def find_jpeg_tiff_offset(data: bytes) -> int:
+def findJpegTiffOffset(data: bytes) -> int:
     offset = 2
     while offset < len(data) - 1:
         if data[offset] != 0xFF:
@@ -66,9 +66,8 @@ def find_jpeg_tiff_offset(data: bytes) -> int:
             segment_start = offset + 4
             if segment_start + 6 > len(data):
                 return -1
-            if not has_exif_header(data, segment_start):
-                return -1
-            return segment_start + 6
+            if hasExifHeader(data, segment_start):
+                return segment_start + 6
 
         if offset + 4 > len(data):
             return -1
@@ -77,7 +76,7 @@ def find_jpeg_tiff_offset(data: bytes) -> int:
     return -1
 
 
-def find_webp_tiff_offset(data: bytes) -> int:
+def findWebpTiffOffset(data: bytes) -> int:
     offset = 12
     while offset + 8 <= len(data):
         chunk_id = data[offset : offset + 4].decode("ascii", errors="ignore")
@@ -92,29 +91,29 @@ def find_webp_tiff_offset(data: bytes) -> int:
         if chunk_id == "EXIF":
             if data_start + chunk_size > len(data):
                 return -1
-            return data_start + 6 if chunk_size >= 6 and has_exif_header(data, data_start) else data_start
+            return data_start + 6 if chunk_size >= 6 and hasExifHeader(data, data_start) else data_start
 
         offset = data_start + chunk_size + (chunk_size % 2)
     return -1
 
 
-def has_exif_header(data: bytes, offset: int) -> bool:
+def hasExifHeader(data: bytes, offset: int) -> bool:
     return data[offset : offset + 6] == b"Exif\x00\x00"
 
 
-def get_exif_orientation(data: bytes) -> int:
+def getExifOrientation(data: bytes) -> int:
     tiff_offset = -1
     if len(data) >= 2 and data[0] == 0xFF and data[1] == 0xD8:
-        tiff_offset = find_jpeg_tiff_offset(data)
+        tiff_offset = findJpegTiffOffset(data)
     elif len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        tiff_offset = find_webp_tiff_offset(data)
+        tiff_offset = findWebpTiffOffset(data)
     if tiff_offset == -1:
         return 1
-    return read_orientation_from_tiff(data, tiff_offset)
+    return readOrientationFromTiff(data, tiff_offset)
 
 
-def apply_exif_orientation(image: Image.Image, original_bytes: bytes) -> Image.Image:
-    orientation = get_exif_orientation(original_bytes)
+def applyExifOrientation(image: Image.Image, original_bytes: bytes) -> Image.Image:
+    orientation = getExifOrientation(original_bytes)
     if orientation == 1:
         return image
 
@@ -140,11 +139,11 @@ def load_image_bytes(data: bytes) -> Image.Image:
 
 
 __all__ = [
-    "apply_exif_orientation",
-    "find_jpeg_tiff_offset",
-    "find_webp_tiff_offset",
-    "get_exif_orientation",
-    "has_exif_header",
+    "applyExifOrientation",
+    "findJpegTiffOffset",
+    "findWebpTiffOffset",
+    "getExifOrientation",
+    "hasExifHeader",
     "load_image_bytes",
-    "read_orientation_from_tiff",
+    "readOrientationFromTiff",
 ]

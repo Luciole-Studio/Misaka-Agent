@@ -11,9 +11,12 @@ from misaka.core.moments import Moments
 from misaka.core.skills import index
 from misaka.core.skills.layers import extension_roots
 from misaka.core.skills.wiring.skills import SkillsPart, _slash_entries
-from misaka.ui.tui.interactive.interactive_mode import InteractiveMode
+from misaka.modes.interactive.interactive_mode import InteractiveMode
 
 NAME = '<inline:misaka_lcm>:misaka_lcm'
+# A bundled extension loads as `builtin:<name>`, and its skills are named by that path the same way.
+SOURCES = [('extension:inline:misaka_lcm', NAME, 'inlinemisaka-lcmmisaka-lcm'),
+           ('extension:builtin:misaka_lcm', 'builtin:misaka_lcm:misaka_lcm', 'builtinmisaka-lcm:misaka-lcm')]
 
 
 def _part(entries):
@@ -29,42 +32,46 @@ def _part(entries):
     return part
 
 
-def _entries(tmp_path):
+def _entries(tmp_path, source='extension:inline:misaka_lcm'):
     skill = tmp_path / 'skills' / 'misaka-lcm' / 'SKILL.md'
     skill.parent.mkdir(parents=True)
     skill.write_text('---\nname: misaka-lcm\ndescription: Recover compacted conversation details.\n---\nFixture body.\n', encoding='utf-8')
     roots = list(extension_roots([{'path': str(skill.parent.parent),
-                                  'metadata': {'source': 'extension:inline:misaka_lcm'}}]))
+                                  'metadata': {'source': source}}]))
     return index._assemble(roots)["entries"]
 
 
 @pytest.mark.asyncio
-async def test_inline_skill_completion_and_actual_command_dispatch(tmp_path):
-    entries = _entries(tmp_path)
-    assert entries[0]['runtime_name'] == NAME
+@pytest.mark.parametrize('source,name,flattened', SOURCES)
+async def test_inline_skill_completion_and_actual_command_dispatch(tmp_path, source, name, flattened):
+    entries = _entries(tmp_path, source)
+    assert entries[0]['runtime_name'] == name
     part = _part(entries)
     session = object.__new__(AgentSession)
     session._extensionRunner = ExtensionRunner([], SimpleNamespace(), str(tmp_path), SimpleNamespace(), None)
     session._resourceLoader = SimpleNamespace(getPrompts=lambda: {"prompts": []})
     session.moments = Moments(session, [])
     session.moments.parts = [part]
-    mode = object.__new__(InteractiveMode)
-    mode.session = session
-    mode.sessionManager = SimpleNamespace(getCwd=lambda: str(tmp_path))
-    mode.fdPath = None
-    provider = mode.createBaseAutocompleteProvider()
-    suggestions = await provider.getSuggestions(['/'], 0, 1, {})
-    item = next(item for item in suggestions.items if item.value == NAME)
-    assert item.label == NAME
-    assert not any(item.value == 'inlinemisaka-lcmmisaka-lcm' for item in suggestions.items)
+    mode = SimpleNamespace(session=session, sessionManager=SimpleNamespace(getCwd=lambda: str(tmp_path)), fdPath=None)
+    mode.getAutocompleteSourceTag = lambda sourceInfo=None: InteractiveMode.getAutocompleteSourceTag(mode, sourceInfo)
+    mode.prefixAutocompleteDescription = lambda description, sourceInfo=None: (
+        InteractiveMode.prefixAutocompleteDescription(mode, description, sourceInfo)
+    )
+    provider = InteractiveMode.createBaseAutocompleteProvider(mode)
+    from misaka.utils.js import AbortController
+
+    suggestions = await provider.getSuggestions(['/'], 0, 1, {'signal': AbortController().signal})
+    item = next(item for item in suggestions.items if item.value == name)
+    assert item.label == name
+    assert not any(item.value == flattened for item in suggestions.items)
     completed = provider.applyCompletion(['/'], 0, 1, item, suggestions.prefix)
-    assert completed['lines'] == ['/' + NAME + ' ']
+    assert completed['lines'] == ['/' + name + ' ']
     text = completed['lines'][0] + 'inspect evidence'
     command = session.getCorePromptCommand(text)
     assert command is not None
-    assert await session._expand_core_prompt_command(command, text) == 'loaded fixture'
+    assert await session._expandCorePromptCommand(command, text) == 'loaded fixture'
     _, table, keys, instruction, _ = part._run_activation.await_args.args
-    assert keys == ['/' + NAME] and instruction == 'inspect evidence'
+    assert keys == ['/' + name] and instruction == 'inspect evidence'
     assert table[keys[0]]['path'] == entries[0]['path']
 
 
@@ -74,7 +81,7 @@ async def test_stacked_inline_skill_preserves_underscores(tmp_path):
     part = _part(entries)
     command = next(c for c in part.commands if c.name == 'git-helper')
     runner = ExtensionRunner([], SimpleNamespace(), str(tmp_path), SimpleNamespace(), None)
-    assert await command.handler('/' + NAME + ' compare evidence', runner.create_command_context()) == 'loaded fixture'
+    assert await command.handler('/' + NAME + ' compare evidence', runner.createCommandContext()) == 'loaded fixture'
     _, _, keys, instruction, _ = part._run_activation.await_args.args
     assert keys == ['/git-helper', '/' + NAME] and instruction == 'compare evidence'
 

@@ -32,7 +32,7 @@ def state(tmp_path, monkeypatch):
 async def test_phase_projection_keeps_original_owner(state, monkeypatch, takeover):
     con, run, root = state
     assert runs.acquire_driver(con, run["id"], "old-driver")
-    runs.prepare_runner(con, "research_branches", root["id"])
+    runs.prepare_runner(con, "research_execution", root["id"])
     runs.set_node(con, root["id"], status="planning")
     run, root = runs.get(con, run["id"]), runs.node(con, root["id"])
     plan = {
@@ -55,12 +55,12 @@ async def test_phase_projection_keeps_original_owner(state, monkeypatch, takeove
     async def yield_owner(*a):
         if takeover == "driver":
             con.execute(
-                "UPDATE research_runs SET driver_lock='new-driver' WHERE id=?",
+                "UPDATE graphs SET lease_token='new-driver' WHERE id=?",
                 (run["id"],),
             )
         if takeover == "node":
             con.execute(
-                "UPDATE research_branches SET runner_key='new-node' WHERE id=?",
+                "UPDATE research_execution SET runner_key='new-node' WHERE id=?",
                 (root["id"],),
             )
 
@@ -180,43 +180,9 @@ def test_research_registration_does_not_relabel_post_submission_bytes(state, mut
         assert artifacts[0]["sha256"] == original_sha
 
 
-@pytest.mark.parametrize("tool", ["write", "office"])
-async def test_live_skill_guard_covers_office_writer(tmp_path, monkeypatch, tool):
-    from misaka.core.extensions import startup_sections
-    from misaka.core.skills.wiring.skills import SkillsPart
-    from misaka.core.tools.office import create_office_tool_definition
-
-    live = tmp_path / "profile" / "skills" / "fixture"
-    live.mkdir(parents=True)
-    path = live / "SKILL.md"
-    path.write_text("before", encoding="utf-8")
-    monkeypatch.setattr(
-        SkillsPart,
-        "_refresh_roots",
-        lambda self: self._live_roots.update({str(live.resolve())}),
-    )
-    monkeypatch.setattr(startup_sections, "register", lambda *a, **k: None)
-    part = SkillsPart(
-        [],
-        str(tmp_path / "profile"),
-        cwd=str(tmp_path),
-        runtime=SimpleNamespace(close=lambda: None),
-    )
-    params = {"path": str(path), "content": "after", "overwrite": True}
-    decision = await part.tool_call({"toolName": tool, "input": params}, None)
-    if not decision and tool == "office":
-        await create_office_tool_definition(str(tmp_path)).execute(
-            "fixture", params, None, None, None
-        )
-    assert path.read_text(encoding="utf-8") == "before", (
-        "office changed protected skill without skill_manage approval/scan/ledger"
-    )
-    assert decision and decision.get("block")
-
-
 @pytest.mark.parametrize("added", [True, False])
 async def test_responses_fallback_call_is_in_final_message(added):
-    from misaka.ai.providers.openai_responses_shared import process_responses_stream
+    from misaka.ai.api.openai_responses_shared import processResponsesStream
     from misaka.ai.types import AssistantMessage, Model, Usage, UsageCost
 
     output = AssistantMessage(
@@ -265,14 +231,14 @@ async def test_responses_fallback_call_is_in_final_message(added):
         yield {"type": "response.completed", "response": {"status": "completed"}}
 
     seen = []
-    await process_responses_stream(
+    await processResponsesStream(
         events(), output, SimpleNamespace(push=seen.append), model
     )
     assert any(e.type == "toolcall_end" for e in seen)
     assert len(output.content) == 1, (
         "toolcall_end was emitted but final message silently dropped the recovered call"
     )
-    from misaka.agent.agent_loop import execute_tool_calls
+    from misaka.agent.agent_loop import _executeToolCalls
     from misaka.agent.types import (
         AgentContext,
         AgentLoopConfig,
@@ -299,7 +265,7 @@ async def test_responses_fallback_call_is_in_final_message(added):
         parameters={"type": "object", "properties": {}},
         execute=execute,
     )
-    result = await execute_tool_calls(
+    result = await _executeToolCalls(
         AgentContext(messages=[], tools=[tool]),
         restored,
         AgentLoopConfig(model=None, convertToLlm=lambda m: m),
@@ -329,7 +295,7 @@ async def test_takeover_between_assignments_stops_old_card_creation(state, takeo
     async def progress(event):
         if takeover and event["local_id"] == "first":
             con.execute(
-                "UPDATE research_runs SET driver_lock='new-driver' WHERE id=?",
+                "UPDATE graphs SET lease_token='new-driver' WHERE id=?",
                 (run["id"],),
             )
 
@@ -555,38 +521,31 @@ async def test_office_guard_checks_secondary_exports_and_freezes_ops(
 ):
     import json
 
-    from misaka.core.extensions import startup_sections
-    from misaka.core.skills.wiring.skills import SkillsPart
+    from misaka.config import home
+    from misaka.core.platform.home_guard import HomeGuard
     from misaka.core.tools.office import prepare_office_input
 
-    live = tmp_path / "live-skills"
-    live.mkdir()
+    # A place this card may not write: MISAKA's home outside `shared`, reached through a link.
+    monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
+    walled = tmp_path / "home" / "state"
+    walled.mkdir(parents=True)
     alias = tmp_path / "alias"
-    alias.symlink_to(live, target_is_directory=True)
-    monkeypatch.setattr(
-        SkillsPart,
-        "_refresh_roots",
-        lambda self: self._live_roots.update({str(live.resolve())}),
-    )
-    monkeypatch.setattr(startup_sections, "register", lambda *a, **k: None)
-    part = SkillsPart(
-        [],
-        str(tmp_path),
-        cwd=str(tmp_path),
-        runtime=SimpleNamespace(close=lambda: None),
-    )
-    destination = alias / "export.pdf" if protected else tmp_path / "ordinary.pdf"
+    alias.symlink_to(walled, target_is_directory=True)
+    project = tmp_path / "project"
+    project.mkdir()
+    guard = HomeGuard("card", str(project), guard_paths=True)
+    destination = alias / "export.pdf" if protected else project / "ordinary.pdf"
     ops = [{"export_pdf": {"out": str(destination)}}]
-    source = tmp_path / "ops.json"
+    source = project / "ops.json"
     source.write_text(json.dumps(ops), encoding="utf-8")
     args = {"path": "document.docx", "ops": "@ops.json" if ops_file else ops}
-    decision = await part.tool_call({"toolName": "office", "input": args}, None)
+    decision = await guard.tool_call({"toolName": "office", "input": args}, None)
     if protected:
         assert decision["block"]
     else:
         assert not decision.get("block")
-        source.write_text(json.dumps([{"export_pdf": {"out": str(live / "bad.pdf")}}]), encoding="utf-8")
-        _, _, checked = prepare_office_input(decision["updatedInput"], str(tmp_path))
+        source.write_text(json.dumps([{"export_pdf": {"out": str(walled / "bad.pdf")}}]), encoding="utf-8")
+        _, _, checked = prepare_office_input(decision["updatedInput"], str(project))
         assert checked == ops
 
 
@@ -602,7 +561,7 @@ async def test_driver_takeover_during_planner_thread_does_not_publish(
 
     def plan(*a, **k):
         con.execute(
-            "UPDATE research_runs SET driver_lock='new' WHERE id=?", (run["id"],)
+            "UPDATE graphs SET lease_token='new' WHERE id=?", (run["id"],)
         )
         return (
             {"status": "clarify", "plan_markdown": "stale", "clarifying_questions": []},
@@ -690,7 +649,7 @@ async def test_repeated_cancellation_drains_only_owned_card_scope(
     await asyncio.wait_for(reached.wait(), 1)
     if takeover:
         con.execute(
-            "UPDATE research_runs SET driver_lock='new' WHERE id=?", (run["id"],)
+            "UPDATE graphs SET lease_token='new' WHERE id=?", (run["id"],)
         )
     task.cancel()
     if not takeover:
@@ -721,6 +680,7 @@ def test_panel_stop_rejects_successor_identity(state, generation, claim):
         card=tid,
         generation=generation,
         claim_lock=claim,
+        consult=None,
         proc=SimpleNamespace(pid=-1),
     )
     daemon = Daemon.__new__(Daemon)
@@ -795,41 +755,35 @@ async def test_cancel_after_assignment_before_drive_stops_new_card(state, monkey
     assert linked[0]["status"] == "stopped"
 
 
+@pytest.mark.parametrize("kind", ["card", "child", "dm", "foreground"])
 async def test_office_executes_the_approved_ops_not_later_file_bytes(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, kind
 ):
     import json
 
-    from misaka.core.extensions import startup_sections
-    from misaka.core.skills.wiring.skills import SkillsPart
-    from misaka.core.tools.office import create_office_tool_definition
+    from misaka.config import home
+    from misaka.core.platform.home_guard import HomeGuard
+    from misaka.core.tools.office import createOfficeToolDefinition
 
-    live = tmp_path / "skills"
-    live.mkdir()
-    protected = live / "SKILL.md"
+    monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
+    walled = tmp_path / "home" / "state"
+    walled.mkdir(parents=True)
+    protected = walled / "notes.md"
     protected.write_text("keep", encoding="utf-8")
-    monkeypatch.setattr(
-        SkillsPart,
-        "_refresh_roots",
-        lambda self: self._live_roots.update({str(live.resolve())}),
-    )
-    monkeypatch.setattr(startup_sections, "register", lambda *a, **k: None)
-    part = SkillsPart(
-        [],
-        str(tmp_path),
-        cwd=str(tmp_path),
-        runtime=SimpleNamespace(close=lambda: None),
-    )
-    ops = tmp_path / "ops.json"
+    project = tmp_path / "project"
+    project.mkdir()
+    # Every checked kind runs the ops it was shown, a person's session too (it may write the home).
+    guard = HomeGuard(kind, str(project), guard_paths=True)
+    ops = project / "ops.json"
     ops.write_text(json.dumps([{"create": {"content": "approved"}}]), encoding="utf-8")
-    decision = await part.tool_call(
+    decision = await guard.tool_call(
         {"toolName": "office", "input": {"path": "output.md", "ops": "@ops.json"}}, None
     )
     ops.write_text(json.dumps([{"export_pdf": {"out": str(protected)}}]), encoding="utf-8")
-    await create_office_tool_definition(str(tmp_path)).execute(
+    await createOfficeToolDefinition(str(project)).execute(
         "fixture", decision["updatedInput"], None, None, None
     )
-    assert (tmp_path / "output.md").read_text(encoding="utf-8") == "approved"
+    assert (project / "output.md").read_text(encoding="utf-8") == "approved"
     assert protected.read_text(encoding="utf-8") == "keep"
 
 
@@ -923,13 +877,13 @@ def test_panel_stop_checks_driver_at_receipt_not_just_sender(state):
     con, run, root = state
     tid = cards.create(con, run["workspace"], "card", "body", "fixture")
     con.execute("UPDATE tasks SET claim_lock='claim' WHERE id=?", (tid,))
-    pane = SimpleNamespace(id="fixture", card=tid, generation=1, claim_lock="claim")
+    pane = SimpleNamespace(id="fixture", card=tid, generation=1, claim_lock="claim", consult=None)
     daemon = Daemon.__new__(Daemon)
     daemon.panes = {pane.id: pane}
     daemon._board = lambda: con
     daemon.close = Mock()
     con.execute(
-        "UPDATE research_runs SET driver_lock='successor' WHERE id=?", (run["id"],)
+        "UPDATE graphs SET lease_token='successor' WHERE id=?", (run["id"],)
     )
     result = daemon._api(
         "card.stop",
@@ -951,13 +905,13 @@ def test_panel_stop_checks_driver_at_receipt_not_just_sender(state):
 def test_driver_takeover_atomically_fences_delayed_node_spawn(state):
     con, run, root = state
     assert runs.acquire_driver(con, run["id"], "old")
-    key = runs.prepare_runner(con, "research_branches", root["id"])
+    key = runs.prepare_runner(con, "research_execution", root["id"])
     assert runs.acquire_driver(con, run["id"], "old")
     assert runs.node(con, root["id"])["runner_key"] == key
-    con.execute("UPDATE research_runs SET driver_expires=0 WHERE id=?", (run["id"],))
+    con.execute("UPDATE graphs SET lease_expires=0 WHERE id=?", (run["id"],))
     assert runs.acquire_driver(con, run["id"], "new")
     assert runs.node(con, root["id"])["runner_key"] is None
-    assert not runs.claim_runner(con, "research_branches", root["id"], key)
+    assert not runs.claim_runner(con, "research_execution", root["id"], key)
 
 
 @pytest.mark.parametrize("rollback", [False, True])

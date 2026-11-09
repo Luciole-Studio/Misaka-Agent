@@ -7,7 +7,7 @@ whose origin the caller knows (supervisor, finalizer, dispatch) never reach it: 
 ``failure_kind="crash"`` themselves."""
 import pytest
 
-from misaka.ai.utils.retry import NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN
+from misaka.ai.utils.retry import _NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN
 from misaka.core.platform import tasks
 
 
@@ -26,6 +26,9 @@ from misaka.core.platform import tasks
     # Retryable provider trouble.
     ("429 RESOURCE_EXHAUSTED. Resource has been exhausted (e.g. check quota).", "rate_limit"),
     ("Error code: 529 - overloaded_error", "server_error"),
+    ("The model is at capacity, please retry", "server_error"),
+    ('{"error": {"code": "server_busy"}}', "server_error"),
+    ("Our servers are currently busy, try again later", "server_error"),
     ("Authentication Fails, Your api key: ****abcd is invalid", "auth_or_quota"),
     ("invalid_token: the access token expired", "auth_or_quota"),
     # Text that is not about a credential at all.
@@ -41,7 +44,7 @@ def test_reasons_are_classified_by_what_they_say(reason, kind):
 
 
 def test_every_quota_word_pi_will_not_retry_is_terminal_here():
-    for word in NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.pattern.split("|"):
+    for word in _NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.pattern.split("|"):
         assert tasks.classify_failure(f"provider said: {word}") == "auth_or_quota", word
 
 

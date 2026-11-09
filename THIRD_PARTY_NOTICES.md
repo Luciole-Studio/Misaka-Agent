@@ -13,13 +13,42 @@ MISAKA 的部分文件移植自其它项目。移植代码所附带的许可证�
 - 上游：https://github.com/earendil-works/pi ，npm 包 `@earendil-works/pi-coding-agent`
 - 许可证：MIT
 - 版权：Copyright (c) 2025 Mario Zechner
-- 许可证全文：`misaka/LICENSE.pi`，取自上游仓库 `v0.87.1` 的 `LICENSE`（npm 包本身不带 LICENSE 文件）
-- 对照件：`@earendil-works/pi-coding-agent` 0.87.1 的 `dist/`
-- 本仓库位置：`misaka/ai/**`、`misaka/agent/**`、`misaka/ui/tui/**`，以及 `misaka/core/`
-  的内核部分。逐目录、逐文件的归属清单是 `misaka/core/PI_ORIGIN.md`。
+- 许可证全文：`misaka/LICENSE.pi`，取自上游仓库 `v1.1.0` 的 `LICENSE`（与 `v0.87.1`、`v1.3.0` 一字不差；npm 包本身不带 LICENSE 文件）
+- 对照件：上游仓库 `v1.3.0` 标签的源码（`packages/*/src`）与 `@earendil-works/pi-ai` 1.3.0 发布包
+- 模型目录数据：`misaka/ai/providers/data/` 是 `@earendil-works/pi-ai` 1.3.0 发布包中 `dist/providers/data` 的原样拷贝，
+  用 `scripts/refresh_model_catalog.py` 按清单校验后更新
+- 本仓库位置：`misaka/ai/**`、`misaka/agent/**`、`misaka/ui/tui/**`、`misaka/mcp/**`（Pi 的
+  `packages/mcp`）、`misaka/codemode/**`（Pi 的 `packages/codemode`；其中 `quickjs_wasi/` 见下面的 quickjs-wasi 条）、
+  `misaka/extensions/{mcp,codemode,tool_search}/**`，`misaka/{chord,durable,env}/**`
+  （Pi 的同名 packages；`chord/loader.py` 与 `chord/manager.py` 是 Python 分叉），以及 `misaka/core/` 的内核
+  部分；这些目录自 2026-10-21 起对照 Pi 1.3.0。`misaka/core/` 逐目录、逐文件的归属清单是 `misaka/core/PI_ORIGIN.md`。
+  仓库里另有一处 Pi 来源：`tests/` 中移植的上游测试（含 faux provider 与 suite 测试夹具）。
 - 说明：MISAKA 的内核是 Pi 的 Python 移植，是本仓库最大的单一上游来源。分叉处在代码里
-  以 `# MISAKA fork:` 注释标出并说明理由。Pi 树内自带许可证头的两个文件
-  （`utils/ansi.ts`、`tui/src/stdin-buffer.ts`）另见下面的 ansi-regex 与 OpenTUI 两条。
+  以 `# MISAKA fork:` 注释标出并说明理由。Pi 树内自带第三方许可证头的文件另见下面各条：
+  `utils/ansi.ts`（ansi-regex）、`tui/src/stdin-buffer.ts`（OpenTUI）、`mcp/src/oauth/{types,discovery,flow}.ts`
+  （MCP TypeScript SDK）、`tui/src/oklab.ts`（Oklab）、`core/export-html/vendor/*.min.js`（marked、highlight.js）。
+
+## quickjs-wasi 与其中的 QuickJS-NG、wasi-libc（经 Pi 的 packages/codemode）
+
+- 上游：https://github.com/vercel-labs/quickjs-wasi ，npm 包 `quickjs-wasi` 3.6.2（Pi 1.3.0 的 codemode 依赖它，版本未变）
+- 许可证：quickjs-wasi 为 MIT（Copyright (c) 2026 Vercel, Inc.）；其中的 QuickJS-NG 0.17.0 为 MIT
+  （Copyright (c) 2017-2026 Fabrice Bellard 等）；wasi-libc 按其多许可证中的 MIT 使用，所含 musl 为 MIT、
+  cloudlibc 为 BSD-2-Clause、dlmalloc 为 CC0
+- 许可证全文：`LICENSES/quickjs-wasi.txt`（四份上游声明的原文汇编）
+- 本仓库位置：`misaka/codemode/quickjs_wasi/quickjs.wasm`（npm 包里的 `quickjs.wasm` 原样拷贝，
+  sha256 `d4c9375f2b1ca4dc95f72c8aa2982a7a9951ac8011490d79c6582df732b4bbd9`）与
+  `misaka/codemode/quickjs_wasi/__init__.py`（完整 MIT 文本在该文件头部）
+- 说明：`__init__.py` 把 quickjs-wasi 的 `src/index.ts` 与 `src/wasi-shim.ts` 中 Pi 的 codemode worker
+  用到的部分移植成 Python，宿主的 WebAssembly 换成 wasmtime；分叉处在文件头部列出。
+
+## TypeBox（经 Pi 的 packages/chord）
+
+- 上游：https://github.com/sinclairzx81/typebox ，npm 包 `typebox` 1.3.27（Pi 1.3.0 的 chord 依赖它）
+- 许可证：MIT
+- 版权：Copyright (c) 2017-2026 Haydn Paterson
+- 本仓库位置：`misaka/chord/_typebox.py`（完整 MIT 文本在该文件头部）
+- 说明：chord 用到的 `Type` 构造器与 `Value.Check/Errors/Clean/Default/Clone` 的 Python 移植（联合分支的优先级排序、
+  字素计数、交叉类型求值、错误文案与路径同上游）；分叉处在文件头部列出。
 
 ## ansi-regex / strip-ansi
 
@@ -38,6 +67,112 @@ MISAKA 的部分文件移植自其它项目。移植代码所附带的许可证�
 - 本仓库位置：`misaka/ui/tui/stdin_buffer.py`（完整 MIT 文本在该文件头部）
 - 说明：经由 Pi 的 `packages/tui/src/stdin-buffer.ts` 移植；转义序列的缓冲与切分
   逻辑来自上游，字节层增量解码与定时器回环是本仓库为 Python 运行时所加。
+
+## MCP TypeScript SDK（经 Pi 的 packages/mcp）
+
+- 上游：https://github.com/modelcontextprotocol/typescript-sdk ，v1.29.0 的 `src/client/auth.ts`
+- 许可证：MIT
+- 版权：Copyright (c) 2024 Anthropic, PBC
+- 许可证全文：`LICENSES/modelcontextprotocol-typescript-sdk.txt`（Pi `packages/mcp/LICENSES/` 的原样拷贝）
+- 本仓库位置：`misaka/mcp/oauth/types.py`、`misaka/mcp/oauth/discovery.py`、`misaka/mcp/oauth/flow.py`
+- 说明：Pi 把 SDK 的 OAuth 发现、动态注册与授权码流程改写成无依赖的结构校验版本并保留了
+  上游头部；MISAKA 再从 Pi 的 TypeScript 移植到 Python，三个文件的文档字符串保留 Pi 的头部原文。
+
+## cross-spawn 及其依赖（经 Pi 的 packages/mcp）
+
+- 上游与许可证：cross-spawn 7.0.6（MIT，Copyright (c) 2018 Made With MOXY Lda）、
+  which 2.0.2 与 isexe 2.0.0（ISC，Copyright (c) Isaac Z. Schlueter and Contributors）、
+  path-key 3.1.1 与 shebang-regex 3.0.0（MIT，Copyright (c) Sindre Sorhus）、
+  shebang-command 2.0.0（MIT，Copyright (c) Kevin Mårtensson）
+- 许可证全文：`LICENSES/cross-spawn-and-dependencies.txt`
+- 本仓库位置：`misaka/mcp/transports/_cross_spawn.py`
+- 说明：Pi 的 stdio 传输用 cross-spawn 拉起服务器进程；MISAKA 把它在 Windows 上解析命令、
+  处理 shebang 与 cmd.exe 转义的那部分移植为 Python，转义规则以 node 跑 cross-spawn 7.0.6
+  产出的向量校验（`tests/fixtures/mcp/cross_spawn_vectors.json`）。
+
+## proper-lockfile 与 retry（经 Pi 的 coding-agent）
+
+- 上游与许可证：proper-lockfile 4.1.2（MIT，Copyright (c) 2018 Made With MOXY Lda）、
+  retry 0.12.0（MIT，Copyright (c) 2011 Tim Koschützki、Felix Geisendörfer）
+- 许可证全文：`LICENSES/proper-lockfile-and-retry.txt`
+- 本仓库位置：`misaka/utils/lockfile.py`
+- 说明：Pi 的 coding-agent 用 proper-lockfile 锁文件（MISAKA 里是 MCP 的 OAuth 扩展）；MISAKA 把它的
+  `lib/lockfile.js`、`lib/adapter.js`、`lib/mtime-precision.js` 与 retry 的退避参数那一部分
+  逐行改写为 Python（以 `mkdir` 为原子加锁、陈旧锁接管、定时刷新、ELOCKED/ECOMPROMISED/ENOTACQUIRED）。
+
+## jsdiff（经 Pi 的 packages/durable）
+
+- 上游：https://github.com/kpdecker/jsdiff ，npm 包 `diff` 8.0.4
+- 许可证：BSD-3-Clause
+- 版权：Copyright (c) 2009-2015, Kevin Decker
+- 许可证全文：`LICENSES/jsdiff.txt`
+- 本仓库位置：`misaka/utils/jsdiff.py`
+- 说明：Pi 的 durable 编辑工具用 `diffLines` 与补丁生成；MISAKA 移植其中的 Myers 行差异
+  （`diff/base.js`、`diff/line.js`）与 `patch/create.js`，只含工具用到的部分；输出以 node 跑真实的
+  `diff` 8.0.4 录下的用例校验（`tests/fixtures/jsdiff_cases.json`）。
+
+## grok-mermaid（经 Pi 的 coding-agent）
+
+- 上游：https://github.com/xl0/grok-mermaid ，npm 包 `grok-mermaid` 0.2.3
+- 许可证：Apache-2.0
+- 版权：Copyright 2023-2026 SpaceXAI；Copyright 2026 Alexey Zaytsev
+- 许可证全文：`LICENSES/grok-mermaid.txt`
+- 本仓库位置：`misaka/ui/tui/vendor/grok_mermaid/`
+- 说明：Pi 的 TUI 用它把 Markdown 里的 Mermaid 代码块画成终端里的 Unicode 框线图；MISAKA 逐文件移植全部源码
+  （解析、布局、画布、宽度表、源码框）。改动：边的 `from` 字段改名 `from_`（Python 关键字），模型类型改为
+  dataclass。输出以 node 跑真实的 grok-mermaid 0.2.3 录下的结果逐字节校验（`tests/fixtures/grok_mermaid_oracle.json`）。
+
+## marked（经 Pi 的 packages/tui）
+
+- 上游：https://github.com/markedjs/marked ，npm 包 `marked` 18.0.11
+- 许可证：MIT
+- 版权：Copyright (c) 2018+, MarkedJS；Copyright (c) 2011-2018, Christopher Jeffrey
+- 许可证全文：`LICENSES/marked.txt`
+- 本仓库位置：`misaka/ui/tui/vendor/marked/`
+- 说明：Pi 的 TUI 用 marked 把 Markdown 切成词元再自己渲染；MISAKA 逐行移植其中的词法部分
+  （`rules`、`helpers`、`Tokenizer`、`Lexer`、`Hooks` 与 `Marked` 的词法接口），不含 HTML 的
+  `Parser`/`Renderer`。正则保留 JavaScript 源码，经 `misaka/utils/js_regexp.py` 按 JavaScript 语义编译；
+  输出以 node 跑真实的 marked 18.0.11 录下的词元校验（`tests/fixtures/marked_18_0_11_tokens.json.gz`）。
+- 另一处：`misaka/core/export_html/vendor/marked.min.js` 是 marked v18.0.5 的压缩构建，取自 Pi 1.1.0（1.3.0 未改）的
+  `core/export-html/vendor/` 原样拷贝，文件头保留上游版权行；HTML 导出页在浏览器里用它渲染 Markdown。
+
+## highlight.js（经 Pi 的 export-html）
+
+- 上游：https://github.com/highlightjs/highlight.js ，v11.9.0
+- 许可证：BSD-3-Clause
+- 版权：Copyright (c) 2006, Ivan Sagalaev 及其他贡献者
+- 许可证全文：`LICENSES/highlight.js.txt`
+- 本仓库位置：`misaka/core/export_html/vendor/highlight.min.js`
+- 说明：Pi 1.1.0（1.3.0 未改）`core/export-html/vendor/` 中压缩构建的原样拷贝，HTML 导出页用它给代码块着色；文件头保留
+  上游的版本与许可证行。
+
+## Oklab（经 Pi 的 packages/tui）
+
+- 上游：https://bottosson.github.io/posts/oklab/ 与 https://bottosson.github.io/posts/colorpicker/ 的参考实现
+- 许可证：MIT
+- 版权：Copyright (c) 2021 Björn Ottosson
+- 本仓库位置：`misaka/ui/tui/colors.py` 的 `rgbToOklab` 一段（许可文本在该段注释里）
+- 说明：经由 Pi 的 `packages/tui/src/oklab.ts` 移植，只取 sRGB 到 Oklab 的换算。
+
+## get-east-asian-width（经 Pi 的 packages/tui）
+
+- 上游：https://github.com/sindresorhus/get-east-asian-width ，npm 包 `get-east-asian-width` 1.6.0
+- 许可证：MIT
+- 版权：Copyright (c) Sindre Sorhus <sindresorhus@gmail.com> (https://sindresorhus.com)
+- 许可证全文：`LICENSES/get-east-asian-width.txt`
+- 本仓库位置：`misaka/ui/tui/vendor/get_east_asian_width/`
+- 说明：Pi 的 TUI 用它量字符的显示宽度；MISAKA 逐文件移植 `index.js`、`lookup.js`、`lookup-data.js`
+  与 `utilities.js`，取代原先的 wcwidth 依赖。
+
+## Unicode 17 RGI 表情序列（经 Pi 的 packages/tui）
+
+- 上游：https://github.com/node-unicode/unicode-17.0.0 ，npm 包 `@unicode/unicode-17.0.0` 2.0.7
+- 许可证：MIT
+- 版权：Copyright Mathias Bynens <https://mathiasbynens.be/>
+- 许可证全文：`LICENSES/unicode-17.0.0.txt`
+- 本仓库位置：`misaka/ui/tui/vendor/unicode_rgi_emoji.py`
+- 说明：Pi 用 `/^\p{RGI_Emoji}$/v` 判断一个字素是不是表情；Python 的正则没有字符串属性，
+  MISAKA 把该包 `Sequence_Property/RGI_Emoji` 的 3,953 个序列收成一张查找表。
 
 ## hermes-lcm
 
@@ -154,6 +289,23 @@ and host patches are in `vendor/PROVENANCE.json`; regenerate/check with
 `scripts/skills_vendor_sync.py <upstream-checkout> [--write]`.
 The MISAKA scope, scanner enforcement, transactions and lifecycle adapters
 are not represented as verbatim upstream code.
+On 2026-10-24 how skills run was aligned with Hermes `bda3a363e9`: a skill is
+served and run from its own directory (no execution copies, no card snapshots,
+no guard on skill trees or on shell expansions); the file tools refuse the
+skills hub cache as Hermes `agent/file_safety.py` does
+(`misaka/core/web/evidence.py`); `_is_community_hub_skill` is copied from
+Hermes `agent/skill_preprocessing.py` into `misaka/core/skills/preprocessing.py`.
+One difference stays: the home's own write rule (`misaka/core/platform/home_guard.py`),
+which Hermes does not have, still keeps a card's or a sub-agent's `write`/`edit`/`office`
+out of the home outside `shared/`, so skills in the home and in a role change there through
+`skill_manage`; a skill whose real path lies in `shared/` (a link into it) can be written
+by those tools too.
+
+## Hermes Bot Mode 联系会话
+
+- Hermes 源码：https://github.com/nousresearch/hermes-agent ，MIT，Copyright (c) 2025 Nous Research；许可证文本：`misaka/core/web/LICENSE.hermes-agent`。
+- `misaka/cli/dm.py`：Bot Mode 私信模型的移植（永久 Bot Chat 会话、署名前缀、协议段；2026-08-19 按当时的 `tools/bot_mode_probe.py`）。2026-10-24 按 `bda3a363e9695e3f63fce4a7ca85ba17b5fecb61` 对齐联系轮的语义：网关的无活动超时（`gateway/run_turn.py`、`gateway/run.py` 的 `_watch_gateway_turn_inactivity`）代替 600 秒墙钟，一次按策略的重试，失败回告发信方（`tools/bot_mode_dm.py` 的 `_wait_reply_main` 措辞）；发信的窗口都已关闭时停下这一轮（上游把投递作为发信会话的后台进程起，`_spawn_delivery`，并随该会话收掉，`agent/client_lifecycle.py` 的 `_close_task_resources`）。
+- `misaka/core/network/bot_failure_reasons.py`：同一提交的 `tools/bot_failure_reasons.py` 原文节选（原因码、分类器、重试策略）。
 
 ## CCB subagent implementation reference
 
@@ -162,10 +314,6 @@ are not represented as verbatim upstream code.
 - Native ports/adapters: `misaka/core/subagent/`; background Bash host integration in
   `misaka/core/tools/bash.py`, `misaka/core/moments.py`, and `misaka/core/agent_session.py`;
   the source semantic-boolean conversion in `misaka/utils/values.py`.
-- MCP OAuth lifecycle: `misaka/core/subagent/mcp_auth.py` references the pinned
-  `src/services/mcp/auth.ts` and uses the installed official Python MCP SDK for
-  the protocol. Secure storage and cancellation ownership reuse MISAKA helpers;
-  loopback port binding, file-backed metadata and role isolation are native adaptations.
 - Live permission mode: native session/part state plus existing child JSONL IPC,
   using the pinned `packages/builtin-tools/src/tools/AgentTool/runAgent.ts`
   `agentGetAppState` mode-precedence rule.
@@ -175,6 +323,18 @@ are not represented as verbatim upstream code.
   this notice does not assign it an MIT or other open-source license.
 - Behavioral source pointers are retained in the ported modules. Native adaptations
   preserve MISAKA role/project ownership, Pi sessions, and the Hermes Skill/LCM hosts.
+- Top-level permission mode and dialog (2026-10-24): `configuration.initial_permission_mode`
+  follows `utils/permissions/permissionSetup.ts` `initialPermissionModeFromCLI` over the settings'
+  `permissions.defaultMode`/`disableBypassPermissionsMode` (no launch flags: MISAKA starts its
+  sessions itself; unset falls back to `bypassPermissions` instead of `default`, by user ruling; `auto`
+  falls back as under CCB's circuit breaker, the transcript classifier running in sub-agents only);
+  `misaka/core/subagent/permission_suggestions.py` ports the dialog's "Yes / Yes, and don't ask
+  again / No" with `BashTool/bashPermissions.ts` (`getSimpleCommandPrefix`,
+  `suggestionForExactCommand`, `SAFE_ENV_VARS`), `BashTool/pathValidation.ts` path suggestions,
+  `utils/permissions/filesystem.ts` `generateSuggestions`/`createReadRuleSuggestion`,
+  `shellPermissionHelpers.tsx` `generateShellSuggestionsLabel`,
+  `FilePermissionDialog/permissionOptions.tsx` and `FallbackPermissionRequest.tsx`; CCB's
+  `localSettings` is the project's `.misaka/settings.json`.
 
 ## shell-quote (selected lexer port)
 
@@ -200,6 +360,7 @@ are not represented as verbatim upstream code.
 - 许可证全文、源文件 SHA256 和改动边界：`misaka/core/tools/_office/LICENSE.frontier-agent`、`PROVENANCE.json`、`ORIGIN.md`。
 - 来源：上游 `_writer_*`、`_reader_*`、`create_file.py`、`read_file.py`；其自身注明功能设计参考 Mercor-Intelligence/archipelago（Apache-2.0），寻址和参数设计由 FrontierAgent 实现。
 - 本地改动包含引用友好的文本渲染、工作区归属、权限和错误信封、线程／写入队列、暂存回滚、独立转换配置、缺陷修正；不包含上游 PDF OCR 服务调用、视觉模型网关和沙箱基础设施。
+- `misaka/agent/guards.py` 的 `NoProgressGuard` 移植自 `workflows/agent_team/observers/no_progress_guard.py`（对照 `e4cb2397109c957a2f99c3a5d850b9fc479dbef6`）：阈值、"连续轮次里至少三次新建子代理"的前提、新鲜实质报告清零、退场式派活加速停止与提示冷却照上游；上游四个工具按 `misaka/core/platform/vocabulary.py` 的 `NO_PROGRESS_VOCABULARY` 对应到 `Agent`/`SendMessage`/`TaskOutput`/`TaskStop`，前台 `Agent` 自带报告；提示与停止语为中文转述。
 - `misaka/core/documents/index.py` 的逐页 OCR 判定（`_route` 及其阈值：无文字、乱码比例、图片覆盖面积）参照上游 `plugins/tools/_reader_pdf.py` 的逐页路由规则重新实现；图片规则收窄为"图片为主且文字稀少"，数学字体与矢量图规则未采用，理由见该段注释。
 - 插图标注（`index.py` 的 `figures`：图片占比、logo 宽度与笔画数阈值）参照上游 `_reader_pdf.py` 的 auto 模式标注；为无视觉模型代读图片时所用的转写提示词（`core/web/vision.py` 的 `TRANSCRIBE`）取自上游 `_reader_core.py` 的 `_VISION_PROMPT`；代读由 MISAKA 的 `vision` 扩展在请求前统一完成。幻灯片的查看沿用上游的路径：`needs_vlm` 标记（上游 "needs VLM"）指出要看的幻灯片，经 LibreOffice 导出 PDF（`soffice.export_pdf`，即上游 `_export_pdf`）再渲染该页。
 

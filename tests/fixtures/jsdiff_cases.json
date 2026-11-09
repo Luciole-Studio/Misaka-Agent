@@ -1,0 +1,4813 @@
+[
+{
+"a": "\r\n",
+"b": "\r\n🙂\nbar",
+"context": 7,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "\r\n"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "🙂\nbar"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +1,3 @@\n \r\n+🙂\n+bar\n\\ No newline at end of file\n"
+},
+{
+"a": "c\nx y\nbar\nc\n\na\ne\nx y\nd\nfoo\n}\n\n﻿z\nline\n\n{\nx y\n}\n🙂\n}\ne\n﻿z\na\r\n",
+"b": "x y\nbar\nc\n\na\ne\nd\nfoo\n}\n\n﻿z\nline\n\n \n{\nx y\n}\n🙂\n}\ne\n🙂\n﻿z\na\r\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "c\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "x y\nbar\nc\n\na\ne\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "x y\n"
+},
+{
+"count": 7,
+"added": false,
+"removed": false,
+"value": "d\nfoo\n}\n\n﻿z\nline\n\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": " \n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "{\nx y\n}\n🙂\n}\ne\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "🙂\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "﻿z\na\r\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,23 +1,23 @@\n-c\n x y\n bar\n c\n \n a\n e\n-x y\n d\n foo\n }\n \n ﻿z\n line\n \n+ \n {\n x y\n }\n 🙂\n }\n e\n+🙂\n ﻿z\n a\r\n"
+},
+{
+"a": "{\nd\na\n🙂\nbar\n﻿z\nbar",
+"b": "a\n🙂\nbar\nd\n﻿z",
+"context": 4,
+"parts": [
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "{\nd\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "a\n🙂\nbar\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "﻿z\nbar"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "d\n﻿z"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,7 +1,5 @@\n-{\n-d\n a\n 🙂\n bar\n-﻿z\n-bar\n\\ No newline at end of file\n+d\n+﻿z\n\\ No newline at end of file\n"
+},
+{
+"a": "",
+"b": "foo\n🙂\nline\n",
+"context": 1,
+"parts": [
+{
+"count": 3,
+"added": true,
+"removed": false,
+"value": "foo\n🙂\nline\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -0,0 +1,3 @@\n+foo\n+🙂\n+line\n"
+},
+{
+"a": "a\nbar\n\nx y\n\né\ne\ne\ne",
+"b": "a\nbar\n\nx y\n\né\ne\ne\ne",
+"context": 4,
+"parts": [
+{
+"count": 9,
+"added": false,
+"removed": false,
+"value": "a\nbar\n\nx y\n\né\ne\ne\ne"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n"
+},
+{
+"a": "﻿z\r\nd\r\nbar\r\n\r\nx y\r\n{\r\n}\r\nd\r\n\r\n \r\n🙂\r\né\r\n﻿z\r\nbar\r\n\r\nb\r\n﻿z\r\na\r\nx y\r\né\r\n\r\n{\r\nbar\r\n\r\n﻿z\r\n🙂\r\n}\r\n﻿z\r\n ",
+"b": "﻿z\r\nd\r\nd\n\r\nx y\r\n{\r\n}\r\nd\r\n\r\n \r\n🙂\r\né\r\n﻿z\r\nbar\r\n\r\nb\r\n🙂\na\r\nx y\r\né\r\n\r\n{\r\nbar\r\n\r\n﻿z\r\n🙂\r\n}\r\n﻿z\r\n ",
+"context": 7,
+"parts": [
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "﻿z\r\nd\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "bar\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "d\n"
+},
+{
+"count": 13,
+"added": false,
+"removed": false,
+"value": "\r\nx y\r\n{\r\n}\r\nd\r\n\r\n \r\n🙂\r\né\r\n﻿z\r\nbar\r\n\r\nb\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "﻿z\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "🙂\n"
+},
+{
+"count": 12,
+"added": false,
+"removed": false,
+"value": "a\r\nx y\r\né\r\n\r\n{\r\nbar\r\n\r\n﻿z\r\n🙂\r\n}\r\n﻿z\r\n "
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,24 +1,24 @@\n ﻿z\r\n d\r\n-bar\r\n+d\n \r\n x y\r\n {\r\n }\r\n d\r\n \r\n  \r\n 🙂\r\n é\r\n ﻿z\r\n bar\r\n \r\n b\r\n-﻿z\r\n+🙂\n a\r\n x y\r\n é\r\n \r\n {\r\n bar\r\n \r\n"
+},
+{
+"a": "b\r\n﻿z\n",
+"b": "b\r\n﻿z\n",
+"context": 4,
+"parts": [
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "b\r\n﻿z\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n"
+},
+{
+"a": "é\r\nb\r\n{\r\nfoo\r\n﻿z\r\né\r\n \r\ne\r\nfoo\r\nd\r\n\r\n﻿z\r\n\r\nline\r\nfoo\r\nc\r\ne\r\nd\r\nd\r\ne\r\n \r\ne\r\nd\r\nfoo\r\n",
+"b": "é\r\nb\r\n{\r\nfoo\r\nfoo\né\r\n \r\ne\r\nfoo\r\nd\r\n\r\n﻿z\r\n\r\nline\r\nfoo\r\nc\r\ne\r\nd\r\nd\r\ne\r\n \r\ne\r\nd\r\nfoo\r\n",
+"context": 4,
+"parts": [
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "é\r\nb\r\n{\r\nfoo\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "﻿z\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "foo\n"
+},
+{
+"count": 19,
+"added": false,
+"removed": false,
+"value": "é\r\n \r\ne\r\nfoo\r\nd\r\n\r\n﻿z\r\n\r\nline\r\nfoo\r\nc\r\ne\r\nd\r\nd\r\ne\r\n \r\ne\r\nd\r\nfoo\r\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,9 +1,9 @@\n é\r\n b\r\n {\r\n foo\r\n-﻿z\r\n+foo\n é\r\n  \r\n e\r\n foo\r\n"
+},
+{
+"a": "}\n \nc\n🙂\nc\nbar\n{\nfoo\nd\n🙂\n🙂\nx y\n🙂\nline\n﻿z\nc\n \n}\nfoo\n🙂\nb\na\nd\n \ne\nx y",
+"b": "}\n \n🙂\nc\nbar\n{\nfoo\nd\n🙂\nline\n🙂\na\nline\n﻿z\nc\n \n}\nfoo\n🙂\nb\n{\na\nd\n \ne\nx y\n﻿z\n",
+"context": 1,
+"parts": [
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "}\n \n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "c\n"
+},
+{
+"count": 7,
+"added": false,
+"removed": false,
+"value": "🙂\nc\nbar\n{\nfoo\nd\n🙂\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "line\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "🙂\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "x y\n🙂\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "a\n"
+},
+{
+"count": 8,
+"added": false,
+"removed": false,
+"value": "line\n﻿z\nc\n \n}\nfoo\n🙂\nb\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "{\n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "a\nd\n \ne\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "x y"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "x y\n﻿z\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -2,3 +2,2 @@\n  \n-c\n 🙂\n@@ -10,5 +9,5 @@\n 🙂\n+line\n 🙂\n-x y\n-🙂\n+a\n line\n@@ -21,2 +20,3 @@\n b\n+{\n a\n@@ -25,2 +25,3 @@\n e\n-x y\n\\ No newline at end of file\n+x y\n+﻿z\n"
+},
+{
+"a": "a\na\n🙂\nline\nx y\nb\ne\n\nd\na\n}\né\nx y\nc\n{\nd\r\n",
+"b": "a\na\nline\n🙂\ne\nline\nb\nx y\n\ne\n\nd\na\n}\né\nc\n{\nd\r",
+"context": 4,
+"parts": [
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "a\na\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "line\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "🙂\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "e\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "line\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "x y\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "b\n"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "x y\n\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "e\n\nd\na\n}\né\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "x y\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "c\n{\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "d\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "d\r"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,16 +1,18 @@\n a\n a\n+line\n 🙂\n+e\n line\n-x y\n b\n+x y\n+\n e\n \n d\n a\n }\n é\n-x y\n c\n {\n-d\r\n+d\r\n\\ No newline at end of file\n"
+},
+{
+"a": "}\r\nb\r\n﻿z\r\n \r\na\r\nb\r\na\r\né\r\nb\r\né\r\né\r\n﻿z\r\nfoo\r\n﻿z\r\nb\r\né\r\nb\r\nd",
+"b": "}\r\nb\r\n﻿z\r\n \r\na\r\nb\r\na\r\né\r\nb\r\né\r\né\r\n﻿z\r\nfoo\r\n﻿z\r\nb\r\né\r\nb\r\nd",
+"context": 7,
+"parts": [
+{
+"count": 18,
+"added": false,
+"removed": false,
+"value": "}\r\nb\r\n﻿z\r\n \r\na\r\nb\r\na\r\né\r\nb\r\né\r\né\r\n﻿z\r\nfoo\r\n﻿z\r\nb\r\né\r\nb\r\nd"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n"
+},
+{
+"a": "{\r\n🙂\r\na\r\nb\r\né\r\n﻿z\r\ne\r\nbar\r\n\r\nx y\r\nline\r\nbar\r\nx y\r\nx y\r\nc\r\n}\r\né\r\n",
+"b": "{\r\n🙂\r\na\r\nb\r\né\r\n﻿z\r\ne\r\nbar\r\n\r\nx y\r\nline\r\nbar\r\nx y\r\nx y\r\nc\r\n}\r\né\r\nb",
+"context": 7,
+"parts": [
+{
+"count": 17,
+"added": false,
+"removed": false,
+"value": "{\r\n🙂\r\na\r\nb\r\né\r\n﻿z\r\ne\r\nbar\r\n\r\nx y\r\nline\r\nbar\r\nx y\r\nx y\r\nc\r\n}\r\né\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "b"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -11,7 +11,8 @@\n line\r\n bar\r\n x y\r\n x y\r\n c\r\n }\r\n é\r\n+b\n\\ No newline at end of file\n"
+},
+{
+"a": "bar\r\nd\r\n{\r\n \r\n{\r\n \r\n{\r\nbar\r\n🙂\r\n",
+"b": "bar\r\n \r\n{\r\n \r\n{\r\nbar\r\n🙂\r\n",
+"context": 0,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "bar\r\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "d\r\n{\r\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": " \r\n{\r\n \r\n{\r\nbar\r\n🙂\r\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -2,2 +1,0 @@\n-d\r\n-{\r\n"
+},
+{
+"a": " \n}\nb\nc\n \n{\na\né\n \n \nb",
+"b": "\n \nbar\nb\na\nc\n \n{\nb\né\n \n \nb\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": " \n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "}\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "bar\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "b\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "a\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "c\n \n{\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "a\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "b\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "é\n \n \n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "b"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "b\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,11 +1,13 @@\n+\n  \n-}\n+bar\n b\n+a\n c\n  \n {\n-a\n+b\n é\n  \n  \n-b\n\\ No newline at end of file\n+b\n"
+},
+{
+"a": "line\n",
+"b": "\nline\nd\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "line\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "d\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +1,3 @@\n+\n line\n+d\n"
+},
+{
+"a": "foo\n\nc\n \n \nd\ne\n{\nc\n}\nb",
+"b": "﻿z\n}\n\nc\n \nd\ne\n{\nc\nb",
+"context": 0,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\n"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "﻿z\n}\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "\nc\n \n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": " \n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "d\ne\n{\nc\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "}\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "b"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +1,2 @@\n-foo\n+﻿z\n+}\n@@ -5,1 +5,0 @@\n- \n@@ -10,1 +9,0 @@\n-}\n"
+},
+{
+"a": "x y\n﻿z\nbar\na\n🙂\nd\ne\nbar\nline\nc\n🙂\nd\n}\nbar\n{\n\n{\na\nb\nbar\nc\nc\n}\nc\nbar\n \n{\n",
+"b": "x y\n﻿z\nbar\na\n🙂\nd\ne\nbar\nline\nc\n🙂\nd\n}\nbar\n{\n\n{\na\nb\nbar\nc\nc\n}\nc\nbar\n \n{\n\n",
+"context": 4,
+"parts": [
+{
+"count": 27,
+"added": false,
+"removed": false,
+"value": "x y\n﻿z\nbar\na\n🙂\nd\ne\nbar\nline\nc\n🙂\nd\n}\nbar\n{\n\n{\na\nb\nbar\nc\nc\n}\nc\nbar\n \n{\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -24,4 +24,5 @@\n c\n bar\n  \n {\n+\n"
+},
+{
+"a": "e\nx y\nc\n🙂\ne\n🙂\nline\nd\nx y\n\na\nline\n\ne\nb\n \n",
+"b": "e\nx y\nc\n🙂\ne\n🙂\nline\nd\nx y\n\na\nline\n\ne\nb\n ",
+"context": 4,
+"parts": [
+{
+"count": 15,
+"added": false,
+"removed": false,
+"value": "e\nx y\nc\n🙂\ne\n🙂\nline\nd\nx y\n\na\nline\n\ne\nb\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": " \n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": " "
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -12,5 +12,5 @@\n line\n \n e\n b\n- \n+ \n\\ No newline at end of file\n"
+},
+{
+"a": "{\n🙂\n🙂\nb\n \n﻿z\na\n \nd\n \n}\n\n\n{\nbar",
+"b": "{\n🙂\n🙂\nb\n﻿z\nline\na\né\n \nline\nd\n \n}\n\n{\nbar\n",
+"context": 4,
+"parts": [
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "{\n🙂\n🙂\nb\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": " \n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "﻿z\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "line\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "a\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "é\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": " \n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "line\n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "d\n \n}\n\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "{\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "bar"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "bar\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,15 +1,16 @@\n {\n 🙂\n 🙂\n b\n- \n ﻿z\n+line\n a\n+é\n  \n+line\n d\n  \n }\n \n-\n {\n-bar\n\\ No newline at end of file\n+bar\n"
+},
+{
+"a": "b\r\n",
+"b": " \nb\r",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "b\r\n"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": " \nb\r"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +1,2 @@\n-b\r\n+ \n+b\r\n\\ No newline at end of file\n"
+},
+{
+"a": "\nc\n﻿z\nline\n}\né\n🙂\nfoo\na\n﻿z\ne\né\n \n",
+"b": "\n﻿z\nline\nbar\né\nfoo\nfoo\na\nbar\n \né\n \n\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "c\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "﻿z\nline\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "}\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "bar\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "é\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "🙂\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "foo\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "foo\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "a\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "﻿z\ne\n"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "bar\n \n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "é\n \n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,13 +1,13 @@\n \n-c\n ﻿z\n line\n-}\n+bar\n é\n-🙂\n foo\n+foo\n a\n-﻿z\n-e\n+bar\n+ \n é\n  \n+\n"
+},
+{
+"a": "🙂",
+"b": "x y",
+"context": 0,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "🙂"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "x y"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +1,1 @@\n-🙂\n\\ No newline at end of file\n+x y\n\\ No newline at end of file\n"
+},
+{
+"a": "é\nx y\nb\nbar\nd\na\nx y\nline\nfoo\n}\nb\n﻿z\nb\nc\n{\ne\na\r\n",
+"b": "é\né\nb\nbar\nd\na\nx y\nline\n}\nb\n﻿z\nb\nc\n🙂\ne\na\r\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "é\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "x y\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "é\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "b\nbar\nd\na\nx y\nline\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\n"
+},
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "}\nb\n﻿z\nb\nc\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "{\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "🙂\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "e\na\r\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,17 +1,16 @@\n é\n-x y\n+é\n b\n bar\n d\n a\n x y\n line\n-foo\n }\n b\n ﻿z\n b\n c\n-{\n+🙂\n e\n a\r\n"
+},
+{
+"a": "\n",
+"b": "{\n\nline\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "{\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "line\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +1,3 @@\n+{\n \n+line\n"
+},
+{
+"a": "}\n🙂\ne\n}\n}\nline\nbar\n🙂",
+"b": "}\nx y\ne\n}\nbar\nline\nbar\n🙂",
+"context": 0,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "}\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "🙂\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "x y\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "e\n}\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "}\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "bar\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "line\nbar\n🙂"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -2,1 +2,1 @@\n-🙂\n+x y\n@@ -5,1 +5,1 @@\n-}\n+bar\n"
+},
+{
+"a": "line\r\né\r\nbar\r\nx y\r\nb\r\na\r\ne\r\nx y\r\n{\r\n",
+"b": "line\r\né\r\nbar\r\nx y\r\nb\r\na\r\ne\r\nx y\r\n{\r\n",
+"context": 7,
+"parts": [
+{
+"count": 9,
+"added": false,
+"removed": false,
+"value": "line\r\né\r\nbar\r\nx y\r\nb\r\na\r\ne\r\nx y\r\n{\r\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n"
+},
+{
+"a": "\r\nd\r\na\r\nb",
+"b": "🙂\nline\na\r\ne\n}",
+"context": 4,
+"parts": [
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "\r\nd\r\n"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "🙂\nline\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "a\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "b"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "e\n}"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,4 +1,5 @@\n-\r\n-d\r\n+🙂\n+line\n a\r\n-b\n\\ No newline at end of file\n+e\n+}\n\\ No newline at end of file\n"
+},
+{
+"a": "\r\n",
+"b": "\r\nc",
+"context": 0,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "c"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,0 +2,1 @@\n+c\n\\ No newline at end of file\n"
+},
+{
+"a": "bar\r\n \r\nc\r\n}\r\nbar\r\ne\r\né\r\nd\r\n \r\nbar\r\n﻿z\r\n}\r\n﻿z\r\nx y\r\n﻿z\r\n﻿z\r\nd\r\n}\r\n{\n",
+"b": "bar\r\n \r\nc\r\nline\nbar\r\ne\r\né\r\nd\r\n \r\nbar\r\na\n﻿z\r\n}\r\n﻿z\r\n}\n﻿z\r\n﻿z\r\nd\r\n}\r\n{\n",
+"context": 4,
+"parts": [
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "bar\r\n \r\nc\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "}\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "line\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "bar\r\ne\r\né\r\nd\r\n \r\nbar\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "a\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "﻿z\r\n}\r\n﻿z\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "x y\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "}\n"
+},
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "﻿z\r\n﻿z\r\nd\r\n}\r\n{\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,18 +1,19 @@\n bar\r\n  \r\n c\r\n-}\r\n+line\n bar\r\n e\r\n é\r\n d\r\n  \r\n bar\r\n+a\n ﻿z\r\n }\r\n ﻿z\r\n-x y\r\n+}\n ﻿z\r\n ﻿z\r\n d\r\n }\r\n"
+},
+{
+"a": "﻿z\n\nline\n{\n{\nfoo\nx y\n{\n\nc\né\na\nfoo\na\n﻿z\né\n}\n \nbar\n{\n \na\n \né\n\n}\nd\na\r\n",
+"b": "﻿z\n\nline\n{\n{\nfoo\nx y\n{\n\nc\né\na\nfoo\na\n﻿z\né\n}\n \nbar\n{\n \na\n \né\n\n}\nd\na\r\n",
+"context": 4,
+"parts": [
+{
+"count": 28,
+"added": false,
+"removed": false,
+"value": "﻿z\n\nline\n{\n{\nfoo\nx y\n{\n\nc\né\na\nfoo\na\n﻿z\né\n}\n \nbar\n{\n \na\n \né\n\n}\nd\na\r\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n"
+},
+{
+"a": "foo\r\né\r\n﻿z\r\ne\r\n﻿z\r\n}\r\nfoo\r\nfoo\r\n \r\nb\r\n🙂\r\n}\r\n🙂\r\nbar\r\nd\r\ne\r\nbar\r\nfoo\r\nbar\r\nb\r\nx y\r\n}\r\n",
+"b": "a\né\r\n﻿z\r\ne\r\n﻿z\r\n}\r\nfoo\r\nfoo\r\n﻿z\nb\r\n🙂\r\n}\r\n🙂\r\nline\nd\r\ne\r\nbar\r\na\nb\r\nx y\r\n\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "a\n"
+},
+{
+"count": 7,
+"added": false,
+"removed": false,
+"value": "é\r\n﻿z\r\ne\r\n﻿z\r\n}\r\nfoo\r\nfoo\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": " \r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "﻿z\n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "b\r\n🙂\r\n}\r\n🙂\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "bar\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "line\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "d\r\ne\r\nbar\r\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "foo\r\nbar\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "a\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "b\r\nx y\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "}\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,22 +1,21 @@\n-foo\r\n+a\n é\r\n ﻿z\r\n e\r\n ﻿z\r\n }\r\n foo\r\n foo\r\n- \r\n+﻿z\n b\r\n 🙂\r\n }\r\n 🙂\r\n-bar\r\n+line\n d\r\n e\r\n bar\r\n-foo\r\n-bar\r\n+a\n b\r\n x y\r\n-}\r\n+\n"
+},
+{
+"a": "é\r\n🙂\r\n\r\na\r\nb\r\nx y",
+"b": "é\r\n🙂\r\n\r\nfoo\nx y\nx y",
+"context": 1,
+"parts": [
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "é\r\n🙂\r\n\r\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "a\r\nb\r\n"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "foo\nx y\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "x y"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -3,4 +3,4 @@\n \r\n-a\r\n-b\r\n+foo\n+x y\n x y\n\\ No newline at end of file\n"
+},
+{
+"a": "e\r\n🙂\r\n﻿z\r\nline\r\nfoo\r\né\r\né\r\n}\r\n}\r\né\r\nfoo\r\nline\r\n}\r\n}\r\nc\r\nbar\r\nx y\r\n\r\ne\r\nb\r\nbar\r\nbar\n",
+"b": "🙂\n🙂\r\n﻿z\r\nline\r\nfoo\r\né\r\né\r\n}\r\n}\r\né\r\nfoo\r\nline\r\n}\r\n}\r\nc\r\nbar\r\nx y\r\ne\r\nb\r\nbar\r\nbar\n\n",
+"context": 0,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "e\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "🙂\n"
+},
+{
+"count": 16,
+"added": false,
+"removed": false,
+"value": "🙂\r\n﻿z\r\nline\r\nfoo\r\né\r\né\r\n}\r\n}\r\né\r\nfoo\r\nline\r\n}\r\n}\r\nc\r\nbar\r\nx y\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "\r\n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "e\r\nb\r\nbar\r\nbar\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +1,1 @@\n-e\r\n+🙂\n@@ -18,1 +17,0 @@\n-\r\n@@ -22,0 +22,1 @@\n+\n"
+},
+{
+"a": "c\ne\nline\n \ne\n}\n﻿z\nline\n﻿z\nb\n🙂\n🙂\na\n\nline\nd\n﻿z\né\n\n \n",
+"b": "c\ne\nline\n \ne\n}\n﻿z\nline\n﻿z\nb\n🙂\n🙂\na\nx y\n\nline\na\nd\n﻿z\né\n\n \n\n",
+"context": 0,
+"parts": [
+{
+"count": 13,
+"added": false,
+"removed": false,
+"value": "c\ne\nline\n \ne\n}\n﻿z\nline\n﻿z\nb\n🙂\n🙂\na\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "x y\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "\nline\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "a\n"
+},
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "d\n﻿z\né\n\n \n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -13,0 +14,1 @@\n+x y\n@@ -15,0 +17,1 @@\n+a\n@@ -20,0 +23,1 @@\n+\n"
+},
+{
+"a": "foo\r\nd\r\ne\r\n \r\n﻿z\r\nfoo\r\n \r\né\r\nc\r\n}\r\nx y\r\n}\r\nbar\r\ne\r\nd\r\nx y\r\né\r\n \r\n﻿z\n",
+"b": "d\r\ne\r\n{\n﻿z\r\nfoo\r\n \r\né\r\nc\r\n}\r\nx y\r\n}\r\nbar\r\ne\r\nd\r\nx y\r\né\r\nx y\n \r\n﻿z\n}",
+"context": 1,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\r\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "d\r\ne\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": " \r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "{\n"
+},
+{
+"count": 13,
+"added": false,
+"removed": false,
+"value": "﻿z\r\nfoo\r\n \r\né\r\nc\r\n}\r\nx y\r\n}\r\nbar\r\ne\r\nd\r\nx y\r\né\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "x y\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": " \r\n﻿z\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "}"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,5 +1,4 @@\n-foo\r\n d\r\n e\r\n- \r\n+{\n ﻿z\r\n@@ -17,3 +16,5 @@\n é\r\n+x y\n  \r\n ﻿z\n+}\n\\ No newline at end of file\n"
+},
+{
+"a": "foo\n﻿z\né\nfoo\nfoo\nfoo\nd\nline\n\n\né\n﻿z\ne\n{\n\nfoo\n🙂\nline\nc\né\na\n﻿z\nline\n﻿z\ne\n﻿z\n\n",
+"b": "foo\n﻿z\nfoo\nc\nfoo\nb\nfoo\nd\nline\n\n\né\n﻿z\ne\n{\n\nfoo\n🙂\nline\nc\né\na\n﻿z\nline\n﻿z\ne\n\n\n",
+"context": 4,
+"parts": [
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "foo\n﻿z\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "é\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "foo\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "c\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "foo\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "b\n"
+},
+{
+"count": 20,
+"added": false,
+"removed": false,
+"value": "foo\nd\nline\n\n\né\n﻿z\ne\n{\n\nfoo\n🙂\nline\nc\né\na\n﻿z\nline\n﻿z\ne\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "﻿z\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,9 +1,10 @@\n foo\n ﻿z\n-é\n foo\n+c\n foo\n+b\n foo\n d\n line\n \n@@ -22,6 +23,6 @@\n ﻿z\n line\n ﻿z\n e\n-﻿z\n \n+\n"
+},
+{
+"a": "🙂\r\na\r\n🙂\r\na\r\nx y\r\nx y\r\nb\r\nline\r\nfoo\r\nline\r\nx y\r\nc\r\né\r\nb\r\n \n",
+"b": "🙂\r\na\r\n🙂\r\na\r\nx y\r\nx y\r\nb\r\nline\r\nx y\na\n\nline\r\nx y\r\nc\r\né\r\nb\r\n \n",
+"context": 4,
+"parts": [
+{
+"count": 8,
+"added": false,
+"removed": false,
+"value": "🙂\r\na\r\n🙂\r\na\r\nx y\r\nx y\r\nb\r\nline\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\r\n"
+},
+{
+"count": 3,
+"added": true,
+"removed": false,
+"value": "x y\na\n\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "line\r\nx y\r\nc\r\né\r\nb\r\n \n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -5,9 +5,11 @@\n x y\r\n x y\r\n b\r\n line\r\n-foo\r\n+x y\n+a\n+\n line\r\n x y\r\n c\r\n é\r\n"
+},
+{
+"a": "c\na\nb\n﻿z\n{\r\n",
+"b": "line\nc\na\nb\n{\r\n",
+"context": 0,
+"parts": [
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "line\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "c\na\nb\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "﻿z\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "{\r\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -0,0 +1,1 @@\n+line\n@@ -4,1 +4,0 @@\n-﻿z\n"
+},
+{
+"a": " \nb\né\ne\na\né\nc\nb\n🙂\nfoo\né\nb\n}\ne\nc\nb\n🙂\n}\né\né\n\né\nc\n🙂\nline\r\n",
+"b": " \nb\né\ne\na\né\nc\nb\n}\n🙂\né\nb\nb\n}\ne\nc\ne\nb\n🙂\n}\né\né\n\né\nc\nb\n🙂\n{\nline\r\n\n",
+"context": 4,
+"parts": [
+{
+"count": 8,
+"added": false,
+"removed": false,
+"value": " \nb\né\ne\na\né\nc\nb\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "}\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "🙂\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "é\nb\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "b\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "}\ne\nc\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "e\n"
+},
+{
+"count": 8,
+"added": false,
+"removed": false,
+"value": "b\n🙂\n}\né\né\n\né\nc\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "b\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "🙂\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "{\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "line\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -5,21 +5,26 @@\n a\n é\n c\n b\n+}\n 🙂\n-foo\n é\n b\n+b\n }\n e\n c\n+e\n b\n 🙂\n }\n é\n é\n \n é\n c\n+b\n 🙂\n+{\n line\r\n+\n"
+},
+{
+"a": "c\r\nx y\r\n{\r\nx y\r\n \r\nline\r\nbar\r\nb\r\nbar\r\n{\r\nfoo\r\n🙂\r\n",
+"b": "d\n{\r\n\n \r\nline\r\nbar\r\ne\nb\r\nbar\r\n{\r\nfoo\r\n🙂\r\n",
+"context": 4,
+"parts": [
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "c\r\nx y\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "d\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "{\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "x y\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": " \r\nline\r\nbar\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "e\n"
+},
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "b\r\nbar\r\n{\r\nfoo\r\n🙂\r\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,11 +1,11 @@\n-c\r\n-x y\r\n+d\n {\r\n-x y\r\n+\n  \r\n line\r\n bar\r\n+e\n b\r\n bar\r\n {\r\n foo\r\n"
+},
+{
+"a": "b\r\n\r\n}\r\n ",
+"b": "b\r\n}\nline\nd\n\r\n}\r",
+"context": 7,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "b\r\n"
+},
+{
+"count": 3,
+"added": true,
+"removed": false,
+"value": "}\nline\nd\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "\r\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "}\r\n "
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "}\r"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,4 +1,6 @@\n b\r\n+}\n+line\n+d\n \r\n-}\r\n- \n\\ No newline at end of file\n+}\r\n\\ No newline at end of file\n"
+},
+{
+"a": "foo\n{\nbar\n}\na\n\n \n{\nline\nx y\n}\n🙂\n{\n{\nline\n\nd\nbar\né\n}\n🙂\nb\nline\na\ne\nfoo\nfoo\n}\na\n \n",
+"b": "b\n{\nbar\n}\na\n\n \n{\nline\nx y\n}\n🙂\n{\na\nc\n{\nline\n\nd\né\n}\n🙂\nb\nline\na\nfoo\ne\nfoo\nfoo\nx y\na\n \n",
+"context": 0,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "b\n"
+},
+{
+"count": 12,
+"added": false,
+"removed": false,
+"value": "{\nbar\n}\na\n\n \n{\nline\nx y\n}\n🙂\n{\n"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "a\nc\n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "{\nline\n\nd\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "bar\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "é\n}\n🙂\nb\nline\na\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "foo\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "e\nfoo\nfoo\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "}\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "x y\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "a\n \n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +1,1 @@\n-foo\n+b\n@@ -13,0 +14,2 @@\n+a\n+c\n@@ -18,1 +19,0 @@\n-bar\n@@ -24,0 +26,1 @@\n+foo\n@@ -28,1 +30,1 @@\n-}\n+x y\n"
+},
+{
+"a": "b\r\nb\r\nbar\r\nline\r\nline\r\nc\r\nc\r\nbar\r\n}\r\nc\r\nb\r\nb\r\n{\r\né\r\n{\r\n﻿z",
+"b": "b\r\nb\r\nbar\r\nline\r\nline\r\nc\r\nc\r\nbar\r\n}\r\n{\nb\r\n{\r\né\r\n{\r\n﻿z",
+"context": 0,
+"parts": [
+{
+"count": 9,
+"added": false,
+"removed": false,
+"value": "b\r\nb\r\nbar\r\nline\r\nline\r\nc\r\nc\r\nbar\r\n}\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "c\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "{\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "b\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "b\r\n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "{\r\né\r\n{\r\n﻿z"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -10,1 +10,1 @@\n-c\r\n+{\n@@ -12,1 +11,0 @@\n-b\r\n"
+},
+{
+"a": "\n",
+"b": "e",
+"context": 7,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "e"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +1,1 @@\n-\n+e\n\\ No newline at end of file\n"
+},
+{
+"a": "b\n",
+"b": "",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "b\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +0,0 @@\n-b\n"
+},
+{
+"a": "bar\r\n",
+"b": "bar\r\n🙂\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "bar\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "🙂\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +1,2 @@\n bar\r\n+🙂\n"
+},
+{
+"a": "d\n﻿z\na\na\nd\nline\nc\na\nline\n}\nline\nx y\né\ne\ne\ne\n{\nb\n \n﻿z\n\n﻿z",
+"b": "d\n \n﻿z\na\na\nd\nline\nc\na\nline\n}\nline\nx y\né\ne\ne\ne\n{\nb\n \n﻿z\n\n﻿z",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "d\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": " \n"
+},
+{
+"count": 21,
+"added": false,
+"removed": false,
+"value": "﻿z\na\na\nd\nline\nc\na\nline\n}\nline\nx y\né\ne\ne\ne\n{\nb\n \n﻿z\n\n﻿z"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,5 +1,6 @@\n d\n+ \n ﻿z\n a\n a\n d\n"
+},
+{
+"a": "bar\na\n🙂\nc\nx y\nbar\n﻿z\n{\nbar\n﻿z\nline\nline\nfoo\na\n\nline\né\né\n﻿z\n🙂\n}\nfoo\r\n",
+"b": "bar\na\n🙂\nc\nx y\nbar\n﻿z\n{\nbar\n﻿z\nline\nline\nfoo\na\n\nline\né\né\n﻿z\n🙂\n}\nfoo\r",
+"context": 7,
+"parts": [
+{
+"count": 21,
+"added": false,
+"removed": false,
+"value": "bar\na\n🙂\nc\nx y\nbar\n﻿z\n{\nbar\n﻿z\nline\nline\nfoo\na\n\nline\né\né\n﻿z\n🙂\n}\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "foo\r"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -15,8 +15,8 @@\n \n line\n é\n é\n ﻿z\n 🙂\n }\n-foo\r\n+foo\r\n\\ No newline at end of file\n"
+},
+{
+"a": "e\na\n}\nline\n{\nfoo\ne\r\n",
+"b": "e\na\n}\nline\n{\ne\r\n",
+"context": 7,
+"parts": [
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "e\na\n}\nline\n{\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "e\r\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,7 +1,6 @@\n e\n a\n }\n line\n {\n-foo\n e\r\n"
+},
+{
+"a": "e\na\nd\nd\n}\nx y\n﻿z\n \ne\n \n",
+"b": "e\na\nd\nd\n}\n﻿z\n \ne\n \nc\ne",
+"context": 7,
+"parts": [
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "e\na\nd\nd\n}\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "x y\n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "﻿z\n \ne\n \n"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "c\ne"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,10 +1,11 @@\n e\n a\n d\n d\n }\n-x y\n ﻿z\n  \n e\n  \n+c\n+e\n\\ No newline at end of file\n"
+},
+{
+"a": "foo\n﻿z\n\nc\n🙂\n﻿z\n\n﻿z\n\ne\n",
+"b": "foo\n﻿z\n\nc\n🙂\n﻿z\n\ne\nline\n",
+"context": 0,
+"parts": [
+{
+"count": 7,
+"added": false,
+"removed": false,
+"value": "foo\n﻿z\n\nc\n🙂\n﻿z\n\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "﻿z\n\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "e\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "line\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -8,2 +7,0 @@\n-﻿z\n-\n@@ -10,0 +9,1 @@\n+line\n"
+},
+{
+"a": "c\nc\n🙂\n\n\n",
+"b": "}\nc\n﻿z\n\n🙂\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "}\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "c\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "c\n🙂\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "﻿z\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "🙂\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,5 +1,5 @@\n+}\n c\n-c\n-🙂\n+﻿z\n \n-\n+🙂\n"
+},
+{
+"a": "{\r\nd\r\n \r\n{\r\ne\r\ne\r\nb\r\n\r\n{\r\nfoo\r\n{\r\n{\r\n🙂\r\nd\r\nline\r\nline\r\nfoo\r\n\r\n﻿z\r\n",
+"b": "{\r\n}\n{\r\ne\r\ne\r\nb\r\n\r\n{\r\nfoo\né\nfoo\r\n{\r\n🙂\r\nd\r\nline\r\nline\r\nfoo\r\n\r\n﻿z\r\n\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "{\r\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "d\r\n \r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "}\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "{\r\ne\r\ne\r\nb\r\n\r\n{\r\n"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "foo\né\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "foo\r\n{\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "{\r\n"
+},
+{
+"count": 7,
+"added": false,
+"removed": false,
+"value": "🙂\r\nd\r\nline\r\nline\r\nfoo\r\n\r\n﻿z\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,19 +1,20 @@\n {\r\n-d\r\n- \r\n+}\n {\r\n e\r\n e\r\n b\r\n \r\n {\r\n+foo\n+é\n foo\r\n {\r\n-{\r\n 🙂\r\n d\r\n line\r\n line\r\n foo\r\n \r\n ﻿z\r\n+\n"
+},
+{
+"a": "e\nfoo\nx y\nc\nbar\nb\nline\n",
+"b": "foo\nx y\nc\nbar\nb\nline\n}\ne\n\n{",
+"context": 1,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "e\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "foo\nx y\nc\nbar\nb\nline\n"
+},
+{
+"count": 4,
+"added": true,
+"removed": false,
+"value": "}\ne\n\n{"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,2 +1,1 @@\n-e\n foo\n@@ -7,1 +6,5 @@\n line\n+}\n+e\n+\n+{\n\\ No newline at end of file\n"
+},
+{
+"a": "{\n \nfoo\nfoo\r\n",
+"b": "{\n \nx y\nfoo\r\n",
+"context": 1,
+"parts": [
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "{\n \n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "x y\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "foo\r\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -2,3 +2,3 @@\n  \n-foo\n+x y\n foo\r\n"
+},
+{
+"a": "d\nx y\nx y\n",
+"b": "d\nx y\nx y\n",
+"context": 0,
+"parts": [
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "d\nx y\nx y\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n"
+},
+{
+"a": "{\nb\n \ne\n \n🙂\ne\n🙂\n}\né\nb\n",
+"b": "{\n \ne\nbar\n \n🙂\ne\n🙂\n}\né\nb\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "{\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "b\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": " \ne\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "bar\n"
+},
+{
+"count": 7,
+"added": false,
+"removed": false,
+"value": " \n🙂\ne\n🙂\n}\né\nb\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,8 +1,8 @@\n {\n-b\n  \n e\n+bar\n  \n 🙂\n e\n 🙂\n"
+},
+{
+"a": "bar\n🙂\nbar\nline\n﻿z\na\n🙂\n \n}\n}\r\n",
+"b": "bar\n🙂\nbar\nline\n﻿z\na\n🙂\n \n}\n}\r\n",
+"context": 4,
+"parts": [
+{
+"count": 10,
+"added": false,
+"removed": false,
+"value": "bar\n🙂\nbar\nline\n﻿z\na\n🙂\n \n}\n}\r\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n"
+},
+{
+"a": "b\n}\nfoo\né\n}\n\nc\nbar\nd\nbar\n \nb\n}\né\n}\n{\nline\nd\n \nc\nb\n🙂\n}\nb\nbar\ne\n \nfoo\n",
+"b": " \n}\nfoo\né\n}\n\nc\nbar\nd\nbar\n \nb\n}\nb\né\n \n{\nline\nd\n \n🙂\n}\nb\nbar\ne\n \nfoo\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "b\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": " \n"
+},
+{
+"count": 12,
+"added": false,
+"removed": false,
+"value": "}\nfoo\né\n}\n\nc\nbar\nd\nbar\n \nb\n}\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "b\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "é\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "}\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": " \n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "{\nline\nd\n \n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "c\nb\n"
+},
+{
+"count": 7,
+"added": false,
+"removed": false,
+"value": "🙂\n}\nb\nbar\ne\n \nfoo\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,5 +1,5 @@\n-b\n+ \n }\n foo\n é\n }\n@@ -10,16 +10,15 @@\n bar\n  \n b\n }\n+b\n é\n-}\n+ \n {\n line\n d\n  \n-c\n-b\n 🙂\n }\n b\n bar\n"
+},
+{
+"a": "c\r\n \r\n}\r\nb\r\nbar\r\n\r\nbar\r\nfoo\r\né\r\nfoo\r\n﻿z\r\nbar\r\n﻿z\r\n \r\n﻿z\r\nline\r\ne\r\n \r\nb\r\n{\r\nd\r\n🙂\r\n \n",
+"b": "c\r\n \r\n}\r\nb\r\nbar\r\n\r\nbar\r\nfoo\r\nx y\n﻿z\r\nbar\r\n﻿z\r\n \r\n﻿z\r\nline\r\ne\r\n \r\nb\r\n{\r\nd\r\n🙂\r\n \n\n",
+"context": 1,
+"parts": [
+{
+"count": 8,
+"added": false,
+"removed": false,
+"value": "c\r\n \r\n}\r\nb\r\nbar\r\n\r\nbar\r\nfoo\r\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "é\r\nfoo\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "x y\n"
+},
+{
+"count": 13,
+"added": false,
+"removed": false,
+"value": "﻿z\r\nbar\r\n﻿z\r\n \r\n﻿z\r\nline\r\ne\r\n \r\nb\r\n{\r\nd\r\n🙂\r\n \n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -8,4 +8,3 @@\n foo\r\n-é\r\n-foo\r\n+x y\n ﻿z\r\n@@ -23,1 +22,2 @@\n  \n+\n"
+},
+{
+"a": "c\r\n\r\nb\r\né\r\n🙂\r\nd\r\nfoo\r\n﻿z\r\n🙂\r\nx y\r\nd\r\nx y\r\n🙂\r\n﻿z\r\n}",
+"b": "c\r\n\r\nb\r\né\r\n🙂\r\nd\r\nfoo\r\n﻿z\r\n🙂\r\nx y\r\nd\r\nx y\r\n🙂\r\n﻿z\r\n}",
+"context": 7,
+"parts": [
+{
+"count": 15,
+"added": false,
+"removed": false,
+"value": "c\r\n\r\nb\r\né\r\n🙂\r\nd\r\nfoo\r\n﻿z\r\n🙂\r\nx y\r\nd\r\nx y\r\n🙂\r\n﻿z\r\n}"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n"
+},
+{
+"a": "e\r\nd\r\na\r\n}\r\nx y\r\na\r\n}\r\n﻿z\r\né\r\nfoo\r\nline\r\nline\r\nbar\r\nline\r\né\r\nb\r\nb\r\nbar\r\na\r\n \r\nbar\r\nc\r\n🙂\r\nfoo\r\n",
+"b": "e\r\nd\r\na\r\n}\r\nb\nx y\r\n🙂\n}\r\n﻿z\r\né\r\nfoo\r\nline\r\nbar\r\nline\r\nline\na\nb\r\nb\r\nbar\r\na\r\nx y\n \r\nbar\r\nc\r\n🙂\r\nfoo\r\n",
+"context": 4,
+"parts": [
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "e\r\nd\r\na\r\n}\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "b\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "x y\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "a\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "🙂\n"
+},
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "}\r\n﻿z\r\né\r\nfoo\r\nline\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "line\r\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "bar\r\nline\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "é\r\n"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "line\na\n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "b\r\nb\r\nbar\r\na\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "x y\n"
+},
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": " \r\nbar\r\nc\r\n🙂\r\nfoo\r\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,23 +1,25 @@\n e\r\n d\r\n a\r\n }\r\n+b\n x y\r\n-a\r\n+🙂\n }\r\n ﻿z\r\n é\r\n foo\r\n line\r\n-line\r\n bar\r\n line\r\n-é\r\n+line\n+a\n b\r\n b\r\n bar\r\n a\r\n+x y\n  \r\n bar\r\n c\r\n 🙂\r\n"
+},
+{
+"a": "é\nline\n﻿z\né\nx y\na\nx y\nb\nx y\n🙂\nfoo\nbar\né\nbar\n \nx y\nfoo\nc\n\nbar\ne\n",
+"b": "é\nline\n﻿z\né\n\na\nx y\nb\nx y\n🙂\nb\nfoo\nbar\né\nbar\n \nx y\nfoo\nc\n\nline\nbar\ne",
+"context": 4,
+"parts": [
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "é\nline\n﻿z\né\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "x y\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+},
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "a\nx y\nb\nx y\n🙂\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "b\n"
+},
+{
+"count": 9,
+"added": false,
+"removed": false,
+"value": "foo\nbar\né\nbar\n \nx y\nfoo\nc\n\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "line\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "bar\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "e\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "e"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,14 +1,15 @@\n é\n line\n ﻿z\n é\n-x y\n+\n a\n x y\n b\n x y\n 🙂\n+b\n foo\n bar\n é\n bar\n@@ -16,6 +17,7 @@\n x y\n foo\n c\n \n+line\n bar\n-e\n+e\n\\ No newline at end of file\n"
+},
+{
+"a": "﻿z\r\n \r\nc\r\nd\r\nb\r\nd\r\nfoo\r\ne\r\n}\r\nx y\r\n﻿z\r\nfoo\r\nx y\r\nb\r\n\r\n}\r\n🙂",
+"b": "﻿z\r\ne\n \r\nc\r\nd\r\nb\r\nd\r\nfoo\r\ne\r\n}\r\nx y\r\n \n﻿z\r\nfoo\r\nx y\r\nb\r\n\r\n🙂",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "﻿z\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "e\n"
+},
+{
+"count": 9,
+"added": false,
+"removed": false,
+"value": " \r\nc\r\nd\r\nb\r\nd\r\nfoo\r\ne\r\n}\r\nx y\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": " \n"
+},
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "﻿z\r\nfoo\r\nx y\r\nb\r\n\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "}\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "🙂"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,5 +1,6 @@\n ﻿z\r\n+e\n  \r\n c\r\n d\r\n b\r\n@@ -7,11 +8,11 @@\n foo\r\n e\r\n }\r\n x y\r\n+ \n ﻿z\r\n foo\r\n x y\r\n b\r\n \r\n-}\r\n 🙂\n\\ No newline at end of file\n"
+},
+{
+"a": "d\n🙂\nfoo\n\nd\n﻿z\nfoo\n \ne\né\n \n🙂\n{\nline\n﻿z\nb\nbar\nb\n}\ne",
+"b": "d\n🙂\nfoo\n\nd\n﻿z\nfoo\n \ne\né\n \n🙂\n🙂\n{\nline\n﻿z\n{\nb\nbar\nb\n}\n",
+"context": 0,
+"parts": [
+{
+"count": 12,
+"added": false,
+"removed": false,
+"value": "d\n🙂\nfoo\n\nd\n﻿z\nfoo\n \ne\né\n \n🙂\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "🙂\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "{\nline\n﻿z\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "{\n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "b\nbar\nb\n}\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "e"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -12,0 +13,1 @@\n+🙂\n@@ -15,0 +17,1 @@\n+{\n@@ -20,1 +21,0 @@\n-e\n\\ No newline at end of file\n"
+},
+{
+"a": "}\n{\nb\n🙂\n{\nfoo\nline\n﻿z\nc\ne\n\né\n{\n \nb\n﻿z\n}\n",
+"b": "}\n{\nb\n🙂\n{\nfoo\nline\n﻿z\nc\ne\n\nbar\né\n{\n \nb\n﻿z\n}\n",
+"context": 0,
+"parts": [
+{
+"count": 11,
+"added": false,
+"removed": false,
+"value": "}\n{\nb\n🙂\n{\nfoo\nline\n﻿z\nc\ne\n\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "bar\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "é\n{\n \nb\n﻿z\n}\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -11,0 +12,1 @@\n+bar\n"
+},
+{
+"a": "b\r\na\r\nbar\r\nbar\r\ne\r\nx y\r\n\r\n}\r\nc\r\na\r\n \r\n}\r\n﻿z\r\nx y\r\nd\r\nline\r\n{\r\nfoo\r\n \r\ne\r\nd\r\n \r\n\r\n﻿z\r\n﻿z\r\n🙂\r\né\r\nc\r\n",
+"b": "b\r\na\r\nbar\r\nbar\r\ne\r\nx y\r\n\r\n}\r\nc\r\na\r\n \r\nline\n﻿z\r\nx y\r\nd\r\nline\r\n{\r\nfoo\r\n \r\ne\r\nd\r\n \r\n\r\n﻿z\r\n﻿z\r\n🙂\r\né\r\nc\r\né",
+"context": 4,
+"parts": [
+{
+"count": 11,
+"added": false,
+"removed": false,
+"value": "b\r\na\r\nbar\r\nbar\r\ne\r\nx y\r\n\r\n}\r\nc\r\na\r\n \r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "}\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "line\n"
+},
+{
+"count": 16,
+"added": false,
+"removed": false,
+"value": "﻿z\r\nx y\r\nd\r\nline\r\n{\r\nfoo\r\n \r\ne\r\nd\r\n \r\n\r\n﻿z\r\n﻿z\r\n🙂\r\né\r\nc\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "é"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -8,9 +8,9 @@\n }\r\n c\r\n a\r\n  \r\n-}\r\n+line\n ﻿z\r\n x y\r\n d\r\n line\r\n@@ -25,4 +25,5 @@\n ﻿z\r\n 🙂\r\n é\r\n c\r\n+é\n\\ No newline at end of file\n"
+},
+{
+"a": "a\n\nfoo\n{\n \nc\n\nbar\n \n",
+"b": "a\n\nfoo\n{\n \nc\n\n🙂\né\n🙂\n \n",
+"context": 1,
+"parts": [
+{
+"count": 7,
+"added": false,
+"removed": false,
+"value": "a\n\nfoo\n{\n \nc\n\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "bar\n"
+},
+{
+"count": 3,
+"added": true,
+"removed": false,
+"value": "🙂\né\n🙂\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": " \n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -7,3 +7,5 @@\n \n-bar\n+🙂\n+é\n+🙂\n  \n"
+},
+{
+"a": "bar\n \nline\né\n{\n🙂\n\n\nd\nbar\nx y\nb\n🙂\nb\nc\ne\n}\nb\n\nb\nc\n🙂\nd\n🙂\ne\nx y\na\nb\ne",
+"b": "bar\n \nline\né\n{\n🙂\n\nd\nbar\nx y\nb\n🙂\nb\nc\nline\n}\nb\n\nb\nc\n🙂\n🙂\ne\nx y\na\nb\ne\n",
+"context": 1,
+"parts": [
+{
+"count": 7,
+"added": false,
+"removed": false,
+"value": "bar\n \nline\né\n{\n🙂\n\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "\n"
+},
+{
+"count": 7,
+"added": false,
+"removed": false,
+"value": "d\nbar\nx y\nb\n🙂\nb\nc\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "e\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "line\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "}\nb\n\nb\nc\n🙂\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "d\n"
+},
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "🙂\ne\nx y\na\nb\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "e"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "e\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -7,3 +7,2 @@\n \n-\n d\n@@ -15,3 +14,3 @@\n c\n-e\n+line\n }\n@@ -22,3 +21,2 @@\n 🙂\n-d\n 🙂\n@@ -28,2 +26,2 @@\n b\n-e\n\\ No newline at end of file\n+e\n"
+},
+{
+"a": "é\r\n﻿z\r\nfoo\r\nb\r\n}\r\nfoo\r\n{\r\nb\r\n🙂\r\né\r\nd\r\nx y\r\ne\n",
+"b": "é\r\n﻿z\r\nfoo\r\nb\r\n}\r\n{\r\nb\r\n🙂\r\né\r\nd\r\nx y\r\nline\ne\nx y\nx y",
+"context": 4,
+"parts": [
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "é\r\n﻿z\r\nfoo\r\nb\r\n}\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\r\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "{\r\nb\r\n🙂\r\né\r\nd\r\nx y\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "line\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "e\n"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "x y\nx y"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -2,12 +2,14 @@\n ﻿z\r\n foo\r\n b\r\n }\r\n-foo\r\n {\r\n b\r\n 🙂\r\n é\r\n d\r\n x y\r\n+line\n e\n+x y\n+x y\n\\ No newline at end of file\n"
+},
+{
+"a": "b",
+"b": "c\nd",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "b"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "c\nd"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +1,2 @@\n-b\n\\ No newline at end of file\n+c\n+d\n\\ No newline at end of file\n"
+},
+{
+"a": "bar\nc\n}\né\nbar\nb\n﻿z\n🙂\nd\nbar\nb\nbar\n{\nd\nfoo\nx y\né\n \nline\né",
+"b": "bar\nc\né\nbar\nb\n🙂\nd\nbar\nb\nbar\n{\nd\nfoo\nx y\né\n \nb\nline\né",
+"context": 1,
+"parts": [
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "bar\nc\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "}\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "é\nbar\nb\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "﻿z\n"
+},
+{
+"count": 11,
+"added": false,
+"removed": false,
+"value": "🙂\nd\nbar\nb\nbar\n{\nd\nfoo\nx y\né\n \n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "b\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "line\né"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -2,3 +2,2 @@\n c\n-}\n é\n@@ -6,3 +5,2 @@\n b\n-﻿z\n 🙂\n@@ -18,2 +16,3 @@\n  \n+b\n line\n"
+},
+{
+"a": "b\nc\nbar\n\n🙂\n\nline\nfoo\nc\n﻿z\n🙂\nc\n🙂\n\na\nbar\n﻿z\n🙂\n \n﻿z\nc\nd\n🙂\n}\nc\nfoo\né\n﻿z\nd\nline",
+"b": "b\nc\nbar\n🙂\n\nline\nfoo\n\nc\n﻿z\n🙂\nc\n \n🙂\n\na\nbar\n﻿z\n🙂\n﻿z\n \n﻿z\nc\n🙂\n}\nc\nfoo\né\n﻿z\nd\nline",
+"context": 7,
+"parts": [
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "b\nc\nbar\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "\n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "🙂\n\nline\nfoo\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "c\n﻿z\n🙂\nc\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": " \n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "🙂\n\na\nbar\n﻿z\n🙂\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "﻿z\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": " \n﻿z\nc\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "d\n"
+},
+{
+"count": 8,
+"added": false,
+"removed": false,
+"value": "🙂\n}\nc\nfoo\né\n﻿z\nd\nline"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,29 +1,30 @@\n b\n c\n bar\n-\n 🙂\n \n line\n foo\n+\n c\n ﻿z\n 🙂\n c\n+ \n 🙂\n \n a\n bar\n ﻿z\n 🙂\n+﻿z\n  \n ﻿z\n c\n-d\n 🙂\n }\n c\n foo\n é\n ﻿z\n d\n"
+},
+{
+"a": "🙂\nbar\nfoo\n﻿z\nb\nline\na\n{\n}\nline\nfoo\nline\n",
+"b": "é\nbar\nfoo\n﻿z\nb\nline\na\n{\n}\nline\nx y\nline\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "🙂\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "é\n"
+},
+{
+"count": 9,
+"added": false,
+"removed": false,
+"value": "bar\nfoo\n﻿z\nb\nline\na\n{\n}\nline\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "x y\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "line\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,5 +1,5 @@\n-🙂\n+é\n bar\n foo\n ﻿z\n b\n@@ -7,6 +7,6 @@\n a\n {\n }\n line\n-foo\n+x y\n line\n"
+},
+{
+"a": "🙂",
+"b": "}",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "🙂"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "}"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +1,1 @@\n-🙂\n\\ No newline at end of file\n+}\n\\ No newline at end of file\n"
+},
+{
+"a": "c\nfoo\n",
+"b": "c\nx y",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "c\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "x y"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,2 +1,2 @@\n c\n-foo\n+x y\n\\ No newline at end of file\n"
+},
+{
+"a": "c\r\nbar\r\n﻿z\r\n \r\nx y\r\nbar\r\n﻿z\r\n \r\n\r\nline\r\nd\r\ne\r\nbar\r\n﻿z\r\nbar\r\nc\r\nfoo\r\nx y\r\nbar\r\n{\r\nd\r\né\r\ne\r\n🙂\r\nline\r\né\r\na\r\n{\r\nfoo\r\n\r\n",
+"b": "c\r\nbar\r\n﻿z\r\n \r\nx y\r\nbar\r\n﻿z\r\n \r\n\r\nline\r\nd\r\ne\r\nbar\r\n﻿z\r\nbar\r\nc\r\nx y\r\nbar\r\nd\r\né\r\ne\r\n🙂\r\nline\r\né\r\na\r\n{\r\n\r\n\n",
+"context": 7,
+"parts": [
+{
+"count": 16,
+"added": false,
+"removed": false,
+"value": "c\r\nbar\r\n﻿z\r\n \r\nx y\r\nbar\r\n﻿z\r\n \r\n\r\nline\r\nd\r\ne\r\nbar\r\n﻿z\r\nbar\r\nc\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\r\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "x y\r\nbar\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "{\r\n"
+},
+{
+"count": 8,
+"added": false,
+"removed": false,
+"value": "d\r\né\r\ne\r\n🙂\r\nline\r\né\r\na\r\n{\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -10,21 +10,19 @@\n line\r\n d\r\n e\r\n bar\r\n ﻿z\r\n bar\r\n c\r\n-foo\r\n x y\r\n bar\r\n-{\r\n d\r\n é\r\n e\r\n 🙂\r\n line\r\n é\r\n a\r\n {\r\n-foo\r\n \r\n+\n"
+},
+{
+"a": "\r\nd\r\n﻿z\r\nc\r\ne\r\né\r\né\r\n🙂\r\né\r\n{\r\né\r\nc\r\n}\r\né",
+"b": "\r\nd\r\n{\n﻿z\r\nc\r\ne\r\né\r\né\r\n🙂\r\né\r\n{\r\né\r\n﻿z\nc\r\n}\r\n ",
+"context": 7,
+"parts": [
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "\r\nd\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "{\n"
+},
+{
+"count": 9,
+"added": false,
+"removed": false,
+"value": "﻿z\r\nc\r\ne\r\né\r\né\r\n🙂\r\né\r\n{\r\né\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "﻿z\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "c\r\n}\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "é"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": " "
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,14 +1,16 @@\n \r\n d\r\n+{\n ﻿z\r\n c\r\n e\r\n é\r\n é\r\n 🙂\r\n é\r\n {\r\n é\r\n+﻿z\n c\r\n }\r\n-é\n\\ No newline at end of file\n+ \n\\ No newline at end of file\n"
+},
+{
+"a": "﻿z\nfoo\nb\n🙂\na\nbar\ne\ne\n﻿z\nline\n\n🙂\nd\na\nd\nline\nc\nc\né\ne\nx y\na\nbar\ne\nfoo\n}\nfoo\n\nc\n",
+"b": "﻿z\n🙂\nfoo\nb\n🙂\na\nbar\ne\n﻿z\nline\n\n🙂\nd\na\nd\nline\né\nc\né\ne\nx y\na\nbar\né\nfoo\n}\nfoo\n\nc\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "﻿z\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "🙂\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "foo\nb\n🙂\na\nbar\ne\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "e\n"
+},
+{
+"count": 8,
+"added": false,
+"removed": false,
+"value": "﻿z\nline\n\n🙂\nd\na\nd\nline\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "é\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "c\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "c\n"
+},
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "é\ne\nx y\na\nbar\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "e\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "é\n"
+},
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "foo\n}\nfoo\n\nc\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,28 +1,28 @@\n ﻿z\n+🙂\n foo\n b\n 🙂\n a\n bar\n e\n-e\n ﻿z\n line\n \n 🙂\n d\n a\n d\n line\n+é\n c\n-c\n é\n e\n x y\n a\n bar\n-e\n+é\n foo\n }\n foo\n \n"
+},
+{
+"a": "🙂\r\nfoo\r\na\r\n}\r\nbar\r\na\r\nfoo\r\nfoo\r\n﻿z\r\nfoo\r\nline\r\nline\r\nd\r\nc\r\n﻿z\r\nx y\r\nb\r\n﻿z\r\nline\r\n \r\nbar\r\nfoo\r\nbar\r\n}\r\ne\r\nb\n",
+"b": "🙂\r\nfoo\r\na\r\n}\r\nbar\r\na\r\n\nfoo\r\n﻿z\r\nfoo\r\nline\r\nline\r\nd\r\nc\r\nbar\n﻿z\r\nx y\r\nb\r\n﻿z\r\nline\r\n \r\nbar\r\nfoo\r\nbar\r\n}\r\ne\r\nb\n",
+"context": 7,
+"parts": [
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "🙂\r\nfoo\r\na\r\n}\r\nbar\r\na\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "foo\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\r\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "﻿z\r\nfoo\r\nline\r\nline\r\nd\r\nc\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "bar\n"
+},
+{
+"count": 12,
+"added": false,
+"removed": false,
+"value": "﻿z\r\nx y\r\nb\r\n﻿z\r\nline\r\n \r\nbar\r\nfoo\r\nbar\r\n}\r\ne\r\nb\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,21 +1,22 @@\n 🙂\r\n foo\r\n a\r\n }\r\n bar\r\n a\r\n+\n foo\r\n-foo\r\n ﻿z\r\n foo\r\n line\r\n line\r\n d\r\n c\r\n+bar\n ﻿z\r\n x y\r\n b\r\n ﻿z\r\n line\r\n  \r\n bar\r\n"
+},
+{
+"a": "\r\nline\r\n \r\nb\r\nc\r\ne\r\nx y",
+"b": "\r\nline\r\n \r\nb\r\nc\r\ne\r\nx y",
+"context": 7,
+"parts": [
+{
+"count": 7,
+"added": false,
+"removed": false,
+"value": "\r\nline\r\n \r\nb\r\nc\r\ne\r\nx y"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n"
+},
+{
+"a": "e\n{\nfoo\nfoo\n{\nfoo\n{\nx y\nc\ne\nfoo\na",
+"b": "e\n{\nfoo\nfoo\n{\n{\nc\ne\na",
+"context": 4,
+"parts": [
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "e\n{\nfoo\nfoo\n{\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "{\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "x y\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "c\ne\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "a"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -2,11 +2,8 @@\n {\n foo\n foo\n {\n-foo\n {\n-x y\n c\n e\n-foo\n a\n\\ No newline at end of file\n"
+},
+{
+"a": "b\r\nbar\r\nb\r\né\r\nbar\r\nline\r\nd\r\nd\r\n{\r\nc\r\nline\r\nc\r\n{\r\na\r\n",
+"b": "b\r\nbar\r\nb\r\nbar\r\nline\r\nd\r\nd\r\n{\r\nc\r\nline\r\nc\r\na\r",
+"context": 4,
+"parts": [
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "b\r\nbar\r\nb\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "é\r\n"
+},
+{
+"count": 8,
+"added": false,
+"removed": false,
+"value": "bar\r\nline\r\nd\r\nd\r\n{\r\nc\r\nline\r\nc\r\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "{\r\na\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "a\r"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,14 +1,12 @@\n b\r\n bar\r\n b\r\n-é\r\n bar\r\n line\r\n d\r\n d\r\n {\r\n c\r\n line\r\n c\r\n-{\r\n-a\r\n+a\r\n\\ No newline at end of file\n"
+},
+{
+"a": "\n}\n}\nline\nx y\ne\n}\n﻿z\nb\na\n\n\n🙂\nc\n{\nb\n{\ne\nx y\nd\nbar\n{",
+"b": "\n}\n}\nb\nline\nx y\ne\n}\n﻿z\nb\na\n\n\n🙂\na\nc\n{\na\nb\n{\ne\nx y\nd\nbar",
+"context": 4,
+"parts": [
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "\n}\n}\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "b\n"
+},
+{
+"count": 10,
+"added": false,
+"removed": false,
+"value": "line\nx y\ne\n}\n﻿z\nb\na\n\n\n🙂\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "a\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "c\n{\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "a\n"
+},
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "b\n{\ne\nx y\nd\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "bar\n{"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "bar"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,7 +1,8 @@\n \n }\n }\n+b\n line\n x y\n e\n }\n@@ -10,13 +11,14 @@\n a\n \n \n 🙂\n+a\n c\n {\n+a\n b\n {\n e\n x y\n d\n-bar\n-{\n\\ No newline at end of file\n+bar\n\\ No newline at end of file\n"
+},
+{
+"a": "\r\n🙂\r\nbar\r\n \r\nbar\r\n🙂\r\n🙂\r\nc\r\nd\r\nline\r\na\r\ne\r\nbar\r\n}\r\n}\r\ne\r\n{\r\nfoo\r\nline\r\né\r\nline\r\na\r\na\r\na",
+"b": "\r\n🙂\r\nbar\r\n \r\nbar\r\n🙂\r\n🙂\r\nc\r\nline\r\na\r\ne\r\nbar\r\n}\r\n}\r\ne\r\nc\n{\r\nfoo\r\nline\r\né\r\nline\r\na\r\na",
+"context": 1,
+"parts": [
+{
+"count": 8,
+"added": false,
+"removed": false,
+"value": "\r\n🙂\r\nbar\r\n \r\nbar\r\n🙂\r\n🙂\r\nc\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "d\r\n"
+},
+{
+"count": 7,
+"added": false,
+"removed": false,
+"value": "line\r\na\r\ne\r\nbar\r\n}\r\n}\r\ne\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "c\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "{\r\nfoo\r\nline\r\né\r\nline\r\na\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "a\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "a"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -8,3 +8,2 @@\n c\r\n-d\r\n line\r\n@@ -16,2 +15,3 @@\n e\r\n+c\n {\r\n@@ -22,3 +22,2 @@\n a\r\n-a\r\n a\n\\ No newline at end of file\n"
+},
+{
+"a": "e\r\ne\r\nb\r\né\r\n🙂\r\n}\r\nx y\r\na\r\nline\r\n\r\n",
+"b": "e\r\nb\r\né\r\n🙂\r\n}\r\nx y\r\na\r\né\nx y\nline\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "e\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "e\r\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "b\r\né\r\n🙂\r\n}\r\nx y\r\na\r\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "line\r\n\r\n"
+},
+{
+"count": 3,
+"added": true,
+"removed": false,
+"value": "é\nx y\nline\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,10 +1,10 @@\n e\r\n-e\r\n b\r\n é\r\n 🙂\r\n }\r\n x y\r\n a\r\n-line\r\n-\r\n+é\n+x y\n+line\n"
+},
+{
+"a": "é\nx y\na\n🙂\nc\nc\nfoo\né\nb\nx y\n﻿z\nbar\nbar\n{\n🙂\nc\n\nc\né\ne\né",
+"b": "é\nb\nx y\na\n🙂\nc\nc\nfoo\né\nx y\nline\nbar\nbar\n{\n🙂\nd\nc\n\n}\né\né",
+"context": 1,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "é\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "b\n"
+},
+{
+"count": 7,
+"added": false,
+"removed": false,
+"value": "x y\na\n🙂\nc\nc\nfoo\né\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "b\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "x y\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "﻿z\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "line\n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "bar\nbar\n{\n🙂\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "d\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "c\n\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "c\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "}\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "é\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "e\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "é"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,2 +1,3 @@\n é\n+b\n x y\n@@ -8,5 +9,4 @@\n é\n-b\n x y\n-﻿z\n+line\n bar\n@@ -15,7 +15,7 @@\n 🙂\n+d\n c\n \n-c\n+}\n é\n-e\n é\n\\ No newline at end of file\n"
+},
+{
+"a": "x y\r\n{\r\nbar\r\na\r\n\r\n}\r\n{\r\na\r\n\r\nbar\r\n\n",
+"b": "x y\r\n{\r\nbar\r\na\r\n\r\n}\r\n{\r\na\r\n\r\nbar\r\n\n",
+"context": 1,
+"parts": [
+{
+"count": 11,
+"added": false,
+"removed": false,
+"value": "x y\r\n{\r\nbar\r\na\r\n\r\n}\r\n{\r\na\r\n\r\nbar\r\n\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n"
+},
+{
+"a": " \n\ne\nb\n \nb\nx y\né\nfoo\nfoo\n}\nline\na\n \nfoo\nx y\nb\n}",
+"b": " \n \n\ne\nb\n \nx y\né\n🙂\nfoo\nfoo\n}\nline\n\nd\n \nfoo\nfoo\nb\n}",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": " \n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": " \n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "\ne\nb\n \n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "b\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "x y\né\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "🙂\n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "foo\nfoo\n}\nline\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "a\n"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "\nd\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": " \nfoo\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "x y\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "foo\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "b\n}"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,18 +1,20 @@\n  \n+ \n \n e\n b\n  \n-b\n x y\n é\n+🙂\n foo\n foo\n }\n line\n-a\n+\n+d\n  \n foo\n-x y\n+foo\n b\n }\n\\ No newline at end of file\n"
+},
+{
+"a": " \nd\n🙂\n\né\na\n}\nline\n\n🙂\n\n﻿z\ne\n\ne\nbar\n🙂\n🙂\nb\nc\nfoo\n﻿z\n\né\nline\nc\n{\na\n",
+"b": " \nd\nx y\n\né\na\n}\nline\n\n🙂\n\n﻿z\ne\n\ne\nbar\n🙂\né\nb\nc\nfoo\n﻿z\n\nline\nc\nbar\na\n",
+"context": 4,
+"parts": [
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": " \nd\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "🙂\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "x y\n"
+},
+{
+"count": 14,
+"added": false,
+"removed": false,
+"value": "\né\na\n}\nline\n\n🙂\n\n﻿z\ne\n\ne\nbar\n🙂\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "🙂\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "é\n"
+},
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "b\nc\nfoo\n﻿z\n\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "é\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "line\nc\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "{\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "bar\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "a\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,7 +1,7 @@\n  \n d\n-🙂\n+x y\n \n é\n a\n }\n@@ -14,15 +14,14 @@\n \n e\n bar\n 🙂\n-🙂\n+é\n b\n c\n foo\n ﻿z\n \n-é\n line\n c\n-{\n+bar\n a\n"
+},
+{
+"a": "b\r\n\r\na\r\ne\r\nline\r\nc\r\n\r\nbar\r\nc\r\nb\r\n{\r\nb\r\ne\r\n \r\ne\r\nd\r\né\r\nfoo\r\nc\r\nbar\r\n🙂\r\n}\r\nc\r\nline\r\n{\r\né\r\nx y\r\nx y\n",
+"b": "b\r\n\r\na\r\nline\r\nc\r\né\nbar\r\nc\r\n{\r\nb\r\ne\r\n \r\ne\r\nd\r\né\r\nfoo\r\nc\r\nbar\r\n🙂\r\n}\r\nc\r\nline\r\n{\r\né\r\nx y\r\nx y\n",
+"context": 4,
+"parts": [
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "b\r\n\r\na\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "e\r\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "line\r\nc\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "é\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "bar\r\nc\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "b\r\n"
+},
+{
+"count": 18,
+"added": false,
+"removed": false,
+"value": "{\r\nb\r\ne\r\n \r\ne\r\nd\r\né\r\nfoo\r\nc\r\nbar\r\n🙂\r\n}\r\nc\r\nline\r\n{\r\né\r\nx y\r\nx y\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,14 +1,12 @@\n b\r\n \r\n a\r\n-e\r\n line\r\n c\r\n-\r\n+é\n bar\r\n c\r\n-b\r\n {\r\n b\r\n e\r\n  \r\n"
+},
+{
+"a": "c\r\nx y\r\n\r\nfoo\r\nb\r\nfoo\r\nc\r\nline\r\nfoo\r\na\r\nx y\r\n{\r\n}\r\nb\r\nx y\r\n \r\nb\r\nline\r\nx y\r\na\r\n﻿z\r\n﻿z\r\na\r\n",
+"b": "c\r\n\r\nfoo\r\nb\r\nfoo\r\nc\r\nline\r\nfoo\r\na\r\nx y\r\n{\r\n}\r\né\nx y\r\n \r\nb\r\nline\r\nx y\r\na\r\n﻿z\r\n﻿z\r\na\r",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "c\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "x y\r\n"
+},
+{
+"count": 11,
+"added": false,
+"removed": false,
+"value": "\r\nfoo\r\nb\r\nfoo\r\nc\r\nline\r\nfoo\r\na\r\nx y\r\n{\r\n}\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "b\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "é\n"
+},
+{
+"count": 8,
+"added": false,
+"removed": false,
+"value": "x y\r\n \r\nb\r\nline\r\nx y\r\na\r\n﻿z\r\n﻿z\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "a\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "a\r"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,6 +1,5 @@\n c\r\n-x y\r\n \r\n foo\r\n b\r\n foo\r\n@@ -10,14 +9,14 @@\n a\r\n x y\r\n {\r\n }\r\n-b\r\n+é\n x y\r\n  \r\n b\r\n line\r\n x y\r\n a\r\n ﻿z\r\n ﻿z\r\n-a\r\n+a\r\n\\ No newline at end of file\n"
+},
+{
+"a": "🙂\r\nbar\r\nd\r\nbar\r\na\r\na\r\né\r\nx y\r\n﻿z\r\nx y\r\n﻿z\r\n﻿z\r\ne\r\n\r\n{\r\nb\r\n﻿z\r\na\r\na\r\na\r\n﻿z\r\né\r\nb\r\nbar\n",
+"b": "🙂\r\n}\nbar\r\nd\r\nbar\r\na\r\na\r\né\r\nx y\r\n﻿z\r\nx y\r\n﻿z\r\n﻿z\r\ne\r\n\r\n{\r\na\nb\r\n﻿z\r\na\r\na\r\na\r\n﻿z\r\né\r\nb\r\nbar\n\nfoo",
+"context": 7,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "🙂\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "}\n"
+},
+{
+"count": 14,
+"added": false,
+"removed": false,
+"value": "bar\r\nd\r\nbar\r\na\r\na\r\né\r\nx y\r\n﻿z\r\nx y\r\n﻿z\r\n﻿z\r\ne\r\n\r\n{\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "a\n"
+},
+{
+"count": 9,
+"added": false,
+"removed": false,
+"value": "b\r\n﻿z\r\na\r\na\r\na\r\n﻿z\r\né\r\nb\r\nbar\n"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "\nfoo"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,24 +1,28 @@\n 🙂\r\n+}\n bar\r\n d\r\n bar\r\n a\r\n a\r\n é\r\n x y\r\n ﻿z\r\n x y\r\n ﻿z\r\n ﻿z\r\n e\r\n \r\n {\r\n+a\n b\r\n ﻿z\r\n a\r\n a\r\n a\r\n ﻿z\r\n é\r\n b\r\n bar\n+\n+foo\n\\ No newline at end of file\n"
+},
+{
+"a": "﻿z\r\n \r\né\r\n﻿z\r\n\r\n🙂\r\nd\r\nb\r\na\r\nx y\r\nb\r\n﻿z\r\na\r\na\r\ne\n",
+"b": "﻿z\r\n \r\né\r\n﻿z\r\n\r\n🙂\r\nline\nb\r\na\r\nx y\r\nb\r\n﻿z\r\na\r\na\r\ne\n",
+"context": 7,
+"parts": [
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "﻿z\r\n \r\né\r\n﻿z\r\n\r\n🙂\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "d\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "line\n"
+},
+{
+"count": 8,
+"added": false,
+"removed": false,
+"value": "b\r\na\r\nx y\r\nb\r\n﻿z\r\na\r\na\r\ne\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,14 +1,14 @@\n ﻿z\r\n  \r\n é\r\n ﻿z\r\n \r\n 🙂\r\n-d\r\n+line\n b\r\n a\r\n x y\r\n b\r\n ﻿z\r\n a\r\n a\r\n"
+},
+{
+"a": "bar\nx y\n﻿z\nline\nb\n{",
+"b": "﻿z\nb\n{",
+"context": 4,
+"parts": [
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "bar\nx y\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "﻿z\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "line\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "b\n{"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,6 +1,3 @@\n-bar\n-x y\n ﻿z\n-line\n b\n {\n\\ No newline at end of file\n"
+},
+{
+"a": "d\r\n \r\nx y\r\nc\r\nx y\r\né\r\nbar\r\n\r\nline\r\na\r\n \r\n \r\nbar\r\nc\r\n🙂\r\né\r\ne\r\nline\r\n🙂\r\n﻿z\r\n🙂\r\nx y\n",
+"b": "d\r\n \r\nx y\r\nx y\r\né\r\nbar\r\n\r\nline\r\na\r\n \r\n \r\nbar\r\nc\r\n\né\r\ne\r\nline\r\n🙂\r\n﻿z\r\n🙂\r\nx y\n\n",
+"context": 7,
+"parts": [
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "d\r\n \r\nx y\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "c\r\n"
+},
+{
+"count": 10,
+"added": false,
+"removed": false,
+"value": "x y\r\né\r\nbar\r\n\r\nline\r\na\r\n \r\n \r\nbar\r\nc\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "🙂\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+},
+{
+"count": 7,
+"added": false,
+"removed": false,
+"value": "é\r\ne\r\nline\r\n🙂\r\n﻿z\r\n🙂\r\nx y\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,22 +1,22 @@\n d\r\n  \r\n x y\r\n-c\r\n x y\r\n é\r\n bar\r\n \r\n line\r\n a\r\n  \r\n  \r\n bar\r\n c\r\n-🙂\r\n+\n é\r\n e\r\n line\r\n 🙂\r\n ﻿z\r\n 🙂\r\n x y\n+\n"
+},
+{
+"a": "{\r\nb\r\n\r\nb\r\nx y\r\nb\r\n}\r\ne\r\nd\r\né\r\nfoo\r\n",
+"b": "\r\nx y\r\na\nb\r\n}\r\ne\r\né\r\nfoo\r\n",
+"context": 1,
+"parts": [
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "{\r\nb\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "b\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "x y\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "a\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "b\r\n}\r\ne\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "d\r\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "é\r\nfoo\r\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,6 +1,4 @@\n-{\r\n-b\r\n \r\n-b\r\n x y\r\n+a\n b\r\n@@ -8,3 +6,2 @@\n e\r\n-d\r\n é\r\n"
+},
+{
+"a": "b\r\nb\r\n﻿z\r\nx y\r\na\r\ne\r\nx y\r\ne\r\nc\r\na\r\n🙂\r\n \r\n \r\né\r\né\r\n}\r\ne\r\nc\r\n{\r\n\r\n\r\n",
+"b": "b\r\nb\r\n﻿z\r\nx y\r\na\r\ne\r\nx y\r\ne\r\nc\r\na\r\n🙂\r\n \r\n \r\né\r\né\r\n}\r\ne\r\nc\r\n{\r\n\r\n\r\n{",
+"context": 4,
+"parts": [
+{
+"count": 21,
+"added": false,
+"removed": false,
+"value": "b\r\nb\r\n﻿z\r\nx y\r\na\r\ne\r\nx y\r\ne\r\nc\r\na\r\n🙂\r\n \r\n \r\né\r\né\r\n}\r\ne\r\nc\r\n{\r\n\r\n\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "{"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -18,4 +18,5 @@\n c\r\n {\r\n \r\n \r\n+{\n\\ No newline at end of file\n"
+},
+{
+"a": "\n}\nc\n🙂\nb\nbar\ne\nd\nc\n}\nfoo\nbar\né\n{\n🙂\n﻿z\n﻿z\nc\n}\nc\n{\n🙂\nc\nline\r\n",
+"b": "}\n\n}\nc\n🙂\nb\nbar\ne\nd\nc\n}\nfoo\nbar\né\n{\n🙂\n﻿z\n﻿z\nc\nc\n{\n🙂\nc\nline\r\nd",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "}\n"
+},
+{
+"count": 18,
+"added": false,
+"removed": false,
+"value": "\n}\nc\n🙂\nb\nbar\ne\nd\nc\n}\nfoo\nbar\né\n{\n🙂\n﻿z\n﻿z\nc\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "}\n"
+},
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": "c\n{\n🙂\nc\nline\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "d"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,4 +1,5 @@\n+}\n \n }\n c\n 🙂\n@@ -15,10 +16,10 @@\n 🙂\n ﻿z\n ﻿z\n c\n-}\n c\n {\n 🙂\n c\n line\r\n+d\n\\ No newline at end of file\n"
+},
+{
+"a": "e\n \n}\nfoo\nline\nbar\n{\nline\nbar\nfoo\nb\nb\nx y\nline\nx y\né\n\nfoo\nd\nc\nline\n﻿z\n}",
+"b": "e\n \n}\nfoo\nline\nbar\n﻿z\n{\nline\nbar\nb\nb\nx y\nline\nx y\né\n\nfoo\nd\nc\nline\n﻿z\n}",
+"context": 4,
+"parts": [
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "e\n \n}\nfoo\nline\nbar\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "﻿z\n"
+},
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "{\nline\nbar\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "foo\n"
+},
+{
+"count": 13,
+"added": false,
+"removed": false,
+"value": "b\nb\nx y\nline\nx y\né\n\nfoo\nd\nc\nline\n﻿z\n}"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -3,12 +3,12 @@\n }\n foo\n line\n bar\n+﻿z\n {\n line\n bar\n-foo\n b\n b\n x y\n line\n"
+},
+{
+"a": "a\r\nline\r\n\r\n \r\n \r\nb\n",
+"b": "line\r\nb\n \r\nb\nx y\nd\na",
+"context": 1,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "a\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "line\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "b\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": " \r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": " \r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "b\n"
+},
+{
+"count": 3,
+"added": true,
+"removed": false,
+"value": "x y\nd\na"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,6 +1,7 @@\n-a\r\n line\r\n-\r\n+b\n  \r\n- \r\n b\n+x y\n+d\n+a\n\\ No newline at end of file\n"
+},
+{
+"a": "🙂\nd\nd\na\nline",
+"b": "﻿z\nline\na\nline\nc",
+"context": 4,
+"parts": [
+{
+"count": 3,
+"added": false,
+"removed": true,
+"value": "🙂\nd\nd\n"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "﻿z\nline\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "a\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "line"
+},
+{
+"count": 2,
+"added": true,
+"removed": false,
+"value": "line\nc"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,5 +1,5 @@\n-🙂\n-d\n-d\n+﻿z\n+line\n a\n-line\n\\ No newline at end of file\n+line\n+c\n\\ No newline at end of file\n"
+},
+{
+"a": "﻿z\n🙂\nfoo\nc\nline\n﻿z\nd\n \nc\n}\né\nx y\n{\nb\nc\nx y\nc\n",
+"b": "﻿z\n🙂\nfoo\nc\nline\n﻿z\nd\n \nc\n}\né\nx y\né\nb\nc\nx y\nc\n",
+"context": 7,
+"parts": [
+{
+"count": 12,
+"added": false,
+"removed": false,
+"value": "﻿z\n🙂\nfoo\nc\nline\n﻿z\nd\n \nc\n}\né\nx y\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "{\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "é\n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "b\nc\nx y\nc\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -6,12 +6,12 @@\n ﻿z\n d\n  \n c\n }\n é\n x y\n-{\n+é\n b\n c\n x y\n c\n"
+},
+{
+"a": "}\r\nfoo\r\nline\r\na\r\nb\r\n}\r\nline\r\nb",
+"b": "}\r\na\na\r\nb\r\n}\r\nline\r\nb\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "}\r\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": true,
+"value": "foo\r\nline\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "a\n"
+},
+{
+"count": 4,
+"added": false,
+"removed": false,
+"value": "a\r\nb\r\n}\r\nline\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "b"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "b\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,8 +1,7 @@\n }\r\n-foo\r\n-line\r\n+a\n a\r\n b\r\n }\r\n line\r\n-b\n\\ No newline at end of file\n+b\n"
+},
+{
+"a": "c\r\nbar\r\nfoo\r\nx y\r\nb\r\nb\r\nc\r\n \r\né\r\nx y\r\nfoo\r\nline\r\n﻿z\r\nfoo\r\nline\r\n \r\nd\r\n🙂\r\n}\r\nline\r\n🙂",
+"b": "c\r\nbar\r\nfoo\r\ne\nx y\r\nb\r\nbar\nb\r\nc\r\n \r\né\r\nx y\r\nfoo\r\nbar\n﻿z\r\nfoo\r\nfoo\n \r\nd\r\n🙂\r\n}\r\nline\r\n🙂\n",
+"context": 4,
+"parts": [
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "c\r\nbar\r\nfoo\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "e\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "x y\r\nb\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "bar\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "b\r\nc\r\n \r\né\r\nx y\r\nfoo\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "line\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "bar\n"
+},
+{
+"count": 2,
+"added": false,
+"removed": false,
+"value": "﻿z\r\nfoo\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "line\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "foo\n"
+},
+{
+"count": 5,
+"added": false,
+"removed": false,
+"value": " \r\nd\r\n🙂\r\n}\r\nline\r\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "🙂"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "🙂\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,21 +1,23 @@\n c\r\n bar\r\n foo\r\n+e\n x y\r\n b\r\n+bar\n b\r\n c\r\n  \r\n é\r\n x y\r\n foo\r\n-line\r\n+bar\n ﻿z\r\n foo\r\n-line\r\n+foo\n  \r\n d\r\n 🙂\r\n }\r\n line\r\n-🙂\n\\ No newline at end of file\n+🙂\n"
+},
+{
+"a": " \né\nb\n{\ne\nx y\nfoo\na\nx y\nd\nb\n{\na\n}\nd\n﻿z\nline\n﻿z\n﻿z\n}\n}\r\n",
+"b": " \né\nb\n{\ne\nx y\nfoo\na\nx y\nd\nb\n{\na\n}\nd\n﻿z\nline\n﻿z\n﻿z\n}\n}\r\n\n",
+"context": 4,
+"parts": [
+{
+"count": 21,
+"added": false,
+"removed": false,
+"value": " \né\nb\n{\ne\nx y\nfoo\na\nx y\nd\nb\n{\na\n}\nd\n﻿z\nline\n﻿z\n﻿z\n}\n}\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -18,4 +18,5 @@\n ﻿z\n ﻿z\n }\n }\r\n+\n"
+},
+{
+"a": "﻿z\r\nx y\r\n}\r\nc\r\nc\r\n\r\n{\r\né\r\na\r\n🙂\r\n{\r\nx y\r\nb\r\n}\r\na\r\nd\r\nbar\r\nc\r\n}\r\n﻿z\r\n﻿z\r\ne\r\n",
+"b": "﻿z\r\nx y\r\n}\r\nc\r\nc\r\n\r\n{\r\né\r\na\r\n🙂\r\n{\r\nx y\r\nb\r\n}\r\na\r\n\nd\r\nbar\r\nc\r\n}\r\n﻿z\r\n﻿z\r\ne\r\n",
+"context": 1,
+"parts": [
+{
+"count": 15,
+"added": false,
+"removed": false,
+"value": "﻿z\r\nx y\r\n}\r\nc\r\nc\r\n\r\n{\r\né\r\na\r\n🙂\r\n{\r\nx y\r\nb\r\n}\r\na\r\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "\n"
+},
+{
+"count": 7,
+"added": false,
+"removed": false,
+"value": "d\r\nbar\r\nc\r\n}\r\n﻿z\r\n﻿z\r\ne\r\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -15,2 +15,3 @@\n a\r\n+\n d\r\n"
+},
+{
+"a": "a\r\nx y\r\n}\r\né\r\n}\r\n﻿z\r\nbar\r\nbar\r\n \r\nb\r\nfoo\r\n\r\n{\r\nbar\r\n}\r\né\r\n🙂\r\n \r\n{\r\ne\r\n",
+"b": "a\r\nx y\r\n}\r\né\r\n}\r\n﻿z\r\nbar\r\nbar\r\n \r\nb\r\nfoo\r\n\r\n{\r\nbar\r\n}\r\né\r\n🙂\r\n \r\n{\r\ne\r\n",
+"context": 0,
+"parts": [
+{
+"count": 20,
+"added": false,
+"removed": false,
+"value": "a\r\nx y\r\n}\r\né\r\n}\r\n﻿z\r\nbar\r\nbar\r\n \r\nb\r\nfoo\r\n\r\n{\r\nbar\r\n}\r\né\r\n🙂\r\n \r\n{\r\ne\r\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n"
+},
+{
+"a": "",
+"b": "",
+"context": 4,
+"parts": [],
+"patch": "--- f.txt\n+++ f.txt\n"
+},
+{
+"a": "",
+"b": "x",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "x"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -0,0 +1,1 @@\n+x\n\\ No newline at end of file\n"
+},
+{
+"a": "x",
+"b": "",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "x"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +0,0 @@\n-x\n\\ No newline at end of file\n"
+},
+{
+"a": "x\n",
+"b": "x",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "x\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "x"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +1,1 @@\n-x\n+x\n\\ No newline at end of file\n"
+},
+{
+"a": "x",
+"b": "x\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "x"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "x\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,1 +1,1 @@\n-x\n\\ No newline at end of file\n+x\n"
+},
+{
+"a": "a\nb\nc\n",
+"b": "a\nb\nc\n",
+"context": 4,
+"parts": [
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "a\nb\nc\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n"
+},
+{
+"a": "a\nb\nc\n",
+"b": "a\nc\n",
+"context": 4,
+"parts": [
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "a\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "b\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "c\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,3 +1,2 @@\n a\n-b\n c\n"
+},
+{
+"a": "a\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\nz\n",
+"b": "a\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\ny\n",
+"context": 4,
+"parts": [
+{
+"count": 20,
+"added": false,
+"removed": false,
+"value": "a\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\na\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "z\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "y\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -17,5 +17,5 @@\n a\n a\n a\n a\n-z\n+y\n"
+},
+{
+"a": "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n",
+"b": "1\n2\n3\nX\n5\n6\n7\n8\n9\n10\nY\n12\n",
+"context": 4,
+"parts": [
+{
+"count": 3,
+"added": false,
+"removed": false,
+"value": "1\n2\n3\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "4\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "X\n"
+},
+{
+"count": 6,
+"added": false,
+"removed": false,
+"value": "5\n6\n7\n8\n9\n10\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": true,
+"value": "11\n"
+},
+{
+"count": 1,
+"added": true,
+"removed": false,
+"value": "Y\n"
+},
+{
+"count": 1,
+"added": false,
+"removed": false,
+"value": "12\n"
+}
+],
+"patch": "--- f.txt\n+++ f.txt\n@@ -1,12 +1,12 @@\n 1\n 2\n 3\n-4\n+X\n 5\n 6\n 7\n 8\n 9\n 10\n-11\n+Y\n 12\n"
+}
+]

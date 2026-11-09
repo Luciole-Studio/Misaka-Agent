@@ -1,18 +1,17 @@
-"""Stateful public Agent API surface."""
+"""Translated from pi's ``packages/agent/src/agent.ts`` (v1.1.0)."""
 
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, overload
 
 from pydantic import BaseModel
 
-from misaka.agent.agent_loop import run_agent_loop, run_agent_loop_continue
-from misaka.agent.stream_fn import get_default_stream_fn
+from misaka.agent.agent_loop import runAgentLoop, runAgentLoopContinue
+from misaka.agent.stream_fn import getDefaultStreamFn
 from misaka.agent.types import (
     AfterToolCallContext,
     AfterToolCallResult,
@@ -47,31 +46,33 @@ from misaka.ai.types import (
     Usage,
     validate_message,
 )
-from misaka.ai.utils.transcript import get_current_system_message
-from misaka.utils.values import maybe_await
-
-logger = logging.getLogger(__name__)
-
-
-class MutableAgentState(AgentState):
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name == "tools" and value is not None or name == "messages" and value is not None:
-            value = list(value)
-        elif name == "pendingToolCalls" and value is not None:
-            value = set(value)
-        super().__setattr__(name, value)
-
-
-EMPTY_USAGE = Usage(
-    input=0,
-    output=0,
-    cacheRead=0,
-    cacheWrite=0,
-    totalTokens=0,
-    cost={"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
+from misaka.ai.utils.transcript import (
+    createInitialSystemMessage,
+    getCurrentSystemMessage,
+    toToolDeclaration,
 )
+from misaka.utils.js import AbortController, AbortSignal, errorMessage, liveKeys
+from misaka.utils.values import maybe_await, read_field
 
-DEFAULT_MODEL = Model(
+
+def _defaultConvertToLlm(messages: list[AgentMessage]) -> list[MessageValue]:
+    return [
+        message  # type: ignore[misc]
+        for message in messages
+        if read_field(message, "role") in ("system", "user", "assistant", "toolResult")
+    ]
+
+
+_EMPTY_USAGE = {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
+}
+
+_DEFAULT_MODEL = Model(
     id="unknown",
     name="unknown",
     api="unknown",
@@ -84,81 +85,35 @@ DEFAULT_MODEL = Model(
     maxTokens=0,
 )
 
-AgentListener = Callable[["AgentEvent", "AbortSignal"], Awaitable[None] | None]
-ConvertToLlmFn = Callable[[list[AgentMessage]], list[MessageValue] | Awaitable[list[MessageValue]]]
-TransformContextFn = Callable[
-    [list[AgentMessage], "AbortSignal | None"],
-    list[AgentMessage] | Awaitable[list[AgentMessage]],
-]
-ApiKeyFn = Callable[[str], str | None | Awaitable[str | None]]
-PrepareNextTurnFn = Callable[
-    ["AbortSignal | None"],
-    AgentLoopTurnUpdate | None | Awaitable[AgentLoopTurnUpdate | None],
-]
-PrepareNextTurnWithContextFn = Callable[
-    [PrepareNextTurnContext, "AbortSignal | None"],
-    AgentLoopTurnUpdate | None | Awaitable[AgentLoopTurnUpdate | None],
-]
+
+# Initial state for `Agent`. `systemPrompt` and `tools` become the leading system message unless `messages` already
+# starts with one. MISAKA fork: a mapping or any object with those attributes (such as an `AgentState`).
+type AgentInitialState = Mapping[str, Any] | Any
 
 
-def _copy_empty_usage() -> Usage:
-    return EMPTY_USAGE.model_copy(deep=True)
-
-
-def _maybe_model_dump(value: Any) -> Any:
-    if isinstance(value, BaseModel):
-        return value.model_dump()
-    return value
-
-
-def _normalize_standard_message(message: AgentMessage) -> AgentMessage:
-    role = getattr(message, "role", None)
-    if role is None and isinstance(message, dict):
-        role = message.get("role")
-    if role in {"system", "user", "assistant", "toolResult"}:
-        return validate_message(_maybe_model_dump(message))
+def _normalizeStandardMessage(message: Any) -> AgentMessage:
+    """MISAKA fork: an LLM message given as a mapping becomes its message model; message models and custom messages
+    pass through."""
+    if isinstance(message, Mapping) and message.get("role") in ("system", "user", "assistant", "toolResult"):
+        return validate_message(dict(message))
     return message
 
 
-def default_convert_to_llm(messages: list[AgentMessage]) -> list[MessageValue]:
-    converted: list[MessageValue] = []
-    for message in messages:
-        role = message.get("role") if isinstance(message, dict) else getattr(message, "role", None)
-        if role not in {"system", "user", "assistant", "toolResult"}:
-            continue
-        converted.append(validate_message(_maybe_model_dump(message)))
-    return converted
+def _createMutableAgentState(initialState: AgentInitialState | None = None) -> AgentState:
+    tools = list(read_field(initialState, "tools") or [])
+    messages = [_normalizeStandardMessage(message) for message in read_field(initialState, "messages") or []]
+    initialMessage = createInitialSystemMessage(
+        read_field(initialState, "systemPrompt"), [toToolDeclaration(tool) for tool in tools]
+    )
+    if (len(messages) == 0 or read_field(messages[0], "role") != "system") and initialMessage:
+        messages.insert(0, initialMessage)
 
-
-def _create_mutable_agent_state(initial_state: AgentState | dict[str, Any] | None = None) -> AgentState:
-    # `AgentState` is a plain class, not a pydantic model, so the `model_dump()` this
-    # used to call raised AttributeError for anyone who passed the type `AgentOptions`
-    # advertises. Read the five carried fields instead; the streaming fields are
-    # deliberately reset below, exactly as pi's createMutableAgentState does.
-    if isinstance(initial_state, AgentState):
-        initial: dict[str, Any] = {
-            "systemPrompt": initial_state.systemPrompt,
-            "model": initial_state.model,
-            "thinkingLevel": initial_state.thinkingLevel,
-            "tools": initial_state.tools,
-            "messages": initial_state.messages,
-        }
-    else:
-        initial = dict(initial_state or {})
-    model = initial.get("model", DEFAULT_MODEL)
-    if not isinstance(model, Model):
-        model = Model.model_validate(model)
-
-    messages = initial.get("messages") or []
-    normalized_messages = [_normalize_standard_message(message) for message in messages]
-    tools = list(initial.get("tools") or [])
-
-    return MutableAgentState(
-        systemPrompt=initial.get("systemPrompt", ""),
-        model=model,
-        thinkingLevel=initial.get("thinkingLevel", "off"),
+    model = read_field(initialState, "model")
+    return AgentState(
+        model=(model if isinstance(model, Model) else Model.model_validate(model)) if model is not None else _DEFAULT_MODEL,
+        thinkingLevel=read_field(initialState, "thinkingLevel") or "off",
         tools=tools,
-        messages=normalized_messages,
+        messages=messages,
         isStreaming=False,
         streamingMessage=None,
         pendingToolCalls=set(),
@@ -166,39 +121,47 @@ def _create_mutable_agent_state(initial_state: AgentState | dict[str, Any] | Non
     )
 
 
-class AbortSignal:
-    def __init__(self) -> None:
-        self._event = asyncio.Event()
+@dataclass(slots=True)
+class AgentOptions:
+    """Options for constructing an `Agent`."""
 
-    @property
-    def aborted(self) -> bool:
-        return self._event.is_set()
+    initialState: AgentInitialState | None = None
+    convertToLlm: Callable[[list[AgentMessage]], list[MessageValue] | Awaitable[list[MessageValue]]] | None = None
+    transformContext: Callable[[list[AgentMessage], Any | None], Awaitable[list[AgentMessage]]] | None = None
+    streamFn: StreamFn | None = None
+    getApiKey: Callable[[str], str | None | Awaitable[str | None]] | None = None
+    onPayload: Callable[[dict[str, Any], Model], Any] | None = None
+    onResponse: Callable[[ProviderResponse | dict[str, Any], Model], Any] | None = None
+    onProviderStreamEvent: Callable[..., Any] | None = None
+    beforeToolCall: Callable[[BeforeToolCallContext, Any | None], Awaitable[BeforeToolCallResult | None]] | None = None
+    afterToolCall: Callable[[AfterToolCallContext, Any | None], Awaitable[AfterToolCallResult | None]] | None = None
+    finishTurn: FinishTurn | None = None
+    prepareRequest: PrepareRequest | None = None
+    prepareNextTurn: Callable[[Any | None], AgentLoopTurnUpdate | None | Awaitable[AgentLoopTurnUpdate | None]] | None = None
+    prepareNextTurnWithContext: (
+        Callable[[PrepareNextTurnContext, Any | None], AgentLoopTurnUpdate | None | Awaitable[AgentLoopTurnUpdate | None]]
+        | None
+    ) = None
+    steeringMode: QueueMode | None = None
+    followUpMode: QueueMode | None = None
+    sessionId: str | None = None
+    thinkingBudgets: ThinkingBudgets | None = None
+    transport: Transport | None = None
+    maxRetryDelayMs: int | None = None
+    toolExecution: ToolExecutionMode | None = None
 
-    def is_set(self) -> bool:
-        return self._event.is_set()
 
-    async def wait(self) -> None:
-        await self._event.wait()
-
-
-class AbortController:
-    def __init__(self) -> None:
-        self.signal = AbortSignal()
-
-    def abort(self) -> None:
-        self.signal._event.set()
-
-
-class PendingMessageQueue:
+class _PendingMessageQueue:
     def __init__(self, mode: QueueMode) -> None:
-        self.mode = mode
         self._messages: list[AgentMessage] = []
+        self.mode = mode
+        self.together: Callable[[AgentMessage], bool] | None = None  # MISAKA fork: Agent.deliverTogether
 
     def enqueue(self, message: AgentMessage) -> None:
         self._messages.append(message)
 
-    def has_items(self) -> bool:
-        return bool(self._messages)
+    def hasItems(self) -> bool:
+        return len(self._messages) > 0
 
     def peek(self) -> list[AgentMessage]:
         if self.mode == "all":
@@ -208,178 +171,198 @@ class PendingMessageQueue:
 
     def drain(self) -> list[AgentMessage]:
         drained = self.peek()
-        self._messages = self._messages[len(drained):]
+        if drained and self.together is not None and self.together(drained[0]):
+            return self.take(self.together)
+        self._messages = self._messages[len(drained) :]
         return drained
 
     def clear(self) -> None:
-        self._messages.clear()
+        self._messages = []
 
-
-@dataclass(slots=True)
-class AgentOptions:
-    initialState: AgentState | dict[str, Any] | None = None
-    convertToLlm: ConvertToLlmFn | None = None
-    transformContext: TransformContextFn | None = None
-    streamFn: StreamFn | None = None
-    getApiKey: ApiKeyFn | None = None
-    onPayload: Callable[[dict[str, Any], Model], Any] | None = None
-    onResponse: Callable[[ProviderResponse | dict[str, Any], Model], Any] | None = None
-    beforeToolCall: (
-        Callable[[BeforeToolCallContext, AbortSignal | None], Awaitable[BeforeToolCallResult | None]]
-        | None
-    ) = None
-    afterToolCall: (
-        Callable[[AfterToolCallContext, AbortSignal | None], Awaitable[AfterToolCallResult | None]]
-        | None
-    ) = None
-    prepareNextTurn: PrepareNextTurnFn | None = None
-    prepareNextTurnWithContext: PrepareNextTurnWithContextFn | None = None
-    finishTurn: FinishTurn | None = None
-    prepareRequest: PrepareRequest | None = None
-    steeringMode: QueueMode = "one-at-a-time"
-    followUpMode: QueueMode = "one-at-a-time"
-    sessionId: str | None = None
-    thinkingBudgets: ThinkingBudgets | None = None
-    transport: Transport = "auto"
-    maxRetryDelayMs: int | None = None
-    toolExecution: ToolExecutionMode = "parallel"
+    def take(self, predicate: Callable[[AgentMessage], bool]) -> list[AgentMessage]:
+        """MISAKA fork: remove and return the messages ``predicate`` selects, in queue order."""
+        taken = [message for message in self._messages if predicate(message)]
+        self._messages = [message for message in self._messages if not predicate(message)]
+        return taken
 
 
 @dataclass(slots=True)
 class _ActiveRun:
-    completion: asyncio.Future[None]
-    abort_controller: AbortController
+    promise: asyncio.Future[None]
+    abortController: AbortController
+
+
+type AgentListener = Callable[[AgentEvent, AbortSignal], Awaitable[None] | None]
 
 
 class Agent:
-    def __init__(self, options: AgentOptions | dict[str, Any] | None = None, **kwargs: Any) -> None:
-        resolved = self._normalize_options(options, kwargs)
-        self._state = _create_mutable_agent_state(resolved.initialState)
-        self._listeners: list[AgentListener] = []
-        self._steering_queue = PendingMessageQueue(resolved.steeringMode)
-        self._follow_up_queue = PendingMessageQueue(resolved.followUpMode)
-        self._active_run: _ActiveRun | None = None
+    """Stateful wrapper around the low-level agent loop.
 
-        self.convertToLlm = resolved.convertToLlm or default_convert_to_llm
-        self.transformContext = resolved.transformContext
-        self.streamFn = (
-            resolved.streamFn
-            if resolved.streamFn is not None
-            else get_default_stream_fn()
-        )
-        self.getApiKey = resolved.getApiKey
-        self.onPayload = resolved.onPayload
-        self.onResponse = resolved.onResponse
-        self.beforeToolCall = resolved.beforeToolCall
-        self.afterToolCall = resolved.afterToolCall
-        self.finishTurn = resolved.finishTurn
-        self.prepareRequest = resolved.prepareRequest
-        self.prepareNextTurn = resolved.prepareNextTurn
-        self.prepareNextTurnWithContext = resolved.prepareNextTurnWithContext
-        self.sessionId = resolved.sessionId
-        self.thinkingBudgets = resolved.thinkingBudgets
-        self.transport = resolved.transport
-        self.maxRetryDelayMs = resolved.maxRetryDelayMs
-        self.toolExecution = resolved.toolExecution
+    `Agent` owns the current transcript, emits lifecycle events, executes tools,
+    and exposes queueing APIs for steering and follow-up messages.
+    """
 
-    @staticmethod
-    def _normalize_options(options: AgentOptions | dict[str, Any] | None, kwargs: dict[str, Any]) -> AgentOptions:
-        if isinstance(options, AgentOptions):
-            if kwargs:
-                raise TypeError("Use either an AgentOptions object or keyword arguments, not both.")
-            return options
-        if options is None:
-            return AgentOptions(**kwargs)
-        if kwargs:
-            raise TypeError("Use either an options mapping or keyword arguments, not both.")
-        return AgentOptions(**dict(options))
+    def __init__(self, options: AgentOptions | Mapping[str, Any] | None = None, **kwargs: Any) -> None:
+        # Older compiled consumers may omit options or streamFn even though the current API requires them.
+        # MISAKA fork: the options may also be given as a mapping or as keyword arguments.
+        runtimeOptions = _agentOptions(options, kwargs)
+        self._state = _createMutableAgentState(runtimeOptions.initialState)
+        self._listeners: dict[AgentListener, None] = {}
+        self.convertToLlm = runtimeOptions.convertToLlm or _defaultConvertToLlm
+        self.transformContext = runtimeOptions.transformContext
+        self.streamFunction: StreamFn = runtimeOptions.streamFn or getDefaultStreamFn()
+        self.getApiKey = runtimeOptions.getApiKey
+        self.onPayload = runtimeOptions.onPayload
+        self.onResponse = runtimeOptions.onResponse
+        self.onProviderStreamEvent = runtimeOptions.onProviderStreamEvent
+        self.beforeToolCall = runtimeOptions.beforeToolCall
+        self.afterToolCall = runtimeOptions.afterToolCall
+        self.finishTurn = runtimeOptions.finishTurn
+        self.prepareRequest = runtimeOptions.prepareRequest
+        self.prepareNextTurn = runtimeOptions.prepareNextTurn
+        self.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext
+        self._steeringQueue = _PendingMessageQueue(runtimeOptions.steeringMode or "one-at-a-time")
+        self._followUpQueue = _PendingMessageQueue(runtimeOptions.followUpMode or "one-at-a-time")
+        self._activeRun: _ActiveRun | None = None
+        # Session identifier forwarded to providers for cache-aware backends.
+        self.sessionId = runtimeOptions.sessionId
+        # Optional per-level thinking token budgets forwarded to the stream function.
+        self.thinkingBudgets = runtimeOptions.thinkingBudgets
+        # Preferred transport forwarded to the stream function.
+        self.transport: Transport = runtimeOptions.transport or "auto"
+        # Optional cap for provider-requested retry delays.
+        self.maxRetryDelayMs = runtimeOptions.maxRetryDelayMs
+        # Tool execution strategy for assistant messages that contain multiple tool calls.
+        self.toolExecution: ToolExecutionMode = runtimeOptions.toolExecution or "parallel"
+
+    def subscribe(self, listener: AgentListener) -> Callable[[], bool]:
+        """Subscribe to agent lifecycle events.
+
+        Listener promises are awaited in subscription order and are included in
+        the current run's settlement. Listeners also receive the active abort
+        signal for the current run.
+
+        `agent_end` is the final emitted event for a run, but the agent does not
+        become idle until all awaited listeners for that event have settled.
+        """
+        self._listeners[listener] = None
+
+        def unsubscribe() -> bool:
+            if listener not in self._listeners:
+                return False
+            del self._listeners[listener]
+            return True
+
+        return unsubscribe
 
     @property
     def state(self) -> AgentState:
+        """Current agent state.
+
+        Assigning `state.tools` or `state.messages` copies the provided top-level array.
+        """
         return self._state
 
     @property
     def steeringMode(self) -> QueueMode:
-        return self._steering_queue.mode
+        """Controls how queued steering messages are drained."""
+        return self._steeringQueue.mode
 
     @steeringMode.setter
     def steeringMode(self, mode: QueueMode) -> None:
-        self._steering_queue.mode = mode
+        self._steeringQueue.mode = mode
 
     @property
     def followUpMode(self) -> QueueMode:
-        return self._follow_up_queue.mode
+        """Controls how queued follow-up messages are drained."""
+        return self._followUpQueue.mode
 
     @followUpMode.setter
     def followUpMode(self, mode: QueueMode) -> None:
-        self._follow_up_queue.mode = mode
+        self._followUpQueue.mode = mode
 
     @property
-    def signal(self) -> AbortSignal | None:
-        return self._active_run.abort_controller.signal if self._active_run is not None else None
+    def deliverTogether(self) -> Callable[[AgentMessage], bool] | None:
+        """MISAKA fork: when the next queued message is one this selects, every queued message it
+        selects leaves the queue with it, whatever the queue's mode -- CCB's queue processor
+        drains every queued command of the head's mode at once. The session selects
+        background-task notifications, which one at a time each opened a turn of their own."""
+        return self._followUpQueue.together
 
-    def subscribe(self, listener: AgentListener) -> Callable[[], None]:
-        if listener not in self._listeners:
-            self._listeners.append(listener)
-
-        def unsubscribe() -> None:
-            if listener in self._listeners:
-                self._listeners.remove(listener)
-
-        return unsubscribe
+    @deliverTogether.setter
+    def deliverTogether(self, predicate: Callable[[AgentMessage], bool] | None) -> None:
+        self._steeringQueue.together = self._followUpQueue.together = predicate
 
     def steer(self, message: AgentMessage) -> None:
-        self._steering_queue.enqueue(message)
+        """Queue a message to be injected after the current assistant turn finishes."""
+        self._steeringQueue.enqueue(message)
 
     def followUp(self, message: AgentMessage) -> None:
-        self._follow_up_queue.enqueue(message)
-
-    def follow_up(self, message: AgentMessage) -> None:
-        self.followUp(message)
+        """Queue a message to run only after the agent would otherwise stop."""
+        self._followUpQueue.enqueue(message)
 
     def clearSteeringQueue(self) -> None:
-        self._steering_queue.clear()
+        """Remove all queued steering messages."""
+        self._steeringQueue.clear()
 
     def clearFollowUpQueue(self) -> None:
-        self._follow_up_queue.clear()
+        """Remove all queued follow-up messages."""
+        self._followUpQueue.clear()
 
     def clearAllQueues(self) -> None:
+        """Remove all queued steering and follow-up messages."""
         self.clearSteeringQueue()
         self.clearFollowUpQueue()
 
     def hasQueuedMessages(self) -> bool:
         """Returns true when either queue still contains pending messages."""
-        return self._steering_queue.has_items() or self._follow_up_queue.has_items()
+        return self._steeringQueue.hasItems() or self._followUpQueue.hasItems()
 
     def peekQueuedMessages(self) -> list[AgentMessage]:
         """Preview the messages selected for the next turn without consuming them."""
-        steering = self._steering_queue.peek()
-        return steering if steering else self._follow_up_queue.peek()
+        steering = self._steeringQueue.peek()
+        return steering if len(steering) > 0 else self._followUpQueue.peek()
+
+    def takeQueuedMessages(self, predicate: Callable[[AgentMessage], bool]) -> list[AgentMessage]:
+        """MISAKA fork: remove the queued messages ``predicate`` selects and return them, steering first. The
+        session takes back what was queued into a run that then never started (``AgentSession._startRun``)."""
+        return [*self._steeringQueue.take(predicate), *self._followUpQueue.take(predicate)]
+
+    @property
+    def signal(self) -> AbortSignal | None:
+        """Active abort signal for the current run, if any."""
+        return self._activeRun.abortController.signal if self._activeRun is not None else None
 
     def abort(self) -> None:
-        if self._active_run is not None:
-            self._active_run.abort_controller.abort()
+        """Abort the current run, if one is active."""
+        if self._activeRun is not None:
+            self._activeRun.abortController.abort()
 
-    async def waitForIdle(self) -> None:
-        active_run = self._active_run
-        if active_run is None:
-            return
-        await asyncio.shield(active_run.completion)
+    def waitForIdle(self) -> asyncio.Future[None]:
+        """Resolve when the current run and all awaited event listeners have finished.
 
-    async def wait_for_idle(self) -> None:
-        await self.waitForIdle()
+        This resolves after `agent_end` listeners settle.
+        """
+        if self._activeRun is not None:
+            # MISAKA fork: shielded, so a waiter that is cancelled does not cancel the run's promise.
+            return asyncio.shield(self._activeRun.promise)
+        resolved: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        resolved.set_result(None)
+        return resolved
 
     def reset(self) -> None:
         """Clear conversation state and queues while retaining the replayed prompt/tool baseline."""
-        if self._active_run is not None:  # pi 1532c99 #7717: resetting mid-run would wipe the active run state
+        if self._activeRun is not None:
             raise RuntimeError("Agent is already processing. Wait for completion before resetting.")
-        baseline = get_current_system_message(self._state.messages)
+
+        baseline = getCurrentSystemMessage(self._state.messages)
         self._state.messages = [baseline] if baseline else []
         self._state.isStreaming = False
         self._state.streamingMessage = None
         self._state.pendingToolCalls = set()
         self._state.errorMessage = None
-        self.clearAllQueues()
+        self.clearFollowUpQueue()
+        self.clearSteeringQueue()
 
     @overload
     async def prompt(self, message: AgentMessage | Sequence[AgentMessage]) -> None: ...
@@ -388,270 +371,230 @@ class Agent:
     async def prompt(self, input: str, images: Sequence[ImageContent] | None = None) -> None: ...
 
     async def prompt(
-        self,
-        input: str | AgentMessage | Sequence[AgentMessage],
-        images: Sequence[ImageContent] | None = None,
+        self, input: str | AgentMessage | Sequence[AgentMessage], images: Sequence[ImageContent] | None = None
     ) -> None:
-        if self._active_run is not None:
+        """Start a new prompt from text, a single message, or a batch of messages."""
+        if self._activeRun is not None:
             raise RuntimeError(
-                "Agent is already processing a prompt. "
-                "Use steer() or followUp() to queue messages, or wait for completion."
+                "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
             )
-
-        prompt_messages = self._normalize_prompt_input(input, images)
-        await self._run_prompt_messages(prompt_messages)
+        messages = self._normalizePromptInput(input, images)
+        await self._runPromptMessages(messages)
 
     async def continue_(self) -> None:
-        if self._active_run is not None:
+        """Continue from the current transcript. The last message must be a user or tool-result message.
+
+        MISAKA fork: upstream's `continue()`; `continue` is a Python keyword.
+        """
+        if self._activeRun is not None:
             raise RuntimeError("Agent is already processing. Wait for completion before continuing.")
 
-        last_message = self._state.messages[-1] if self._state.messages else None
-        if last_message is None or all(
-            (message.get("role") if isinstance(message, dict) else getattr(message, "role", None)) == "system"
-            for message in self._state.messages
-        ):
+        lastMessage = self._state.messages[-1] if self._state.messages else None
+        if lastMessage is None or all(read_field(message, "role") == "system" for message in self._state.messages):
             raise RuntimeError("No messages to continue from")
 
-        if getattr(last_message, "role", None) == "assistant":
-            queued_steering = self._steering_queue.drain()
-            if queued_steering:
-                await self._run_prompt_messages(queued_steering, skip_initial_steering_poll=True)
+        if read_field(lastMessage, "role") == "assistant":
+            queuedSteering = self._steeringQueue.drain()
+            if len(queuedSteering) > 0:
+                await self._runPromptMessages(queuedSteering, skipInitialSteeringPoll=True)
                 return
 
-            queued_follow_ups = self._follow_up_queue.drain()
-            if queued_follow_ups:
-                await self._run_prompt_messages(queued_follow_ups)
+            queuedFollowUps = self._followUpQueue.drain()
+            if len(queuedFollowUps) > 0:
+                await self._runPromptMessages(queuedFollowUps)
                 return
 
             raise RuntimeError("Cannot continue from message role: assistant")
 
-        await self._run_continuation()
+        await self._runContinuation()
 
-    async def continue_run(self) -> None:
-        await self.continue_()
-
-    def _normalize_prompt_input(
-        self,
-        input: str | AgentMessage | Sequence[AgentMessage],
-        images: Sequence[ImageContent] | None,
+    def _normalizePromptInput(
+        self, input: str | AgentMessage | Sequence[AgentMessage], images: Sequence[ImageContent] | None = None
     ) -> list[AgentMessage]:
-        if isinstance(input, str):
-            content: list[TextContent | ImageContent] = [TextContent(text=input)]
-            if images:
-                content.extend(images)
-            return [
-                _normalize_standard_message(
-                    {"role": "user", "content": content, "timestamp": int(time.time() * 1000)}
-                )
-            ]
-        if isinstance(input, Sequence) and not isinstance(input, BaseModel):
-            return [_normalize_standard_message(message) for message in input]
-        return [_normalize_standard_message(input)]
+        # MISAKA fork: LLM messages given as mappings become message models (`_normalizeStandardMessage`).
+        if isinstance(input, Sequence) and not isinstance(input, str | BaseModel):
+            return [_normalizeStandardMessage(message) for message in input]
 
-    async def _run_prompt_messages(
-        self,
-        prompt_messages: list[AgentMessage],
-        *,
-        skip_initial_steering_poll: bool = False,
-    ) -> None:
+        if not isinstance(input, str):
+            return [_normalizeStandardMessage(input)]
+
+        content: list[TextContent | ImageContent] = [TextContent(text=input)]
+        if images and len(images) > 0:
+            content.extend(images)
+        return [_normalizeStandardMessage({"role": "user", "content": content, "timestamp": int(time.time() * 1000)})]
+
+    async def _runPromptMessages(self, messages: list[AgentMessage], *, skipInitialSteeringPoll: bool = False) -> None:
         async def executor(signal: AbortSignal) -> None:
-            await run_agent_loop(
-                prompt_messages,
-                self._create_context_snapshot(),
-                self._create_loop_config(skip_initial_steering_poll=skip_initial_steering_poll),
-                self._emit_event,
+            await runAgentLoop(
+                messages,
+                self._createContextSnapshot(),
+                self._createLoopConfig(skipInitialSteeringPoll=skipInitialSteeringPoll),
+                self._processEvents,
                 signal,
-                self.streamFn,
+                self.streamFunction,
             )
 
-        await self._run_with_lifecycle(executor)
+        await self._runWithLifecycle(executor)
 
-    async def _run_continuation(self) -> None:
+    async def _runContinuation(self) -> None:
         async def executor(signal: AbortSignal) -> None:
-            await run_agent_loop_continue(
-                self._create_context_snapshot(),
-                self._create_loop_config(),
-                self._emit_event,
+            await runAgentLoopContinue(
+                self._createContextSnapshot(),
+                self._createLoopConfig(),
+                self._processEvents,
                 signal,
-                self.streamFn,
+                self.streamFunction,
             )
 
-        await self._run_with_lifecycle(executor)
+        await self._runWithLifecycle(executor)
 
-    def _create_context_snapshot(self) -> AgentContext:
-        return AgentContext(
-            messages=self._state.messages[:],
-            tools=self._state.tools[:],
-        )
+    def _createContextSnapshot(self) -> AgentContext:
+        return AgentContext(messages=self._state.messages[:], tools=self._state.tools[:])
 
-    def _create_loop_config(self, *, skip_initial_steering_poll: bool = False) -> AgentLoopConfig:
-        skip_poll = skip_initial_steering_poll
+    def _createLoopConfig(self, *, skipInitialSteeringPoll: bool = False) -> AgentLoopConfig:
+        skipPoll = skipInitialSteeringPoll
 
-        async def get_steering_messages() -> list[AgentMessage]:
-            nonlocal skip_poll
-            if skip_poll:
-                skip_poll = False
+        async def prepareNextTurn(context: PrepareNextTurnContext) -> AgentLoopTurnUpdate | None:
+            if self.prepareNextTurnWithContext:
+                return await maybe_await(self.prepareNextTurnWithContext(context, self.signal))
+            return await maybe_await(self.prepareNextTurn(self.signal)) if self.prepareNextTurn else None
+
+        async def getSteeringMessages() -> list[AgentMessage]:
+            nonlocal skipPoll
+            if skipPoll:
+                skipPoll = False
                 return []
-            return self._steering_queue.drain()
+            return self._steeringQueue.drain()
 
-        async def get_follow_up_messages() -> list[AgentMessage]:
-            return self._follow_up_queue.drain()
-
-        async def prepare_next_turn(next_turn_context: Any) -> AgentLoopTurnUpdate | None:
-            if self.prepareNextTurnWithContext is not None:
-                return await maybe_await(
-                    self.prepareNextTurnWithContext(next_turn_context, self.signal)
-                )
-            if self.prepareNextTurn is not None:
-                return await maybe_await(self.prepareNextTurn(self.signal))
-            return None
+        async def getFollowUpMessages() -> list[AgentMessage]:
+            return self._followUpQueue.drain()
 
         return AgentLoopConfig(
             model=self._state.model,
-            convertToLlm=self.convertToLlm,
-            transformContext=self.transformContext,
-            getApiKey=self.getApiKey,
-            prepareNextTurn=(
-                prepare_next_turn
-                if self.prepareNextTurnWithContext is not None
-                or self.prepareNextTurn is not None
-                else None
-            ),
-            finishTurn=self.finishTurn,
-            prepareRequest=self.prepareRequest,
-            getSteeringMessages=get_steering_messages,
-            getFollowUpMessages=get_follow_up_messages,
-            toolExecution=self.toolExecution,
-            beforeToolCall=self.beforeToolCall,
-            afterToolCall=self.afterToolCall,
             reasoning=None if self._state.thinkingLevel == "off" else self._state.thinkingLevel,
             sessionId=self.sessionId,
             onPayload=self.onPayload,
             onResponse=self.onResponse,
+            onProviderStreamEvent=self.onProviderStreamEvent,
             transport=self.transport,
             thinkingBudgets=self.thinkingBudgets,
             maxRetryDelayMs=self.maxRetryDelayMs,
+            toolExecution=self.toolExecution,
+            beforeToolCall=self.beforeToolCall,
+            afterToolCall=self.afterToolCall,
+            finishTurn=self.finishTurn,
+            prepareRequest=self.prepareRequest,
+            prepareNextTurn=prepareNextTurn if self.prepareNextTurnWithContext or self.prepareNextTurn else None,
+            convertToLlm=self.convertToLlm,
+            transformContext=self.transformContext,
+            getApiKey=self.getApiKey,
+            getSteeringMessages=getSteeringMessages,
+            getFollowUpMessages=getFollowUpMessages,
         )
 
-    async def _run_with_lifecycle(self, executor: Callable[[AbortSignal], Awaitable[None]]) -> None:
-        if self._active_run is not None:
+    async def _runWithLifecycle(self, executor: Callable[[AbortSignal], Awaitable[None]]) -> None:
+        if self._activeRun is not None:
             raise RuntimeError("Agent is already processing.")
 
-        loop = asyncio.get_running_loop()
-        self._active_run = _ActiveRun(completion=loop.create_future(), abort_controller=AbortController())
+        abortController = AbortController()
+        self._activeRun = _ActiveRun(promise=asyncio.get_running_loop().create_future(), abortController=abortController)
+
         self._state.isStreaming = True
         self._state.streamingMessage = None
         self._state.errorMessage = None
 
         try:
-            await executor(self._active_run.abort_controller.signal)
+            await executor(abortController.signal)
         except BaseException as error:
-            # pi catches `Exception` here (agent.ts:502); the two BaseException-only
-            # exits have no JS equivalent and are not the model erroring -- turning
-            # Ctrl-C into a stopReason="error" message leaves the process running.
+            # MISAKA fork: KeyboardInterrupt and SystemExit are not the model erroring (JavaScript has no such exits),
+            # and a cancellation that is not our own abort belongs to the caller, so none of them is answered here.
             if isinstance(error, KeyboardInterrupt | SystemExit):
                 raise
-            aborted = self.signal is not None and self.signal.aborted
-            if isinstance(error, asyncio.CancelledError) and not aborted:
-                raise                      # the caller cancelled us: do not answer for them
-            await self._handle_run_failure(error)
+            if isinstance(error, asyncio.CancelledError) and not abortController.signal.aborted:
+                raise
+            await self._handleRunFailure(error, abortController.signal.aborted)
         finally:
-            self._finish_run()
+            self._finishRun()
 
-    async def _handle_run_failure(self, error: BaseException) -> None:
-        aborted = self.signal.aborted if self.signal is not None else False
-        if not aborted:
-            # The message keeps only str(error); a TypeError or IndexError from a hook is
-            # otherwise a bare phrase on screen with no way back to its line (2026-09-22).
-            logger.warning("agent run failed before an answer: %s", error, exc_info=error)
-        failure_message = AssistantMessage(
+    async def _handleRunFailure(self, error: BaseException, aborted: bool) -> None:
+        failureMessage = AssistantMessage(
             content=[TextContent(text="")],
             api=self._state.model.api,
             provider=self._state.model.provider,
             model=self._state.model.id,
-            usage=_copy_empty_usage(),
+            usage=Usage.model_validate(_EMPTY_USAGE),
             stopReason="aborted" if aborted else "error",
-            errorMessage=str(error),
+            errorMessage=errorMessage(error),
             timestamp=int(time.time() * 1000),
         )
-        await self._emit_event(MessageStartEvent(message=failure_message))
-        await self._emit_event(MessageEndEvent(message=failure_message))
-        await self._emit_event(TurnEndEvent(message=failure_message, toolResults=[]))
-        await self._emit_event(AgentEndEvent(messages=[failure_message]))
+        await self._processEvents(MessageStartEvent(message=failureMessage))
+        await self._processEvents(MessageEndEvent(message=failureMessage))
+        await self._processEvents(TurnEndEvent(message=failureMessage, toolResults=[]))
+        await self._processEvents(AgentEndEvent(messages=[failureMessage]))
 
-    def _finish_run(self) -> None:
-        active_run = self._active_run
+    def _finishRun(self) -> None:
         self._state.isStreaming = False
         self._state.streamingMessage = None
         self._state.pendingToolCalls = set()
-        self._active_run = None
-        if active_run is not None and not active_run.completion.done():
-            active_run.completion.set_result(None)
+        activeRun = self._activeRun
+        self._activeRun = None
+        if activeRun is not None and not activeRun.promise.done():
+            activeRun.promise.set_result(None)
 
-    async def _emit_event(self, event: AgentEvent) -> None:
-        self._reduce_state(event)
-        signal = self.signal
-        if signal is None:
+    async def _processEvents(self, event: AgentEvent) -> None:
+        """Reduce internal state for a loop event, then await listeners.
+
+        `agent_end` only means no further loop events will be emitted. The run is
+        considered idle later, after all awaited listeners for `agent_end` finish
+        and `finishRun()` clears runtime-owned state.
+        """
+        match event.type:
+            case "message_start":
+                self._state.streamingMessage = event.message
+
+            case "message_update":
+                self._state.streamingMessage = event.message
+
+            case "message_end":
+                self._state.streamingMessage = None
+                # MISAKA fork: an LLM message given as a mapping enters the transcript as its message model.
+                self._state.messages.append(_normalizeStandardMessage(event.message))
+
+            case "tool_execution_start":
+                pendingToolCalls = set(self._state.pendingToolCalls)
+                pendingToolCalls.add(event.toolCallId)
+                self._state.pendingToolCalls = pendingToolCalls
+
+            case "tool_execution_end":
+                pendingToolCalls = set(self._state.pendingToolCalls)
+                pendingToolCalls.discard(event.toolCallId)
+                self._state.pendingToolCalls = pendingToolCalls
+
+            case "turn_end":
+                if read_field(event.message, "role") == "assistant" and read_field(event.message, "errorMessage"):
+                    self._state.errorMessage = read_field(event.message, "errorMessage")
+
+            case "agent_end":
+                self._state.streamingMessage = None
+
+        signal = self._activeRun.abortController.signal if self._activeRun is not None else None
+        if not signal:
             raise RuntimeError("Agent listener invoked outside active run")
-        for listener in tuple(self._listeners):
+        for listener in liveKeys(self._listeners):
             await maybe_await(listener(event, signal))
 
-    def _reduce_state(self, event: AgentEvent) -> None:
-        if event.type == "message_start":
-            self._state.streamingMessage = self._copy_agent_message(event.message)
-            return
 
-        if event.type == "message_update":
-            self._state.streamingMessage = self._copy_agent_message(event.message)
-            return
-
-        if event.type == "message_end":
-            self._state.streamingMessage = None
-            self._state.messages = [
-                *self._state.messages,
-                _normalize_standard_message(self._copy_agent_message(event.message)),
-            ]
-            return
-
-        if event.type == "tool_execution_start":
-            pending = set(self._state.pendingToolCalls)
-            pending.add(event.toolCallId)
-            self._state.pendingToolCalls = pending
-            return
-
-        if event.type == "tool_execution_end":
-            pending = set(self._state.pendingToolCalls)
-            pending.discard(event.toolCallId)
-            self._state.pendingToolCalls = pending
-            return
-
-        if event.type == "turn_end" and getattr(event.message, "role", None) == "assistant":
-            error_message = getattr(event.message, "errorMessage", None)
-            if error_message:
-                self._state.errorMessage = error_message
-            return
-
-        if event.type == "agent_end":
-            self._state.streamingMessage = None
-
-    def _copy_agent_message(self, message: AgentMessage) -> AgentMessage:
-        if isinstance(message, BaseModel):
-            return message.model_copy(deep=True)
-        if isinstance(message, dict):
-            return dict(message)
-        return message
+def _agentOptions(options: AgentOptions | Mapping[str, Any] | None, kwargs: dict[str, Any]) -> AgentOptions:
+    """MISAKA fork: `AgentOptions`, a mapping of its members, or keyword arguments -- one of the three."""
+    if isinstance(options, AgentOptions):
+        if kwargs:
+            raise TypeError("Use either an AgentOptions object or keyword arguments, not both.")
+        return options
+    if options is None:
+        return AgentOptions(**kwargs)
+    if kwargs:
+        raise TypeError("Use either an options mapping or keyword arguments, not both.")
+    return AgentOptions(**dict(options))
 
 
-__all__ = [
-    "DEFAULT_MODEL",
-    "EMPTY_USAGE",
-    "AbortController",
-    "AbortSignal",
-    "Agent",
-    "AgentListener",
-    "AgentOptions",
-    "MutableAgentState",
-    "PendingMessageQueue",
-    "QueueMode",
-    "default_convert_to_llm",
-]
+__all__ = ["Agent", "AgentInitialState", "AgentListener", "AgentOptions", "QueueMode"]

@@ -5,7 +5,7 @@ never called ``misaka_research_assign``, and the driver paused the run with "req
 length" -- which the model then read as "the request was too long" and shrank the plan."""
 import pytest
 
-from misaka.ai.utils.overflow import hit_output_limit, output_limit_error
+from misaka.ai.utils._output_limit import hit_output_limit, output_limit_error
 from misaka.core.research import planner
 
 
@@ -35,7 +35,7 @@ def _run_command(monkeypatch, replies):
     monkeypatch.setattr(planner, "_call", fake_call)
     monkeypatch.setattr(planner.runs, "action", lambda con, run_id, node_id, key: accepted["value"])
     monkeypatch.setattr(planner.commands, "tool", lambda *args, **kwargs: object())
-    monkeypatch.setattr(planner, "find_most_recent_session", lambda directory: None)
+    monkeypatch.setattr(planner, "findMostRecentSession", lambda directory: None)
     run = {"id": "r1", "workspace": "/tmp", "root_session": "root.jsonl"}
     node = {"id": "b1", "depth": 0}
     try:
@@ -112,7 +112,7 @@ def test_reconcile_nudges_a_reply_that_ends_in_prose(monkeypatch):
     monkeypatch.setattr(planner.runs, "root", lambda con, run_id: {"id": "b0", "depth": 0})
     monkeypatch.setattr(planner, "_lo_session", lambda run, node: "/tmp")
     monkeypatch.setattr(planner.commands, "reconcile_tool", lambda *args, **kwargs: object())
-    monkeypatch.setattr(planner, "find_most_recent_session", lambda directory: None)
+    monkeypatch.setattr(planner, "findMostRecentSession", lambda directory: None)
     run = {"id": "r1", "workspace": "/tmp", "root_session": "root.jsonl", "limits_json": "{}",
            "question": "why is the sky blue"}
     outcome = planner.reconcile(None, run, {}, None, round=1, material={}, validate=lambda value: value)

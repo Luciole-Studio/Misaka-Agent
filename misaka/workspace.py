@@ -10,21 +10,23 @@ from misaka.utils.markdown import atx_headings
 _OUTLINE_SCAN_CHARS = 256 * 1024
 _OUTLINE_MAX_HEADINGS = 120
 _OUTLINE_MAX_TITLE_CHARS = 200
+_FOLD_FILES_OVER = 100      # files (artifacts, documents) under one node beyond which they are listed by folder
+_FOLDER_KEEPS_FILES = 10    # a folder holding at most this many of them still lists each one
 
 
 def _doc_node(m, workspace=None):
-    """Build a workspace-tree node for an indexed document."""
+    """Build a workspace-tree node for an indexed document: its PageIndex structure when it has
+    one. A document without one is a leaf; ``doc_outline`` lists its pages. Listing each page's
+    first line here read every page of every document on each call -- 140,000 nodes on a
+    33,308-document project, a 21 MB index the view cut at 200 KB before the task board
+    (2026-10-27, R33)."""
     did = m["doc_id"]
     node = {"node_id": f"doc:{did}", "title": m["title"],
-            "summary": f"{m['pages']} pages", "nodes": []}
+            "summary": f"{m['pages']} pages", "source": m.get("orig_path"), "nodes": []}
     tree = corpus._tree(did, workspace=workspace)
     if tree:
         node["nodes"] = tree
         node["summary"] += " (PageIndex structure)"
-        return node
-    node["nodes"] = [{"node_id": f"doc:{did}#p{h['page']}", "title": f"p{h['page']}",
-                      "summary": h["head"].replace("\n", " ")}
-                     for h in corpus.page_heads(did, workspace=workspace)]
     return node
 
 
@@ -91,10 +93,10 @@ def _project_file(workspace):
 
 def _session_node(node_id, title, path):
     """One conversation of a run: its LCM session id (the session file's header id) and file."""
-    from misaka.core.session_manager import read_session_header
+    from misaka.core.session_manager import readSessionHeader
     if not path:
         return None
-    sid = str(read_session_header(path).get("id") or "")
+    sid = str(readSessionHeader(path).get("id") or "")
     return {"node_id": node_id, "title": title, "summary": f"session_id {sid}" if sid else "session id unknown",
             "path": path}
 
@@ -146,7 +148,7 @@ def outline(bcon, task_id=None, *, workspace=None, run_id=None, research_store=N
     for t in tasks:
         kids = [{"node_id": f"task:{t['id']}#contract", "title": "Task contract (goal, boundaries, acceptance criteria)",
                  "summary": (t["body"] or "")[:80].replace("\n", " ")}]
-        if t["output_dir"]:
+        if t["output_dir"] and os.path.isdir(t["output_dir"]):
             kids.append({"node_id": f"task:{t['id']}#output", "title": "Deliverable directory", "path": t["output_dir"]})
         for m in by_task.get(t["id"], []):
             kids.append(_doc_node(m, workspace))
@@ -193,13 +195,15 @@ def outline(bcon, task_id=None, *, workspace=None, run_id=None, research_store=N
                           ]})
 
     project_node = _project_file(workspace)
+    # The board first: the view is cut at 200 KB, and on a large project the runs' registered
+    # files used to fill all of it before a single card (2026-10-27).
     top_nodes = ([project_node] if project_node else []) + [
-        {"node_id": "runs", "title": "Research Runs", "summary": str(len(run_nodes)),
-         "nodes": run_nodes},
         {"node_id": "board", "title": "Task board", "summary": f"{len(card_nodes)} cards",
          "nodes": card_nodes},
         {"node_id": "materials", "title": "Research materials", "summary": f"{len(materials)} documents",
          "nodes": materials},
+        {"node_id": "runs", "title": "Research Runs", "summary": str(len(run_nodes)),
+         "nodes": run_nodes},
         {"node_id": "ledger", "title": "Evidence ledger", "summary": "Research findings, quotations, and evaluations"},
     ]
     name = (os.path.basename(workspace.rstrip(os.sep)) or workspace) if workspace else ""
@@ -207,14 +211,59 @@ def outline(bcon, task_id=None, *, workspace=None, run_id=None, research_store=N
             "nodes": top_nodes}
 
 
-def render(tree, depth=0, out=None):
-    """Render a workspace tree as indented text."""
-    out = [] if out is None else out
+def render(tree):
+    """Render a workspace tree as indented text.
+
+    A node with more than ``_FOLD_FILES_OVER`` files under it lists them by the folder each one
+    is in: a folder of a few keeps its files listed, a larger one is one line with its count and
+    how to list it (``find`` there; ``doc_list`` with the folder as query for document IDs).
+    Every file is either listed or counted under its own folder. Cards of a 33,308-document
+    project declared tens of thousands of OCR pages, and their names filled the 200 KB view.
+    The tree itself, and the saved JSON index, keep every file."""
+    out = []
+    _render_lines(tree, 0, out)
+    return "\n".join(out)
+
+
+def _file_location(node):
+    """``(kind, path)`` for a registered artifact or an indexed document, else ``(None, None)``."""
+    nid = node.get("node_id", "")
+    if nid.startswith("artifact:") and node.get("path"):
+        return "artifact", node["path"]
+    if nid.startswith("doc:") and "#" not in nid and node.get("source"):
+        return "doc", node["source"]
+    return None, None
+
+
+def _render_lines(tree, depth, out):
+    # Joined once by ``render``: a join at every level copied the whole text per node, which on
+    # a 214,587-node project took 746 s against 0.07 s (2026-10-27, R33).
     pad = "  " * depth
     s = tree.get("summary")
     out.append(f"{pad}{tree.get('title','')}  [{tree.get('node_id','')}]" + (f"  — {s}" if s else ""))
     if tree.get("path"):
         out.append(f"{pad}  Path: {tree['path']}")
-    for kid in tree.get("nodes") or []:
-        render(kid, depth + 1, out)
-    return "\n".join(out)
+    kids = tree.get("nodes") or []
+    files = [kid for kid in kids if _file_location(kid)[0]]
+    if len(files) <= _FOLD_FILES_OVER:
+        for kid in kids:
+            _render_lines(kid, depth + 1, out)
+        return
+    for kid in kids:
+        if not _file_location(kid)[0]:
+            _render_lines(kid, depth + 1, out)
+    folders = {}
+    for kid in files:
+        kind, path = _file_location(kid)
+        folders.setdefault((os.path.dirname(path), kind), []).append(kid)
+    for (folder, kind), group in sorted(folders.items()):
+        if len(group) <= _FOLDER_KEEPS_FILES:
+            for kid in group:
+                _render_lines(kid, depth + 1, out)
+            continue
+        where = os.path.join(folder, "")
+        listing = (f"{len(group)} registered files, not listed here; find in this folder lists them"
+                   if kind == "artifact" else
+                   f"{len(group)} indexed documents, not listed here; doc_list with this folder as "
+                   "its query gives their IDs")
+        out.append(f"{pad}  {where}  — {listing}")

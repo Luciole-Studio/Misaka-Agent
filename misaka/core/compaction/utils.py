@@ -1,22 +1,21 @@
-"""Shared utilities for coding-agent compaction and branch summarization."""
+"""Translated from pi's ``packages/coding-agent/src/core/compaction/utils.ts`` (v1.3.0).
+
+Shared utilities for compaction and branch summarization.
+"""
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any
 
 from misaka.ai.types import MessageValue
+from misaka.ai.utils.text import contentText
+from misaka.utils.js import jsLength, jsonStringify, jsSlice
 from misaka.utils.values import read_field
 
-_TOOL_RESULT_MAX_CHARS = 2000
-
-SUMMARIZATION_SYSTEM_PROMPT = (
-    "You are a context summarization assistant. Your task is to read a conversation between a user "
-    "and an AI assistant, then produce a structured summary following the exact format specified.\n\n"
-    "Do NOT continue the conversation. Do NOT respond to any questions in the conversation. "
-    "ONLY output the structured summary."
-)
+# ============================================================================
+# File Operation Tracking
+# ============================================================================
 
 
 @dataclass(slots=True)
@@ -26,11 +25,20 @@ class FileOperations:
     edited: set[str] = field(default_factory=set)
 
 
-def create_file_ops() -> FileOperations:
+def createFileOps() -> FileOperations:
     return FileOperations()
 
 
-def extract_file_ops_from_message(message: Any, file_ops: FileOperations) -> None:
+def extractFileOpsFromMessage(message: Any, fileOps: FileOperations) -> None:
+    """Extract file operations from tool calls in an assistant message, or from the nested calls
+    recorded on a tool result.
+    """
+    if read_field(message, "role") == "toolResult":
+        # Calls made from codemode scripts are recorded on the script's result.
+        nestedCalls = read_field(message, "nestedCalls")
+        for call in (read_field(nestedCalls, "calls") or []) if nestedCalls is not None else []:
+            addFileOp(read_field(call, "name"), read_field(call, "arguments"), fileOps)
+        return
     if read_field(message, "role") != "assistant":
         return
     content = read_field(message, "content")
@@ -38,162 +46,128 @@ def extract_file_ops_from_message(message: Any, file_ops: FileOperations) -> Non
         return
 
     for block in content:
+        if block is None:
+            continue
         if read_field(block, "type") != "toolCall":
             continue
-        arguments = read_field(block, "arguments")
-        if not isinstance(arguments, dict):
-            continue
-        path = arguments.get("path")
-        if not isinstance(path, str) or not path:
-            continue
-
-        name = read_field(block, "name")
-        if name == "read":
-            file_ops.read.add(path)
-        elif name == "write":
-            file_ops.written.add(path)
-        elif name == "edit":
-            file_ops.edited.add(path)
+        addFileOp(read_field(block, "name"), read_field(block, "arguments"), fileOps)
 
 
-def compute_file_lists(file_ops: FileOperations) -> dict[str, list[str]]:
-    modified = {*file_ops.edited, *file_ops.written}
-    read_files = sorted(path for path in file_ops.read if path not in modified)
-    modified_files = sorted(modified)
-    return {"readFiles": read_files, "modifiedFiles": modified_files}
+def addFileOp(toolName: Any, args: Any, fileOps: FileOperations) -> None:
+    path = args.get("path") if isinstance(args, dict) and isinstance(args.get("path"), str) else None
+    if not path:
+        return
+    match toolName:
+        case "read":
+            fileOps.read.add(path)
+        case "write":
+            fileOps.written.add(path)
+        case "edit":
+            fileOps.edited.add(path)
 
 
-def format_file_operations(read_files: list[str], modified_files: list[str]) -> str:
+def computeFileLists(fileOps: FileOperations) -> dict[str, list[str]]:
+    """Compute final file lists from file operations.
+    Returns readFiles (files only read, not modified) and modifiedFiles.
+    """
+    modified = {*fileOps.edited, *fileOps.written}
+    readOnly = sorted(f for f in fileOps.read if f not in modified)
+    modifiedFiles = sorted(modified)
+    return {"readFiles": readOnly, "modifiedFiles": modifiedFiles}
+
+
+def formatFileOperations(readFiles: list[str], modifiedFiles: list[str]) -> str:
+    """Format file operations as XML tags for summary."""
     sections: list[str] = []
-    if read_files:
-        read_block = "\n".join(read_files)
-        sections.append(f"<read-files>\n{read_block}\n</read-files>")
-    if modified_files:
-        modified_block = "\n".join(modified_files)
-        sections.append(f"<modified-files>\n{modified_block}\n</modified-files>")
-    if not sections:
+    if len(readFiles) > 0:
+        sections.append(f"<read-files>\n{chr(10).join(readFiles)}\n</read-files>")
+    if len(modifiedFiles) > 0:
+        sections.append(f"<modified-files>\n{chr(10).join(modifiedFiles)}\n</modified-files>")
+    if len(sections) == 0:
         return ""
-    return f"\n\n{'\n\n'.join(sections)}"
+    return "\n\n" + "\n\n".join(sections)
 
 
-def serialize_conversation(messages: list[MessageValue]) -> str:
+# ============================================================================
+# Message Serialization
+# ============================================================================
+
+# Maximum characters for a tool result in serialized summaries.
+TOOL_RESULT_MAX_CHARS = 2000
+
+
+def truncateForSummary(text: str, maxChars: int) -> str:
+    """Truncate text to a maximum character length for summarization.
+    Keeps the beginning and appends a truncation marker.
+    """
+    if jsLength(text) <= maxChars:
+        return text
+    truncatedChars = jsLength(text) - maxChars
+    return f"{jsSlice(text, 0, maxChars)}\n\n[... {truncatedChars} more characters truncated]"
+
+
+def serializeConversation(messages: list[MessageValue]) -> str:
+    """Serialize LLM messages to text for summarization.
+    This prevents the model from treating it as a conversation to continue.
+    Call convertToLlm() first to handle custom message types.
+
+    Tool results are truncated to keep the summarization request within
+    reasonable token budgets. Full content is not needed for summarization.
+
+    Thinking is omitted. Providers return summaries of the real reasoning, and
+    replayed thinking is often not part of the model's live context: for example,
+    a block that does not match its request is dropped. Including it can make the
+    summarization request larger than the context it summarizes. Visible text,
+    tool calls, and tool results record what happened.
+    """
     parts: list[str] = []
 
-    for message in messages:
-        role = read_field(message, "role")
+    for msg in messages:
+        role = read_field(msg, "role")
         if role == "user":
-            content = _serialize_user_content(read_field(message, "content"))
+            content = contentText(read_field(msg, "content") or [], "")
             if content:
                 parts.append(f"[User]: {content}")
-            continue
+        elif role == "assistant":
+            toolCalls: list[str] = []
+            blocks = read_field(msg, "content") or []
 
-        if role == "assistant":
-            text_parts: list[str] = []
-            thinking_parts: list[str] = []
-            tool_calls: list[str] = []
-            for block in read_field(message, "content") or []:
-                block_type = read_field(block, "type")
-                if block_type == "text":
-                    text = read_field(block, "text")
-                    if isinstance(text, str):
-                        text_parts.append(text)
-                elif block_type == "thinking":
-                    thinking = read_field(block, "thinking")
-                    if isinstance(thinking, str):
-                        thinking_parts.append(thinking)
-                elif block_type == "toolCall":
-                    arguments = read_field(block, "arguments")
-                    items = arguments.items() if isinstance(arguments, dict) else []
-                    args_str = ", ".join(f"{key}={_safe_json_stringify(value)}" for key, value in items)
-                    tool_calls.append(f"{read_field(block, 'name')}({args_str})")
-            if thinking_parts:
-                parts.append(f"[Assistant thinking]: {'\n'.join(thinking_parts)}")
-            if text_parts:
-                parts.append(f"[Assistant]: {'\n'.join(text_parts)}")
-            if tool_calls:
-                parts.append(f"[Assistant tool calls]: {'; '.join(tool_calls)}")
-            continue
+            for block in blocks:
+                blockType = read_field(block, "type")
+                if blockType == "toolCall":
+                    args = read_field(block, "arguments")
+                    argsStr = ", ".join(
+                        f"{k}={jsonStringify(v)}" for k, v in (args.items() if isinstance(args, dict) else [])
+                    )
+                    toolCalls.append(f"{read_field(block, 'name')}({argsStr})")
 
-        if role == "toolResult":
-            content = _serialize_tool_result_content(read_field(message, "content"))
+            if any(read_field(block, "type") == "text" for block in blocks):
+                parts.append(f"[Assistant]: {contentText(blocks)}")
+            if len(toolCalls) > 0:
+                parts.append(f"[Assistant tool calls]: {'; '.join(toolCalls)}")
+        elif role == "toolResult":
+            content = contentText(read_field(msg, "content") or [], "")
             if content:
-                parts.append(f"[Tool result]: {_truncate_for_summary(content, _TOOL_RESULT_MAX_CHARS)}")
+                parts.append(f"[Tool result]: {truncateForSummary(content, TOOL_RESULT_MAX_CHARS)}")
 
     return "\n\n".join(parts)
 
 
-def _serialize_user_content(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
-    for block in content:
-        if read_field(block, "type") == "text":
-            text = read_field(block, "text")
-            if isinstance(text, str):
-                parts.append(text)
-    return "".join(parts)
+# ============================================================================
+# Summarization System Prompt
+# ============================================================================
 
+SUMMARIZATION_SYSTEM_PROMPT = """You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.
 
-def _serialize_tool_result_content(content: Any) -> str:
-    if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
-    for block in content:
-        if read_field(block, "type") == "text":
-            text = read_field(block, "text")
-            if isinstance(text, str):
-                parts.append(text)
-    return "".join(parts)
+Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary."""
 
-
-def _truncate_for_summary(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    truncated_chars = len(text) - max_chars
-    return f"{text[:max_chars]}\n\n[... {truncated_chars} more characters truncated]"
-
-
-def _safe_json_stringify(value: Any) -> str:
-    try:
-        # Compact and unescaped, like `JSON.stringify`: the result is measured by length
-        # for the chars/4 token estimate, and default ASCII escaping turns every CJK
-        # character into six -- inflating estimates on non-ASCII content by 2-3x, which
-        # made compaction fire far too early for those sessions.
-        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    except (TypeError, ValueError):
-        return "[unserializable]"
-    return serialized if serialized is not None else "undefined"
-
-
-computeFileLists = compute_file_lists
-createFileOps = create_file_ops
-extractFileOpsFromMessage = extract_file_ops_from_message
-formatFileOperations = format_file_operations
-serializeConversation = serialize_conversation
 
 __all__ = [
     "SUMMARIZATION_SYSTEM_PROMPT",
     "FileOperations",
     "computeFileLists",
-    "compute_file_lists",
     "createFileOps",
-    "create_file_ops",
     "extractFileOpsFromMessage",
-    "extract_file_ops_from_message",
     "formatFileOperations",
-    "format_file_operations",
     "serializeConversation",
-    "serialize_conversation",
 ]
-
-
-def _assistant_text(message: Any) -> str:
-    parts: list[str] = []
-    for block in read_field(message, "content") or []:
-        if read_field(block, "type") == "text":
-            text = read_field(block, "text")
-            if isinstance(text, str):
-                parts.append(text)
-    return "\n".join(parts)

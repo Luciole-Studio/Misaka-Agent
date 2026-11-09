@@ -54,3 +54,50 @@ def test_sdist_and_wheel_keep_package_with_ignored_source_symlink(tmp_path):
     with ZipFile(wheel) as archive:
         assert {name: archive.read(name) for name in archive.namelist()
                 if name.startswith("misaka/")} == expected
+
+
+def test_the_wheel_ships_the_licence_texts_catalog_data_and_bundled_assets(tmp_path):
+    """The wheel a user install builds carries every licence text, the model catalog data with its manifest, and the
+    non-Python files the ported modules read at runtime, codemode's QuickJS wasm among them."""
+    import json
+
+    root = Path(__file__).resolve().parents[1]
+    dist = tmp_path / "dist"
+    result = subprocess.run(
+        ["uv", "build", "--offline", "--wheel", "--python", sys.executable, "--out-dir", str(dist), str(root)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=600, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    [wheel] = dist.glob("*.whl")
+    with ZipFile(wheel) as archive:
+        names = set(archive.namelist())
+        [metadata] = [name for name in names if name.endswith(".dist-info/METADATA")]
+        requires = [
+            line.split(":", 1)[1].strip()
+            for line in archive.read(metadata).decode("utf-8").splitlines()
+            if line.startswith("Requires-Dist:")
+        ]
+
+    licences = {name.split(".dist-info/licenses/", 1)[1] for name in names if ".dist-info/licenses/" in name}
+    expected = {"LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"} | {
+        f"LICENSES/{path.name}" for path in (root / "LICENSES").glob("*.txt")
+    }
+    assert expected <= licences
+    assert "misaka/LICENSE.pi" in names
+
+    data = root / "misaka" / "ai" / "providers" / "data"
+    manifest = json.loads((data / ".manifest.json").read_text(encoding="utf-8"))
+    assert "misaka/ai/providers/data/.manifest.json" in names
+    assert {f"misaka/ai/providers/data/{name}" for name in manifest["files"]} <= names
+
+    assert {
+        "misaka/extensions/codemode/codemode.md",
+        "misaka/core/export_html/template.html",
+        "misaka/core/export_html/template.css",
+        "misaka/core/export_html/template.js",
+        "misaka/core/export_html/vendor/marked.min.js",
+        "misaka/core/export_html/vendor/highlight.min.js",
+    } <= names
+    assert [name for name in names if name.endswith(".wasm")] == ["misaka/codemode/quickjs_wasi/quickjs.wasm"]
+    assert any(requirement.startswith("wasmtime") for requirement in requires)
+    assert any(requirement.startswith("referencing") for requirement in requires)

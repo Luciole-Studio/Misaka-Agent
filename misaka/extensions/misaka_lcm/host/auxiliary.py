@@ -11,8 +11,8 @@ from types import SimpleNamespace
 
 import httpx
 
-from misaka.ai.utils.abort import sleep
-from misaka.ai.utils.error_body import provider_error_headers, provider_error_status
+from misaka.ai.utils._sdk_error import provider_error_headers, provider_error_status
+from misaka.utils.sleep import sleep
 
 from ..native import auxiliary_recovery as policy
 from . import execution

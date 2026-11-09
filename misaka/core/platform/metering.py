@@ -1,7 +1,7 @@
-"""Every model request a metered session makes, leased against ``research.token_cap`` and recorded.
+"""Every model request a metered session makes, leased against the token cap and recorded.
 
-All of them pass one point: the provider registry (``misaka.ai.api_registry``) -- the agent's
-own turns, compaction summaries, the vision bridge, MoA's member calls, LCM's summaries, the cache
+All of them pass one point, ``misaka.ai.api._meter``: the built-in APIs (``lazyApi``) and the api registry ask it --
+the agent's own turns, compaction summaries, the vision bridge, MoA's member calls, LCM's summaries, the cache
 warmer. :func:`install` puts :func:`meter` there. A request finds the ledger it is billed to
 (``budget.ledger``: the window turn's usage context, else the ``MISAKA_USAGE_*`` environment of a
 card, node or sub-agent process); with none it passes through untouched, as a plain chat does.
@@ -11,7 +11,7 @@ thinking an adapter asks for beyond that (``thinking_allowance``) -- waits while
 flight fill the cap, stops with ``budget.EXHAUSTED_MESSAGE`` when spending already has, sends with
 ``maxTokens`` cut to the lease, and records what it used when it ends. Reasoning is left as the
 caller asked: the lease pays for it. 2026-10-07 (issue #10 plan, token_cap): a run used to get one
-fixed 32,768-token slice for its whole life, smaller than one research request, and only the
+fixed 32,768-token slice for its whole life, smaller than one of its requests, and only the
 session's own turns were bounded at all.
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from misaka.agent.request_budget import context_token_upper_bound, usage_tokens
-from misaka.ai.providers.simple_options import thinking_allowance
+from misaka.ai.api._thinking_allowance import thinking_allowance
 from misaka.ai.types import AssistantMessage, ErrorEvent
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.core.platform import budget
@@ -75,8 +75,8 @@ def allowance() -> tuple[int, int] | None:
 
 
 def install() -> None:
-    from misaka.ai import api_registry
-    api_registry.set_request_meter(meter)
+    from misaka.ai.api import _meter
+    _meter.set_request_meter(meter)
 
 
 def _limited(options: Any, max_tokens: int) -> Any:
@@ -99,19 +99,20 @@ def _limited(options: Any, max_tokens: int) -> Any:
     return limited
 
 
-def _ended(out: AssistantMessageEventStream, model: Any, reason: str, text: str | None) -> None:
-    """End ``out`` with no reply: an error (or an abort) the agent loop reads like a provider's."""
-    from misaka.ai.providers._common import _empty_usage
+def _ended(out: AssistantMessageEventStream, model: Any, reason: str, text: str | None, startedAt: int) -> None:
+    """End ``out`` with no reply: an error (or an abort) the agent loop reads like a provider's. Like a provider's
+    reply it carries the time the request started, and ``out`` times it from there."""
+    from misaka.ai.api._common import _empty_usage
     message = AssistantMessage(content=[], api=model.api, provider=model.provider, model=model.id,
                                usage=_empty_usage(), stopReason=reason, errorMessage=text,
-                               timestamp=time.time_ns() // 1_000_000)
+                               timestamp=startedAt)
     out.push(ErrorEvent(reason=reason, error=message))
     out.end(message)
 
 
 def _exhausted_text(reading: dict, need: int) -> str:
     left = max(0, int(reading.get("cap", 0)) - int(reading.get("used", 0)))
-    return (f"{budget.EXHAUSTED_MESSAGE}: the next request needs up to {need:,} tokens and this research run "
+    return (f"{budget.EXHAUSTED_MESSAGE}: the next request needs up to {need:,} tokens and this run "
             f"has {left:,} of its {int(reading.get('cap', 0)):,} left. It stops here; raise the cap and resume it "
             f"to go on.")
 
@@ -148,6 +149,8 @@ def meter(model: Any, context: Any, options: Any, send) -> AssistantMessageEvent
     if current is None and local is None:
         return send(options)
     out = AssistantMessageEventStream()
+    # When the request started: the timestamp of a reply the meter ends it with (pi: providers stamp theirs).
+    startedAt = time.time_ns() // 1_000_000
 
     async def run() -> None:
         bound = context_token_upper_bound(context)
@@ -156,7 +159,7 @@ def meter(model: Any, context: Any, options: Any, send) -> AssistantMessageEvent
         output = min(configured or model_max or FALLBACK_OUTPUT_TOKENS, model_max or FALLBACK_OUTPUT_TOKENS)
         if model.api == "openai-codex-responses" and model.api not in _warned_uncapped:
             _warned_uncapped.add(model.api)
-            logger.warning("%s takes no output limit: research.token_cap leases its whole output, "
+            logger.warning("%s takes no output limit: the token cap leases its whole output, "
                            "but cannot cut a reply short", model.api)
         extra = thinking_allowance(model, options)
         need = bound + min(MIN_OUTPUT_TOKENS, output) + extra
@@ -164,20 +167,20 @@ def meter(model: Any, context: Any, options: Any, send) -> AssistantMessageEvent
         try:
             reading = await _lease(current, local, need, want, read_field(options, "signal"))
         except Exception as error:  # noqa: BLE001 - a ledger that cannot be read sends nothing: fail closed, visibly
-            _ended(out, model, "error", f"token ledger unavailable: {type(error).__name__}: {error}")
+            _ended(out, model, "error", f"token ledger unavailable: {type(error).__name__}: {error}", startedAt)
             return
         if reading["status"] == "aborted":
-            _ended(out, model, "aborted", "Request was aborted")
+            _ended(out, model, "aborted", "Request was aborted", startedAt)
             return
         if reading["status"] == "exhausted":
             if reading.get("local"):
                 # The session's own allowance, not the run's: the run goes on.
-                _ended(out, model, "error", f"this session's allowance of {reading['cap']:,} tokens is used up")
+                _ended(out, model, "error", f"this session's allowance of {reading['cap']:,} tokens is used up", startedAt)
                 return
             if current and current[3]:
                 # Every driver and card of the run stops on it, not only this session.
                 await asyncio.to_thread(budget.cap_reached_path, current[0], current[1], current[3])
-            _ended(out, model, "error", _exhausted_text(reading, need))
+            _ended(out, model, "error", _exhausted_text(reading, need), startedAt)
             return
         lease, granted = reading.get("lease"), int(reading["tokens"])
         streamed, started = 0, False
@@ -228,7 +231,7 @@ def meter(model: Any, context: Any, options: Any, send) -> AssistantMessageEvent
         if terminal is not None:
             out.push(terminal)
         if failure is not None:
-            _ended(out, model, "error", failure)
+            _ended(out, model, "error", failure, startedAt)
         else:
             out.end(message)
 

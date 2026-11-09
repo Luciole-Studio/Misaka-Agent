@@ -1,4 +1,8 @@
-"""Lazy registration for built-in image generation providers."""
+"""Translated from pi's ``packages/ai/src/providers/images/register-builtins.ts`` (v1.1.0).
+
+MISAKA fork: the module cache holds the imported module or the import's exception, where upstream keeps the import
+promise (the first outcome is kept either way).
+"""
 
 from __future__ import annotations
 
@@ -7,60 +11,58 @@ import time
 from types import ModuleType
 from typing import Any
 
-from misaka.ai.images_api_registry import (
-    ImagesApiProvider,
-    register_images_api_provider,
-)
-from misaka.ai.types import AssistantImages, ImagesContext, ImagesModel, ImagesOptions
+from misaka.ai.images_api_registry import ImagesApiProvider, registerImagesApiProvider
+from misaka.ai.types import AssistantImages, ImageModel, ImagesContext, ImagesOptions
+from misaka.utils.js import jsString
 
-_openrouter_images_provider_module: ModuleType | Exception | None = None
+_openRouterImagesProviderModulePromise: ModuleType | BaseException | None = None
 
 
-def _create_lazy_load_error_images(model: ImagesModel, error: Any) -> AssistantImages:
+def _createLazyLoadErrorImages(model: ImageModel, error: Any) -> AssistantImages:
     return AssistantImages(
         api=model.api,
         provider=model.provider,
         model=model.id,
         output=[],
         stopReason="error",
-        errorMessage=str(error),
+        errorMessage=(str(error) or type(error).__name__) if isinstance(error, BaseException) else jsString(error),
         timestamp=time.time_ns() // 1_000_000,
     )
 
 
-def _load_openrouter_images_provider_module() -> ModuleType:
-    global _openrouter_images_provider_module
-    if _openrouter_images_provider_module is None:
+def _loadOpenRouterImagesProviderModule() -> ModuleType:
+    global _openRouterImagesProviderModulePromise
+    if _openRouterImagesProviderModulePromise is None:
         try:
-            _openrouter_images_provider_module = importlib.import_module("misaka.ai.providers.images.openrouter")
-        except Exception as error:
-            _openrouter_images_provider_module = error
-            raise
-    if isinstance(_openrouter_images_provider_module, Exception):
-        raise _openrouter_images_provider_module
-    return _openrouter_images_provider_module
+            _openRouterImagesProviderModulePromise = importlib.import_module("misaka.ai.api.openrouter_images")
+        except Exception as error:  # noqa: BLE001 - the rejected import is cached, as the promise is
+            _openRouterImagesProviderModulePromise = error
+    if isinstance(_openRouterImagesProviderModulePromise, BaseException):
+        raise _openRouterImagesProviderModulePromise
+    return _openRouterImagesProviderModulePromise
 
 
-async def generate_images_openrouter(
-    model: ImagesModel,
+async def generateImagesOpenRouter(
+    model: ImageModel,
     context: ImagesContext,
     options: ImagesOptions | None = None,
 ) -> AssistantImages:
     try:
-        module = _load_openrouter_images_provider_module()
-        return await module.generateImagesOpenRouter(model, context, options)
-    except Exception as error:  # noqa: BLE001
-        return _create_lazy_load_error_images(model, error)
+        module = _loadOpenRouterImagesProviderModule()
+        return await module.generateImages(model, context, options)
+    except Exception as error:  # noqa: BLE001 - the failure is the result
+        return _createLazyLoadErrorImages(model, error)
 
 
-def register_built_in_images_api_providers() -> None:
-    register_images_api_provider(
-        ImagesApiProvider(api="openrouter-images", generateImages=generate_images_openrouter)
+def registerBuiltInImagesApiProviders() -> None:
+    registerImagesApiProvider(
+        ImagesApiProvider(
+            api="openrouter-images",
+            generateImages=generateImagesOpenRouter,
+        )
     )
 
 
-register_built_in_images_api_providers()
+registerBuiltInImagesApiProviders()
 
-generateImagesOpenRouter = generate_images_openrouter
-
-__all__ = ["generateImagesOpenRouter"]
+__all__ = ["generateImagesOpenRouter", "registerBuiltInImagesApiProviders"]

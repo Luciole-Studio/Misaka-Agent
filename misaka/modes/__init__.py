@@ -1,4 +1,7 @@
-"""Shared mode exports for coding-agent."""
+"""Translated from pi's ``packages/coding-agent/src/modes/index.ts`` (v1.1.0).
+
+Shared mode exports for coding-agent.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +9,8 @@ from importlib import import_module
 from typing import Any
 
 _PUBLIC_EXPORTS: dict[str, tuple[str, str]] = {
-    "InteractiveMode": ("misaka.ui.tui.interactive.interactive_mode", "InteractiveMode"),
-    "InteractiveModeOptions": ("misaka.ui.tui.interactive.interactive_mode", "InteractiveModeOptions"),
+    "InteractiveMode": ("misaka.modes.interactive.interactive_mode", "InteractiveMode"),
+    "InteractiveModeOptions": ("misaka.modes.interactive.interactive_mode", "InteractiveModeOptions"),
     "PrintModeOptions": ("misaka.modes.print_mode", "PrintModeOptions"),
     "runPrintMode": ("misaka.modes.print_mode", "runPrintMode"),
 }

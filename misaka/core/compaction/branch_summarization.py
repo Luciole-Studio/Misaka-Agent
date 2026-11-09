@@ -2,29 +2,30 @@
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from typing import Any, TypedDict
 
-from misaka.agent.harness.session.uuid import uuidv7
 from misaka.agent.types import AgentMessage, StreamFn
 from misaka.ai.types import Context, Model, SimpleStreamOptions, Usage, UserMessage
 from misaka.ai.utils.retry import RetryCallbacks, RetryPolicy
-from misaka.ai.utils.transcript import normalize_context
+from misaka.ai.utils.text import contentText
+from misaka.ai.utils.transcript import normalizeContext
+from misaka.ai.utils.uuid import uuidv7
 from misaka.core.compaction.compaction import (
-    complete_summarization,
-    estimate_tokens,
-    get_summarization_failure,
+    completeSummarization,
+    estimateTokens,
+    getSummarizationFailure,
 )
 from misaka.core.compaction.utils import (
     SUMMARIZATION_SYSTEM_PROMPT,
     FileOperations,
-    _assistant_text,
-    compute_file_lists,
-    create_file_ops,
-    extract_file_ops_from_message,
-    format_file_operations,
-    serialize_conversation,
+    computeFileLists,
+    createFileOps,
+    extractFileOpsFromMessage,
+    formatFileOperations,
+    serializeConversation,
 )
 from misaka.core.messages import (
     convertToLlm,
@@ -113,7 +114,7 @@ class GenerateBranchSummaryOptions:
     callbacks: RetryCallbacks | None = None
 
 
-def collect_entries_for_branch_summary(
+def collectEntriesForBranchSummary(
     session: ReadonlySessionManager,
     old_leaf_id: str | None,
     target_id: str,
@@ -143,9 +144,9 @@ def collect_entries_for_branch_summary(
     return CollectEntriesResult(entries=entries, commonAncestorId=common_ancestor_id)
 
 
-def prepare_branch_entries(entries: list[SessionEntry], token_budget: int = 0) -> BranchPreparation:
+def prepareBranchEntries(entries: list[SessionEntry], token_budget: int = 0) -> BranchPreparation:
     messages: list[AgentMessage] = []
-    file_ops = create_file_ops()
+    file_ops = createFileOps()
     total_tokens = 0
 
     for entry in entries:
@@ -166,11 +167,11 @@ def prepare_branch_entries(entries: list[SessionEntry], token_budget: int = 0) -
                     file_ops.edited.add(path)
 
     for entry in reversed(entries):
-        message = _get_message_from_entry(entry)
+        message = getMessageFromEntry(entry)
         if message is None:
             continue
-        extract_file_ops_from_message(message, file_ops)
-        tokens = estimate_tokens(message)
+        extractFileOpsFromMessage(message, file_ops)
+        tokens = estimateTokens(message)
         if token_budget > 0 and total_tokens + tokens > token_budget:
             entry_type = entry.get("type")
             if entry_type in {"compaction", "branch_summary"} and total_tokens < token_budget * 0.9:
@@ -184,7 +185,7 @@ def prepare_branch_entries(entries: list[SessionEntry], token_budget: int = 0) -
     return BranchPreparation(messages=messages, fileOps=file_ops, totalTokens=total_tokens)
 
 
-async def generate_branch_summary(
+async def generateBranchSummary(
     entries: list[SessionEntry],
     options: GenerateBranchSummaryOptions,
 ) -> BranchSummaryResult:
@@ -192,13 +193,13 @@ async def generate_branch_summary(
     context_window = options.model.contextWindow or 128000
     token_budget = context_window - reserve_tokens
     if token_budget <= 0:
-        # `prepare_branch_entries` reads a non-positive budget as "no limit" (:173), so a
+        # MISAKA fork: `prepareBranchEntries` reads a non-positive budget as "no limit" (:173), so a
         # model whose whole context is smaller than the reserve -- an 8k or 16k window
         # against the default 16384 -- used to send the entire branch and have the
         # provider reject the request, failing the summary silently. Half the window is
         # the fallback: it leaves room for the instructions and the summary itself.
         token_budget = max(1, context_window // 2)
-    preparation = prepare_branch_entries(entries, token_budget)
+    preparation = prepareBranchEntries(entries, token_budget)
 
     if not preparation.messages:
         return BranchSummaryResult(summary="No content to summarize")
@@ -212,16 +213,18 @@ async def generate_branch_summary(
 
     prompt_text = (
         "<conversation>\n"
-        f"{serialize_conversation(convertToLlm(preparation.messages))}\n"
+        f"{serializeConversation(convertToLlm(preparation.messages))}\n"
         f"</conversation>\n\n{instructions}"
     )
     # Uses the same summarization request path as compaction so provider
     # request behavior (timeouts, retries, attribution headers) stays consistent
     # without running through agent state/events. Retried via completeSummarization
     # so transient stream drops reuse the configured retry policy.
-    response = await complete_summarization(
+    maxTokens = min(4096, options.model.maxTokens if options.model.maxTokens > 0 else math.inf)
+
+    response = await completeSummarization(
         options.model,
-        normalize_context(
+        normalizeContext(
             Context(
                 systemPrompt=SUMMARIZATION_SYSTEM_PROMPT,
                 messages=[UserMessage(content=[{"type": "text", "text": prompt_text}], timestamp=_timestamp_ms())],
@@ -232,7 +235,7 @@ async def generate_branch_summary(
             headers=options.headers,
             env=options.env,
             signal=options.signal,
-            maxTokens=2048,
+            maxTokens=maxTokens,
             cacheRetention="none",
             sessionId=uuidv7(),
         ),
@@ -242,15 +245,15 @@ async def generate_branch_summary(
     )
     if response.stopReason == "aborted":
         return BranchSummaryResult(aborted=True)
-    failure = get_summarization_failure(response, "Branch summarization")
+    failure = getSummarizationFailure(response, "Branch summarization")
     if failure:
         return BranchSummaryResult(error=failure)
     if any(read_field(block, "type") == "toolCall" for block in response.content):
         return BranchSummaryResult(error="Branch summarization attempted to call a tool")
 
-    summary = _BRANCH_SUMMARY_PREAMBLE + _assistant_text(response)
-    file_lists = compute_file_lists(preparation.fileOps)
-    summary += format_file_operations(file_lists["readFiles"], file_lists["modifiedFiles"])
+    summary = _BRANCH_SUMMARY_PREAMBLE + contentText(response.content)
+    file_lists = computeFileLists(preparation.fileOps)
+    summary += formatFileOperations(file_lists["readFiles"], file_lists["modifiedFiles"])
     return BranchSummaryResult(
         summary=summary or "No summary generated",
         usage=response.usage,
@@ -259,7 +262,7 @@ async def generate_branch_summary(
     )
 
 
-def _get_message_from_entry(entry: SessionEntry) -> AgentMessage | None:
+def getMessageFromEntry(entry: SessionEntry) -> AgentMessage | None:
     entry_type = entry.get("type")
     if entry_type == "message":
         message = entry.get("message")
@@ -293,9 +296,6 @@ def _timestamp_ms() -> int:
     return int(time.time() * 1000)
 
 
-collectEntriesForBranchSummary = collect_entries_for_branch_summary
-generateBranchSummary = generate_branch_summary
-prepareBranchEntries = prepare_branch_entries
 
 __all__ = [
     "BranchPreparation",
@@ -305,9 +305,6 @@ __all__ = [
     "FileOperations",
     "GenerateBranchSummaryOptions",
     "collectEntriesForBranchSummary",
-    "collect_entries_for_branch_summary",
     "generateBranchSummary",
-    "generate_branch_summary",
     "prepareBranchEntries",
-    "prepare_branch_entries",
 ]

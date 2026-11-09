@@ -1,10 +1,26 @@
-"""Fuzzy matching helpers for command and file completion."""
+"""Translated from pi-tui's ``fuzzy.ts`` (v1.1.0).
+
+Fuzzy matching utilities.
+Matches if all query characters appear in order (not necessarily consecutive).
+Lower score = better match.
+
+MISAKA fork: positions and lengths count UTF-16 code units, as upstream's do (the strings are matched in their UTF-16
+form), so scores agree for text with characters outside the BMP.
+"""
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
+
+from misaka.utils import js_regexp
+from misaka.utils.js import jsTrim, toUtf16Units
+from misaka.utils.js_regexp import RegExp
+
+_WORD_BOUNDARY = RegExp(r"[\s\-_./:]")
+_ALPHA_NUMERIC = RegExp(r"^(?<letters>[a-z]+)(?<digits>[0-9]+)$")
+_NUMERIC_ALPHA = RegExp(r"^(?<digits>[0-9]+)(?<letters>[a-z]+)$")
+_TOKEN_SEPARATOR = RegExp(r"[\s/]+")
 
 
 @dataclass(slots=True)
@@ -14,98 +30,114 @@ class FuzzyMatch:
 
 
 def fuzzyMatch(query: str, text: str) -> FuzzyMatch:
-    query_lower = query.lower()
-    text_lower = text.lower()
+    queryLower = toUtf16Units(query.lower())
+    textLower = toUtf16Units(text.lower())
 
-    def match_query(normalized_query: str) -> FuzzyMatch:
-        if len(normalized_query) == 0:
+    def matchQuery(normalizedQuery: str) -> FuzzyMatch:
+        if len(normalizedQuery) == 0:
             return FuzzyMatch(matches=True, score=0)
 
-        if len(normalized_query) > len(text_lower):
+        if len(normalizedQuery) > len(textLower):
             return FuzzyMatch(matches=False, score=0)
 
-        query_index = 0
-        score = 0.0
-        last_match_index = -1
-        consecutive_matches = 0
+        queryIndex = 0
+        score: float = 0
+        lastMatchIndex = -1
+        consecutiveMatches = 0
 
-        for index, char in enumerate(text_lower):
-            if query_index >= len(normalized_query):
+        while queryIndex < len(normalizedQuery):
+            i = textLower.find(normalizedQuery[queryIndex], lastMatchIndex + 1)
+            if i == -1:
                 break
-            if char != normalized_query[query_index]:
-                continue
 
-            is_word_boundary = index == 0 or bool(re.match(r"[\s\-_./:]", text_lower[index - 1]))
+            isWordBoundary = i == 0 or _WORD_BOUNDARY.test(textLower[i - 1])
 
-            if last_match_index == index - 1:
-                consecutive_matches += 1
-                score -= consecutive_matches * 5
+            # Reward consecutive matches
+            if lastMatchIndex == i - 1:
+                consecutiveMatches += 1
+                score -= consecutiveMatches * 5
             else:
-                consecutive_matches = 0
-                if last_match_index >= 0:
-                    score += (index - last_match_index - 1) * 2
+                consecutiveMatches = 0
+                # Penalize gaps
+                if lastMatchIndex >= 0:
+                    score += (i - lastMatchIndex - 1) * 2
 
-            if is_word_boundary:
+            # Reward word boundary matches
+            if isWordBoundary:
                 score -= 10
 
-            score += index * 0.1
-            last_match_index = index
-            query_index += 1
+            # Slight penalty for later matches
+            score += i * 0.1
 
-        if query_index < len(normalized_query):
+            lastMatchIndex = i
+            queryIndex += 1
+
+        if queryIndex < len(normalizedQuery):
             return FuzzyMatch(matches=False, score=0)
 
-        if normalized_query == text_lower:
+        if normalizedQuery == textLower:
             score -= 100
 
         return FuzzyMatch(matches=True, score=score)
 
-    primary_match = match_query(query_lower)
-    if primary_match.matches:
-        return primary_match
+    primaryMatch = matchQuery(queryLower)
+    if primaryMatch.matches:
+        return primaryMatch
 
-    alpha_numeric_match = re.fullmatch(r"(?P<letters>[a-z]+)(?P<digits>[0-9]+)", query_lower)
-    numeric_alpha_match = re.fullmatch(r"(?P<digits>[0-9]+)(?P<letters>[a-z]+)", query_lower)
-    swapped_query = ""
-    if alpha_numeric_match is not None:
-        swapped_query = f"{alpha_numeric_match.group('digits')}{alpha_numeric_match.group('letters')}"
-    elif numeric_alpha_match is not None:
-        swapped_query = f"{numeric_alpha_match.group('letters')}{numeric_alpha_match.group('digits')}"
+    alphaNumericMatch = js_regexp.match(queryLower, _ALPHA_NUMERIC)
+    numericAlphaMatch = js_regexp.match(queryLower, _NUMERIC_ALPHA)
+    alphaNumericGroups = getattr(alphaNumericMatch, "groups", None) or {}
+    numericAlphaGroups = getattr(numericAlphaMatch, "groups", None) or {}
+    swappedQuery = (
+        f"{alphaNumericGroups.get('digits') or ''}{alphaNumericGroups.get('letters') or ''}"
+        if alphaNumericMatch
+        else f"{numericAlphaGroups.get('letters') or ''}{numericAlphaGroups.get('digits') or ''}"
+        if numericAlphaMatch
+        else ""
+    )
 
-    if not swapped_query:
-        return primary_match
+    if not swappedQuery:
+        return primaryMatch
 
-    swapped_match = match_query(swapped_query)
-    if not swapped_match.matches:
-        return primary_match
+    swappedMatch = matchQuery(swappedQuery)
+    if not swappedMatch.matches:
+        return primaryMatch
 
-    return FuzzyMatch(matches=True, score=swapped_match.score + 5)
+    return FuzzyMatch(matches=True, score=swappedMatch.score + 5)
 
 
-def fuzzyFilter[T](items: list[T], query: str, get_text: Callable[[T], str]) -> list[T]:
-    if not query.strip():
+def fuzzyFilter[T](items: list[T], query: str, getText: Callable[[T], str]) -> list[T]:
+    """Filter and sort items by fuzzy match quality (best matches first).
+    Supports whitespace- and slash-separated tokens: all tokens must match.
+    """
+    if not jsTrim(query):
         return items
 
-    tokens = [token for token in re.split(r"[\s/]+", query.strip()) if token]
-    if not tokens:
+    tokens = [t for t in js_regexp.split(jsTrim(query), _TOKEN_SEPARATOR) if len(t) > 0]
+
+    if len(tokens) == 0:
         return items
 
     results: list[tuple[T, float]] = []
+
     for item in items:
-        text = get_text(item)
-        total_score = 0.0
-        all_match = True
+        text = getText(item)
+        totalScore: float = 0
+        allMatch = True
+
         for token in tokens:
             match = fuzzyMatch(token, text)
-            if not match.matches:
-                all_match = False
+            if match.matches:
+                totalScore += match.score
+            else:
+                allMatch = False
                 break
-            total_score += match.score
-        if all_match:
-            results.append((item, total_score))
 
-    results.sort(key=lambda pair: pair[1])
-    return [item for item, _score in results]
+        if allMatch:
+            results.append((item, totalScore))
+
+    results.sort(key=lambda r: r[1])
+    return [item for item, _totalScore in results]
 
 
 __all__ = ["FuzzyMatch", "fuzzyFilter", "fuzzyMatch"]

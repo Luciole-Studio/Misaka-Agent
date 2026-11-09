@@ -18,8 +18,8 @@ waits for the turn to end and goes in as the next one; a turn is never cancelled
 message (raven's rule). Ctrl-C in the pane cancels the turn and the card stays running.
 
 Two hosts: ``misaka ally-card`` in a daemon pane (the daemon claimed the card and hands the claim
-over in the environment, as for ``card-shell``), and ``dispatch.run_task`` in process for headless
-research. In process nobody types, so an attempt that goes idle without completing is over and
+over in the environment, as for ``card-shell``), and ``dispatch.run_task`` in process for a headless
+workflow. In process nobody types, so an attempt that goes idle without completing is over and
 its dispatcher settles it.
 """
 from __future__ import annotations
@@ -49,6 +49,7 @@ from misaka.core.network.ally.transcript import Transcript
 from misaka.core.platform import tasks as db
 
 PROGRESS_SECONDS = 60       # how often a busy ally stamps progress on its card (as a Sister does)
+UNSETTLED_GRACE_SECONDS = 30   # how long a card told it is still running may wait with nothing typed or mailed
 CANCEL_SECONDS = 10         # how long a cancelled turn has to end before its agent is stopped
 PREVIEW_CHARS = 160
 
@@ -79,13 +80,16 @@ def _preview(text):
 
 
 class Attempt:
-    """One claimed attempt at an ally's card. ``out`` is the pane's terminal; None in process."""
+    """One claimed attempt at an ally's card. ``out`` is the pane's terminal; None in process.
+    With ``consult`` -- ``(run_id, lock)`` -- it is instead a finished card answering a message
+    (``tasks.start_consultation``): no claim, and the card stays as it is."""
 
-    def __init__(self, task, generation, claim_lock, *, db_path, out=None):
+    def __init__(self, task, generation, claim_lock, *, db_path, out=None, consult=None):
         self.task = task
         self.task_id, self.name = task["id"], task["assignee"]
         self.workspace = db.workspace_for(task)
         self.generation, self.claim_lock = int(generation), claim_lock
+        self.consult = consult
         self.db_path, self.out = os.path.expanduser(db_path), out
         self.space = os.environ.get("MISAKA_NET_SPACE") or None
         self.con = db.connect(db_path)
@@ -103,6 +107,7 @@ class Attempt:
         self._progressed = False        # an update came since the last progress stamp
         self._midline = False
         self._held = self._nudged = self._continued = False
+        self._idle_ends = False         # the wait after this turn ends the attempt unsettled (``idle``)
 
     # -- the pane --
 
@@ -190,7 +195,8 @@ class Attempt:
                "MISAKA_USAGE_DB": self.db_path,
                "MISAKA_USAGE_TASK_ID": self.task_id,
                "MISAKA_USAGE_GENERATION": str(self.generation),
-               "MISAKA_USAGE_CLAIM_LOCK": self.claim_lock,
+               **({worker.CONSULT_RUN_ENV: self.consult[0], worker.CONSULT_LOCK_ENV: self.consult[1]}
+                  if self.consult is not None else {"MISAKA_USAGE_CLAIM_LOCK": self.claim_lock}),
                "MISAKA_ALLY_SESSION": self.transcript.session_id,
                "MISAKA_WORKSPACE": self.workspace}
         if self.space:
@@ -256,7 +262,8 @@ class Attempt:
             db.set_runtime(self.con, self.task_id, self.acp_session, manager.getSessionFile(),
                            generation=self.generation, claim_lock=self.claim_lock)
             worker.record_output_baseline(self.con, row)
-        await asyncio.to_thread(record)
+        if self.consult is None:           # a consultation changes nothing the claim fences
+            await asyncio.to_thread(record)
 
         from misaka.core import session_catalog
         from misaka.core.network.wiring import panel
@@ -284,10 +291,22 @@ class Attempt:
     # -- the board --
 
     def _owned(self):
-        """The card, its lease renewed, while this attempt still holds it; else None."""
+        """The card, its lease renewed, while this attempt still holds it; else None. For a
+        consultation: the finished card, while the consultation runs."""
+        if self.consult is not None:
+            run = db.get_run(self.con, self.consult[0])
+            row = db.get(self.con, self.task_id)
+            if (run is None or run["status"] != "running" or run["claim_lock"] != self.consult[1]
+                    or row is None or row["status"] not in db.CONSULTABLE
+                    or int(row["generation"]) != self.generation):
+                return None
+            db.heartbeat_consultation(self.con, *self.consult)
+            return row
         return worker.owned_card(self.con, self.task_id, self.generation, self.claim_lock)
 
     def _still_mine(self):
+        if self.consult is not None:
+            return self._owned() is not None
         row = db.get(self.con, self.task_id)
         return (row is not None and row["status"] == "running" and int(row["generation"]) == self.generation
                 and row["claim_lock"] == self.claim_lock)
@@ -305,6 +324,9 @@ class Attempt:
         return messages.render_mail(mine) if mine else None
 
     def _fail(self, reason, kind):
+        if self.consult is not None:
+            messages.settle_consultation(self.con, *self.consult, "failed", reason=reason)
+            return
         if db.add_event(self.con, self.task_id, "failed", {"reason": reason},
                         generation=self.generation, claim_lock=self.claim_lock):
             db.mark_failed(self.con, self.task_id, generation=self.generation, claim_lock=self.claim_lock,
@@ -342,7 +364,7 @@ class Attempt:
         """One ACP turn; returns ``(stopReason, error)``."""
         self.transcript.user(text)
         self._print(f"› {_preview(text)}")
-        self.busy, self._progressed = True, True
+        self.busy, self._progressed, self._idle_ends = True, True, False
         await self._announce("agent_start")
         stamper = asyncio.create_task(self._stamp())
         error = None
@@ -384,6 +406,14 @@ class Attempt:
         row = await asyncio.to_thread(self._owned)
         if row is None:
             raise _Over                   # stopped, parked for input, or reclaimed
+        if self.consult is not None:
+            # Answered. What the turn changed is declared again (a Sister's _redeclare_if_done).
+            from misaka.core.network import dispatch
+            if row["status"] == "done":
+                await asyncio.to_thread(dispatch.redeclare, self.con, row)
+            await asyncio.to_thread(messages.settle_consultation, self.con, *self.consult, "done")
+            self._print(f"[card {self.task_id} answered]")
+            raise _Over
         summary = await asyncio.to_thread(worker.declared_completion, self.con, row)
         if summary is not None:
             try:
@@ -399,6 +429,7 @@ class Attempt:
             self._print(f"[card {self.task_id} submitted]")
             raise _Over
         if self._held:
+            self._idle_ends = True
             return None
         self._held = True
         missing = worker.missing_deliverable(row)
@@ -413,14 +444,24 @@ class Attempt:
         return text or None
 
     async def idle(self):
-        """Wait for the next turn's text: a typed line or mail. None ends the attempt."""
+        """Wait for the next turn's text: a typed line or mail. None ends the attempt. After the
+        card's one notice that it is still running, a wait that brings neither for
+        ``UNSETTLED_GRACE_SECONDS`` ends the attempt unsettled, as in process (``dispatch._run_ally``)
+        and as a Sister's pane does (``todo.TodoPart._watch_idle``)."""
         if self.out is None:
             return await asyncio.to_thread(self._take_mail)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + UNSETTLED_GRACE_SECONDS if self._idle_ends else None
         while not self.stopping:
             if text := self._typed() or await asyncio.to_thread(self._take_mail):
                 return text
             if not await asyncio.to_thread(self._still_mine):
                 return None
+            if deadline is not None and loop.time() >= deadline:
+                row = await asyncio.to_thread(self._owned)
+                if row is None:
+                    return None
+                raise _Failed(worker.unsettled_reason(row), "protocol_violation")
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.wake.wait(), messages.POLL_SECONDS)
         return None
@@ -455,25 +496,28 @@ class Attempt:
 
 
 def _first_prompt(task, *, loaded, say, earlier):
-    """A message to a session that has the card goes in alone, as ``card-shell --resume --say``
+    """A message to a session that has the card goes in alone, as ``card-shell --resume --say-file``
     sends it; otherwise the contract, after the conversation the agent does not have, if any."""
     if loaded and say is not None:
         return say
     contract = worker.card_prompt(task)
-    if task.get("_research"):
+    if task.get("_owner_context"):
         # A Sister has this in her system prompt; ACP has none, so it opens the conversation.
-        from misaka.core.research.planner import RESEARCH_SISTER_DISCIPLINE
-        contract = RESEARCH_SISTER_DISCIPLINE + "\n" + contract
+        from misaka.core.platform import owners
+        owner = owners.named(task.get("_owner"))
+        if owner is not None:
+            contract = owner.card_discipline(task["_owner_context"]) + "\n" + contract
     if earlier:
         contract = EARLIER.format(path=earlier) + "\n\n" + contract
     return contract + (f"\n\n## Message\n{say}" if say is not None else "")
 
 
-async def run_attempt(task, generation, claim_lock, *, db_path, say=None, out=None):
+async def run_attempt(task, generation, claim_lock, *, db_path, say=None, out=None, consult=None):
     """Run one claimed attempt at an ally's card until it settles, fails, or leaves this claim.
     ``task`` is the card as ``worker.card_prompt`` reads it; ``say`` continues the card with a
-    message; ``out`` is the pane's terminal (None in process), whose keys reach the attempt."""
-    attempt = Attempt(task, generation, claim_lock, db_path=db_path, out=out)
+    message; ``out`` is the pane's terminal (None in process), whose keys reach the attempt.
+    ``consult`` -- ``(run_id, lock)`` -- runs a finished card's answer to a message instead."""
+    attempt = Attempt(task, generation, claim_lock, db_path=db_path, out=out, consult=consult)
     if out is not None:
         loop = asyncio.get_running_loop()
         if sys.platform == "win32":
@@ -522,8 +566,9 @@ def _read_lines(loop, deliver):
         loop.add_reader(fd, ready)
 
 
-def launch(task_id, say=None):
-    """``misaka ally-card``: the daemon claimed the card for this pane (``MISAKA_USAGE_*``)."""
+def launch(task_id, say=None, consult=False):
+    """``misaka ally-card``: the daemon claimed the card for this pane (``MISAKA_USAGE_*``), or
+    with ``consult`` opened a consultation of the finished card (``MISAKA_CONSULT_*``)."""
     from misaka.core.platform import cards as card_files
 
     with contextlib.closing(db.connect(CFG["db"])) as con:
@@ -531,9 +576,19 @@ def launch(task_id, say=None):
         if row is None:
             sys.exit(f"Card not found: {task_id}")
         task = {**dict(row), "_handoffs": worker.card_handoffs(con, row), **worker.card_extras(con, row)}
-    generation, claim_lock = worker.claim_env(task_id)
-    if generation is None or task["claim_lock"] != claim_lock or int(task["generation"]) != generation:
-        sys.exit(f"Card {task_id} is not claimed by this pane; the daemon owns the claim.")
+    consultation = None
+    if consult:
+        generation, run_id, lock = worker.consult_env(task_id)
+        with contextlib.closing(db.connect(CFG["db"])) as con:
+            run = db.get_run(con, run_id) if run_id else None
+        if (not say or run is None or run["status"] != "running" or generation != int(task["generation"])
+                or task["status"] not in db.CONSULTABLE):
+            sys.exit(f"Card {task_id}: no consultation of this finished card is open for this pane.")
+        claim_lock, consultation = None, (run_id, lock)
+    else:
+        generation, claim_lock = worker.claim_env(task_id)
+        if generation is None or task["claim_lock"] != claim_lock or int(task["generation"]) != generation:
+            sys.exit(f"Card {task_id} is not claimed by this pane; the daemon owns the claim.")
     workspace = db.workspace_for(task)
     if not os.path.isdir(workspace):
         sys.exit(f"Card {task_id}: its folder {workspace} no longer exists.")
@@ -542,4 +597,5 @@ def launch(task_id, say=None):
     from misaka.utils import loop_watchdog
     loop_watchdog.configure(f"card-{task_id}", exit_on_stall=True)
     asyncio.run(loop_watchdog.watched(
-        run_attempt(task, generation, claim_lock, db_path=CFG["db"], say=say, out=sys.stdout)))
+        run_attempt(task, generation, claim_lock, db_path=CFG["db"], say=say, out=sys.stdout,
+                    consult=consultation)))

@@ -8,18 +8,15 @@ import json
 
 import pytest
 
-from misaka.ai.utils.json_parse import (
-    StreamingArgs,
-    _escape_stray_quotes,
-    parse_json_with_repair,
-)
+from misaka.ai.utils._streaming_args import StreamingArgs
+from misaka.ai.utils.json_parse import _escape_stray_quotes, parseJsonWithRepair
 
 BROKEN = ('{"path": "IE_ireland.md", "edits": [{"oldText": "## 附：跨卡接口", '
           '"newText": "## ⑯bis\\n\\n用户的总问题要求"新秩序"如何运作。以"爱尔兰中立化"换取承认——列为"永久中立国"而非"盟国"。\\n\\n---"}]}')
 
 
 def test_the_real_payload_parses_with_the_quotes_kept_as_text():
-    value = parse_json_with_repair(BROKEN)
+    value = parseJsonWithRepair(BROKEN)
     new_text = value["edits"][0]["newText"]
     assert '要求"新秩序"如何运作' in new_text
     assert '以"爱尔兰中立化"换取' in new_text
@@ -30,7 +27,7 @@ def test_the_real_payload_parses_with_the_quotes_kept_as_text():
 def test_valid_json_is_never_touched():
     text = json.dumps({"a": "x \" y", "b": ["q", {"c": "d"}], "e": 1}, ensure_ascii=False)
     assert _escape_stray_quotes(text) == text
-    assert parse_json_with_repair(text) == json.loads(text)
+    assert parseJsonWithRepair(text) == json.loads(text)
 
 
 @pytest.mark.parametrize("text, expected", [
@@ -39,7 +36,7 @@ def test_valid_json_is_never_touched():
     ('{"a": "x", "b": "y "z""}', {"a": "x", "b": 'y "z"'}),
 ])
 def test_stray_quote_shapes(text, expected):
-    assert parse_json_with_repair(text) == expected
+    assert parseJsonWithRepair(text) == expected
 
 
 def test_a_streamed_call_with_stray_quotes_now_executes():
@@ -50,4 +47,4 @@ def test_a_streamed_call_with_stray_quotes_now_executes():
 
 def test_genuinely_broken_json_still_raises():
     with pytest.raises(json.JSONDecodeError):
-        parse_json_with_repair('{"a": [1, 2')
+        parseJsonWithRepair('{"a": [1, 2')

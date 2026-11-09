@@ -7,11 +7,12 @@ import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from misaka.config import profiles
+from misaka.core.network.card_contract import Finding
+from misaka.core.platform import owners
 from misaka.core.platform import tasks as task_store
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.platform.session import run_coro, run_session
 from misaka.core.platform.vocabulary import MANAGEMENT_TOOLS
-from misaka.core.skills import sandbox as skill_sandbox
 from misaka.utils.paths import posix_relpath
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ MAX_ARTIFACT_PATH_CHARS = 1_024
 
 
 def over_cap(usage_db, task_id, cap):
-    """Whether the research run ``task_id`` belongs to has spent ``cap``: a card is not started then."""
+    """Whether the scope ``task_id`` belongs to has spent ``cap``: a card is not started then."""
     from misaka.core.platform import budget
     cap = budget.default_cap() if cap is None else int(cap or 0)
     if not usage_db or not task_id or not cap:
@@ -34,7 +35,7 @@ def budget_cap_reason():
 
 
 def stopped_at_cap(error):
-    """Whether a run ended because a request did not fit under ``research.token_cap``."""
+    """Whether a run ended because a request did not fit under the token cap."""
     from misaka.core.platform import budget
     return budget.EXHAUSTED_MESSAGE in str(error or "")
 
@@ -49,7 +50,8 @@ COMPLETION_INSTRUCTIONS = """
   report progress. A card whose contract names a deliverable cannot be completed until that file exists there.
 - Put deliverables in the requested location: files written into the card's output directory are collected
   automatically.
-- On a research card, record final evidence-backed findings and concrete uncertainties with `misaka_card_note`.
+- When the card asks for findings, record final evidence-backed findings and concrete uncertainties with
+  `misaka_card_note`.
 """
 
 
@@ -102,6 +104,33 @@ def claim_env(task_id):
         return int(generation), claim_lock
     except ValueError:
         return None, None
+
+
+CONSULT_RUN_ENV, CONSULT_LOCK_ENV = "MISAKA_CONSULT_RUN", "MISAKA_CONSULT_LOCK"
+
+
+def consult_env(task_id):
+    """``(generation, run_id, lock)`` of the consultation this process was started to answer
+    (``tasks.start_consultation``), or ``(None, None, None)``. The daemon hands it over as it
+    hands a claim; the card's generation is the one being consulted, and stays."""
+    owner = os.environ.get("MISAKA_USAGE_TASK_ID")
+    generation = os.environ.get("MISAKA_USAGE_GENERATION")
+    run_id, lock = os.environ.get(CONSULT_RUN_ENV), os.environ.get(CONSULT_LOCK_ENV)
+    if owner != task_id or not generation or not run_id or not lock:
+        return None, None, None
+    try:
+        return int(generation), run_id, lock
+    except ValueError:
+        return None, None, None
+
+
+def attempt_env(task_id):
+    """``(generation, claim_lock)`` this process works ``task_id`` under: its claim, or for a
+    consultation the consulted generation with no claim (``claim_lock`` None)."""
+    generation, claim_lock = claim_env(task_id)
+    if generation is not None:
+        return generation, claim_lock
+    return consult_env(task_id)[0], None
 
 
 def owned_card(con, task_id, generation, claim_lock):
@@ -163,11 +192,21 @@ def missing_deliverable(task):
     return None if name is None or deliverable_path(task, name) else name
 
 
+def unsettled_reason(task, refused=None):
+    """Why an attempt told once that its card is still running ended unsettled when it went idle
+    again (a Sister's ``todo.TodoPart._watch_idle``, an ally's ``Attempt.idle``). The next
+    attempt reads it in its contract (``card_prompt``)."""
+    reason = ("the turn after the notice that the card was still running ended again without "
+              "`misaka_card_complete`, and nothing was left to wake the session")
+    if missing := missing_deliverable(task):
+        reason += f"; the deliverable `{missing}` is not under `{task['output_dir']}`"
+    if refused:
+        reason += f"; `misaka_card_complete` last answered: {refused}"
+    return reason
+
+
 def deliverable_path(task, name):
-    """The delivered file for contract name ``name`` under the card's output directory, or None.
-    The Sister's file may differ from the contract name in a character or two: Last Order's
-    plans misspell names (2026-09-28: 莱茅邦联 for 莱茵邦联, 狂太 for 犹太), and holding her to the
-    misspelling only made her copy the file under it."""
+    """The delivered file for contract name ``name`` under the card's output directory, or None."""
     output_dir = _card_field(task, "output_dir")
     if not output_dir:
         return None
@@ -176,15 +215,10 @@ def deliverable_path(task, name):
         workspace = _card_field(task, "workspace")
         if workspace:
             root.relative_to(Path(workspace).resolve(strict=True))
-        candidates = [name] + sorted(
-            entry for entry in os.listdir(root)
-            if entry != name and len(entry) == len(name) and os.path.splitext(entry)[1] == os.path.splitext(name)[1]
-            and sum(a != b for a, b in zip(entry, name, strict=True)) <= 2)
-        for candidate in candidates:
-            path = (root / candidate).resolve(strict=True)
-            path.relative_to(root)  # a symlink outside this card is not its deliverable
-            if path.is_file() and path.stat().st_size > 0:
-                return path
+        path = (root / name).resolve(strict=True)
+        path.relative_to(root)  # a symlink outside this card is not its deliverable
+        if path.is_file() and path.stat().st_size > 0:
+            return path
     except (OSError, RuntimeError, ValueError):
         pass
     return None
@@ -284,26 +318,33 @@ def materials_on_hand(workspace):
 
 
 def card_extras(con, task, cfg=None, *, include_materials=True):
-    """Research/material context shared by every card entry point.
+    """A workflow's context and the materials on hand, shared by every card entry point.
 
     Who else is on the board reaches a session through its system prompt's routing catalog,
     never through the task body. Restore paths can skip materials they will not publish,
     avoiding unrelated filesystem reads.
     """
-    extras = {"_research": None, "_materials": "", "_session_overrides": {}}
-    with contextlib.suppress(Exception):   # a board without the research schema is an ordinary board
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_run_tasks'").fetchone():
-            row = con.execute("SELECT run_id, branch_id, kind FROM research_run_tasks WHERE task_id=?",
-                              (task["id"],)).fetchone()
-            if row is not None:
-                extras["_research"] = dict(row)
-                from misaka.core.research import runs
-
-                # The run's own compaction threshold and output limit, when it chose them.
-                extras["_session_overrides"] = runs.session_overrides(runs.get(con, row["run_id"]))
+    extras = {"_owner_context": None, "_owner": None, "_materials": "", "_session_overrides": {}}
+    with contextlib.suppress(Exception):   # a board a workflow has never touched is an ordinary board
+        owner, context = owners.card(con, task["id"])
+        if owner is not None:
+            extras["_owner_context"], extras["_owner"] = context, owner.name
+            extras["_session_overrides"] = owner.session_overrides(con, context)
     if include_materials:
         extras["_materials"] = materials_on_hand(task["workspace"])
     return extras
+
+
+def _delivers_there(task):
+    """Whether the card is told about its output folder: a workflow's cards are, and so is a card whose
+    contract names a file. Any other card works in the project, and a folder it never asked for would
+    only draw its new files away from where they belong."""
+    if task["output_dir"] != task_store.card_output_dir(task["workspace"], task["id"]):
+        return True
+    try:
+        return contract_deliverable(task) is not None
+    except ValueError:
+        return True
 
 
 def card_prompt(task):
@@ -332,10 +373,13 @@ def card_prompt(task):
         body += "\n\n## Task attachments\n" + "\n".join(lines)
     if materials := task.get("_materials"):
         body += "\n\n## Materials already in this workspace\n" + materials
-    if output_dir := task.get("output_dir"):
+    if (output_dir := task.get("output_dir")) and _delivers_there(task):
         body += (
             "\n\n## Deliverable location\n"
-            f"Write every new deliverable under `{output_dir}`. Files there are recorded automatically."
+            f"Write every new deliverable under `{output_dir}`. Files there are recorded automatically.\n"
+            "The project's searchable documents take what stands directly in that folder or under its "
+            "`sources/` and `reports/`, and PDF, DjVu, EPUB and Office files anywhere in it. Put a transcription "
+            "or reading report others should find under `reports/`, and working files in any other folder."
         )
     if failure := task.get("last_failure_error"):
         body += (
@@ -387,7 +431,7 @@ def _output_files(root, workspace):
     board's own folders are not deliverables."""
     out = []
     for base, dirs, files in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in ("cards", "research", "node_modules"))
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in ("cards", "node_modules"))
         out.extend(posix_relpath(os.path.join(base, name), workspace)
                    for name in sorted(files) if not name.startswith("."))
     return out
@@ -398,7 +442,7 @@ def _output_snapshot(task, root):
     output_dir = task.get("output_dir")
     if not output_dir:
         return {}
-    from misaka.utils.paths import get_file_revision
+    from misaka.utils.paths import getFileRevision
 
     output = Path(output_dir).resolve()
     output.relative_to(root)
@@ -407,7 +451,7 @@ def _output_snapshot(task, root):
     snapshot = {}
     for value in _output_files(str(output), str(root)):
         relative = _artifact(root, value)
-        revision = get_file_revision(str(root / relative)) if relative else None
+        revision = getFileRevision(str(root / relative)) if relative else None
         if revision is not None:
             snapshot[relative] = list(revision)
     return snapshot
@@ -494,10 +538,9 @@ def build_submission(con, task, summary):
 
     # Notes append material. Only critique issues are a complete snapshot (below).
     # Never let an uncertainty-only note erase the findings recorded earlier.
-    from misaka.core.research.ledger import Finding
     findings, uncertain = [], []
     for event in con.execute(
-        "SELECT payload FROM events WHERE task_id=? AND kind='research_evidence' "
+        "SELECT payload FROM events WHERE task_id=? AND kind='card_evidence' "
         "AND generation=? ORDER BY id", (task["id"], task["generation"]),
     ):
         evidence = json.loads(event["payload"])
@@ -516,26 +559,9 @@ def build_submission(con, task, summary):
         "uncertain": uncertain,
         "findings": findings,
     }
-    # Typed tool data, frozen with the card's completion. Never reopen a model-written JSON file.
-    critique = attempt_payload(con, task, "research_critique")
-    if critique is not None:
-        submission["issues"] = critique["issues"]
-    divergence = attempt_payload(con, task, "research_divergence")
-    if divergence is not None:
-        submission["alternatives"] = divergence["alternatives"]
-    if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_run_tasks'").fetchone():
-        link = con.execute("SELECT kind FROM research_run_tasks WHERE task_id=?", (task["id"],)).fetchone()
-        from misaka.core.research import runs
-        if link and link["kind"] in runs.CRITIQUE_KINDS and "issues" not in submission:
-            raise IncompleteSubmission(
-                "Record the red-team issues with misaka_card_note before completing the card "
-                "(issues=[] if none)."
-            )
-        if link and link["kind"] == "divergence" and "alternatives" not in submission:
-            raise IncompleteSubmission(
-                "Record the alternatives with misaka_card_note before completing the card "
-                "(alternatives=[] if none)."
-            )
+    owner, context = owners.card(con, task["id"])
+    if owner is not None:
+        owner.submission(con, task, context, submission, lambda kind: attempt_payload(con, task, kind))
     return submission
 
 
@@ -549,21 +575,17 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
     prompt = card_prompt(task)
 
     role = profiles.role_of(profile_dir)
-    # The engine has no skill loading of its own; the skills extension reads the
-    # card's sandbox (SessionSpec.skill_roots) and nothing else.
     from misaka.config import sessions as session_roots
 
     # New cards follow saved thinking defaults; resumed cards keep their native setting.
     flags = ["--session-dir", session_roots.card_session_dir(task)]
     if model:
         flags += ["--model", model]
-    ro_root = os.path.join(state_dir, ".skills-ro")
     sender = role.rsplit("/", 1)[-1]
     from misaka.core.wiring import SessionSpec, assemble, spec_overrides
 
     kind = "beast" if beast else "card"
     delegates = not profiles.is_last_order(profile_dir)
-    skill_roots = None
     if beast:
         # Beast mode gets no builtin tools: with DELEGATE it keeps only the child-management
         # tools, otherwise none (Last Order has no DELEGATE, so it runs tool-less).
@@ -571,11 +593,9 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
             flags += ["-t", ",".join(MANAGEMENT_TOOLS)]
         else:
             flags += ["-nt"]
-    else:
-        # Regular cards run against read-only copies of the role's skill stack: skills are
-        # read-only at run time (constitution), and a card never sees the live tree.
-        skill_sandbox.snapshot_stack(profile_dir, workspace, ro_root)
-        skill_roots = (("sandbox", ro_root),)
+        # A `-t` list without `mcp__` entries keeps MCP tools registered (pi 1.0.4); a wrap-up turn
+        # starts no MCP servers at all.
+        flags.append("--no-mcp")
     assembly = assemble(SessionSpec(
         profile_dir=profile_dir,
         role=role,
@@ -585,14 +605,13 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         receive_messages=True,          # a card hears Last Order (and her Sisters) at its next tool boundary
         task_id=task.get("id"),
         tool_ceiling=MANAGEMENT_TOOLS if beast and delegates else None,
-        skill_roots=skill_roots,
-        research_context=bool(task.get("_research")),
+        workflow_context=bool(task.get("_owner_context")),
         overrides=spec_overrides(task.get("_session_overrides")),
     ))
     from misaka.config import identity
     for section in identity.base_prompt_sources(profile_dir, role):
         flags += ["--append-system-prompt", section]
-    return flags, assembly, prompt, ro_root, role
+    return flags, assembly, prompt, role
 
 
 def continue_flags(session_file, session_dir):
@@ -631,12 +650,12 @@ def run_card(
 ):
     """Run one task card; its session lifecycle finalizes the board row."""
     task_id = task.get("id") if isinstance(task, dict) else None
-    flags, assembly, prompt, ro_root, role = card_session_setup(
+    flags, assembly, prompt, role = card_session_setup(
         task, workspace, profile_dir, provider, default_model
     )
     if task.get("_say") is not None:
         # A settled card continued with a message (``dispatch.run_task(say=...)``): the turn goes on
-        # in her own conversation and is the message alone, as ``card-shell --resume --say`` is in
+        # in her own conversation and is the message alone, as ``card-shell --resume --say-file`` is in
         # a pane -- the contract she already worked from is not sent again.
         from misaka.config import sessions as session_roots
         flags += continue_flags(task.get("session_file"), session_roots.card_session_dir(task)) or []
@@ -649,8 +668,6 @@ def run_card(
            "MISAKA_MCP_ROLE": role,
            "MISAKA_WORKSPACE": workspace,
            "MISAKA_TASK_OUTPUT_DIR": str(task.get("output_dir") or workspace)}
-    if os.path.isdir(ro_root):
-        env["MISAKA_SKILL_SANDBOX"] = ro_root    # nested agents pin the same read-only skill snapshot
     if usage_db and task_id and usage_generation is not None:
         env.update({
             "MISAKA_USAGE_DB": str(usage_db),
@@ -661,14 +678,9 @@ def run_card(
         if usage_claim_lock:
             env["MISAKA_USAGE_CLAIM_LOCK"] = str(usage_claim_lock)
     if over_cap(usage_db, task_id, usage_token_cap):
-        skill_sandbox.cleanup(ro_root)
         return {"ok": False, "reason": budget_cap_reason(), "exit_code": 0, "budget_stop": True}
-    r = None
-    try:
-        r = run_coro(run_session(flags, prompt, workspace, on_event=on_event, timeout=None,
-                                 assembly=assembly, env=env))
-    finally:
-        skill_sandbox.cleanup(ro_root)          # the read-only copies go with the run, however it ended
+    r = run_coro(run_session(flags, prompt, workspace, on_event=on_event, timeout=None,
+                             assembly=assembly, env=env))
 
     row = task_store.get(con, task_id) if con is not None and task_id else None
     if row is not None and row["status"] != "running":

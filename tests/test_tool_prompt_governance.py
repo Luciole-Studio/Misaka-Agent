@@ -14,10 +14,10 @@ from misaka.core.documents.prompt import (
     WEB_EVIDENCE_GUIDELINE,
 )
 from misaka.core.documents.wiring import documents
-from misaka.core.system_prompt import build_system_prompt
+from misaka.core.system_prompt import buildSystemPrompt
 from misaka.core.tools import _office
 from misaka.core.tools.download_file import create_download_file_tool_definition
-from misaka.core.tools.office import create_office_tool_definition
+from misaka.core.tools.office import createOfficeToolDefinition
 from misaka.core.tools.web_fetch import create_web_fetch_tool_definition
 from misaka.core.web import extract
 from misaka.core.web import tool as web_search
@@ -32,7 +32,7 @@ class ToolPromptGovernanceTests(unittest.TestCase):
         collector = ToolCollector()
         for register in (documents.register, extract.register, web_search.register):
             register(collector)
-        for factory in (create_office_tool_definition, create_download_file_tool_definition,
+        for factory in (createOfficeToolDefinition, create_download_file_tool_definition,
                         create_web_fetch_tool_definition):
             collector.registerTool(factory(self.workspace))
         self.tools = {definition.name: definition for definition in collector.tools}
@@ -48,8 +48,8 @@ class ToolPromptGovernanceTests(unittest.TestCase):
             _toolRegistry=self.tools, _toolDefinitions=self.tools,
         )
         # pi 0.87: the rebuild sets the base options; the text is rendered from them.
-        AgentSession._rebuild_system_prompt(session, names)
-        return build_system_prompt(session._baseSystemPromptOptions)
+        AgentSession._rebuildSystemPrompt(session, names)
+        return buildSystemPrompt(session._baseSystemPromptOptions)
 
     def test_shared_rules_survive_standalone_tools_and_deduplicate(self):
         cases = (

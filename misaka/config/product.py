@@ -32,9 +32,9 @@ _KNOBS = {
 # Every knob ``setting()`` is asked for, by settings.json section and key, with the type its value
 # must fit (None: any JSON value). Defaults stay with the callers -- two of them are computed.
 KNOBS = {
+    ("documents", "mineru_tier"): str,
+    ("documents", "ocr_engine"): str,
     ("documents", "ocr_langs"): str,
-    ("mcp", "call_timeout"): float,
-    ("mcp", "init_timeout"): float,
     ("mcp", "required_wait"): float,
     ("network", "max_concurrent_per_sister"): int,
     ("network", "max_concurrent_sisters"): int,
@@ -42,7 +42,6 @@ KNOBS = {
     ("research", "beast_at"): float,
     ("research", "plan_approval"): bool,
     ("research", "token_cap"): int,
-    ("skills", "copy_cap_mb"): int,
     ("subagents", "agent_list_in_messages"): bool,
     ("subagents", "auto_background_tasks"): bool,
     ("subagents", "auto_memory"): bool,
@@ -112,6 +111,14 @@ def _fit(raw, cast):
         raise _Unfit(f"is not {kind}") from None
 
 
+def _checked(section, key, raw, cast):
+    """``raw`` as the knob's value, or ``_Unfit``: it must fit the type and be a word the knob knows."""
+    value = _fit(raw, cast)
+    if value not in ONE_OF.get((section, key), (value,)):
+        raise _Unfit(f"is not one of {', '.join(ONE_OF[section, key])}")
+    return value
+
+
 def setting(section: str, key: str, default, cast=None):
     """One product knob: ``settings.json[section][key]``, else ``default``. ``cast`` (int, float,
     bool or str) is applied to what the file holds. A value that does not fit was refused at
@@ -122,7 +129,7 @@ def setting(section: str, key: str, default, cast=None):
         return default
     raw = block[key]
     try:
-        return _fit(raw, cast)
+        return _checked(section, key, raw, cast)
     except _Unfit as error:
         if (section, key, repr(raw)) not in _warned:
             _warned.add((section, key, repr(raw)))
@@ -139,17 +146,22 @@ def validate_settings() -> list[str]:
         if not isinstance(block, dict) or key not in block:
             continue
         try:
-            value = _fit(block[key], cast)
+            value = _checked(section, key, block[key], cast)
         except _Unfit as error:
             errors.append(f"{section}.{key}={block[key]!r} {error}")
             continue
-        if (section, key) in _NOT_NEGATIVE and value < 0:
+        if (section, key) in NOT_NEGATIVE and value < 0:
             errors.append(f"{section}.{key}={block[key]!r} is negative (0 is none)")
     return errors
 
 
-# A negative cap stopped every research run at its start.
-_NOT_NEGATIVE = {("research", "token_cap")}
+# A negative cap stopped every research run at its start. The settings schema says so too (`minimum: 0`).
+NOT_NEGATIVE = {("research", "token_cap")}
+
+# A knob that takes one of a few words: a slip of the pen would otherwise read as some other choice
+# in silence. The settings schema says so too (`enum`).
+ONE_OF = {("documents", "mineru_tier"): ("advanced", "standard", "basic"),
+          ("documents", "ocr_engine"): ("auto", "mineru", "ocrmypdf")}
 
 
 def _models():

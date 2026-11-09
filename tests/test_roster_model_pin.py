@@ -31,13 +31,14 @@ def _pin(root: str, sid: str) -> dict:
 
 
 def test_the_menu_offers_provider_qualified_references(product_provider):
-    choices = roster.model_choices()
+    runtime = roster._runtime()
+    choices = roster.model_choices(runtime)
     assert choices[0] == roster.DEFAULT_CHOICE and choices[-1] == roster.CUSTOM_CHOICE
     concrete = choices[1:-1]
     assert concrete and any(item.startswith(f"{product_provider}/") for item in concrete)
     # Every menu entry is a valid pin as-is.
     for item in concrete:
-        assert roster.resolve_pin(item) == item
+        assert roster.resolve_pin(item, runtime) == item
 
 
 def test_an_invalid_pin_creates_nothing(tmp_path, product_provider):
@@ -56,14 +57,14 @@ def test_a_bare_id_pins_on_the_product_provider(tmp_path, product_provider):
 
 
 def test_a_gateway_id_with_slashes_pins_on_the_gateway_not_the_vendor(tmp_path, product_provider):
-    from misaka.ai.models import get_models, get_providers
+    from misaka.ai.compat import getModels, getProviders
 
     # A raw ID that exists on exactly one provider and whose first segment names another
     # real provider: the shape that used to be split and pinned to the vendor's account.
-    providers = set(get_providers())
+    providers = set(getProviders())
     owners: dict[str, set[str]] = {}
     for provider in providers:
-        for model in get_models(provider):
+        for model in getModels(provider):
             owners.setdefault(model.id, set()).add(provider)
     raw = next(
         model_id
@@ -89,7 +90,7 @@ def test_menu_includes_every_configured_provider(monkeypatch):
     models = [SimpleNamespace(provider="openai-codex", id="gpt-test"),
               SimpleNamespace(provider="google", id="gemini-test"),
               SimpleNamespace(provider="gateway", id="anthropic/claude-test")]
-    monkeypatch.setattr(roster, "_registry", lambda: SimpleNamespace(getAvailable=lambda: models))
+    runtime = SimpleNamespace(getAvailableSnapshot=lambda: models)
     monkeypatch.setattr(roster, "current_config", lambda: {"provider": "google"})
-    assert roster.model_choices() == [roster.DEFAULT_CHOICE, "gateway/anthropic/claude-test",
+    assert roster.model_choices(runtime) == [roster.DEFAULT_CHOICE, "gateway/anthropic/claude-test",
                                       "google/gemini-test", "openai-codex/gpt-test", roster.CUSTOM_CHOICE]

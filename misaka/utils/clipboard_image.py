@@ -1,35 +1,22 @@
-"""Clipboard image helpers."""
+"""Translated from pi's ``coding-agent/src/utils/clipboard-image.ts`` (v1.1.0)."""
 
 from __future__ import annotations
 
 import asyncio
 import os
-import selectors
-import subprocess
+import sys
 import tempfile
-import time
-from pathlib import Path
-from typing import Any, Protocol
-from uuid import uuid4
+import uuid
+from collections.abc import Mapping
+from io import BytesIO
+from typing import Any, TypedDict
 
 from PIL import Image
 
-from misaka.utils.clipboard_native import get_clipboard as _get_native_clipboard_backend
-from misaka.utils.exif_orientation import apply_exif_orientation
-
-SUPPORTED_IMAGE_MIME_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif")
-
-DEFAULT_LIST_TIMEOUT_MS = 1000
-DEFAULT_READ_TIMEOUT_MS = 3000
-DEFAULT_POWERSHELL_TIMEOUT_MS = 5000
-DEFAULT_MAX_BUFFER_BYTES = 50 * 1024 * 1024
-_READ_CHUNK_BYTES = 64 * 1024
-
-
-class _NativeClipboard(Protocol):
-    def has_image(self) -> bool: ...
-
-    async def get_image_binary(self) -> bytes | bytearray | list[int] | None: ...
+from misaka.ui.tui import native_platform
+from misaka.utils.clipboard_command import runClipboardCommand
+from misaka.utils.mime import detectSupportedImageMimeType
+from misaka.utils.wsl import isWSL
 
 
 class ClipboardImage:
@@ -37,30 +24,43 @@ class ClipboardImage:
         self.bytes = bytes
         self.mimeType = mimeType
 
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, ClipboardImage) and (self.bytes, self.mimeType) == (other.bytes, other.mimeType)
 
-class ReadClipboardImageOptions:
-    def __init__(self, *, env: dict[str, str] | None = None, platform: str | None = None) -> None:
-        self.env = env
-        self.platform = platform
-
-
-class _CommandResult:
-    def __init__(self, *, stdout: bytes, ok: bool) -> None:
-        self.stdout = stdout
-        self.ok = ok
+    def __repr__(self) -> str:
+        return f"ClipboardImage(mimeType={self.mimeType!r}, bytes={len(self.bytes)})"
 
 
-def is_wayland_session(env: dict[str, str] | None = None) -> bool:
-    resolved_env = env or os.environ
-    return bool(resolved_env.get("WAYLAND_DISPLAY")) or resolved_env.get("XDG_SESSION_TYPE") == "wayland"
+class _NoImage:
+    """MISAKA fork: pi's readers answer ``null`` (the backend has no image) or ``undefined`` (the backend failed).
+    Python has one null, so ``None`` plays ``undefined`` and this falsy marker plays ``null``: an empty Wayland
+    clipboard must not fall through to stale X11 clipboard contents."""
+
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return False
 
 
-def base_mime_type(mime_type: str) -> str:
-    return mime_type.split(";", 1)[0].strip().lower()
+NO_IMAGE = _NoImage()
+
+SUPPORTED_IMAGE_MIME_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif")
+
+DEFAULT_LIST_TIMEOUT_MS = 1000
+DEFAULT_POWERSHELL_TIMEOUT_MS = 5000
 
 
-def extension_for_image_mime_type(mime_type: str) -> str | None:
-    match base_mime_type(mime_type):
+def isWaylandSession(env: Mapping[str, str] | None = None) -> bool:
+    env = os.environ if env is None else env
+    return bool(env.get("WAYLAND_DISPLAY")) or env.get("XDG_SESSION_TYPE") == "wayland"
+
+
+def baseMimeType(mimeType: str) -> str:
+    return mimeType.split(";")[0].strip().lower()
+
+
+def extensionForImageMimeType(mimeType: str) -> str | None:
+    match baseMimeType(mimeType):
         case "image/png":
             return "png"
         case "image/jpeg":
@@ -73,342 +73,197 @@ def extension_for_image_mime_type(mime_type: str) -> str | None:
             return None
 
 
-def select_preferred_image_mime_type(mime_types: list[str]) -> str | None:
-    normalized = [{"raw": value.strip(), "base": base_mime_type(value)} for value in mime_types if value.strip()]
+def selectPreferredImageMimeType(mimeTypes: list[str]) -> str | None:
+    normalized = [{"raw": t, "base": baseMimeType(t)} for t in (t.strip() for t in mimeTypes) if t]
+
     for preferred in SUPPORTED_IMAGE_MIME_TYPES:
-        match = next((item for item in normalized if item["base"] == preferred), None)
+        match = next((t for t in normalized if t["base"] == preferred), None)
         if match is not None:
-            return str(match["raw"])
-    any_image = next((item for item in normalized if str(item["base"]).startswith("image/")), None)
-    return str(any_image["raw"]) if any_image is not None else None
+            return match["raw"]
+
+    anyImage = next((t for t in normalized if t["base"].startswith("image/")), None)
+    return anyImage["raw"] if anyImage is not None else None
 
 
-def is_supported_image_mime_type(mime_type: str) -> bool:
-    return base_mime_type(mime_type) in SUPPORTED_IMAGE_MIME_TYPES
+def isSupportedImageMimeType(mimeType: str) -> bool:
+    base = baseMimeType(mimeType)
+    return any(t == base for t in SUPPORTED_IMAGE_MIME_TYPES)
 
 
-def convert_to_png(image_bytes: bytes) -> bytes | None:
-    try:
-        from io import BytesIO
+async def convertToPng(bytes: bytes) -> bytes | None:
+    """Convert unsupported image formats to PNG.
+    Returns null if conversion is unavailable or fails.
+    MISAKA fork: Pillow does the decoding pi does with Photon, off the event loop."""
 
-        raw_image = Image.open(BytesIO(image_bytes))
-        raw_image.load()
-        normalized = apply_exif_orientation(raw_image, image_bytes)
+    def convert() -> bytes | None:
         try:
-            output = BytesIO()
-            normalized.save(output, format="PNG")
-            return output.getvalue()
-        finally:
-            if normalized is not raw_image:
-                normalized.close()
-            raw_image.close()
-    except Exception:  # noqa: BLE001 - any decode failure means no image
+            with Image.open(BytesIO(bytes)) as image:
+                output = BytesIO()
+                image.save(output, format="PNG")
+                return output.getvalue()
+        except Exception:  # noqa: BLE001 - upstream `catch { return null; }`
+            return None
+
+    return await asyncio.to_thread(convert)
+
+
+def _lines(output: bytes) -> list[str]:
+    """``toString("utf-8").split(/\\r?\\n/).map(trim).filter(Boolean)``."""
+    return [line.strip() for line in output.decode("utf-8", errors="replace").replace("\r\n", "\n").split("\n") if line.strip()]
+
+
+# Undefined means the backend failed; null means it has no image. An empty
+# Wayland clipboard must not fall through to stale X11 clipboard contents.
+async def readClipboardImageViaWlPaste() -> ClipboardImage | _NoImage | None:
+    listed = await runClipboardCommand("wl-paste", ["--list-types"], {"timeoutMs": DEFAULT_LIST_TIMEOUT_MS})
+    if listed is None:
         return None
 
+    types = _lines(listed)
 
-def run_command(
-    command: str,
-    args: list[str],
-    *,
-    timeout_ms: int = DEFAULT_READ_TIMEOUT_MS,
-    max_buffer_bytes: int = DEFAULT_MAX_BUFFER_BYTES,
-    env: dict[str, str] | None = None,
-) -> _CommandResult:
-    """Run one clipboard helper and return its stdout, or ``ok=False``.
+    selectedType = selectPreferredImageMimeType(types)
+    if not selectedType:
+        return NO_IMAGE
 
-    ``max_buffer_bytes`` is enforced while reading, the way Node's ``execFile({maxBuffer})``
-    that this mirrors does: a `subprocess.run(capture_output=True)` first read the whole of
-    stdout into memory and only then compared the length, so a 1 GB image on the clipboard
-    was copied into this process in full before being thrown away. Over the limit -- or past
-    the deadline -- the child is killed and nothing is returned.
+    data = await runClipboardCommand("wl-paste", ["--type", selectedType, "--no-newline"])
+    if data is None:
+        return None
+    if len(data) == 0:
+        return NO_IMAGE
 
-    Every caller is the Linux/Wayland/WSL command cascade below (wl-paste, xclip, wslpath,
-    powershell.exe under WSL), so the poll-a-pipe loop only ever runs on POSIX.
-    """
+    return ClipboardImage(bytes=data, mimeType=baseMimeType(selectedType))
+
+
+async def readClipboardImageViaPowerShell() -> ClipboardImage | _NoImage:
+    """On WSL, the Linux clipboard (Wayland/X11) does not receive image data from
+    Windows screenshots (Win+Shift+S). PowerShell can access the Windows clipboard
+    directly, so we use it as a fallback."""
+    tmpFile = os.path.join(tempfile.gettempdir(), f"pi-wsl-clip-{uuid.uuid4()}.png")
+
     try:
-        proc = subprocess.Popen(
-            [command, *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,   # never a pipe: nothing reads it, and a full one deadlocks
-            env=env,
+        winPathResult = await runClipboardCommand("wslpath", ["-w", tmpFile], {"timeoutMs": DEFAULT_LIST_TIMEOUT_MS})
+        if winPathResult is None:
+            return NO_IMAGE
+
+        winPath = winPathResult.decode("utf-8", errors="replace").strip()
+        if not winPath:
+            return NO_IMAGE
+
+        psQuotedWinPath = winPath.replace("'", "''")
+        psScript = "; ".join([
+            "Add-Type -AssemblyName System.Windows.Forms",
+            "Add-Type -AssemblyName System.Drawing",
+            f"$path = '{psQuotedWinPath}'",
+            "$img = [System.Windows.Forms.Clipboard]::GetImage()",
+            "if ($img) { $img.Save($path, [System.Drawing.Imaging.ImageFormat]::Png); Write-Output 'ok' } else { Write-Output 'empty' }",
+        ])
+
+        result = await runClipboardCommand(
+            "powershell.exe", ["-NoProfile", "-Command", psScript], {"timeoutMs": DEFAULT_POWERSHELL_TIMEOUT_MS}
         )
-    except OSError:
-        return _CommandResult(stdout=b"", ok=False)
+        if result is None:
+            return NO_IMAGE
 
-    deadline = time.monotonic() + timeout_ms / 1000
-    chunks: list[bytes] = []
-    total = 0
-    failed = False
-    stdout_pipe = proc.stdout
-    assert stdout_pipe is not None
-    try:
-        with selectors.DefaultSelector() as selector:
-            selector.register(stdout_pipe, selectors.EVENT_READ)
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or not selector.select(remaining):
-                    failed = True                       # timed out mid-read
-                    break
-                chunk = os.read(stdout_pipe.fileno(), _READ_CHUNK_BYTES)
-                if not chunk:
-                    break                               # EOF: the child closed stdout
-                total += len(chunk)
-                if total > max_buffer_bytes:
-                    failed = True
-                    break
-                chunks.append(chunk)
-    except (OSError, ValueError):
-        # ValueError is how a selector rejects a file object it cannot poll (a pipe on
-        # Windows, which no caller here reaches): an unreadable child is a failed read,
-        # not an exception out of a clipboard probe.
-        failed = True
-    finally:
-        if failed:
-            proc.kill()
-        stdout_pipe.close()
-        try:
-            proc.wait(timeout=max(deadline - time.monotonic(), 1.0))
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            failed = True
+        output = result.decode("utf-8", errors="replace").strip()
+        if output != "ok":
+            return NO_IMAGE
 
-    if failed or proc.returncode != 0:
-        return _CommandResult(stdout=b"", ok=False)
-    return _CommandResult(stdout=b"".join(chunks), ok=True)
+        with open(tmpFile, "rb") as file:  # noqa: ASYNC230 - pi reads it with readFileSync too
+            bytes_ = file.read()
+        if len(bytes_) == 0:
+            return NO_IMAGE
 
-
-def read_clipboard_image_via_wl_paste(*, env: dict[str, str] | None = None) -> ClipboardImage | None:
-    listed = run_command("wl-paste", ["--list-types"], timeout_ms=DEFAULT_LIST_TIMEOUT_MS, env=env)
-    if not listed.ok:
-        return None
-
-    mime_types = [line.strip() for line in listed.stdout.decode("utf-8", errors="ignore").splitlines() if line.strip()]
-    selected_type = select_preferred_image_mime_type(mime_types)
-    if selected_type is None:
-        return None
-
-    data = run_command("wl-paste", ["--type", selected_type, "--no-newline"], env=env)
-    if not data.ok or not data.stdout:
-        return None
-    return ClipboardImage(bytes=data.stdout, mimeType=base_mime_type(selected_type))
-
-
-def _read_proc_version() -> str:
-    return Path("/proc/version").read_text(encoding="utf-8")
-
-
-def is_wsl(env: dict[str, str] | None = None) -> bool:
-    resolved_env = env or os.environ
-    if resolved_env.get("WSL_DISTRO_NAME") or resolved_env.get("WSLENV"):
-        return True
-    try:
-        version = _read_proc_version().lower()   # one read, not one per keyword
-    except OSError:
-        return False
-    return "microsoft" in version or "wsl" in version
-
-
-def read_clipboard_image_via_powershell(*, env: dict[str, str] | None = None) -> ClipboardImage | None:
-    tmp_file = str(Path(tempfile.gettempdir()) / f"harn-wsl-clip-{uuid4()}.png")
-    try:
-        win_path_result = run_command("wslpath", ["-w", tmp_file], timeout_ms=DEFAULT_LIST_TIMEOUT_MS, env=env)
-        if not win_path_result.ok:
-            return None
-
-        win_path = win_path_result.stdout.decode("utf-8", errors="ignore").strip()
-        if not win_path:
-            return None
-
-        quoted_win_path = win_path.replace("'", "''")
-        script = "; ".join(
-            [
-                "Add-Type -AssemblyName System.Windows.Forms",
-                "Add-Type -AssemblyName System.Drawing",
-                f"$path = '{quoted_win_path}'",
-                "$img = [System.Windows.Forms.Clipboard]::GetImage()",
-                (
-                    "if ($img) { $img.Save($path, [System.Drawing.Imaging.ImageFormat]::Png); "
-                    "Write-Output 'ok' } else { Write-Output 'empty' }"
-                ),
-            ]
-        )
-        result = run_command(
-            "powershell.exe",
-            ["-NoProfile", "-Command", script],
-            timeout_ms=DEFAULT_POWERSHELL_TIMEOUT_MS,
-            env=env,
-        )
-        if not result.ok or result.stdout.decode("utf-8", errors="ignore").strip() != "ok":
-            return None
-
-        bytes_value = Path(tmp_file).read_bytes()
-        if not bytes_value:
-            return None
-        return ClipboardImage(bytes=bytes_value, mimeType="image/png")
-    except OSError:
-        return None
+        return ClipboardImage(bytes=bytes_, mimeType="image/png")
+    except Exception:  # noqa: BLE001 - upstream `catch { return null; }`
+        return NO_IMAGE
     finally:
         try:
-            Path(tmp_file).unlink()
+            os.unlink(tmpFile)
         except OSError:
-            pass
+            pass  # Ignore cleanup errors.
 
 
-def read_clipboard_image_via_xclip(*, env: dict[str, str] | None = None) -> ClipboardImage | None:
-    targets = run_command(
-        "xclip",
-        ["-selection", "clipboard", "-t", "TARGETS", "-o"],
-        timeout_ms=DEFAULT_LIST_TIMEOUT_MS,
-        env=env,
+async def readClipboardImageViaXclip() -> ClipboardImage | _NoImage | None:
+    targets = await runClipboardCommand(
+        "xclip", ["-selection", "clipboard", "-t", "TARGETS", "-o"], {"timeoutMs": DEFAULT_LIST_TIMEOUT_MS}
     )
-    candidate_types: list[str] = []
-    if targets.ok:
-        candidate_types = [
-            line.strip()
-            for line in targets.stdout.decode("utf-8", errors="ignore").splitlines()
-            if line.strip()
-        ]
 
-    preferred = select_preferred_image_mime_type(candidate_types) if candidate_types else None
-    try_types = [preferred, *SUPPORTED_IMAGE_MIME_TYPES] if preferred is not None else list(SUPPORTED_IMAGE_MIME_TYPES)
-    seen: set[str] = set()
-    for mime_type in try_types:
-        if mime_type in seen:
-            continue
-        seen.add(mime_type)
-        data = run_command("xclip", ["-selection", "clipboard", "-t", mime_type, "-o"], env=env)
-        if data.ok and data.stdout:
-            return ClipboardImage(bytes=data.stdout, mimeType=base_mime_type(mime_type))
-    return None
-
-
-async def read_clipboard_image_via_native_clipboard() -> ClipboardImage | None:
-    clipboard = _get_native_clipboard()
-    # MISAKA fork: pi asks the native clipboard for its types before reading. Pillow has no
-    # cheap probe -- ``has_image`` grabs the whole image, synchronously on the event loop --
-    # so read once off the loop; ``get_image_binary`` answers None when there is no image.
-    if clipboard is None:
+    if targets is None:
         return None
 
-    image_data = await clipboard.get_image_binary()
-    if not image_data:
+    candidateTypes = _lines(targets)
+    preferred = selectPreferredImageMimeType(candidateTypes)
+    if not preferred:
+        return NO_IMAGE
+
+    data = await runClipboardCommand("xclip", ["-selection", "clipboard", "-t", preferred, "-o"])
+    if data is None:
         return None
-
-    if isinstance(image_data, bytes):
-        bytes_value = image_data
-    elif isinstance(image_data, bytearray):
-        bytes_value = bytes(image_data)
-    else:
-        bytes_value = bytes(image_data)
-    return ClipboardImage(bytes=bytes_value, mimeType="image/png")
+    if len(data) == 0:
+        return NO_IMAGE
+    return ClipboardImage(bytes=data, mimeType=baseMimeType(preferred))
 
 
-async def read_clipboard_image(
-    options: ReadClipboardImageOptions | dict[str, Any] | None = None,
-) -> ClipboardImage | None:
-    resolved_options = _resolve_options(options)
-    env = resolved_options.env or dict(os.environ)
-    platform = resolved_options.platform or _platform()
+async def readClipboardImageViaNativeClipboard() -> ClipboardImage | _NoImage | None:
+    clipboard: Any = native_platform.getNativeClipboard()
+    bytes_ = await clipboard.getImage() if clipboard is not None else None
+    if bytes_ is None:
+        return None
+    if not bytes_:
+        return NO_IMAGE
+    data = bytes(bytes_)
+    return ClipboardImage(bytes=data, mimeType=detectSupportedImageMimeType(data) or "application/octet-stream")
+
+
+class ReadClipboardImageOptions(TypedDict, total=False):
+    env: Mapping[str, str]
+    platform: str
+
+
+async def readClipboardImage(options: ReadClipboardImageOptions | None = None) -> ClipboardImage | None:
+    options = options or {}
+    env = options.get("env", os.environ)
+    platform = options.get("platform") or _platform()
 
     if env.get("TERMUX_VERSION"):
         return None
 
-    image: ClipboardImage | None = None
+    image: ClipboardImage | _NoImage | None = None
 
     if platform == "linux":
-        wsl = is_wsl(env)
-        wayland = is_wayland_session(env)
-
-        if wayland or wsl:
-            image = await asyncio.to_thread(_read_via_external_commands, env=env, wsl=wsl)
-
-        if image is None and not wayland:
-            image = await read_clipboard_image_via_native_clipboard()
+        wsl = isWSL(env)
+        if isWaylandSession(env) or wsl:
+            image = await readClipboardImageViaWlPaste()
+        if image is None:
+            image = await readClipboardImageViaXclip()
+        # Preserve Linux's empty/unavailable distinction if Windows has no image.
+        if not image and wsl:
+            image = (await readClipboardImageViaPowerShell()) or image
+        if image is None:
+            image = await readClipboardImageViaNativeClipboard()
     else:
-        image = await read_clipboard_image_via_native_clipboard()
+        image = await readClipboardImageViaNativeClipboard()
 
-    if image is None:
+    if not isinstance(image, ClipboardImage):
         return None
 
-    if not is_supported_image_mime_type(image.mimeType):
-        # A decode plus a PNG re-encode of up to DEFAULT_MAX_BUFFER_BYTES, in Python:
-        # off the loop for the same reason the cascade above is.
-        png_bytes = await asyncio.to_thread(convert_to_png, image.bytes)
-        if png_bytes is None:
+    # Convert unsupported formats (e.g., Windows DIB data wrapped as BMP) to PNG
+    if not isSupportedImageMimeType(image.mimeType):
+        pngBytes = await convertToPng(image.bytes)
+        if not pngBytes:
             return None
-        return ClipboardImage(bytes=png_bytes, mimeType="image/png")
+        return ClipboardImage(bytes=pngBytes, mimeType="image/png")
 
     return image
-
-
-def _read_via_external_commands(
-    *, env: dict[str, str] | None, wsl: bool
-) -> ClipboardImage | None:
-    """The wl-paste/xclip/powershell cascade, as one call off the event loop.
-
-    Three helpers rather than one because each may come back empty, and every step is a
-    ``subprocess.run`` with its own timeout: 1s + 3s to list and read through wl-paste,
-    the same again through xclip once per candidate MIME type, then 1s + 5s for wslpath
-    and powershell. A WSL box with nothing image-shaped on the clipboard can spend the
-    better part of half a minute in here, and pasting is a keystroke in the TUI -- on the
-    loop it is the whole interface that stops answering, not just the paste.
-
-    Reached only when the caller found Wayland or WSL, which is also the only way the
-    powershell step below is reachable, so the sequence matches the cascade it replaced.
-    """
-    image = read_clipboard_image_via_wl_paste(env=env) or read_clipboard_image_via_xclip(env=env)
-    if image is None and wsl:
-        image = read_clipboard_image_via_powershell(env=env)
-    return image
-
-
-def _resolve_options(options: ReadClipboardImageOptions | dict[str, Any] | None) -> ReadClipboardImageOptions:
-    if isinstance(options, ReadClipboardImageOptions):
-        return options
-    if isinstance(options, dict):
-        return ReadClipboardImageOptions(
-            env=options.get("env"),
-            platform=options.get("platform"),
-        )
-    return ReadClipboardImageOptions()
 
 
 def _platform() -> str:
-    import sys
-
+    """``process.platform``."""
     if sys.platform.startswith("linux"):
         return "linux"
-    if sys.platform == "darwin":
-        return "darwin"
-    if sys.platform in {"win32", "cygwin"}:
+    if sys.platform == "cygwin":
         return "win32"
     return sys.platform
 
 
-def _get_native_clipboard() -> _NativeClipboard | None:
-    return _get_native_clipboard_backend()
-
-
-__all__ = [
-    "DEFAULT_LIST_TIMEOUT_MS",
-    "DEFAULT_MAX_BUFFER_BYTES",
-    "DEFAULT_POWERSHELL_TIMEOUT_MS",
-    "DEFAULT_READ_TIMEOUT_MS",
-    "SUPPORTED_IMAGE_MIME_TYPES",
-    "ClipboardImage",
-    "ReadClipboardImageOptions",
-    "base_mime_type",
-    "convert_to_png",
-    "extension_for_image_mime_type",
-    "is_supported_image_mime_type",
-    "is_wayland_session",
-    "is_wsl",
-    "read_clipboard_image",
-    "read_clipboard_image_via_native_clipboard",
-    "read_clipboard_image_via_powershell",
-    "read_clipboard_image_via_wl_paste",
-    "read_clipboard_image_via_xclip",
-    "run_command",
-    "select_preferred_image_mime_type",
-]
+__all__ = ["ClipboardImage", "extensionForImageMimeType", "isWaylandSession", "readClipboardImage"]

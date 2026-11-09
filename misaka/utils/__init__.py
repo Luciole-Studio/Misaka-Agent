@@ -1,34 +1,23 @@
 """Utility exports for the coding-agent package."""
 
-from misaka.utils.ansi import strip_ansi, stripAnsi
+from misaka.utils.ansi import stripAnsi
 from misaka.utils.mime import (
     IMAGE_TYPE_SNIFF_BYTES,
     PNG_SIGNATURE,
-    detect_supported_image_mime_type,
-    detect_supported_image_mime_type_from_file,
     detectSupportedImageMimeType,
     detectSupportedImageMimeTypeFromFile,
 )
 from misaka.utils.paths import (
-    canonicalize_path,
     canonicalizePath,
-    format_path_relative_to_cwd_or_absolute,
     formatPathRelativeToCwdOrAbsolute,
-    get_cwd_relative_path,
     getCwdRelativePath,
-    is_local_path,
     isLocalPath,
-    mark_path_ignored_by_cloud_sync,
     markPathIgnoredByCloudSync,
-    normalize_path,
     normalizePath,
-    resolve_path,
     resolvePath,
 )
 from misaka.utils.shell import (
-    get_powershell_config,
     getPowerShellConfig,
-    sanitize_binary_output,
     sanitizeBinaryOutput,
 )
 
@@ -42,9 +31,7 @@ _IMAGE_RESIZE_EXPORTS = {
     "IMAGE_RESIZE_DEFAULT_MAX_BYTES": "DEFAULT_MAX_BYTES",
     "ImageResizeOptions": "ImageResizeOptions",
     "ResizedImage": "ResizedImage",
-    "format_dimension_note": "format_dimension_note",
     "formatDimensionNote": "formatDimensionNote",
-    "resize_image": "resize_image",
     "resizeImage": "resizeImage",
 }
 
@@ -66,31 +53,17 @@ __all__ = [
     "ImageResizeOptions",
     "ResizedImage",
     "canonicalizePath",
-    "canonicalize_path",
     "detectSupportedImageMimeType",
     "detectSupportedImageMimeTypeFromFile",
-    "detect_supported_image_mime_type",
-    "detect_supported_image_mime_type_from_file",
     "formatDimensionNote",
     "formatPathRelativeToCwdOrAbsolute",
-    "format_dimension_note",
-    "format_path_relative_to_cwd_or_absolute",
     "getCwdRelativePath",
     "getPowerShellConfig",
-    "get_cwd_relative_path",
-    "get_powershell_config",
     "isLocalPath",
-    "is_local_path",
     "markPathIgnoredByCloudSync",
-    "mark_path_ignored_by_cloud_sync",
     "normalizePath",
-    "normalize_path",
     "resizeImage",
-    "resize_image",
     "resolvePath",
-    "resolve_path",
     "sanitizeBinaryOutput",
-    "sanitize_binary_output",
     "stripAnsi",
-    "strip_ansi",
 ]

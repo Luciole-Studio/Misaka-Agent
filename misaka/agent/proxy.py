@@ -1,42 +1,24 @@
-"""Proxy stream function for apps that route model calls through a server.
+"""Proxy stream function for apps that route LLM calls through a server.
+The server manages auth and proxies requests to LLM providers.
 
-This is the Python port of Pi's ``packages/agent/src/proxy.ts``.  The server owns
-provider authentication and sends Pi assistant-message events with ``partial`` removed;
-this module reconstructs the partial message locally.
-
-Two Python runtime details are deliberate:
-
-* ``httpTransport`` is the ``httpx`` equivalent of replacing the browser's global
-  ``fetch`` in a test or host application.  It is local-only and never crosses the wire.
-* Misaka's current ``StopReason`` has no transient ``"pending"`` member, so the partial
-  starts at ``"stop"`` like its other providers and is overwritten by the terminal event.
+Translated from pi's ``packages/agent/src/proxy.ts`` (v1.1.0). MISAKA fork: ``fetch`` is the WHATWG shim
+(``misaka.utils.whatwg_fetch``), so tests replace this module's ``fetch`` where upstream stubs the global one.
 """
 
 from __future__ import annotations
 
-import codecs
-import json
 import logging
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import Mapping
 from typing import Any, Literal, NotRequired, TypedDict
 
-import httpx
-from pydantic import BaseModel, ConfigDict
-
-from misaka.ai.providers._common import (
-    _await_with_signal,
-    _empty_usage,
-    _iterate_async_iterable,
-)
+from misaka.ai.api.pi_messages import _serializeContext
 from misaka.ai.types import (
     AssistantMessage,
     AssistantMessageEventValue,
-    Context,
     DoneEvent,
     ErrorEvent,
     Model,
-    SimpleStreamOptions,
     StartEvent,
     TextContent,
     TextDeltaEvent,
@@ -53,16 +35,25 @@ from misaka.ai.types import (
     TranscriptContext,
     Usage,
 )
-from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
-from misaka.ai.utils.json_parse import StreamingArgs, parse_streaming_json
-from misaka.ai.utils.transcript import normalize_context
-from misaka.utils.values import signal_aborted
+from misaka.ai.utils._streaming_args import StreamingArgs
+from misaka.ai.utils.event_stream import (
+    AssistantMessageEventStream,
+    createAssistantMessageEventStream,
+    spawn_stream_task,
+)
+from misaka.ai.utils.json_parse import parseStreamingJson
+from misaka.utils.js import (
+    Utf8Decoder,
+    addAbortListener,
+    errorMessage,
+    jsonParse,
+    jsonStringify,
+    jsTrim,
+)
+from misaka.utils.values import read_field, signal_aborted
+from misaka.utils.whatwg_fetch import fetch
 
 logger = logging.getLogger(__name__)
-
-
-class ProxyMessageEventStream(AssistantMessageEventStream):
-    """Assistant-message stream returned by :func:`stream_proxy`."""
 
 
 class ProxyStartEvent(TypedDict):
@@ -119,22 +110,25 @@ class ProxyToolCallDeltaEvent(TypedDict):
 class ProxyToolCallEndEvent(TypedDict):
     type: Literal["toolcall_end"]
     contentIndex: int
-    toolCall: ToolCall
+    toolCall: Any
 
 
 class ProxyDoneEvent(TypedDict):
     type: Literal["done"]
     reason: Literal["stop", "length", "toolUse"]
-    usage: dict[str, Any]
+    usage: Any
+    providerThinkingLevel: NotRequired[str]
 
 
 class ProxyErrorEvent(TypedDict):
     type: Literal["error"]
     reason: Literal["aborted", "error"]
     errorMessage: NotRequired[str]
-    usage: dict[str, Any]
+    usage: Any
+    providerThinkingLevel: NotRequired[str]
 
 
+# Proxy event types - server sends these with partial field stripped to reduce bandwidth.
 type ProxyAssistantMessageEvent = (
     ProxyStartEvent
     | ProxyTextStartEvent
@@ -151,424 +145,337 @@ type ProxyAssistantMessageEvent = (
 )
 
 
-class ProxyStreamOptions(SimpleStreamOptions):
-    """Pi's proxy-safe stream options plus the proxy endpoint credentials."""
+class ProxySerializableStreamOptions(TypedDict, total=False):
+    temperature: float
+    samplingParams: Any
+    maxTokens: int
+    reasoning: Any
+    cacheRetention: Any
+    sessionId: str
+    headers: dict[str, str]
+    metadata: dict[str, Any]
+    transport: Any
+    thinkingBudgets: Any
+    maxRetryDelayMs: int
 
-    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
+class ProxyStreamOptions(ProxySerializableStreamOptions, total=False):
+    # Local abort signal for the proxy request
+    signal: Any
+    # Auth token for the proxy server
     authToken: str
+    # Proxy server URL (e.g., "https://genai.example.com")
     proxyUrl: str
-    httpTransport: httpx.AsyncBaseTransport | None = None
 
 
-def _build_proxy_request_options(options: ProxyStreamOptions) -> dict[str, Any]:
-    thinking_budgets = options.thinkingBudgets
-    return {
-        "temperature": options.temperature,
-        "samplingParams": options.samplingParams,
-        "maxTokens": options.maxTokens,
-        "reasoning": options.reasoning,
-        "cacheRetention": options.cacheRetention,
-        "sessionId": options.sessionId,
-        "headers": dict(options.headers) if options.headers is not None else None,
-        "metadata": dict(options.metadata) if options.metadata is not None else None,
-        "transport": options.transport,
-        "thinkingBudgets": (
-            thinking_budgets.model_dump(mode="json", exclude_none=True)
-            if isinstance(thinking_budgets, BaseModel)
-            else thinking_budgets
-        ),
-        "maxRetryDelayMs": options.maxRetryDelayMs,
+def _buildProxyRequestOptions(options: Any) -> ProxySerializableStreamOptions:
+    """Stream function that proxies through a server instead of calling LLM providers directly.
+    The server strips the partial field from delta events to reduce bandwidth.
+    We reconstruct the partial message client-side.
+
+    Use this as the `streamFn` option when creating an Agent that needs to go through a proxy.
+
+    MISAKA fork: the options are read as an object or a mapping (the agent loop hands over an options namespace).
+    """
+    return {  # type: ignore[return-value]
+        "temperature": read_field(options, "temperature"),
+        "samplingParams": read_field(options, "samplingParams"),
+        "maxTokens": read_field(options, "maxTokens"),
+        "reasoning": read_field(options, "reasoning"),
+        "cacheRetention": read_field(options, "cacheRetention"),
+        "sessionId": read_field(options, "sessionId"),
+        "headers": read_field(options, "headers"),
+        "metadata": read_field(options, "metadata"),
+        "transport": read_field(options, "transport"),
+        "thinkingBudgets": read_field(options, "thinkingBudgets"),
+        "maxRetryDelayMs": read_field(options, "maxRetryDelayMs"),
     }
 
 
-def _as_options(
-    options: ProxyStreamOptions | Mapping[str, Any] | Any,
-) -> ProxyStreamOptions:
-    if isinstance(options, ProxyStreamOptions):
-        return options
-    if isinstance(options, Mapping):
-        payload = dict(options)
-    elif hasattr(options, "keys") and hasattr(options, "__getitem__"):
-        payload = {key: options[key] for key in options}
-    elif isinstance(options, BaseModel):
-        payload = options.model_dump()
-    else:
-        payload = vars(options)
-    return ProxyStreamOptions.model_validate(payload)
+def _jsonValue(value: Any) -> Any:
+    """MISAKA fork: a pydantic option (thinking budgets, sampling parameters) as ``JSON.stringify`` writes it."""
+    dump = getattr(value, "model_dump", None)
+    return dump(mode="json", exclude_none=True) if callable(dump) else value
 
 
-def _as_context(context: Context | TranscriptContext | Mapping[str, Any] | Any) -> TranscriptContext:
-    """The normalized transcript the server receives: the loop already hands one over, and
-    a raw `Context` (or a mapping shaped like one) is folded the way every stream entry
-    point folds it."""
-    if isinstance(context, TranscriptContext | Context | Mapping):
-        return normalize_context(context)
-    return normalize_context(
-        Context(
-            systemPrompt=getattr(context, "systemPrompt", None),
-            messages=list(context.messages),
-            tools=getattr(context, "tools", None),
-        )
-    )
-
-
-def _serialize_context(context: TranscriptContext) -> dict[str, Any]:
-    # Keep native parse diagnostics in history, not in the upstream wire protocol. The tools
-    # a system message declares are rebuilt rather than dumped because `Tool.parameters` may
-    # hold a pydantic model class, which has no JSON form until `parameters_json_schema()`.
-    payload = context.model_dump(mode="json", exclude_none=True, exclude={
-        "messages": {"__all__": {"content": {"__all__": {"argumentsError"}}, "toolsAdded": True}},
-    })
-    for message, dumped in zip(context.messages, payload["messages"], strict=True):
-        tools = getattr(message, "toolsAdded", None)
-        if tools is None:
-            continue
-        dumped["toolsAdded"] = []
-        for tool in tools:
-            serialized: dict[str, Any] = {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.parameters_json_schema(),
-            }
-            if tool.constrainedSampling is not None:
-                serialized["constrainedSampling"] = (
-                    tool.constrainedSampling.model_dump(mode="json", exclude_none=True)
-                    if isinstance(tool.constrainedSampling, BaseModel)
-                    else tool.constrainedSampling
-                )
-            dumped["toolsAdded"].append(serialized)
-    return payload
-
-
-def stream_proxy(
-    model: Model,
-    context: Context | Mapping[str, Any] | Any,
-    options: ProxyStreamOptions | Mapping[str, Any] | Any,
-) -> ProxyMessageEventStream:
-    """Proxy one model stream through ``<proxyUrl>/api/stream``."""
-
-    stream = ProxyMessageEventStream()
-    partial = _create_partial_message(model)
+def streamProxy(model: Model, context: TranscriptContext, options: ProxyStreamOptions | Any) -> AssistantMessageEventStream:
+    stream = createAssistantMessageEventStream()
 
     async def run() -> None:
-        signal = _read_option(options, "signal")
-        try:
-            resolved_options = _as_options(options)
-            await _consume_proxy_stream(
-                stream,
-                model,
-                _as_context(context),
-                resolved_options,
-                partial,
-            )
-        except Exception as error:  # noqa: BLE001 - every request failure is an error event
-            aborted = signal_aborted(signal)
-            reason: Literal["aborted", "error"] = "aborted" if aborted else "error"
-            partial.stopReason = reason
-            partial.errorMessage = (
-                "Request aborted by user" if aborted else _stringify_error(error)
-            )
-            stream.push(ErrorEvent(reason=reason, error=partial))
-        finally:
-            stream.end()
+        # Initialize the partial message that we'll build up from events
+        partial = AssistantMessage(
+            stopReason="pending",
+            content=[],
+            api=model.api,
+            provider=model.provider,
+            model=model.id,
+            usage=Usage(
+                input=0,
+                output=0,
+                cacheRead=0,
+                cacheWrite=0,
+                totalTokens=0,
+                cost={"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
+            ),
+            timestamp=_now(),
+        )
 
-    spawn_stream_task(run())
+        reader: Any = None
+        signal = read_field(options, "signal")
+
+        def abortHandler() -> None:
+            if reader is not None:
+                spawn_stream_task(reader.cancel())
+
+        removeAbortListener = addAbortListener(signal, abortHandler) if signal is not None else None
+
+        try:
+            requestOptions = {
+                key: _jsonValue(value)
+                for key, value in _buildProxyRequestOptions(options).items()
+                if value is not None
+            }
+            response = await fetch(
+                f"{read_field(options, 'proxyUrl')}/api/stream",
+                {
+                    "method": "POST",
+                    "headers": {
+                        "Authorization": f"Bearer {read_field(options, 'authToken')}",
+                        "Content-Type": "application/json",
+                    },
+                    "body": jsonStringify(
+                        {
+                            "model": model.model_dump(mode="json", exclude_none=True),
+                            "context": _serializeContext(context),
+                            "options": requestOptions,
+                        }
+                    ),
+                    "signal": signal,
+                },
+            )
+
+            if not response.ok:
+                failure = f"Proxy error: {response.status} {response.statusText}"
+                try:
+                    errorData = await response.json()
+                    if isinstance(errorData, Mapping) and errorData.get("error"):
+                        failure = f"Proxy error: {errorData['error']}"
+                except Exception:  # noqa: BLE001, S110 - Couldn't parse error response
+                    pass
+                raise RuntimeError(failure)
+
+            reader = response.body
+            decoder = Utf8Decoder()
+            buffer = ""
+            sawTerminalEvent = False
+            # MISAKA fork: upstream keeps `partialJson` on the tool-call block; a ToolCall model has no such field,
+            # so the raw argument text lives here, keyed by content index.
+            partialJson: dict[int, str] = {}
+
+            def processLine(line: str) -> None:
+                nonlocal sawTerminalEvent
+                if not line.startswith("data: "):
+                    return
+                data = jsTrim(line[6:])
+                if not data:
+                    return
+                proxyEvent = jsonParse(data)
+                event = _processProxyEvent(proxyEvent, partial, partialJson)
+                if event is not None:
+                    if event.type in ("done", "error"):
+                        sawTerminalEvent = True
+                    stream.push(event)
+
+            if reader is not None:
+                async for value in reader:
+                    if signal_aborted(signal):
+                        raise RuntimeError("Request aborted by user")
+
+                    buffer += decoder.decode(value)
+                    lines = buffer.split("\n")
+                    buffer = lines.pop() or ""
+
+                    for line in lines:
+                        processLine(line)
+
+            if signal_aborted(signal):
+                raise RuntimeError("Request aborted by user")
+
+            # The final event may not be newline-terminated; flush the decoder and
+            # process whatever is left in the buffer.
+            buffer += decoder.decode(b"", final=True)
+            if buffer:
+                processLine(buffer)
+
+            if not sawTerminalEvent:
+                # A clean EOF without a done/error event means the server dropped the
+                # response mid-stream. Surface it as an error instead of leaving
+                # consumers waiting on a result that never arrives.
+                partial.stopReason = "error"
+                partial.errorMessage = "Connection closed by proxy server before the response completed"
+                stream.push(ErrorEvent(reason="error", error=partial))
+
+            stream.end()
+        except Exception as error:  # noqa: BLE001 - every request failure is an error event
+            reason: Literal["aborted", "error"] = "aborted" if signal_aborted(signal) else "error"
+            partial.stopReason = reason
+            partial.errorMessage = errorMessage(error)
+            stream.push(ErrorEvent(reason=reason, error=partial), cause=error)
+            stream.end()
+        finally:
+            if removeAbortListener is not None:
+                removeAbortListener()
+
+    spawn_stream_task(run(), stream=stream)
     return stream
 
 
-async def _consume_proxy_stream(
-    stream: ProxyMessageEventStream,
-    model: Model,
-    context: TranscriptContext,
-    options: ProxyStreamOptions,
-    partial: AssistantMessage,
-) -> None:
-    request_body = {
-        "model": model.model_dump(mode="json", exclude_none=True),
-        "context": _serialize_context(context),
-        "options": {
-            key: value
-            for key, value in _build_proxy_request_options(options).items()
-            if value is not None
-        },
-    }
-    request_content = json.dumps(
-        request_body,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-    http_transport = options.httpTransport
-    client = httpx.AsyncClient(
-        transport=http_transport,
-        timeout=httpx.Timeout(None),
-        follow_redirects=True,
-    )
-    try:
-        request = client.build_request(
-            "POST",
-            f"{options.proxyUrl}/api/stream",
-            headers={
-                "Authorization": f"Bearer {options.authToken}",
-                "Content-Type": "application/json",
-            },
-            content=request_content,
-        )
-        response = await _await_with_signal(
-            client.send(request, stream=True), options.signal
-        )
-        try:
-            if not response.is_success:
-                raise RuntimeError(
-                    await _read_proxy_error_response(response, options.signal)
-                )
-
-            terminal_received = False
-            tool_call_buffers: dict[int, str] = {}
-            async for proxy_event in _read_proxy_events(response, options.signal):
-                event = _process_proxy_event(proxy_event, partial, tool_call_buffers)
-                if event is None:
-                    continue
-                stream.push(event)
-                if event.type in {"done", "error"}:
-                    terminal_received = True
-                    break
-
-            if signal_aborted(options.signal):
-                raise RuntimeError("Request aborted by user")
-            if not terminal_received:
-                raise RuntimeError("Proxy stream ended without a terminal event")
-        finally:
-            await response.aclose()
-    finally:
-        # A caller-supplied transport may be a shared pool. Closing the client would close
-        # that transport too; this matches the ownership rule used by Misaka's providers.
-        if http_transport is None:
-            await client.aclose()
+def _now() -> int:
+    return int(time.time() * 1000)
 
 
-async def _read_proxy_events(
-    response: httpx.Response,
-    signal: Any,
-) -> AsyncIterator[Mapping[str, Any]]:
-    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-    buffer = ""
-    async for chunk in _iterate_async_iterable(
-        response.aiter_bytes(),
-        signal,
-        on_abort=response.aclose,
-    ):
-        buffer += decoder.decode(chunk)
-        lines = buffer.split("\n")
-        buffer = lines.pop()
-        for line in lines:
-            if not line.startswith("data: "):
-                continue
-            data = line[6:].strip()
-            if not data:
-                continue
-            parsed = json.loads(data)
-            if not isinstance(parsed, Mapping):
-                raise TypeError("Proxy event must be a JSON object")
-            yield parsed
+def _contentAt(partial: AssistantMessage, index: int) -> Any:
+    """MISAKA fork: ``partial.content[index]``, undefined past the end."""
+    return partial.content[index] if 0 <= index < len(partial.content) else None
 
 
-def _process_proxy_event(
-    proxy_event: Mapping[str, Any],
-    partial: AssistantMessage,
-    tool_call_buffers: dict[int, str],
-) -> AssistantMessageEventValue | None:
-    event_type = proxy_event.get("type")
-
-    if event_type == "start":
-        return StartEvent(partial=partial)
-
-    if event_type == "text_start":
-        index = _content_index(proxy_event)
-        _set_content(partial, index, TextContent(text=""))
-        return TextStartEvent(contentIndex=index, partial=partial)
-
-    if event_type == "text_delta":
-        index = _content_index(proxy_event)
-        content = _require_content(partial, index, "text", "text_delta")
-        content.text += proxy_event["delta"]
-        return TextDeltaEvent(
-            contentIndex=index,
-            delta=proxy_event["delta"],
-            partial=partial,
-        )
-
-    if event_type == "text_end":
-        index = _content_index(proxy_event)
-        content = _require_content(partial, index, "text", "text_end")
-        content.textSignature = proxy_event.get("contentSignature")
-        return TextEndEvent(contentIndex=index, content=content.text, partial=partial)
-
-    if event_type == "thinking_start":
-        index = _content_index(proxy_event)
-        _set_content(partial, index, ThinkingContent(thinking=""))
-        return ThinkingStartEvent(contentIndex=index, partial=partial)
-
-    if event_type == "thinking_delta":
-        index = _content_index(proxy_event)
-        content = _require_content(partial, index, "thinking", "thinking_delta")
-        content.thinking += proxy_event["delta"]
-        return ThinkingDeltaEvent(
-            contentIndex=index,
-            delta=proxy_event["delta"],
-            partial=partial,
-        )
-
-    if event_type == "thinking_end":
-        index = _content_index(proxy_event)
-        content = _require_content(partial, index, "thinking", "thinking_end")
-        content.thinkingSignature = proxy_event.get("contentSignature")
-        return ThinkingEndEvent(
-            contentIndex=index,
-            content=content.thinking,
-            partial=partial,
-        )
-
-    if event_type == "toolcall_start":
-        index = _content_index(proxy_event)
-        _set_content(
-            partial,
-            index,
-            ToolCall(
-                id=proxy_event["id"],
-                name=proxy_event["toolName"],
-                arguments={},
-            ),
-        )
-        tool_call_buffers[index] = ""
-        return ToolCallStartEvent(contentIndex=index, partial=partial)
-
-    if event_type == "toolcall_delta":
-        index = _content_index(proxy_event)
-        content = _require_content(partial, index, "toolCall", "toolcall_delta")
-        raw = f"{tool_call_buffers.get(index, '')}{proxy_event['delta']}"
-        tool_call_buffers[index] = raw
-        parsed = parse_streaming_json(raw)
-        content.arguments = parsed if isinstance(parsed, dict) else {}
-        return ToolCallDeltaEvent(
-            contentIndex=index,
-            delta=proxy_event["delta"],
-            partial=partial,
-        )
-
-    if event_type == "toolcall_end":
-        index = _content_index(proxy_event)
-        if index >= len(partial.content):
-            return None
-        content = partial.content[index]
-        if content.type != "toolCall":
-            return None
-        raw_tool_call = proxy_event["toolCall"]
-        finalized = ToolCall.model_validate(raw_tool_call)
-        raw_keys = (
-            raw_tool_call.keys()
-            if isinstance(raw_tool_call, Mapping)
-            else ToolCall.model_fields
-        )
-        for key in raw_keys:
-            if key in ToolCall.model_fields:
-                setattr(content, key, getattr(finalized, key))
-        raw = tool_call_buffers.pop(index, None)
-        if raw and content.argumentsError is None:
-            StreamingArgs(raw).finish_into(content)
-        return ToolCallEndEvent(contentIndex=index, toolCall=content, partial=partial)
-
-    if event_type == "done":
-        for index, raw in tool_call_buffers.items():
-            if raw:
-                StreamingArgs(raw).finish_into(_require_content(partial, index, "toolCall", "done"))
-        tool_call_buffers.clear()
-        reason = proxy_event["reason"]
-        partial.stopReason = reason
-        partial.usage = Usage.model_validate(proxy_event["usage"])
-        return DoneEvent(reason=reason, message=partial)
-
-    if event_type == "error":
-        reason = proxy_event["reason"]
-        partial.stopReason = reason
-        partial.errorMessage = proxy_event.get("errorMessage")
-        partial.usage = Usage.model_validate(proxy_event["usage"])
-        return ErrorEvent(reason=reason, error=partial)
-
-    logger.warning("Unhandled proxy event type: %s", event_type)
-    return None
-
-
-def _create_partial_message(model: Model) -> AssistantMessage:
-    return AssistantMessage(
-        content=[],
-        api=model.api,
-        provider=model.provider,
-        model=model.id,
-        usage=_empty_usage(),
-        # See the module docstring: Misaka has no transient "pending" StopReason yet.
-        stopReason="stop",
-        timestamp=int(time.time() * 1000),
-    )
-
-
-def _content_index(event: Mapping[str, Any]) -> int:
-    index = event.get("contentIndex")
-    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
-        raise IndexError(f"Proxy event has an invalid contentIndex: {index!r}")
-    return index
-
-
-def _set_content(partial: AssistantMessage, index: int, content: Any) -> None:
+def _setContent(partial: AssistantMessage, index: int, content: Any) -> None:
+    """MISAKA fork: ``partial.content[index] = content``; a JavaScript array grows to take the index."""
     while len(partial.content) <= index:
         partial.content.append(TextContent(text=""))
     partial.content[index] = content
 
 
-def _require_content(
+def _processProxyEvent(
+    proxyEvent: Mapping[str, Any],
     partial: AssistantMessage,
-    index: int,
-    expected_type: str,
-    event_type: str,
-) -> Any:
-    if index >= len(partial.content):
-        raise RuntimeError(f"Received {event_type} for non-{expected_type} content")
-    content = partial.content[index]
-    if content.type != expected_type:
-        raise RuntimeError(f"Received {event_type} for non-{expected_type} content")
-    return content
+    partialJson: dict[int, str],
+) -> AssistantMessageEventValue | None:
+    """Process a proxy event and update the partial message."""
+    match proxyEvent.get("type"):
+        case "start":
+            return StartEvent(partial=partial)
+
+        case "text_start":
+            _setContent(partial, proxyEvent["contentIndex"], TextContent(text=""))
+            return TextStartEvent(contentIndex=proxyEvent["contentIndex"], partial=partial)
+
+        case "text_delta":
+            content = _contentAt(partial, proxyEvent["contentIndex"])
+            if content is not None and content.type == "text":
+                content.text += proxyEvent["delta"]
+                return TextDeltaEvent(
+                    contentIndex=proxyEvent["contentIndex"],
+                    delta=proxyEvent["delta"],
+                    partial=partial,
+                )
+            raise RuntimeError("Received text_delta for non-text content")
+
+        case "text_end":
+            content = _contentAt(partial, proxyEvent["contentIndex"])
+            if content is not None and content.type == "text":
+                content.textSignature = proxyEvent.get("contentSignature")
+                return TextEndEvent(
+                    contentIndex=proxyEvent["contentIndex"],
+                    content=content.text,
+                    partial=partial,
+                )
+            raise RuntimeError("Received text_end for non-text content")
+
+        case "thinking_start":
+            _setContent(partial, proxyEvent["contentIndex"], ThinkingContent(thinking=""))
+            return ThinkingStartEvent(contentIndex=proxyEvent["contentIndex"], partial=partial)
+
+        case "thinking_delta":
+            content = _contentAt(partial, proxyEvent["contentIndex"])
+            if content is not None and content.type == "thinking":
+                content.thinking += proxyEvent["delta"]
+                return ThinkingDeltaEvent(
+                    contentIndex=proxyEvent["contentIndex"],
+                    delta=proxyEvent["delta"],
+                    partial=partial,
+                )
+            raise RuntimeError("Received thinking_delta for non-thinking content")
+
+        case "thinking_end":
+            content = _contentAt(partial, proxyEvent["contentIndex"])
+            if content is not None and content.type == "thinking":
+                content.thinkingSignature = proxyEvent.get("contentSignature")
+                return ThinkingEndEvent(
+                    contentIndex=proxyEvent["contentIndex"],
+                    content=content.thinking,
+                    partial=partial,
+                )
+            raise RuntimeError("Received thinking_end for non-thinking content")
+
+        case "toolcall_start":
+            _setContent(
+                partial,
+                proxyEvent["contentIndex"],
+                ToolCall(id=proxyEvent["id"], name=proxyEvent["toolName"], arguments={}),
+            )
+            partialJson[proxyEvent["contentIndex"]] = ""
+            return ToolCallStartEvent(contentIndex=proxyEvent["contentIndex"], partial=partial)
+
+        case "toolcall_delta":
+            content = _contentAt(partial, proxyEvent["contentIndex"])
+            if content is not None and content.type == "toolCall":
+                partialJson[proxyEvent["contentIndex"]] = partialJson.get(proxyEvent["contentIndex"], "") + proxyEvent["delta"]
+                parsed = parseStreamingJson(partialJson[proxyEvent["contentIndex"]])
+                content.arguments = parsed if isinstance(parsed, dict) else {}
+                partial.content[proxyEvent["contentIndex"]] = content.model_copy()  # Trigger reactivity
+                return ToolCallDeltaEvent(
+                    contentIndex=proxyEvent["contentIndex"],
+                    delta=proxyEvent["delta"],
+                    partial=partial,
+                )
+            raise RuntimeError("Received toolcall_delta for non-toolCall content")
+
+        case "toolcall_end":
+            content = _contentAt(partial, proxyEvent["contentIndex"])
+            if content is not None and content.type == "toolCall":
+                # `Object.assign(content, proxyEvent.toolCall)`: the fields the server sent replace the block's.
+                finalized = ToolCall.model_validate(proxyEvent["toolCall"])
+                for key in proxyEvent["toolCall"]:
+                    if key in ToolCall.model_fields:
+                        setattr(content, key, getattr(finalized, key))
+                raw = partialJson.pop(proxyEvent["contentIndex"], None)
+                # MISAKA fork: the server's final arguments win; only an empty object is checked against the streamed
+                # text, so a malformed stream still surfaces as `argumentsError` (as `pi_messages` does).
+                if raw and content.argumentsError is None and not content.arguments:
+                    StreamingArgs(raw).finish_into(content)
+                return ToolCallEndEvent(
+                    contentIndex=proxyEvent["contentIndex"],
+                    toolCall=content,
+                    partial=partial,
+                )
+            return None
+
+        case "done":
+            # MISAKA fork: a tool call the server never ended keeps a streaming preview, which is not an executable
+            # argument set; it gets the strict final parse (and an error receipt when the JSON is incomplete).
+            for index, raw in partialJson.items():
+                content = _contentAt(partial, index)
+                if raw and content is not None and content.type == "toolCall":
+                    StreamingArgs(raw).finish_into(content)
+            partialJson.clear()
+            partial.stopReason = proxyEvent["reason"]
+            partial.usage = Usage.model_validate(proxyEvent["usage"])
+            if proxyEvent.get("providerThinkingLevel") is not None:
+                partial.providerThinkingLevel = proxyEvent["providerThinkingLevel"]
+            return DoneEvent(reason=proxyEvent["reason"], message=partial)
+
+        case "error":
+            partial.stopReason = proxyEvent["reason"]
+            partial.errorMessage = proxyEvent.get("errorMessage")
+            partial.usage = Usage.model_validate(proxyEvent["usage"])
+            if proxyEvent.get("providerThinkingLevel") is not None:
+                partial.providerThinkingLevel = proxyEvent["providerThinkingLevel"]
+            return ErrorEvent(reason=proxyEvent["reason"], error=partial)
+
+        case _:
+            logger.warning("Unhandled proxy event type: %s", proxyEvent.get("type"))
+            return None
 
 
-async def _read_proxy_error_response(response: httpx.Response, signal: Any) -> str:
-    fallback = f"Proxy error: {response.status_code} {response.reason_phrase}"
-    try:
-        body = await _await_with_signal(
-            response.aread(), signal, on_abort=response.aclose
-        )
-        payload = json.loads(body.decode("utf-8"))
-    except Exception:  # noqa: BLE001 - Pi falls back when the error body is not JSON
-        return fallback
-    if isinstance(payload, Mapping) and payload.get("error"):
-        return f"Proxy error: {payload['error']}"
-    return fallback
-
-
-def _read_option(options: Any, name: str) -> Any:
-    if isinstance(options, Mapping):
-        return options.get(name)
-    return getattr(options, name, None)
-
-
-def _stringify_error(error: Exception) -> str:
-    return str(error) or error.__class__.__name__
-
-
-streamProxy = stream_proxy
-
-__all__ = [
-    "ProxyAssistantMessageEvent",
-    "ProxyStreamOptions",
-    "streamProxy",
-    "stream_proxy",
-]
+__all__ = ["ProxyAssistantMessageEvent", "ProxyStreamOptions", "streamProxy"]

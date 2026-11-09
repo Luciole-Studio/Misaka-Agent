@@ -43,18 +43,18 @@ def test_a_node_claims_its_row_although_the_parent_recorded_a_drifted_identity(t
     with closing(tasks.connect(str(tmp_path / "board.db"))) as con:
         run = runs.create(con, workspace=str(tmp_path), question="Fixture question")
         node = runs.nodes(con, run["id"])[0]
-        key = runs.prepare_runner(con, "research_branches", node["id"])
+        key = runs.prepare_runner(con, "research_execution", node["id"])
         mine = processes.identity(os.getpid())
-        con.execute("UPDATE research_branches SET runner_pid=?, runner_identity=? WHERE id=?",
+        con.execute("UPDATE research_execution SET runner_pid=?, runner_identity=? WHERE id=?",
                     (os.getpid(), _shifted(mine, 1.0), node["id"]))
-        assert runs.claim_runner(con, "research_branches", node["id"], key) is True
+        assert runs.claim_runner(con, "research_execution", node["id"], key) is True
         row = runs.node(con, node["id"])
         assert row["runner_identity"] == mine                                # the child's own reading stands
 
-        con.execute("UPDATE research_branches SET runner_identity=? WHERE id=?",
+        con.execute("UPDATE research_execution SET runner_identity=? WHERE id=?",
                     (_shifted(mine, 3600.0), node["id"]))
-        assert runs.claim_runner(con, "research_branches", node["id"], key) is False
-        assert "identity mismatch" in runs.note_claim_failure(con, "research_branches", node["id"], key)
+        assert runs.claim_runner(con, "research_execution", node["id"], key) is False
+        assert "identity mismatch" in runs.note_claim_failure(con, "research_execution", node["id"], key)
 
 
 # Only a POSIX worker publishes a process-group identity (dispatch._worker_identity), so only

@@ -15,6 +15,7 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any
 
+from misaka.ai.utils.typebox_helpers import typeboxSchema
 from misaka.utils.values import read_field
 
 CONTEXT_FRAMING_TOKENS = 4096
@@ -127,7 +128,7 @@ def context_token_upper_bound(context: Any) -> int:
         if hasattr(tool, "parameters_json_schema"):
             parameters = tool.parameters_json_schema()
         elif isinstance(parameters, type) and hasattr(parameters, "model_json_schema"):
-            parameters = parameters.model_json_schema()
+            parameters = typeboxSchema(parameters)
         tools.append(
             {
                 "name": str(read_field(tool, "name", "")),

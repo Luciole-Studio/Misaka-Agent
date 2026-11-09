@@ -116,6 +116,11 @@ def permission_settings(session: Any, *, cwd: str | None = None, include_project
             getter = getattr(part, "get_permission_settings", None)
             if callable(getter) and (grant := getter()):
                 result.append(grant)
+    # CCB destination "session": what this session's dialog granted, for it and its sub-agents.
+    for part in getattr(getattr(session, "moments", None), "parts", ()):
+        getter = getattr(part, "get_session_permissions", None)
+        if callable(getter) and (grant := getter()):
+            result.append(grant)
     return result
 
 
@@ -183,6 +188,33 @@ def validate_permission_mode(mode):
     if not isinstance(mode, str) or mode not in PERMISSION_MODES:
         raise ValueError("Invalid permission mode")
     return mode
+
+
+def initial_permission_mode(session):
+    """The mode a top-level session starts in: CCB ``initialPermissionModeFromCLI``
+    (permissionSetup.ts) over the settings' ``permissions.defaultMode``. MISAKA starts its sessions
+    itself (the panel, cards, contact turns), so no launch flag ranks above it; ``/agents mode``
+    changes a live session. As in CCB, bypassPermissions is passed over while
+    ``permissions.disableBypassPermissionsMode`` is "disable", and auto where it cannot run (CCB's
+    circuit breaker): a top-level session has no transcript classifier, which runs in sub-agents.
+    A mode passed over falls back to default, as in CCB; no mode at all is bypassPermissions, where
+    CCB's is default, because a pi session never asked (user ruling, 2026-10-24)."""
+    settings: dict[str, Any] = {}
+    for layer in settings_layers(session):      # user, project, managed: the later one wins, as CCB merges
+        permissions = layer.get("permissions")
+        if isinstance(permissions, Mapping):
+            settings.update({key: permissions[key] for key in ("defaultMode", "disableBypassPermissionsMode")
+                             if key in permissions})
+    disabled = settings.get("disableBypassPermissionsMode") == "disable"
+    if "defaultMode" not in settings:
+        return "default" if disabled else "bypassPermissions"
+    mode = settings["defaultMode"]
+    usable = TOP_LEVEL_PERMISSION_MODES - ({"bypassPermissions"} if disabled else set())
+    return mode if mode in usable else "default"
+
+
+# Modes a top-level session can be in: CCB's external modes, less auto (no classifier here; see above).
+TOP_LEVEL_PERMISSION_MODES = frozenset({"default", "plan", "acceptEdits", "bypassPermissions", "dontAsk"})
 
 
 def current_permission_mode(session, fallback=None):

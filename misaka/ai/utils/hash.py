@@ -1,4 +1,8 @@
-"""Hash helpers used to shorten long opaque strings."""
+"""Translated from pi's ``packages/ai/src/utils/hash.ts`` (v1.1.0).
+
+MISAKA fork: ``Math.imul``, ``>>>``, ``toString(36)`` and ``charCodeAt`` have no Python counterparts; the helpers below
+stand in for them.
+"""
 
 from __future__ import annotations
 
@@ -32,21 +36,16 @@ def _utf16_code_units(text: str) -> list[int]:
     return [encoded[index] | (encoded[index + 1] << 8) for index in range(0, len(encoded), 2)]
 
 
-def short_hash(text: str) -> str:
+def shortHash(str: str) -> str:
+    """Fast deterministic hash to shorten long strings"""
     h1 = _to_int32(0xDEADBEEF)
     h2 = _to_int32(0x41C6CE57)
-    for code_unit in _utf16_code_units(text):
-        h1 = _imul(h1 ^ code_unit, 2654435761)
-        h2 = _imul(h2 ^ code_unit, 1597334677)
-    h1 = _imul(h1 ^ _unsigned_right_shift(h1, 16), 2246822507) ^ _imul(
-        h2 ^ _unsigned_right_shift(h2, 13),
-        3266489909,
-    )
-    h2 = _imul(h2 ^ _unsigned_right_shift(h2, 16), 2246822507) ^ _imul(
-        h1 ^ _unsigned_right_shift(h1, 13),
-        3266489909,
-    )
+    for ch in _utf16_code_units(str):
+        h1 = _imul(h1 ^ ch, 2654435761)
+        h2 = _imul(h2 ^ ch, 1597334677)
+    h1 = _imul(h1 ^ _unsigned_right_shift(h1, 16), 2246822507) ^ _imul(h2 ^ _unsigned_right_shift(h2, 13), 3266489909)
+    h2 = _imul(h2 ^ _unsigned_right_shift(h2, 16), 2246822507) ^ _imul(h1 ^ _unsigned_right_shift(h1, 13), 3266489909)
     return _to_base36(h2 & 0xFFFFFFFF) + _to_base36(h1 & 0xFFFFFFFF)
 
 
-__all__ = ["short_hash"]
+__all__ = ["shortHash"]

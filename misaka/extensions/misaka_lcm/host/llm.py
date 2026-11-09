@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
 
 from misaka.config import current_config
+from misaka.utils._abort_signal import AnyAbortSignal
 from misaka.utils.async_lifecycle import run_in_thread
 from misaka.utils.values import read_field
 
@@ -47,6 +48,14 @@ def runtime(ctx):
         _REGISTRY.reset(registry_token)
 
 
+def _stored(registry, provider):
+    """The provider's stored credential record as the registry's auth.json store last loaded it, without I/O: the
+    synchronous paths here cannot await the store's ``read``."""
+    from misaka.core.auth_storage import _coerce_storage_object
+
+    return _coerce_storage_object(registry.authStorage.readState.data).get(provider)
+
+
 def usage_dict(usage) -> dict:
     """Preserve the host's separate input, output and cache counters."""
     inp, out, read, write = (int(read_field(usage, key, 0) or 0)
@@ -59,14 +68,14 @@ def usage_dict(usage) -> dict:
 
 def get_provider(name):
     """Native provider identity for Hermes' provider-plus-endpoint rule."""
-    from misaka.ai.models import get_providers
+    from misaka.ai.compat import getProviders
 
     registry = _REGISTRY.get()
     from .profiles import get_provider_profile
     profile = get_provider_profile(name)
     if profile is not None and profile.auth_type == 'external_process':
         return profile.name
-    names = {item.provider for item in registry.getAll()} if registry is not None else get_providers()
+    names = {item.provider for item in registry.getAll()} if registry is not None else getProviders()
     if registry is not None:
         from .profiles import native_provider
         name = native_provider(name, registry)
@@ -86,11 +95,11 @@ def _unwrap_moa_provider(provider, model):
 
 
 def _model_route(model, registry):
-    from misaka.ai.models import get_providers
+    from misaka.ai.compat import getProviders
 
     from ..vendor.model_routing import parse_lcm_model_override
 
-    custom = {item.provider for item in registry.getAll()} - set(get_providers())
+    custom = {item.provider for item in registry.getAll()} - set(getProviders())
     return parse_lcm_model_override(model, provider_resolver=lambda name: name == "cerebras" or name in custom)
 
 
@@ -147,7 +156,7 @@ def resolve_model(provider, model, registry):
         if candidate is None:
             raise RuntimeError(f'No native model registered for {provider}')
         return candidate
-    resolved = resolveCliModel({'cliProvider': provider, 'cliModel': model, 'modelRegistry': registry})
+    resolved = resolveCliModel({'cliProvider': provider, 'cliModel': model, 'modelRuntime': registry.modelRuntime})
     if resolved.model is None:
         raise RuntimeError(resolved.error or f'Unknown auxiliary model: {provider}/{model}')
     return resolved.model
@@ -161,21 +170,18 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                     main_runtime, base_url, api_key, api_mode, route_info, latency_info, started,
                     extra_body=None, reasoning_config=None, extra_headers=None, recovery=True):
     from misaka.ai.auth.resolve import AuthResolutionOverrides
-    from misaka.ai.session_resources import cleanup_session_resources
+    from misaka.ai.session_resources import cleanupSessionResources
     from misaka.ai.types import Context, SimpleStreamOptions, UserMessage
-    from misaka.ai.utils.abort import (
-        AbortController,
-        combine_abort_signals,
-        wait_for_abort,
-    )
-    from misaka.core.auth_storage import AuthStorage
     from misaka.core.model_registry import ModelRegistry
+    from misaka.core.model_runtime import ModelRuntime
+    from misaka.utils._abort_signal import wait_for_abort
+    from misaka.utils.js import AbortController
 
     from ..native import auxiliary_options, auxiliary_policy
     from . import routing
 
     execution.check_cancelled()
-    registry = _REGISTRY.get() or ModelRegistry.create(AuthStorage.create())
+    registry = _REGISTRY.get() or ModelRegistry(await ModelRuntime.create())
     system, turns = [], []
     for message in messages or []:
         role = message.get("role", "user")
@@ -273,7 +279,7 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
         if not base_url or base_url == main_runtime.get("base_url"):
             api_key = api_key or main_runtime.get("api_key")
     controller = AbortController()
-    signal = combine_abort_signals(controller, execution.current_signal())
+    signal = AnyAbortSignal(controller.signal, execution.current_signal())
     request = asyncio.current_task()
 
     async def abort_request():
@@ -291,7 +297,7 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
         pooled_entry = None
 
         def issuing_credential():
-            stored = (registry.authStorage.get(pooled_entry.id if pooled_entry else selected.provider)
+            stored = (_stored(registry, pooled_entry.id if pooled_entry else selected.provider)
                       if not api_key and hasattr(registry, 'authStorage') else None)
             # The wire key is authoritative, even when a default login exists.
             return {**(stored or {}), 'access': auth.get('apiKey') or (stored or {}).get('access', '')}
@@ -351,12 +357,13 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                     return await complete(messages=messages, model=selected.id, timeout=budget,
                         cwd=_CWD.get(), signal=signal, temperature=temperature, max_tokens=max_tokens)
             attempt = AbortController()
-            attempt_signal = combine_abort_signals(attempt, signal)
+            attempt_signal = AnyAbortSignal(attempt.signal, signal)
             request_id = str(uuid.uuid4())
             failed = False
             stream = None
             fixed = auxiliary_options._fixed_temperature_for_model(selected.id, selected.baseUrl)
-            if fixed is auxiliary_options.OMIT_TEMPERATURE or auxiliary_options._forbids_sampling_params(selected.id):
+            if (fixed is auxiliary_options.OMIT_TEMPERATURE or auxiliary_options._forbids_sampling_params(selected.id)
+                    or _profile_omits_temperature(selected.provider)):
                 temperature = None
             elif fixed is not None:
                 temperature = fixed
@@ -378,7 +385,8 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                     headers['Authorization'] = f'Bearer {wire_key}'
                     wire_key = None  # native header-only auth omits X-Api-Key
             try:
-                streamed = latency_info is not None or selected.api in {'anthropic-messages', 'openai-codex-responses'}
+                streamed = (latency_info is not None or selected.api in {'anthropic-messages', 'openai-codex-responses'}
+                            or _kimi_code_endpoint(selected.baseUrl))
                 hard_budget = auxiliary_options._aux_stream_total_ceiling(budget) if streamed else budget
                 async with asyncio.timeout(hard_budget):
                     def on_response(_response, _model):
@@ -392,6 +400,7 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                             _responses_cache(payload, wire_model, main_runtime, cache_id,
                                              system_prompt=context.systemPrompt)
                         body = dict(extra_body or {})
+                        sent_by_pi = _KIMI_REASONING_CONTROLS & payload.keys()
                         if selected.provider == 'nous' and selected.api == 'anthropic-messages':
                             body = {**profile.build_extra_body(), **body}
                         if projection is not None:
@@ -399,6 +408,7 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                                             if key != 'extra_headers'})
                             body = auxiliary_options._merge_aux_extra_body(body, projection, reasoning, wire_model.provider)
                         payload.update(body)
+                        _one_kimi_reasoning_control(payload, wire_model, sent_by_pi)
                         return payload
 
                     options = SimpleStreamOptions(
@@ -411,7 +421,7 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                     )
                     if latency_info is not None:
                         latency_info.setdefault("provider_dispatch_ms", _elapsed_ms(started))
-                    stream = registry.streamSimple(wire_model, context, options)
+                    stream = _provider_stream(registry, wire_model, context, options)
                     if streamed:
                         # Only substantive native deltas re-arm the idle window.
                         # Metadata/keepalives count for timing, never for liveness.
@@ -465,7 +475,7 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                         if stream is not None and hasattr(stream, 'settled'):
                             await stream.settled()
                     finally:
-                        cleanup_session_resources(request_id)
+                        cleanupSessionResources(request_id)
                 except Exception:
                     if not failed:
                         raise
@@ -482,7 +492,7 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                 # An explicit key must not refresh an unrelated saved OAuth login.
                 if external or api_key or not hasattr(registry, 'authStorage') or not registry.isUsingOAuth(selected):
                     return False
-                if not registry.authStorage.get(selected.provider):
+                if not _stored(registry, selected.provider):
                     return False
                 owner = Pool(registry, selected.provider, [selected.provider], 'fill_first')
                 entry = SimpleNamespace(id=selected.provider)
@@ -573,6 +583,24 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
             await asyncio.gather(aborting, return_exceptions=True)
 
 
+def _provider_stream(registry, model, context, options):
+    """Stream through the model's own provider with the auth resolved above. The runtime's
+    ``streamSimple`` would resolve it again, and put back the key, headers and endpoint this
+    module deliberately chose (a pooled account, header-only Bearer auth, the /v1 rewrite).
+
+    A task's ``api_mode`` can put the model on an API its provider does not serve (a Z.AI
+    model on its Anthropic endpoint): that one goes by the API it names, as before the runtime.
+    """
+    from misaka.ai.compat import streamSimple
+    from misaka.ai.utils.transcript import normalizeContext
+
+    provider = registry.getProvider(model.provider)
+    catalog = registry.find(model.provider, model.id)
+    if provider is None or (catalog is not None and catalog.api != model.api):
+        return streamSimple(model, context, options)
+    return provider.streamSimple(model, normalizeContext(context), options)
+
+
 def _elapsed_ms(started):
     return max(0, int((time.monotonic() - started) * 1000))
 
@@ -612,6 +640,49 @@ def _responses_cache(payload, model, main_runtime, request_id, *, system_prompt=
         payload.pop("prompt_cache_retention", None)
         if retention:
             payload["prompt_cache_retention"] = retention
+
+
+_KIMI_REASONING_CONTROLS = frozenset({'thinking', 'reasoning_effort'})
+
+
+def _one_kimi_reasoning_control(payload, model, sent_by_pi):
+    """Kimi rejects a request carrying both ``thinking`` and ``reasoning_effort`` (``KimiProfile``). Since pi 1.3.0
+    kimi-coding is an openai-completions provider, so the profile's projection lands on pi's own request. pi's catalog
+    compat knows which control each Kimi Code model takes (``reasoning_effort`` on the K3-style models, the
+    ``thinking`` toggle on the deepseek-format one), so when the projection adds the other one, pi's stays.
+
+    The catalog also knows which models always think (``thinkingLevelMap.off`` is null: every Kimi Code model). pi
+    never sends those ``thinking: disabled``, so a projection of disabled reasoning is dropped rather than asking
+    the model for something it cannot do."""
+    from misaka.ai.models import getSupportedThinkingLevels
+
+    from ..native.profile_kimi_coding import KimiProfile
+    from .profiles import get_provider_profile
+    if not isinstance(get_provider_profile(model.provider), KimiProfile):
+        return
+    if _KIMI_REASONING_CONTROLS <= payload.keys() and len(sent_by_pi) == 1:
+        payload.pop(next(iter(_KIMI_REASONING_CONTROLS - sent_by_pi)))
+    if ('thinking' not in sent_by_pi and payload.get('thinking') == {'type': 'disabled'}
+            and 'off' not in getSupportedThinkingLevels(model)):
+        payload.pop('thinking')
+
+
+def _profile_omits_temperature(provider):
+    """Hermes' provider profile says the server manages temperature (``fixed_temperature=OMIT_TEMPERATURE``: Kimi
+    and Moonshot), as its main agent applies it. The auxiliary rule ``_is_kimi_model`` matches ``kimi-*`` names only,
+    which missed Kimi Code's bare ``k3`` once pi 1.3.0 moved kimi-coding to openai-completions: that wire sends the
+    temperature the Anthropic route used to drop with thinking on."""
+    from ..native.provider_profile import OMIT_TEMPERATURE
+    from .profiles import get_provider_profile
+    return getattr(get_provider_profile(provider), 'fixed_temperature', None) is OMIT_TEMPERATURE
+
+
+def _kimi_code_endpoint(base_url):
+    """Hermes sends Kimi Code's auxiliary calls through its Anthropic client, which streams them under the idle
+    window and the total ceiling (``_client_streams_internally``). pi 1.3.0 serves the same endpoint over
+    openai-completions; the call keeps Hermes' streamed timing rather than falling back to one flat timeout."""
+    from ..native.profile_kimi_coding import _is_confirmed_kimi_coding_url
+    return _is_confirmed_kimi_coding_url((base_url or '').rstrip('/'))
 
 
 def _omit_default_output_limit(payload, model):
@@ -695,3 +766,22 @@ def install() -> None:
         sys.modules["agent.auxiliary_client"] = module
         if "agent" in sys.modules:
             sys.modules["agent"].auxiliary_client = module
+    _summaries_without_output_limit()
+
+
+def _summaries_without_output_limit() -> None:
+    """A summary asks for no output limit, as Hermes' own compressor does (``_generate_summary`` in
+    ``native/context_compressor.py``). Upstream sizes its limit for the text, but adaptive thinking
+    spends the same limit: the text came back cut, which upstream accepts, or empty, which opens
+    the route's circuit. Only this call: ``lcm_expand_query`` shares its task and promises its
+    caller a limit."""
+    from ..vendor import escalation
+    original = escalation._call_llm_for_summary
+    if getattr(original, "misaka_no_output_limit", False):
+        return
+
+    def summarize(prompt, _max_tokens, **kwargs):
+        return original(prompt, None, **kwargs)
+
+    summarize.misaka_no_output_limit = True
+    escalation._call_llm_for_summary = summarize

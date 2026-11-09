@@ -17,16 +17,12 @@ import httpx
 import openai
 import pytest
 
-from misaka.ai.providers import (
-    azure_openai_responses,
-    openai_completions,
-    openai_responses,
-)
-from misaka.ai.utils.retry import RETRYABLE_PROVIDER_ERROR_PATTERN
+from misaka.ai.api import _openai_sdk
+from misaka.ai.utils.retry import _RETRYABLE_PROVIDER_ERROR_PATTERN
 from misaka.core.session_manager import SessionManager
-from misaka.ui.tui.interactive.components.footer import FooterComponent
+from misaka.modes.interactive.components.footer import FooterComponent
 from misaka.ui.tui.terminal import ProcessTerminal
-from misaka.ui.tui.tui import TUI
+from misaka.ui.tui.tui_main_screen import TuiMainScreen
 
 
 class Terminal(ProcessTerminal):
@@ -63,7 +59,7 @@ class SlowContent:
 
 @pytest.mark.asyncio
 async def test_a_slow_frame_leaves_the_loop_as_long_as_it_took(monkeypatch):
-    ui = TUI(Terminal())
+    ui = TuiMainScreen(Terminal())
     ui.addChild(SlowContent())
     loop = asyncio.get_running_loop()
     delays = []
@@ -74,8 +70,8 @@ async def test_a_slow_frame_leaves_the_loop_as_long_as_it_took(monkeypatch):
         ui.lastRenderAt = time.perf_counter() * 1000          # as the render runners stamp it
         ui.doRender()
         ui.renderRequested = True
-        ui._scheduleRender()
-        ui._cancel_render_timer()
+        ui.scheduleRender()
+        ui.cancelRenderTimer()
 
     frame_then_schedule()
     assert ui.lastRenderCostMs >= 30
@@ -86,14 +82,14 @@ async def test_a_slow_frame_leaves_the_loop_as_long_as_it_took(monkeypatch):
     # leaves the loop its CPU's worth: counted from the frame's start, the wait came to nothing.
     ui.lastRenderCostMs, ui.lastRenderWallMs = 30.0, 60.0
     ui.lastRenderAt = time.perf_counter() * 1000 - 60
-    ui._scheduleRender()
-    ui._cancel_render_timer()
+    ui.scheduleRender()
+    ui.cancelRenderTimer()
     assert delays[-1] >= 0.029
 
     ui.lastRenderCostMs = ui.lastRenderWallMs = 1.0
     ui.lastRenderAt = time.perf_counter() * 1000
-    ui._scheduleRender()
-    ui._cancel_render_timer()
+    ui.scheduleRender()
+    ui.cancelRenderTimer()
     assert 0.01 <= delays[-1] <= ui.MIN_RENDER_INTERVAL_MS / 1000
 
 
@@ -106,7 +102,7 @@ class HeldUpTerminal(Terminal):
 
 
 def test_a_terminal_write_held_up_is_not_counted_as_the_frames_work():
-    ui = TUI(HeldUpTerminal())
+    ui = TuiMainScreen(HeldUpTerminal())
     ui.addChild(Content())
     ui.doRender()
     assert ui.lastRenderCostMs < 100, "the next frame is not held back as long as the write was"
@@ -121,6 +117,7 @@ class Session:
     def __init__(self, cwd):
         self.sessionManager = SessionManager.inMemory(cwd=cwd)
         self.model = object()
+        self.routedModel = None
         self.estimates = 0
 
     def getContextUsage(self):
@@ -158,16 +155,56 @@ class Signal:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("adapter", [openai_completions, openai_responses, azure_openai_responses])
-async def test_openai_streams_wait_on_the_abort_signal_once(adapter):
+async def test_openai_streams_wait_on_the_abort_signal_once():
     async def items():
         for index in range(50):
             yield {"index": index}
 
     signal = Signal()
-    received = [item async for item in adapter._iterate_stream(items(), signal)]
+    received = [item async for item in _openai_sdk._iterate_stream(items(), signal)]
     assert [item["index"] for item in received] == list(range(50))
     assert signal.waits == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adapter", ["openai_completions", "openai_responses", "azure_openai_responses"])
+async def test_each_openai_adapter_reads_its_stream_through_the_one_wait_iterator(adapter, monkeypatch):
+    """The adapters share `_openai_sdk._iterate_stream`, so each call site is pinned here."""
+    import importlib
+
+    from misaka.ai.compat import getModel
+    from misaka.ai.types import Context, UserMessage
+
+    module = importlib.import_module(f"misaka.ai.api.{adapter}")
+    model = {
+        "openai_completions": lambda: getModel("openai", "gpt-5").model_copy(update={"api": "openai-completions"}),
+        "openai_responses": lambda: getModel("openai", "gpt-5"),
+        "azure_openai_responses": lambda: getModel("azure", "gpt-5"),
+    }[adapter]()
+
+    async def items():
+        for index in range(50):
+            yield {"index": index}
+
+    async def createWithResponse(*_args, **_kwargs):
+        return _openai_sdk._WithResponse(items(), httpx.Response(200, request=httpx.Request("POST", "https://x")))
+
+    seen: list = []
+    iterate = _openai_sdk._iterate_stream
+
+    def spy(stream_obj, signal=None):
+        seen.append(stream_obj)
+        return iterate(stream_obj, signal)
+
+    monkeypatch.setattr(_openai_sdk, "_create_with_response", createWithResponse)
+    monkeypatch.setattr(_openai_sdk, "_iterate_stream", spy)
+    options = {"apiKey": "sk-test", "signal": Signal()}
+    if adapter == "azure_openai_responses":
+        options["azureBaseUrl"] = "https://example.openai.azure.com/openai/v1"
+    events = [event async for event in module.stream(model, Context(messages=[UserMessage(content="hi", timestamp=0)]), options)]
+
+    assert events
+    assert len(seen) == 1
 
 
 def test_connection_error_names_the_transport_failure():
@@ -178,11 +215,11 @@ def test_connection_error_names_the_transport_failure():
         except httpx.ReadError as transport_error:
             raise openai.APIConnectionError(request=request) from transport_error
     except openai.APIConnectionError as error:
-        message = openai_completions._format_completion_error(error)
+        message = _openai_sdk._format_completion_error(error)
 
     assert message == "Connection error. (ReadError: [WinError 10054] An existing connection was forcibly closed)"
-    assert RETRYABLE_PROVIDER_ERROR_PATTERN.search(message)
-    assert openai_completions._format_completion_error(RuntimeError("boom")) == "boom"
+    assert _RETRYABLE_PROVIDER_ERROR_PATTERN.search(message)
+    assert _openai_sdk._format_completion_error(RuntimeError("boom")) == "boom"
 
 
 def test_a_request_refused_before_it_was_sent_does_not_quote_the_key():
@@ -196,9 +233,9 @@ def test_a_request_refused_before_it_was_sent_does_not_quote_the_key():
         except h11.LocalProtocolError as local:
             raise openai.APIConnectionError(request=request) from local
     except openai.APIConnectionError as error:
-        message = openai_completions._format_completion_error(error)
+        message = _openai_sdk._format_completion_error(error)
     assert "SECRETKEY" not in message and "API key" in message
-    assert RETRYABLE_PROVIDER_ERROR_PATTERN.search(message)
+    assert _RETRYABLE_PROVIDER_ERROR_PATTERN.search(message)
 
 
 @pytest.mark.parametrize("said", [
@@ -209,16 +246,16 @@ def test_a_request_refused_before_it_was_sent_does_not_quote_the_key():
 def test_a_reply_dropped_mid_stream_is_retried(said):
     """The issue #6 failure itself: the provider gave up on a slow reader mid-reply, and none of
     these words was in the pattern, so the turn ended with no retry."""
-    assert RETRYABLE_PROVIDER_ERROR_PATTERN.search(said)
+    assert _RETRYABLE_PROVIDER_ERROR_PATTERN.search(said)
 
 
 def test_the_token_cap_stop_is_never_retried_whatever_its_numbers():
-    from misaka.ai.providers._common import _empty_usage
+    from misaka.ai.api._common import _empty_usage
     from misaka.ai.types import AssistantMessage
-    from misaka.ai.utils.retry import is_retryable_assistant_error
+    from misaka.ai.utils.retry import isRetryableAssistantError
     from misaka.core.platform import budget
-    said = (f"{budget.EXHAUSTED_MESSAGE}: the next request needs up to 500,000 tokens and this research run "
+    said = (f"{budget.EXHAUSTED_MESSAGE}: the next request needs up to 500,000 tokens and this run "
             f"has 429,000 of its 5,000,000 left.")
     message = AssistantMessage(content=[], api="a", provider="p", model="m", usage=_empty_usage(),
                                stopReason="error", errorMessage=said, timestamp=0)
-    assert not is_retryable_assistant_error(message)
+    assert not isRetryableAssistantError(message)

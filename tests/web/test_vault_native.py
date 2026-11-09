@@ -146,7 +146,7 @@ async def test_headless_save_never_prompts_or_writes(part):
 
 @pytest.mark.parametrize('mode', ['cancel', 'repeated_cancel', 'signal', 'close'])
 async def test_vault_cancellation_drains_loop_cleanup_before_return(part, mode):
-    from misaka.agent.agent import AbortController
+    from misaka.utils.js import AbortController
 
     entered, cleaned = asyncio.Event(), asyncio.Event()
     class Waiting(Page):
@@ -222,7 +222,7 @@ async def test_unlock_tokens_are_session_owned_and_released(part):
 
 def test_private_material_read_and_index_guards(tmp_path):
     from misaka.core.documents.index import ingest
-    from misaka.core.tools.path_utils import resolve_read_path
+    from misaka.core.tools.path_utils import resolveReadPath
     original = tmp_path / 'web-evidence/originals/original.md'
     original.parent.mkdir(parents=True)
     original.write_text('fixture-private', encoding='utf-8')
@@ -233,24 +233,24 @@ def test_private_material_read_and_index_guards(tmp_path):
     link.symlink_to(original)
     for path in (original, key, link):
         with pytest.raises(ValueError, match='Private Web material'):
-            resolve_read_path(str(path), str(tmp_path))
+            resolveReadPath(str(path), str(tmp_path))
         with pytest.raises(ValueError, match='Private Web material'):
             ingest(str(path), workspace=str(tmp_path))
     public = tmp_path / 'vaults-notes/note.md'
     public.parent.mkdir()
     public.write_text('ordinary material', encoding='utf-8')
-    assert resolve_read_path(str(public), str(tmp_path)) == str(public)
+    assert resolveReadPath(str(public), str(tmp_path)) == str(public)
 
 
 def test_private_material_guard_checks_resolved_fallback_alias(tmp_path):
-    from misaka.core.tools.path_utils import resolve_read_path
+    from misaka.core.tools.path_utils import resolveReadPath
 
     private = tmp_path / 'vault/vault.key'
     private.parent.mkdir()
     private.write_text('fixture-key', encoding='utf-8')
     (tmp_path / 'alias\u2019.md').symlink_to(private)
     with pytest.raises(ValueError, match='Private Web material'):
-        resolve_read_path("alias'.md", str(tmp_path))
+        resolveReadPath("alias'.md", str(tmp_path))
 
 
 @pytest.mark.parametrize('name', settings.VAULT_TOOLS[1:])

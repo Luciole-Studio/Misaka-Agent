@@ -17,10 +17,10 @@ class _MutationQueueEntry:
     users: int = 0
 
 
-_file_mutation_queues: dict[str, _MutationQueueEntry] = {}
+fileMutationQueues: dict[str, _MutationQueueEntry] = {}
 
 
-def _get_mutation_queue_key(file_path: str) -> str:
+def getMutationQueueKey(file_path: str) -> str:
     resolved_path = os.path.abspath(file_path)
     try:
         return os.path.realpath(resolved_path)
@@ -28,12 +28,12 @@ def _get_mutation_queue_key(file_path: str) -> str:
         return resolved_path
 
 
-async def with_file_mutation_queue[T](file_path: str, fn: Callable[[], Awaitable[T]]) -> T:
-    key = _get_mutation_queue_key(file_path)
-    entry = _file_mutation_queues.get(key)
+async def withFileMutationQueue[T](file_path: str, fn: Callable[[], Awaitable[T]]) -> T:
+    key = getMutationQueueKey(file_path)
+    entry = fileMutationQueues.get(key)
     if entry is None:
         entry = _MutationQueueEntry(lock=asyncio.Lock())
-        _file_mutation_queues[key] = entry
+        fileMutationQueues[key] = entry
     entry.users += 1
 
     try:
@@ -42,9 +42,8 @@ async def with_file_mutation_queue[T](file_path: str, fn: Callable[[], Awaitable
     finally:
         entry.users -= 1
         if entry.users == 0 and not entry.lock.locked():
-            _file_mutation_queues.pop(key, None)
+            fileMutationQueues.pop(key, None)
 
 
-withFileMutationQueue = with_file_mutation_queue
 
 __all__ = ["withFileMutationQueue"]

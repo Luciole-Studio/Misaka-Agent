@@ -16,11 +16,11 @@ from misaka.core.tools.bash import (
     BashToolInput,
     BashToolOptions,
     ShellToolConfig,
-    create_local_shell_operations,
-    create_shell_tool_definition,
+    createLocalShellOperations,
+    createShellToolDefinition,
 )
-from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
-from misaka.utils.shell import get_powershell_config
+from misaka.core.tools.tool_definition_wrapper import wrapToolDefinition
+from misaka.utils.shell import getPowerShellConfig
 
 UTF8_OUTPUT_PREFIX = (
     "try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n"
@@ -29,7 +29,7 @@ _SESSION_ENV_GUIDELINE = (
     "You can inspect PI_* environment variables for current model and session details."
 )
 
-powershell_tool_system_prompt_contribution = {
+powershellToolSystemPromptContribution = {
     "snippet": "Execute PowerShell commands",
     "guidelines": [_SESSION_ENV_GUIDELINE],
 }
@@ -65,9 +65,9 @@ class _LocalPowerShellOperations:
         )
 
 
-def create_local_powershell_operations() -> PowerShellOperations:
+def createLocalPowerShellOperations() -> PowerShellOperations:
     return _LocalPowerShellOperations(
-        create_local_shell_operations("PowerShell", get_powershell_config)
+        createLocalShellOperations("PowerShell", getPowerShellConfig)
     )
 
 
@@ -76,10 +76,11 @@ _POWERSHELL_TOOL_CONFIG = ShellToolConfig(
     label="powershell",
     shellName="PowerShell",
     prompt="PS>",
-    promptSnippet=powershell_tool_system_prompt_contribution["snippet"],
+    promptSnippet=powershellToolSystemPromptContribution["snippet"],
     promptGuidelines=tuple(
-        powershell_tool_system_prompt_contribution["guidelines"]
+        powershellToolSystemPromptContribution["guidelines"]
     ),
+    # MISAKA fork: output files are named after misaka (upstream: `pi-powershell`).
     tempFilePrefix="misaka-powershell",
 )
 
@@ -104,7 +105,7 @@ def _coerce_options(
         )
     operations = resolved.operations
     if operations is None:
-        operations = create_local_powershell_operations()
+        operations = createLocalPowerShellOperations()
     return BashToolOptions(
         operations=operations,
         exposeSessionEnvironment=resolved.exposeSessionEnvironment,
@@ -112,31 +113,28 @@ def _coerce_options(
     )
 
 
-def create_powershell_tool_definition(
+def createPowerShellToolDefinition(
     cwd: str,
     options: PowerShellToolOptions | Mapping[str, Any] | None = None,
 ) -> ToolDefinition[dict[str, Any], PowerShellToolDetails | None]:
-    return create_shell_tool_definition(
+    return createShellToolDefinition(
         cwd,
         _POWERSHELL_TOOL_CONFIG,
         _coerce_options(options),
     )
 
 
-def create_powershell_tool(
+def createPowerShellTool(
     cwd: str,
     options: PowerShellToolOptions | Mapping[str, Any] | None = None,
 ) -> AgentTool:
-    definition = create_powershell_tool_definition(cwd, options)
-    tool = wrap_tool_definition(definition)
+    definition = createPowerShellToolDefinition(cwd, options)
+    tool = wrapToolDefinition(definition)
     object.__setattr__(tool, "promptSnippet", definition.promptSnippet)
     object.__setattr__(tool, "promptGuidelines", definition.promptGuidelines)
     return tool
 
 
-createLocalPowerShellOperations = create_local_powershell_operations
-createPowerShellTool = create_powershell_tool
-createPowerShellToolDefinition = create_powershell_tool_definition
 
 __all__ = [
     "PowerShellOperations",

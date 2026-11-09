@@ -9,9 +9,9 @@ their locators) and from the ``## Sources`` lines and inline locators of the pro
 they close over references: a conclusion that cites a card's output also gets that card's
 sources; a final report that cites a node's conclusion gets that node's.
 
-The bundle is derived state -- rebuilt from scratch on every call, never registered as an
-artifact, never indexed -- so ``sources/`` belongs to this module and anything put there by hand
-is gone at the next rebuild. Runs written before the research graph are left alone.
+The bundle is derived state -- rebuilt on every call, never registered as an artifact, never
+indexed. A rebuild removes only what the last one placed, so a file saved under ``sources/`` by
+hand stays. Runs written before the research graph are left alone.
 """
 from __future__ import annotations
 
@@ -57,10 +57,11 @@ _LOCATOR = re.compile(
        r'''|(?<![\w:.\\/])[A-Za-z]:[\\/](?:[^\s`'"<>\[\]()/\\]+[\\/])+[^\s`'"<>\[\]()/\\]+'''
        if os.name == "nt" else "")
 )
-_NOTE = ("Written by misaka when the products here were settled and rebuilt from scratch each time, so edit "
-         "nothing in this file or under the sources folder. Each file there is a hard link to where it already "
+_NOTE = ("Written by misaka when the products here were settled and rebuilt each time, so edit nothing in this "
+         "file or in the files it lists under the sources folder. Each of those is a hard link to where it already "
          "lives in the project (a copy only where a hard link was not possible); the originals never move. "
          "Cite original project files, not this bundle's disposable sources paths.")
+_PLACED = re.compile(r"^- `(?P<placed>[^`]+)` ← `(?P<source>[^`]+)`")   # a "Cited sources" line of the manifest
 
 
 def _spellings(locator):
@@ -136,7 +137,7 @@ class _Index:
         self.pages = {}            # citable URL -> real path of the saved page
         self.docs = {}             # doc id -> real path of the original file
         self.titles = {}           # real path -> (title, url)
-        self.digests = {}          # real path -> sha256 already on record (corpus, registered artifacts)
+        self.digests = {}          # real path -> sha256 the corpus has on record
         self.consulted = {}        # task id -> real paths its corpus documents point at
         pages = os.path.join(self.workspace, DOWNLOAD_DIR_NAME, "pages")
         for name in (sorted(os.listdir(pages)) if os.path.isdir(pages) else []):
@@ -185,15 +186,6 @@ class _Index:
             return None
         return real
 
-    def checked_digest(self, real):
-        if self.file_inside(real) != real:
-            raise ValueError("source is missing or outside the readable project material")
-        actual = corpus.sha256_file(real)
-        expected = self.digests.get(real)
-        if expected and actual != expected:
-            raise ValueError("source changed since its registered sha256; original evidence is unresolved")
-        return actual
-
     def dir_inside(self, path):
         try:
             real = os.path.realpath(path)
@@ -227,10 +219,23 @@ class _Collector:
         for task in runs.tasks(con, run["id"]):
             if task["output_dir"]:
                 self.cards[os.path.realpath(task["output_dir"])] = task
+        # The registry as it stands now, over the index's corpus digests. Kept here, not added to
+        # the index: one index serves every card a settle bundles, and a card settled again
+        # registers its files under new digests the previous card's collector never saw.
+        self.digests = dict(index.digests)
         for row in runs.artifacts(con, run["id"]):
-            index.digests.setdefault(os.path.realpath(row["path"]), row["sha256"])
+            self.digests.setdefault(os.path.realpath(row["path"]), row["sha256"])
         for node in runs.nodes(con, run["id"]):
             self.nodes[os.path.realpath(os.path.join(index.workspace, runs.node_dir(node["id"])))] = node
+
+    def checked_digest(self, real):
+        if self.index.file_inside(real) != real:
+            raise ValueError("source is missing or outside the readable project material")
+        actual = corpus.sha256_file(real)
+        expected = self.digests.get(real)
+        if expected and actual != expected:
+            raise ValueError("source changed since its registered sha256; original evidence is unresolved")
+        return actual
 
     def cite(self, locator, by, bases, *, origin=None):
         real, reason = self._resolve(locator, bases)
@@ -283,7 +288,7 @@ class _Collector:
         if not real or not real.lower().endswith(_SCAN_SUFFIXES):
             return
         try:
-            self.index.checked_digest(real)
+            self.checked_digest(real)
             if os.path.getsize(real) > _SCAN_LIMIT:
                 return
             with open(real, encoding="utf-8", errors="replace") as handle:
@@ -427,9 +432,22 @@ def _placed_name(relative, taken):
     return name
 
 
-def _reset(path, *, keep):
-    """Empty the sources folder we own (and only that: a symlink or a file there is somebody
-    else's), recreating it when there is something to put in it."""
+def placed_before(manifest, folder, workspace):
+    """What the last build placed under the sources folder, read from its manifest. A file whose
+    original has gone is the last copy, so it is left out."""
+    try:
+        with open(manifest, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except (OSError, UnicodeError):
+        return set()
+    return {os.path.normpath(os.path.join(folder, found["placed"]))
+            for found in filter(None, map(_PLACED.match, lines))
+            if os.path.exists(os.path.join(workspace, found["source"]))}
+
+
+def _reset(path, *, keep, placed):
+    """Remove from the sources folder what the last build ``placed`` (a symlink or a file at this
+    path is somebody else's), recreating the folder when there is something to put in it."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -437,9 +455,14 @@ def _reset(path, *, keep):
     if st is not None:
         if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
             raise ValueError(f"{path} is not a folder this bundle owns; refusing to rebuild it")
-        shutil.rmtree(path)
+        for base, _dirs, files in os.walk(path, topdown=False):
+            for name in files:
+                if os.path.normpath(os.path.join(base, name)) in placed:
+                    os.unlink(os.path.join(base, name))
+            with contextlib.suppress(OSError):      # a folder that still holds something stays
+                os.rmdir(base)
     if keep:
-        os.makedirs(path)
+        os.makedirs(path, exist_ok=True)
 
 
 def _build(collector, *, folder, manifest, sources_dir, title, products, cards=()):
@@ -448,19 +471,21 @@ def _build(collector, *, folder, manifest, sources_dir, title, products, cards=(
     if not corpus.under(folder, index.workspace) or not sources_dir.startswith(folder + os.sep):
         raise ValueError("A bundle is written only inside the research project.")
     inside = lambda real: real.startswith(folder + os.sep)
+    placed = placed_before(manifest, folder, index.workspace)
     valid = []
     for source in collector.sources.values():
         try:
-            if corpus.under(source.real, sources_dir):
+            if os.path.normpath(source.real) in placed:
                 raise ValueError("disposable bundle source; cite the original project file instead")
-            source.digest = index.checked_digest(source.real)
+            source.digest = collector.checked_digest(source.real)
             valid.append(source)
         except (OSError, ValueError) as error:
             collector.unresolved.append((source.relative, str(error), ""))
     to_place = sorted((s for s in valid if not inside(s.real)), key=lambda s: s.relative)
     in_folder = sorted((s for s in valid if inside(s.real)), key=lambda s: s.relative)
-    _reset(sources_dir, keep=bool(to_place))
-    taken = set()
+    _reset(sources_dir, keep=bool(to_place), placed=placed)
+    taken = {posix_relpath(os.path.join(base, name), sources_dir)   # a new link must not land on what stayed
+             for base, _dirs, files in os.walk(sources_dir) for name in files}
     for source in to_place:
         name = _placed_name(source.relative, taken)
         taken.add(name)
@@ -532,11 +557,19 @@ def _build(collector, *, folder, manifest, sources_dir, title, products, cards=(
     return manifest
 
 
-def card_bundle(con, run, task):
-    """Beside one card's outputs: the sources its declared findings rest on and what its files cite."""
+def project_index(workspace):
+    """What the project holds, read once for several card bundles built back to back. Reading it
+    walks the whole corpus: 27 s on a 33,308-document project (2026-10-27, R45)."""
+    return _Index(workspace)
+
+
+def card_bundle(con, run, task, index=None):
+    """Beside one card's outputs: the sources its declared findings rest on and what its files cite.
+    ``index`` is a ``project_index`` shared by the cards of one settle; without it one is read."""
     if not task["output_dir"]:
         return None
-    index = _Index(run["workspace"])
+    if index is None:
+        index = _Index(run["workspace"])
     folder = index.dir_inside(task["output_dir"])
     if folder is None:
         return None

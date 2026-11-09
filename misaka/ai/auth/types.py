@@ -1,36 +1,25 @@
 # ruff: noqa: UP040 - the aliases below are spelled with `TypeAlias`, not the PEP 695
 # `type` statement.
 
-"""The auth data model, translated from pi's ``packages/ai/src/auth/types.ts``.
+"""Translated from pi's ``packages/ai/src/auth/types.ts`` (v1.1.0).
 
-Three shapes live here and they are deliberately different in kind:
-
-* **Records** (``ModelAuth``, the credentials, ``AuthResult``) are data, so they are
-  pydantic models like the rest of ``misaka.ai.types``.
-* **Interfaces** (``CredentialStore``, ``AuthContext``, ``AuthInteraction``) are
-  implemented by classes, so they are ``Protocol``s.
-* **Auth methods** (``ApiKeyAuth``, ``OAuthAuth``) are neither: upstream builds them as
-  object literals whose properties are functions, and a provider supplies whichever
-  subset it has. They are dataclasses holding callables, which keeps "this provider has
-  no interactive login" expressible as ``login=None`` -- the thing pi writes ``login?``.
-
-Field names stay camelCase, as everywhere else in this package.
+MISAKA fork, in the representation only: records are pydantic models, interfaces are ``Protocol``s, and the auth
+methods (``ApiKeyAuth``, ``OAuthAuth``), which upstream builds as object literals of functions, are dataclasses holding
+callables, so "no interactive login" stays expressible as ``login=None``. The anonymous members of the ``AuthPrompt``
+and ``AuthEvent`` unions get class names (``TextPrompt``, ``DeviceCodeEvent``...), and the single object ``check`` and
+``resolve`` take is spelled as keyword parameters (``ApiKeyCheck``, ``ApiKeyResolve``).
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, Protocol, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, field_validator
 
-# Provider-scoped environment overrides. Values take precedence over os.environ.
-ProviderEnv: TypeAlias = dict[str, str]
-# A null value means "remove this header", which is why the value is optional.
-ProviderHeaders: TypeAlias = dict[str, str | None]
-
-AuthType: TypeAlias = Literal["api_key", "oauth"]
+from misaka.ai.types import ProviderEnv, ProviderHeaders
 
 
 class _AuthModel(BaseModel):
@@ -38,10 +27,8 @@ class _AuthModel(BaseModel):
 
 
 class ModelAuth(_AuthModel):
-    """Request auth for a single model request.
-
-    If a value cannot be expressed as ``apiKey``, ``headers`` or ``baseUrl``, it is
-    provider config, not auth.
+    """Request auth for a single model request. If a value cannot be expressed as
+    `apiKey`, `headers`, or `baseUrl`, it is provider config, not auth.
     """
 
     apiKey: str | None = None
@@ -50,10 +37,8 @@ class ModelAuth(_AuthModel):
 
 
 class ApiKeyCredential(_AuthModel):
-    """Stored api-key credential.
-
-    ``env`` holds provider-scoped environment/config values such as Cloudflare
-    account/gateway ids.
+    """Stored api-key credential. `env` holds provider-scoped environment/config
+    values such as Cloudflare account/gateway ids.
     """
 
     type: Literal["api_key"] = "api_key"
@@ -61,42 +46,114 @@ class ApiKeyCredential(_AuthModel):
     env: ProviderEnv | None = None
 
 
-class OAuthCredential(BaseModel):
-    """Stored canonical OAuth credential.
+class OAuthCredentials(BaseModel):
+    """OAuth token data returned by extension compatibility flows."""
 
-    Upstream types this as ``OAuthCredentials`` with an index signature plus a
-    ``type`` tag; the index signature is why this one model allows extra keys where
-    every other record here forbids them. Providers really do stash their own fields
-    here -- GitHub Copilot's ``enterpriseUrl``, OpenAI Codex's ``accountId``, Radius's
-    ``scope`` -- and dropping them on a read-modify-write would strand the credential on
-    the wrong endpoint or account.
-    """
-
+    # The `[key: string]: unknown` index signature: providers keep their own fields here.
     model_config = ConfigDict(extra="allow")
 
-    type: Literal["oauth"] = "oauth"
     refresh: str
     access: str
     expires: int
 
+    @field_validator("expires", mode="before")
+    @classmethod
+    def _wholeMilliseconds(cls, value: Any) -> Any:
+        # MISAKA fork: a JavaScript number may carry a fraction (`Date.now() + expires_in * 1000`); the stored
+        # expiry is whole milliseconds.
+        if isinstance(value, float) and math.isfinite(value):
+            return math.floor(value)
+        return value
 
-CredentialValue: TypeAlias = ApiKeyCredential | OAuthCredential
-# One type-tagged credential per provider -- the shape of today's auth.json.
-Credential: TypeAlias = Annotated[CredentialValue, Field(discriminator="type")]
+
+class OAuthCredential(OAuthCredentials):
+    """Stored canonical OAuth credential."""
+
+    type: Literal["oauth"] = "oauth"
+
+
+# One type-tagged credential per provider — the shape of today's auth.json.
+Credential: TypeAlias = ApiKeyCredential | OAuthCredential
 
 
 class CredentialInfo(_AuthModel):
     """Non-secret credential metadata for account/status enumeration."""
 
     providerId: str
-    type: AuthType
+    type: Literal["api_key", "oauth"]
+
+
+class AuthOperationOptions(BaseModel):
+    """Optional cancellation for public auth and credential operations."""
+
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    signal: Any | None = None
+
+
+class CredentialStore(Protocol):
+    """App-owned credential storage, keyed by `Provider.id`, one credential per
+    provider. `modify` is the only write path, so every mutation is a
+    serialized read-modify-write; `Models.getAuth()` runs OAuth refresh inside
+    `modify` so concurrent requests cannot double-refresh a rotated token. The
+    app persists a credential after login via
+    `modify(provider.id, async () => credential)`. Login/logout orchestration
+    is app-owned.
+
+    Error semantics: `read` resolves `undefined` for missing entries. Methods
+    reject only on storage failure; `Models` wraps such rejections in
+    `ModelsError` with code "auth". Best-effort stores that serve an in-memory
+    view and record persistence errors internally (like coding-agent's
+    AuthStorage) are valid implementations.
+    """
+
+    async def read(self, providerId: str, options: AuthOperationOptions | None = None) -> Credential | None:
+        """Read the stored credential, possibly expired. Display/status use;
+        resolved request auth comes from `Models.getAuth()`.
+        """
+        ...
+
+    async def list(self, options: AuthOperationOptions | None = None) -> list[CredentialInfo]:
+        """List stored credential metadata without resolving or exposing secrets.
+        Implementations must not execute configured API-key commands while listing.
+        """
+        ...
+
+    async def modify(
+        self,
+        providerId: str,
+        fn: Callable[[Credential | None], Awaitable[Credential | None]],
+        options: AuthOperationOptions | None = None,
+    ) -> Credential | None:
+        """Serialized write — the only write path. `fn` sees the current credential
+        because correct writes (refresh, login-during-refresh) depend on it;
+        return the new credential, or undefined to leave the entry unchanged.
+        Mutual exclusion per provider id, cross-process too where the backing
+        store supports it (e.g. a file lock). Resolves with the post-write
+        credential. Rejections from `fn` propagate.
+        """
+        ...
+
+    async def delete(self, providerId: str, options: AuthOperationOptions | None = None) -> None:
+        """Remove a credential (logout). Implementations serialize this against `modify`."""
+        ...
+
+
+class AuthContext(Protocol):
+    """Environment access for auth resolution. Injectable for tests and browsers."""
+
+    async def env(self, name: str) -> str | None: ...
+
+    async def fileExists(self, path: str) -> bool:
+        """Check whether a file exists. Supports a leading `~`. Always false in browsers."""
+        ...
 
 
 class AuthResult(_AuthModel):
     """Result of resolving auth for a model."""
 
     auth: ModelAuth
-    # Provider-scoped values resolved from credentials and ambient context.
+    # Provider-scoped environment/config values resolved from credentials and ambient context.
     env: ProviderEnv | None = None
     # Human-readable label for status UI: "ANTHROPIC_API_KEY", "OAuth", "~/.aws/credentials".
     source: str | None = None
@@ -104,20 +161,21 @@ class AuthResult(_AuthModel):
 
 class AuthCheck(_AuthModel):
     source: str | None = None
-    type: AuthType
+    type: Literal["api_key", "oauth"]
 
 
-class AuthInfoLink(_AuthModel):
-    url: str
-    label: str | None = None
+AuthType: TypeAlias = Literal["api_key", "oauth"]
 
 
 class _Prompt(BaseModel):
+    """Prompt shown to the user during login. `signal` lets the flow cancel a
+    pending prompt when an out-of-band event resolves the step, e.g. a
+    `manual_code` prompt raced against a callback server, aborted when the
+    callback wins.
+    """
+
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
-    # Cancels this one prompt when an out-of-band event resolves the step -- a
-    # `manual_code` prompt raced against a callback server, aborted when the callback
-    # wins. Distinct from AuthInteraction.signal, which aborts the whole login.
     signal: Any | None = None
 
 
@@ -151,8 +209,12 @@ class ManualCodePrompt(_Prompt):
     placeholder: str | None = None
 
 
-AuthPromptValue: TypeAlias = TextPrompt | SecretPrompt | SelectPrompt | ManualCodePrompt
-AuthPrompt: TypeAlias = Annotated[AuthPromptValue, Field(discriminator="type")]
+AuthPrompt: TypeAlias = TextPrompt | SecretPrompt | SelectPrompt | ManualCodePrompt
+
+
+class AuthInfoLink(_AuthModel):
+    url: str
+    label: str | None = None
 
 
 class InfoEvent(_AuthModel):
@@ -171,8 +233,8 @@ class DeviceCodeEvent(_AuthModel):
     type: Literal["device_code"] = "device_code"
     userCode: str
     verificationUri: str
-    intervalSeconds: int | None = None
-    expiresInSeconds: int | None = None
+    intervalSeconds: int | float | None = None
+    expiresInSeconds: int | float | None = None
 
 
 class ProgressEvent(_AuthModel):
@@ -180,164 +242,93 @@ class ProgressEvent(_AuthModel):
     message: str
 
 
-AuthEventValue: TypeAlias = InfoEvent | AuthUrlEvent | DeviceCodeEvent | ProgressEvent
-AuthEvent: TypeAlias = Annotated[AuthEventValue, Field(discriminator="type")]
-
-
-class AuthOperationOptions(BaseModel):
-    """Optional cancellation for public auth and credential operations."""
-
-    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
-
-    signal: Any | None = None
-
-
-class AuthContext(Protocol):
-    """Environment access for auth resolution. Injectable for tests and browsers."""
-
-    async def env(self, name: str) -> str | None: ...
-
-    async def fileExists(self, path: str) -> bool:
-        """Whether a file exists. Supports a leading ``~``."""
-        ...
+AuthEvent: TypeAlias = InfoEvent | AuthUrlEvent | DeviceCodeEvent | ProgressEvent
 
 
 class AuthInteraction(Protocol):
     """Login interaction callbacks serving both api-key and OAuth flows.
 
-    ``prompt()`` returns the entered/selected string (``select`` returns the option id)
-    and raises on cancel/abort. ``signal`` aborts the whole login flow; per-prompt
-    cancellation uses ``AuthPrompt.signal``.
+    `prompt()` returns the entered/selected string (`select` returns the option
+    id). Rejects on cancel/abort. `signal` aborts the whole login flow;
+    per-prompt cancellation uses `AuthPrompt.signal`.
     """
 
     signal: Any | None
 
-    async def prompt(self, prompt: AuthPromptValue) -> str: ...
+    async def prompt(self, prompt: AuthPrompt) -> str: ...
 
-    def notify(self, event: AuthEventValue) -> None: ...
+    def notify(self, event: AuthEvent) -> None: ...
 
 
 class ProviderAuthInteraction(AuthInteraction, Protocol):
-    """Normalized interaction passed to provider login implementations.
-
-    Same as ``AuthInteraction`` except that ``signal`` is declared without ``| None``.
-    """
+    """Normalized interaction passed to provider login implementations."""
 
     signal: Any
 
 
-class CredentialStore(Protocol):
-    """App-owned credential storage, keyed by provider id, one credential per provider.
-
-    ``modify`` is the only write path, so every mutation is a serialized
-    read-modify-write; ``Models.getAuth()`` runs OAuth refresh inside ``modify`` so
-    concurrent requests cannot double-refresh a rotated token. Login/logout
-    orchestration is app-owned.
-
-    Error semantics: ``read`` resolves ``None`` for missing entries. Methods raise only
-    on storage failure, and ``Models`` wraps such failures in ``ModelsError`` with code
-    ``"auth"``. Stores that serve an in-memory view are valid implementations; upstream
-    names coding-agent's ``AuthStorage`` as the example. misaka's ``core.auth_storage``
-    is that kind of store for reads -- ``reload()`` parks a failure in ``loadError`` and
-    ``get()`` answers from memory -- while a failed *write* raises out of
-    ``persistProviderChange`` instead of being recorded internally.
-    """
-
-    async def read(
-        self, providerId: str, options: AuthOperationOptions | None = None
-    ) -> CredentialValue | None:
-        """The stored credential, possibly expired.
-
-        Display and status use this; resolved request auth comes from ``Models.getAuth()``.
-        """
-        ...
-
-    async def list(
-        self, options: AuthOperationOptions | None = None
-    ) -> list[CredentialInfo]:
-        """Stored credential metadata, without resolving or exposing secrets.
-
-        Implementations must not execute configured API-key commands while listing.
-        """
-        ...
-
-    async def modify(
-        self,
-        providerId: str,
-        fn: Callable[[CredentialValue | None], Awaitable[CredentialValue | None]],
-        options: AuthOperationOptions | None = None,
-    ) -> CredentialValue | None:
-        """Serialized write -- the only write path.
-
-        ``fn`` sees the current credential because correct writes (refresh,
-        login-during-refresh) depend on it; it returns the new credential, or ``None`` to
-        leave the entry unchanged. Mutual exclusion is per provider id, cross-process too
-        where the backing store supports it. Returns the post-write credential;
-        exceptions from ``fn`` propagate.
-        """
-        ...
-
-    async def delete(
-        self, providerId: str, options: AuthOperationOptions | None = None
-    ) -> None:
-        """Remove a credential (logout). Implementations serialize this against ``modify``."""
-        ...
-
-
-# The single-object argument pi passes to `check`/`resolve`, kept as keyword parameters so
-# the three names survive the translation without inventing a record type upstream lacks.
 class ApiKeyCheck(Protocol):
     async def __call__(
-        self, *, ctx: AuthContext, credential: ApiKeyCredential | None, signal: Any
+        self, *, ctx: AuthContext, credential: ApiKeyCredential | None = None, signal: Any
     ) -> AuthCheck | None: ...
 
 
 class ApiKeyResolve(Protocol):
     async def __call__(
-        self, *, ctx: AuthContext, credential: ApiKeyCredential | None, signal: Any
+        self, *, ctx: AuthContext, credential: ApiKeyCredential | None = None, signal: Any
     ) -> AuthResult | None: ...
 
 
 @dataclass(slots=True)
 class ApiKeyAuth:
-    """Api-key auth: stored key/provider env plus ambient sources.
-
-    Ambient sources are env vars, AWS profiles, ADC files. Ambient-only providers omit
-    ``login``.
+    """Api-key auth: stored key/provider env plus ambient sources (env vars, AWS
+    profiles, ADC files). Ambient-only providers omit `login`.
     """
 
     # Display name, e.g. "Anthropic API key".
     name: str
-    # Resolve auth from the stored credential and/or ambient sources, merging per field
-    # (`credential.key or env(...)`). None = not configured. Resolution is
-    # provider-scoped; model-specific endpoint preparation happens after it.
+    # Resolve auth from the stored credential and/or ambient sources, merging
+    # per field (`credential.key ?? env("...")`, `credential.env?.NAME ?? env("...")`).
+    # undefined = not configured. Resolution is provider-scoped; model-specific
+    # endpoint preparation happens after auth has been resolved.
     resolve: ApiKeyResolve
-    # Interactive setup (prompt for key/provider env). None = ambient-only.
+    # Interactive setup (prompt for key/provider env). Absent = ambient-only.
     login: Callable[[ProviderAuthInteraction], Awaitable[ApiKeyCredential]] | None = None
-    # Optional side-effect-free availability check, for when `resolve()` would execute
-    # commands or do other request-time work. None means Models checks availability by
-    # resolving auth instead.
+    # Optional side-effect-free availability check. Use this when `resolve()` may
+    # execute commands or perform other request-time work. Missing means Models
+    # checks availability by resolving auth.
     check: ApiKeyCheck | None = None
 
 
 @dataclass(slots=True)
-class OAuthAuth:
-    """OAuth auth.
+class LoginOptions:
+    """App-supplied context for `Models.login`."""
 
-    The ``refresh``/``toAuth`` split is what lets ``Models`` own the locked refresh
-    pattern: ``refresh`` produces a credential, ``toAuth`` derives request auth from
-    whatever credential ends up stored.
+    # Returns the stable ID of this app installation, e.g. sent to OpenAI as its
+    # agent host ID. Called only by login flows that need it, so apps can create
+    # the ID on first use and must return the same ID on every later call.
+    getDeviceId: Callable[[], str] | None = None
+    # Name this app introduces itself with during login, e.g. OpenAI's agent name hint and
+    # Codex originator. Defaults to pi's own name.
+    agentName: str | None = None
+
+
+@dataclass(slots=True)
+class OAuthAuth:
+    """OAuth auth. The `refresh`/`toAuth` split lets `Models` own the locked
+    refresh pattern: `refresh` produces a credential, `toAuth` derives request
+    auth from whatever credential ends up stored.
     """
 
     # Display name, e.g. "Anthropic (Claude Pro/Max)".
     name: str
-    login: Callable[[ProviderAuthInteraction], Awaitable[OAuthCredential]]
-    # Exchange the refresh token. Network call; raises on failure (invalid_grant etc.).
-    # Models runs this under the store lock.
+    # Called as `login(interaction, options)`.
+    login: Callable[..., Awaitable[OAuthCredential]]
+    # Exchange the refresh token. Network call; throws on failure
+    # (invalid_grant etc.). `Models` runs this under the store lock.
     refresh: Callable[[OAuthCredential, Any], Awaitable[OAuthCredential]]
-    # Side-effect-free derivation of request auth from a valid credential. Covers
-    # per-credential baseUrl (GitHub Copilot). Async so lazy wrappers can load the
-    # implementation on first use.
+    # Side-effect-free derivation of request auth from a valid credential.
+    # Covers per-credential baseUrl (GitHub Copilot). Async so lazy wrappers
+    # can load the implementation on first use.
     toAuth: Callable[[OAuthCredential], Awaitable[ModelAuth]]
     # Whether access through this auth method is backed by a provider subscription.
     isSubscription: bool | None = None
@@ -347,10 +338,9 @@ class OAuthAuth:
 
 @dataclass(slots=True)
 class ProviderAuth:
-    """Provider auth. At least one of ``apiKey``/``oauth`` must be present.
-
-    Even ambient-credential providers and keyless local servers provide ``apiKey`` auth,
-    whose ``resolve()`` reports whether the provider is configured.
+    """Provider auth. At least one of `apiKey`/`oauth` must be present: even
+    ambient-credential providers and keyless local servers provide `apiKey`
+    auth whose `resolve()` reports whether the provider is configured.
     """
 
     apiKey: ApiKeyAuth | None = None
@@ -365,30 +355,27 @@ __all__ = [
     "AuthCheck",
     "AuthContext",
     "AuthEvent",
-    "AuthEventValue",
     "AuthInfoLink",
     "AuthInteraction",
     "AuthOperationOptions",
     "AuthPrompt",
-    "AuthPromptValue",
     "AuthResult",
     "AuthType",
     "AuthUrlEvent",
     "Credential",
     "CredentialInfo",
     "CredentialStore",
-    "CredentialValue",
     "DeviceCodeEvent",
     "InfoEvent",
+    "LoginOptions",
     "ManualCodePrompt",
     "ModelAuth",
     "OAuthAuth",
     "OAuthCredential",
+    "OAuthCredentials",
     "ProgressEvent",
     "ProviderAuth",
     "ProviderAuthInteraction",
-    "ProviderEnv",
-    "ProviderHeaders",
     "SecretPrompt",
     "SelectOption",
     "SelectPrompt",

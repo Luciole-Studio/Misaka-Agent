@@ -27,15 +27,16 @@ from misaka.core.moa.provider import (
 def available_slots() -> list[tuple[str, list[str]]]:
     """``(provider, model ids)`` for every provider this install can actually call.
 
-    The model registry's own credential check, so a provider configured in models.json
+    The model runtime's own credential check, so a provider configured in models.json
     counts exactly as one authenticated through ``/login`` does.
     """
-    from misaka.core.auth_storage import AuthStorage
-    from misaka.core.model_registry import ModelRegistry
+    import asyncio
 
-    registry = ModelRegistry.create(AuthStorage.create())
+    from misaka.core.model_runtime import ModelRuntime
+
+    runtime = asyncio.run(ModelRuntime.create())
     by_provider: dict[str, list[str]] = {}
-    for model in registry.getAvailable():
+    for model in runtime.getAvailableSnapshot():
         if model.provider == "moa":
             continue          # an MoA aggregator cannot itself be an MoA preset
         by_provider.setdefault(model.provider, []).append(model.id)

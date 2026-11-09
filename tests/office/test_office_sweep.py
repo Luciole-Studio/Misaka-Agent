@@ -239,7 +239,7 @@ async def test_permission_checks_and_execution_share_ops_file_snapshot(tmp_path,
     import json
 
     from misaka.core.subagent import configuration, policy
-    from misaka.core.tools.office import create_office_tool_definition
+    from misaka.core.tools.office import createOfficeToolDefinition
 
     context = SimpleNamespace(workspace=str(tmp_path), permission_mode='acceptEdits')
     guard = policy.AgentPolicy(context)
@@ -254,7 +254,7 @@ async def test_permission_checks_and_execution_share_ops_file_snapshot(tmp_path,
     assert decision and 'updatedInput' in decision, decision
     assert isinstance(decision['updatedInput']['ops'], list)
     source.write_text(json.dumps([{'create': {'content': 'changed after permission check'}}]), encoding='utf-8')
-    await create_office_tool_definition(str(tmp_path)).execute('audit', decision['updatedInput'])
+    await createOfficeToolDefinition(str(tmp_path)).execute('audit', decision['updatedInput'])
     assert (tmp_path / 'report.txt').read_text(encoding='utf-8') == 'approved content'
 
 

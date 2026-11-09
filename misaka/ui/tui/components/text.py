@@ -1,23 +1,35 @@
-"""Multi-line text display with wrapping and optional background."""
+"""Translated from pi-tui's ``components/text.ts`` (v1.1.0)."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from misaka.ui.tui.tui import Component
-from misaka.ui.tui.utils import applyBackgroundToLine, visibleWidth, wrapTextWithAnsi
+from misaka.ui.tui.utils import (
+    applyBackgroundToLine,
+    flattenLines,
+    visibleWidth,
+    wrapTextWithAnsi,
+)
+from misaka.utils.js import jsTrim
 
 
 class Text(Component):
+    """Text component - displays multi-line text with word wrapping"""
+
     def __init__(
         self,
         text: str = "",
         paddingX: int = 1,
         paddingY: int = 1,
-        customBgFn: callable | None = None,
+        customBgFn: Callable[[str], str] | None = None,
     ) -> None:
         self.text = text
-        self.paddingX = paddingX
-        self.paddingY = paddingY
+        self.paddingX = paddingX  # Left/right padding
+        self.paddingY = paddingY  # Top/bottom padding
         self.customBgFn = customBgFn
+
+        # Cache for rendered output
         self.cachedText: str | None = None
         self.cachedWidth: int | None = None
         self.cachedLines: list[str] | None = None
@@ -28,11 +40,15 @@ class Text(Component):
         self.cachedWidth = None
         self.cachedLines = None
 
-    def setCustomBgFn(self, customBgFn: callable | None = None) -> None:
+    def setCustomBgFn(self, customBgFn: Callable[[str], str] | None = None) -> None:
         self.customBgFn = customBgFn
         self.cachedText = None
         self.cachedWidth = None
         self.cachedLines = None
+
+    def setPaddingX(self, paddingX: int) -> None:
+        self.paddingX = paddingX
+        self.invalidate()
 
     def invalidate(self) -> None:
         self.cachedText = None
@@ -40,44 +56,62 @@ class Text(Component):
         self.cachedLines = None
 
     def render(self, width: int) -> list[str]:
+        # Check cache
         if self.cachedLines is not None and self.cachedText == self.text and self.cachedWidth == width:
             return self.cachedLines
 
-        if not self.text or self.text.strip() == "":
+        # Don't render anything if there's no actual text
+        if not self.text or jsTrim(self.text) == "":
             result: list[str] = []
             self.cachedText = self.text
             self.cachedWidth = width
             self.cachedLines = result
             return result
 
-        normalized_text = self.text.replace("\t", "   ")
-        content_width = max(1, width - self.paddingX * 2)
-        wrapped_lines = wrapTextWithAnsi(normalized_text, content_width)
+        # Replace tabs with 3 spaces
+        normalizedText = self.text.replace("\t", "   ")
 
-        left_margin = " " * self.paddingX
-        right_margin = " " * self.paddingX
-        content_lines: list[str] = []
-        for line in wrapped_lines:
-            line_with_margins = left_margin + line + right_margin
-            if callable(self.customBgFn):
-                content_lines.append(applyBackgroundToLine(line_with_margins, width, self.customBgFn))
+        # Reduce margins when necessary so content and padding fit within the available width.
+        paddingX = min(self.paddingX, max(0, (width - 1) // 2))
+        contentWidth = max(1, width - paddingX * 2)
+
+        # Wrap text (this preserves ANSI codes but does NOT pad)
+        wrappedLines = wrapTextWithAnsi(normalizedText, contentWidth)
+
+        # Add margins and background to each line
+        leftMargin = " " * paddingX
+        rightMargin = " " * paddingX
+        contentLines: list[str] = []
+
+        for line in wrappedLines:
+            # Add margins
+            lineWithMargins = leftMargin + line + rightMargin
+
+            # Apply background if specified (this also pads to full width)
+            if self.customBgFn:
+                contentLines.append(applyBackgroundToLine(lineWithMargins, width, self.customBgFn))
             else:
-                visible_length = visibleWidth(line_with_margins)
-                content_lines.append(line_with_margins + (" " * max(0, width - visible_length)))
+                # No background - just pad to width with spaces
+                visibleLen = visibleWidth(lineWithMargins)
+                paddingNeeded = max(0, width - visibleLen)
+                contentLines.append(lineWithMargins + " " * paddingNeeded)
 
-        empty_line = " " * width
-        empty_lines: list[str] = []
-        for _index in range(self.paddingY):
-            line = (
-                applyBackgroundToLine(empty_line, width, self.customBgFn) if callable(self.customBgFn) else empty_line
-            )
-            empty_lines.append(line)
+        # Add top/bottom padding (empty lines)
+        emptyLine = " " * width
+        emptyLines: list[str] = []
+        for _i in range(self.paddingY):
+            line = applyBackgroundToLine(emptyLine, width, self.customBgFn) if self.customBgFn else emptyLine
+            emptyLines.append(line)
 
-        result = [*empty_lines, *content_lines, *empty_lines]
+        result = [*emptyLines, *contentLines, *emptyLines]
+        flattenLines(result)
+
+        # Update cache
         self.cachedText = self.text
         self.cachedWidth = width
         self.cachedLines = result
-        return result if result else [""]
+
+        return result if len(result) > 0 else [""]
 
 
 __all__ = ["Text"]

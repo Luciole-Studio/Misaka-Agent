@@ -12,7 +12,7 @@ import json
 import os
 
 from misaka.core.platform import prompt_guard
-from misaka.core.research import graph, ledger, runs
+from misaka.core.research import ledger, runs, views
 from misaka.utils.paths import posix_relpath
 
 
@@ -25,7 +25,7 @@ def _parent(con, run, node, parent):
             files.setdefault(row["kind"], []).append(rel(row["path"]))
     return {
         "id": parent["id"], "question": parent["question"], "depth": parent["depth"], "status": parent["status"],
-        "kind": graph.kind(con, parent), "session_file": parent["session_file"],
+        "kind": views.kind(con, parent), "session_file": parent["session_file"],
         "conclusions": files.get("synthesis", []), "critiques": files.get("critique", []),
         "divergence_review": files.get("divergence", []), "plans": files.get("plan", []),
         "issues": [{"id": row["id"], "origin": row["origin"], "round": row["round"], "question": row["question"],
@@ -33,7 +33,8 @@ def _parent(con, run, node, parent):
                    for row in runs.issues(con, run["id"], node_id=parent["id"])],
         "decisions": [{"question": d["question"], "stakes": d["stakes"],
                        "options": [{"label": o["label"], "premise": o["premise"], "node": o["node_id"],
-                                    "reason": o["reason"], "leads_here": o["node_id"] == node["id"]}
+                                    "reason": o["reason"], "covered_by": o["covered_by"],
+                                    "leads_here": o["node_id"] == node["id"]}
                                    for o in runs.options(con, run["id"], decision_id=d["id"])]}
                       for d in runs.decisions(con, run["id"], node_id=parent["id"])],
     }
@@ -63,13 +64,13 @@ def build(con, run, *, node):
                          "task_id": finding["task_id"],
                          "claim_type": finding["claim_type"], "claims": evidence})
     parents = runs.parents(con, node["id"])
-    ancestors = graph.ancestors(con, node["id"])
+    ancestors = views.ancestors(con, node["id"])
     return {
         "run_id": run["id"], "workspace": run["workspace"], "root_question": run["question"],
-        "root_session": run["root_session"], "graph": os.path.join(run["workspace"], graph.graph_path(run)),
-        "paths": os.path.join(run["workspace"], graph.paths_path(run)),
-        "node": {"id": node["id"], "question": node["question"], "depth": node["depth"], "kind": graph.kind(con, node),
-                 "forked_from": graph.fork_source(con, node)["id"] if parents else None},
+        "root_session": run["root_session"], "graph": os.path.join(run["workspace"], views.graph_path(run)),
+        "paths": os.path.join(run["workspace"], views.paths_path(run)),
+        "node": {"id": node["id"], "question": node["question"], "depth": node["depth"], "kind": views.kind(con, node),
+                 "forked_from": views.fork_source(con, node)["id"] if parents else None},
         "reached_by": [{"option": o["id"], "label": o["label"], "premise": o["premise"],
                         "decision": o["decision_question"], "stakes": o["decision_stakes"], "decided_at": o["decided_at"],
                         "rivals": [{"label": r["label"], "premise": r["premise"], "node": r["node_id"], "reason": r["reason"]}
@@ -146,7 +147,8 @@ def render(packet):
             lines.append(f"- decision: {decision['question']} (stakes: {decision['stakes']})")
             for option in decision["options"]:
                 outcome = ("this node" if option["leads_here"] else f"node {option['node']}" if option["node"]
-                           else f"not pursued: {option['reason']}" if option["reason"] else "pending")
+                       else "not pursued" + (f", answered by {option['covered_by']}" if option.get("covered_by") else "")
+                       + f": {option['reason']}" if option["reason"] else "pending")
                 lines.append(f"  - {option['label']} -- {option['premise']} → {outcome}")
     # Findings are Sisters' words and their sources' quotations: data, fenced as planner's
     # evidence block fences the same ledger (issue #10 audit, M3).

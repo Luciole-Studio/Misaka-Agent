@@ -16,6 +16,8 @@ from typing import Any
 
 import httpx
 
+from misaka.utils.js import jsTrim
+
 DEFAULT_HTTP_IDLE_TIMEOUT_MS = 300_000
 
 HTTP_IDLE_TIMEOUT_CHOICES = [
@@ -26,11 +28,6 @@ HTTP_IDLE_TIMEOUT_CHOICES = [
     {"label": "disabled", "timeoutMs": 0},
 ]
 
-_ECMASCRIPT_WHITESPACE = (
-    "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680"
-    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
-    "\u2028\u2029\u202f\u205f\u3000\ufeff"
-)
 _DECIMAL_NUMBER = re.compile(
     r"^[+-]?(?:(?:[0-9]+(?:\.[0-9]*)?)|(?:\.[0-9]+))(?:[eE][+-]?[0-9]+)?$"
 )
@@ -39,7 +36,7 @@ _RADIX_NUMBER = re.compile(r"^0(?P<prefix>[bBoOxX])(?P<digits>[0-9A-Fa-f]+)$")
 
 def parseHttpIdleTimeoutMs(value: Any) -> int | None:
     if isinstance(value, str):
-        trimmed = value.strip(_ECMASCRIPT_WHITESPACE)
+        trimmed = jsTrim(value)
         if trimmed.lower() == "disabled":
             return 0
         if not trimmed:
@@ -85,7 +82,7 @@ def applyHttpProxySettings(
         return
     if not isinstance(http_proxy, str):
         raise TypeError(f"Invalid httpProxy setting: {http_proxy}")
-    proxy = http_proxy.strip(_ECMASCRIPT_WHITESPACE)
+    proxy = jsTrim(http_proxy)
     if not proxy:
         return
     target = os.environ if environ is None else environ
@@ -102,10 +99,7 @@ def createHttpxIdleTimeout(
     idle*, i.e. an immediate ``ReadTimeout`` -- not undici's "0 disables the timeout", which
     is what `HTTP_IDLE_TIMEOUT_CHOICES`' ``disabled`` entry and `parseHttpIdleTimeoutMs`
     ("disabled" -> 0) speak. Callers that accept the settings value must map the disabled
-    choice themselves before calling in; `sdk.py` does (`effective_timeout_ms`). The
-    immediate-timeout reading is pinned by
-    `tests/test_http_dispatcher.py::test_pi_messages_timeout_is_per_idle_gap_and_explicit_zero_times_out`,
-    so it is documented rather than changed here.
+    choice themselves before calling in; `sdk.py` does (`effective_timeout_ms`).
     """
     if timeout_ms is None:
         timeout_ms = DEFAULT_HTTP_IDLE_TIMEOUT_MS
@@ -115,11 +109,32 @@ def createHttpxIdleTimeout(
     return httpx.Timeout(None, read=normalized_timeout_ms / 1000)
 
 
+# MISAKA fork: undici's global dispatcher is this module's idle timeout, which every `fetch` reads when it
+# opens its connection (`whatwg_fetch.createClient`, the OAuth flows' `fetch`).
+_dispatcherIdleTimeoutMs: int = DEFAULT_HTTP_IDLE_TIMEOUT_MS
+
+
+def configureHttpDispatcher(timeoutMs: Any = DEFAULT_HTTP_IDLE_TIMEOUT_MS) -> None:
+    global _dispatcherIdleTimeoutMs
+    normalizedTimeoutMs = parseHttpIdleTimeoutMs(timeoutMs)
+    if normalizedTimeoutMs is None:
+        raise ValueError(f"Invalid HTTP idle timeout: {timeoutMs}")
+    _dispatcherIdleTimeoutMs = normalizedTimeoutMs
+
+
+def dispatcherIdleTimeout() -> float | None:
+    """Seconds the configured dispatcher waits for headers or the next body chunk; None when disabled (undici's
+    ``0``)."""
+    return None if _dispatcherIdleTimeoutMs == 0 else _dispatcherIdleTimeoutMs / 1000
+
+
 __all__ = [
     "DEFAULT_HTTP_IDLE_TIMEOUT_MS",
     "HTTP_IDLE_TIMEOUT_CHOICES",
     "applyHttpProxySettings",
+    "configureHttpDispatcher",
     "createHttpxIdleTimeout",
+    "dispatcherIdleTimeout",
     "formatHttpIdleTimeoutMs",
     "parseHttpIdleTimeoutMs",
 ]

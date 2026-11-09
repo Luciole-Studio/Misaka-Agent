@@ -594,7 +594,7 @@ async def test_saved_pages_remain_readable_and_declarations_are_not_filtered(mon
     run = runs.create(con, workspace=str(workspace), question="Did shipments rise?")
     node = runs.nodes(con, run["id"])[0]
     con.execute(
-        "INSERT INTO research_run_tasks (task_id,run_id,branch_id,kind,round,created_at) "
+        "INSERT INTO research_cards (task_id,run_id,branch_id,kind,round,created_at) "
         "VALUES (?,?,?,?,1,strftime('%s','now'))",
         ("t1", run["id"], node["id"], "explore"),
     )

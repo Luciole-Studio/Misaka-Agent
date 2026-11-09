@@ -128,7 +128,7 @@ def _validate(document):
 def save(changes, *, remove=()):
     # Build the preview from layers, not from effective settings: deleting a profile
     # override must reveal the inherited value, just as the real writer does.
-    from misaka.core.settings_manager import deep_merge_settings
+    from misaka.core.settings_manager import deepMergeSettings
 
     own = config.own_section()
     for key in remove:
@@ -139,7 +139,7 @@ def save(changes, *, remove=()):
     for key, value in changes.items():
         config._set_value(own, key, value)
     shared = config.load_config() if current_scope().profile_dir else {}
-    prospective = deep_merge_settings(shared, own)
+    prospective = deepMergeSettings(shared, own)
     _validate(prospective)
     ui.print_info('Pending settings: ' + ', '.join([*changes, *(f'remove {key}' for key in remove)]))
     with replace(current_scope(), config=prospective, config_error=None).activate():

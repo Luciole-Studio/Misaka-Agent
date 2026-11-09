@@ -78,6 +78,9 @@ def allows_subagents(
 
 
 class _StrictModel(BaseModel):
+    # CCB's strict schemas. A model's tool call is converted first, as every tool's is upstream (pi's `Value.Convert`,
+    # misaka.ai.utils.typebox_convert): "0"/"1" and 0/1 read as booleans and a number as a string where one is
+    # declared; `strict` then refuses whatever is still of the wrong type.
     model_config = ConfigDict(extra="forbid", strict=True)
     _semantic_boolean = field_validator("run_in_background", "block", mode="before", check_fields=False)(semantic_boolean)
 
@@ -159,9 +162,8 @@ def _render_result(result: Any, context: Any = None, *_args: Any) -> Any:
         # Source AgentTool/UI.tsx branch structure; native Text/expanded mode
         # replaces Ink/transcript widgets. Reuse native number/time formatting
         # instead of recreating Intl or another UI framework.
-        from misaka.core.tools.bash import _format_duration
-        from misaka.core.tools.render_utils import get_text_output
-        from misaka.ui.tui.interactive.components.footer import format_tokens
+        from misaka.core.tools.render_utils import formatToolDuration, get_text_output
+        from misaka.modes.interactive.components.footer import format_tokens
 
         expanded = bool(read_field(context, "expanded", False))
         lines = []
@@ -171,7 +173,7 @@ def _render_result(result: Any, context: Any = None, *_args: Any) -> Any:
             count = details.get("totalToolUseCount", 0)
             uses = "1 tool use" if count == 1 else f"{count} tool uses"
             lines.append(f"Done ({uses} · {format_tokens(details.get('totalTokens', 0))} tokens · "
-                         f"{_format_duration(details.get('totalDurationMs', 0))})")
+                         f"{formatToolDuration(details.get('totalDurationMs', 0))})")
         elif status in {"running", "pending"} and "agentId" in details:
             progress = details.get("progress") or {}
             count, tokens = progress.get("toolUseCount", 0), progress.get("tokenCount", 0)
@@ -456,20 +458,47 @@ class SubagentPart:
 
     def set_permission_mode(self, mode):
         from misaka.core.subagent import policy as subagent_policy
-        from misaka.core.subagent.configuration import validate_permission_mode
+        from misaka.core.subagent.configuration import (
+            TOP_LEVEL_PERMISSION_MODES,
+            validate_permission_mode,
+        )
 
         mode = validate_permission_mode(mode)
+        if self._top_level() and mode not in TOP_LEVEL_PERMISSION_MODES:
+            raise ValueError(f"A top-level session cannot use permission mode {mode}: auto needs the "
+                             "transcript classifier, which runs in sub-agents, and bubble is a sub-agent's mode")
         if self.policy is None:
             self.policy = subagent_policy.AgentPolicy(self.role_context)
             self.policy.session = self.session
         self.policy.permission_mode = mode
 
+    def _top_level(self) -> bool:
+        """No parent started this session (a child always carries MISAKA_SUBAGENT_ID)."""
+        return self.role_context.parent_agent_id is None
+
     def attach(self, session: Any) -> None:
         self.session = session
         if self.manager is not None:
             self.manager.session = session
+        if self._top_level() and not (self.policy is not None and self.policy.top_level):
+            # CCB: the main session runs in its permission mode too, and its sub-agents inherit
+            # from it (runAgent.agentGetAppState); the mode comes from the settings, once: a session
+            # switched to keeps the mode the person chose, as CCB's app state does.
+            from misaka.core.subagent.configuration import initial_permission_mode
+
+            self.set_permission_mode(initial_permission_mode(session))
+            self.policy.top_level = True
+            if self.manager is not None:
+                self.manager.permission_updates = self.policy.apply_permission_updates
         if self.policy is not None:
             self.policy.session = session
+
+    def get_session_permissions(self):
+        """What this session's permission dialog granted it (CCB destination "session")."""
+        if self.policy is None:
+            return None
+        grant = self.policy.session_permissions()
+        return grant if grant["allow"] or grant["additionalDirectories"] else None
 
     def configure_agents(self, definitions: Any) -> None:
         """MISAKA CLI/SDK adapter for CCB --agents JSON (flagSettings)."""
@@ -478,8 +507,12 @@ class SubagentPart:
             self.manager.flag_agents = definitions
 
     async def before_agent_start(self, event: Any, _ctx: Any) -> Any:
+        from misaka.core.moments import opens_turn
+
         eligible = await self._refresh_roster(_ctx) if self.manager is not None else {}
-        result = await self.policy.before_agent(event) if self.policy is not None else None
+        # SubagentStart hooks answer a prompt. A run a notification wakes (a task or shell result) has
+        # none; running them there would repeat their context on every wake.
+        result = await self.policy.before_agent(event) if self.policy is not None and opens_turn(event) else None
         from misaka.core.subagent.catalog import list_in_messages, listing_delta
 
         # A hidden Agent tool must not leak an unactionable catalog into the prompt.
@@ -520,7 +553,7 @@ class SubagentPart:
         if name.casefold() in self._disallowed_tools:
             return {"block": True, "reason": f"{name} is excluded by the upstream generic-child tool policy."}
         if self.policy is not None:
-            return await self.policy.before_tool(event)
+            return await self.policy.before_tool(event, _ctx)
 
     async def tool_result(self, event: Any, _ctx: Any) -> Any:
         if self.policy is not None:
@@ -549,6 +582,15 @@ class SubagentPart:
         self._loop = asyncio.get_running_loop()
         _ACTIVE_MANAGERS.setdefault(self._loop, set()).add(manager)
         await self._refresh_roster(ctx)
+        if owner is not None:
+            # The ends a previous process of this session never got to report (R34).
+            try:
+                await manager.recover_notices(ctx)
+            except Exception as error:  # noqa: BLE001 - an unreadable record must not keep the session from opening
+                from misaka.core.subagent.runtime import _log_warning
+
+                await asyncio.to_thread(_log_warning, "Sub-agent notices from before this session reopened "
+                                                      f"could not be recovered: {error}")
 
     async def _refresh_roster(self, ctx: Any) -> dict[str, agent_roster.AgentDefinition]:
         manager = self.manager
@@ -564,22 +606,16 @@ class SubagentPart:
 
                 await asyncio.to_thread(_log_warning, f"Agent definition {path}: {error}")
             self._catalog_diagnostics = diagnostics
-        get_tools = getattr(self.session, "getAllTools", None)
-        tools = get_tools() if get_tools is not None else []
-        from misaka.core import mcp
-
-        available_servers = [server for tool in tools if (server := mcp.server_of(tool.name))]
+        available_servers = [
+            *agent_roster.configured_mcp_servers(self.role_context.profile_dir),
+            *agent_roster.available_mcp_servers(self.session),
+        ]
         from misaka.core.subagent.configuration import denied_agent_types
 
         denied_agents = denied_agent_types(self.session, cwd=cwd, include_project=trusted)
         eligible = {
             name: agent for name, agent in catalog.active_agents.items()
-            if agent.name not in denied_agents and agent_roster.has_required_mcp_servers(agent, [
-                *available_servers,
-                # An isolated MISAKA worker owns inline clients; the parent
-                # cannot connect those in advance. Its ready barrier is final.
-                *(server for server, _ in agent_roster.inline_mcp_entries(agent.mcp_servers)),
-            ])
+            if agent.name not in denied_agents and agent_roster.has_required_mcp_servers(agent, available_servers)
         }
         if self.role_context.allowed_agent_types:
             allowed = {agent_roster._canonical_name(name) for name in self.role_context.allowed_agent_types}

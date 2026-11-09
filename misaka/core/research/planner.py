@@ -10,13 +10,13 @@ import os
 import re
 from pathlib import Path
 
-from misaka.ai.utils.overflow import hit_output_limit
+from misaka.ai.utils._output_limit import hit_output_limit
 from misaka.config import home
-from misaka.core.network.card_contract import format_deliverable, split_deliverable
+from misaka.core.network.card_contract import format_deliverable, one_file, split_deliverable
 from misaka.core.platform import prompt_guard
 from misaka.core.platform import tasks as task_store
 from misaka.core.research import commands, ledger, runs
-from misaka.core.session_manager import find_most_recent_session, read_session_header
+from misaka.core.session_manager import findMostRecentSession, readSessionHeader
 from misaka.utils import atomic
 
 ROOT_CONTRACT = """# Research plan — design only
@@ -219,9 +219,9 @@ position none of them argued. Say what the shared continuation rests on, and wha
 def errata_above(con, run, node):
     """Corrections recorded against the nodes this one descends from, as a prompt section; empty
     when there are none."""
-    from misaka.core.research import graph
+    from misaka.core.research import views
 
-    above = graph.ancestors(con, node["id"])
+    above = views.ancestors(con, node["id"])
     errata = [e for e in runs.errata(con, run["id"]) if e["node"] in above]
     return SYNTHESIS_ERRATA.format(errata="\n".join(
         f"- `{e['node']}` says \"{e['claim']}\" -> {e['correction']} ({e['grounds']})" for e in errata)) if errata else ""
@@ -231,7 +231,7 @@ def position(con, run, node):
     """Where a node stands on the graph, for its own Last Order: how it was reached, the rival
     options it was opened against (with their outcome and conclusion where they have one), and the
     stance it owes its parents -- a join confronts them, any other node answers them."""
-    from misaka.core.research import graph
+    from misaka.core.research import views
 
     lines = []
     for option in runs.origin_options(con, node["id"]):
@@ -245,7 +245,7 @@ def position(con, run, node):
             if rival["node_id"] == node["id"]:
                 outcome = "also pursued by this node"
             elif rival["node_id"]:
-                conclusions = graph.syntheses(con, run, runs.node(con, rival["node_id"]))
+                conclusions = views.syntheses(con, run, runs.node(con, rival["node_id"]))
                 who = ("the deciding node's own line" if rival["node_id"] == option["decided_at"]
                        else f"pursued by node {rival['node_id']}")
                 outcome = who + (f", conclusion `{runs.artifact_path(conclusions[-1])}`" if conclusions
@@ -260,7 +260,7 @@ def position(con, run, node):
         lines.append(f"- a join of nodes {', '.join(row['id'] for row in parents)}: their work is carried forward "
                      "together here (the context packet gives the reconciliation's reasons)")
     stance = JOIN_CONFRONTATION if len(parents) > 1 else ""
-    return "\n".join(lines) + "\n" + stance + INTERLOCUTORS.format(graph=graph.graph_path(run), paths=graph.paths_path(run))
+    return "\n".join(lines) + "\n" + stance + INTERLOCUTORS.format(graph=views.graph_path(run), paths=views.paths_path(run))
 
 
 SYNTHESIS_CONTRACT = """# Node conclusion — synthesize the submitted research output
@@ -427,6 +427,8 @@ Ways in, among others; use one where it bites, never as a label:
   where it went. Read it before anything else. What is on it is not proposed again: when a node pursues it -- from
   whatever frame it was reached -- or an option waiting to be opened takes it up, name that node or option in
   `covered_by`; a path declined or left unopened comes back only with what answers the reason recorded for it.
+  Its last part groups every possibility under what answers it now, so one reached from another frame shows beside
+  the node that took it up: compare premises there, not labels.
 - The research graph: `{graph_path}` -- every node and what it pursues.
 
 ## what makes a proposal
@@ -480,9 +482,10 @@ disposed as `branch` (its gaps were filled or answered in the divergence rounds,
 against the choices your conclusion made -- what each gained, gave up and traded -- before you record anything: a
 possibility your line did not take -- one it gave up or one it never chose -- cannot stand together with it because it
 rests on another presupposition or takes the answer where your line cannot go.
-- Only a possibility not taken is a fork. A decision is a question with its stakes and at least two options that
-  exclude one another, each with its premise; this node's own line may be one option (`own: true`) beside a single
-  possibility it did not take -- that is a real fork. Proposals that together make one other path are one option. A
+- Only a possibility not taken is a fork; a proposal your line already takes is none -- `decline` it, saying where
+  your conclusion takes it. A decision is a question with its stakes and at least two options that exclude one
+  another, each with its premise; this node's own line may be one option (`own: true`) beside a single possibility it
+  did not take -- that is a real fork. Proposals that together make one other path are one option. A
   proposal that brings to light a presupposition your line rests on is a fork when the answer depends on it: the node
   opened for it researches whether the presupposition holds and what the answer becomes if it does not. A proposal
   aimed at the question itself (genealogy, symptomatic reading, ideology critique) is a possibility like any other,
@@ -490,8 +493,19 @@ rests on another presupposition or takes the answer where your line cannot go.
   its challenge is.
 - A possibility is opened once. One on the paths list that a node already pursues -- at any depth, reached from any
   frame -- or that an option waiting to be opened takes up is `covered` by that node or option, not a new option; what
-  your line adds to it is for the reconciliation to join or relate. A path the list shows declined or left unopened becomes an option again only with what answers the
-  reason recorded then.
+  your line adds to it is for the reconciliation to join or relate. The same label is not the same possibility:
+  compare premises -- the list and `on_your_line` give each one's.
+- Your own line you know from the inside. `on_your_line` below lists what the nodes this one descends from already
+  decided, each with where it was decided: in the conversation this one continues, or -- for the parents of a join --
+  in the session file named. Before you take a proposal for one of them, read why it went where it went: above in
+  this conversation, or, where that part was compacted or lies in another session, with the conversation tools you
+  have or in the session file itself. A node of another line -- a sibling opened by the same decision as yours is
+  one -- you know only by what it wrote: a proposal you mark `covered` by it, or by another node's waiting option, is
+  a claim the reconciliation reviews with both lines in view -- say in `reason` which premise you compared and how
+  that node's research answers it.
+- A path the list shows declined or left unopened becomes an option again only with what answers the reason recorded
+  then: name it in the option's `answers`, and let the option's premise say what answers that reason. Being covered
+  is not being answered: a covered path whose covering node does not answer it comes back the same way.
 Record every possibility not taken and invent none to fill a count; you may add forks you see yourself. Options open as
 nodes when the root reconciles this level. Every proposal and every branch issue appears exactly once: in one option's
 `sources` or in `declined` -- `covered` when a node of the graph already pursues it or an option waiting to be opened
@@ -512,13 +526,25 @@ conclusions say something. What relates two nodes is what their conclusions say,
 - An option stays unopened only for a structural reason: it complements a node that exists or opens now (name it), a
   node already pursues it, it is a correction rather than a possibility, the depth or node limit stops it, or a limit
   the user set for this run does -- how many forks may open, say: then open the options whose reasons weigh most within
-  it. Record that reason in `not_pursued`. "Not worth it" is not a reason: a genuine possibility is opened.
+  it. Record that reason in `not_pursued`, and when a node answers the option -- it pursues it, or the option
+  complements it -- that node's id in `covered_by` (the pending option you open for it, when it opens now). "Not
+  worth it" is not a reason: a genuine possibility is opened.
 - A possibility is opened once. An option whose premise a node already pursues -- at any depth, reached from any
   frame, as the paths list shows -- stays unopened: that node is its answer (name it). If
   what the option adds is that possibility meeting the proposing node's line, and the meeting is itself worth
   researching, join the two nodes (below): the join carries forward the research both already did instead of
   starting it again; otherwise record the link as a relation. A path the list shows declined or left unopened
-  opens only when the option answers the reason recorded then.
+  opens only when the option answers the reason recorded then: a pending option that brings such paths back shows
+  them under `answers`, as the node that proposed it named them, each with where it went.
+- Coverage claims: a node of this level closed a proposal as covered by a node -- or a waiting option -- of another
+  line, so nothing was opened for it. That node knew the other line only by what it wrote, at the time it decided;
+  here both are in view. Give every claim below a verdict in `coverage`: read the covering node's conclusion (as it
+  stands now, and whether it was revised since the claim) against the proposal's premise. `holds` when that research
+  answers the proposal -- say how; `reopen` when it does not -- say what that research leaves unanswered. `note` is the
+  record of the verdict; the proposal keeps its own premise. A reopened proposal gets an outcome like a pending
+  option: its id in a node's `options` -- that node opens under the node that raised the proposal, with pending
+  options that ask the same question, if any -- or in `not_pursued`. A claim that holds may still call for a join or
+  a relation, as an option does.
 - Finished nodes whose paths arrive at the same place -- the same state, the same sub-question, the same finding by
   different routes -- may be carried forward together: a join is a new node with each of them as a parent. It shares
   their future work; their histories, evidence and premises stay their own, and it may fork again. Conclusions that
@@ -543,7 +569,8 @@ gives the dissolution as one reading.
 RECONCILE_WAITS = """
 # The reconciliation waits for the user
 It is applied only once the user agrees. After the tool accepts, present it in plain language -- the nodes it opens and
-why, the options it leaves unopened and why, the joins -- and talk it over. Revise it with `misaka_research_reconcile`
+why, the options it leaves unopened and why, the joins, and each coverage claim it upholds or reopens -- and talk it
+over. Revise it with `misaka_research_reconcile`
 (a call replaces the recorded one). Once the user has said it should go ahead, call `misaka_research_start`; it is
 available from the next turn on, so this turn ends with your summary.
 """
@@ -560,11 +587,12 @@ def _catalog_text(items):
 
 
 def _call(worker, cfg, prompt, *, cwd, session_dir, continue_session=False,
-          profile="last_order", tools=RESEARCH_TOOLS, raw=False, task_id=None,
-          model=None, extra_tools=(), con=None, session_file=None, sister_catalog=None):
+          profile="last_order", raw=False, task_id=None,
+          model=None, extra_tools=(), con=None, session_file=None, sister_catalog=None,
+          continue_truncated=False):
     kwargs = {
-        "cwd": cwd, "tools": list(session_tools(worker, tools)),
-        "timeout": None, "research_context": True,
+        "cwd": cwd,
+        "timeout": None,
         "raw": raw, "usage_db": cfg.get("db"), "usage_task_id": task_id,
         "usage_generation": 1, "usage_token_cap": cfg.get("token_cap"),
         "session_dir": session_dir, "continue_session": continue_session,
@@ -575,6 +603,9 @@ def _call(worker, cfg, prompt, *, cwd, session_dir, continue_session=False,
         kwargs["extra_tools"] = extra_tools
     if sister_catalog is not None:
         kwargs["sister_catalog"] = sister_catalog
+    if continue_truncated:
+        # The reply is the phase's deliverable: one cut at the output cap is continued (window.py).
+        kwargs["continue_truncated"] = True
     if model:
         kwargs["model"] = model
     # Waiting for room under the cap happens per request, in the meter; a run whose cap is
@@ -611,7 +642,7 @@ def _validate_task(raw, roster, index):
             raise ValueError(f"Task {index} is missing {key!r}.")
         task[key] = task[key].strip()
     try:
-        split_deliverable(task["deliverable"])  # validate the artifact gate before any cards are created
+        one_file(split_deliverable(task["deliverable"])[0])  # validate the artifact gate before any cards are created
     except ValueError as error:
         raise ValueError(f"Task {task['local_id']}: {error}") from error
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", task["local_id"]):
@@ -804,7 +835,8 @@ def plan(run, cfg, worker, node, *, con, context_path=None):
     prompt = ROOT_CONTRACT + "\n# Artifact layout\nWithin the current workspace, every node's files live under " \
         "nodes/<node>/ and each of its cards under nodes/<node>/cards/<card>/; run-level products go to final/. " \
         "The runtime assigns these paths. Put one deliverable filename on the first line, not a directory; " \
-        "use backticks for spaces. Put requirements on following lines.\n" \
+        "use backticks for spaces. Put requirements on following lines; a card delivers one file, so other files " \
+        "it writes (a script, data) go there too.\n" \
         + f"\n# Current node depth\n{node['depth']} (root = 0; max_depth = {runs.current_limits(con, run)['max_depth']})" \
         + ("" if forks else " -- this node cannot fork: no `decisions` here.") + "\n"
     if runs.is_root(node):
@@ -846,14 +878,14 @@ Read the live workspace view before planning.
         description="Last Order: assign the research plan, record its forks, and choose its red-team Sister",
         model=commands.Plan,
         validate=lambda value: validate_plan(value, roster, decisions_allowed=forks, root=runs.is_root(node)),
-        session_dir=session_dir, tools=RESEARCH_TOOLS, sister_catalog=roster, merge=commands.merge_plan,
+        session_dir=session_dir, sister_catalog=roster, merge=commands.merge_plan,
         reply=lambda payload: "Accepted misaka_research_assign. " + commands.plan_receipt(payload, forks=forks),
     )
     return action["payload"], raw, action["session_file"]
 
 
 def _command(con, run, cfg, worker, node, prompt, *, key, name, description, model, validate,
-             session_dir, tools=RESEARCH_TOOLS, sister_catalog=None, merge=None, reply=None):
+             session_dir, sister_catalog=None, merge=None, reply=None):
     previous = runs.action(con, run["id"], node["id"], key)
     if previous:
         return previous, ""
@@ -864,8 +896,8 @@ def _command(con, run, cfg, worker, node, prompt, *, key, name, description, mod
     return commanded(
         worker, cfg, prompt, command=command, name=name, what=f"{name} for {key}",
         recorded=lambda: runs.action(con, run["id"], node["id"], key),
-        cwd=run["workspace"], session_dir=session_dir, tools=tools, raw=True, sister_catalog=sister_catalog,
-        continue_session=bool(find_most_recent_session(session_dir)), task_id=run["id"], con=con,
+        cwd=run["workspace"], session_dir=session_dir, raw=True, sister_catalog=sister_catalog,
+        continue_session=bool(findMostRecentSession(session_dir)), task_id=run["id"], con=con,
         session_file=session_file)
 
 
@@ -1076,10 +1108,11 @@ def synthesize(con, run, cfg, worker, node, task_rows, *, followup=None, round=1
               + navigation(run["id"]))
     session_dir = _lo_session(run, node)
     _obj, text, err = _call(
-        worker, cfg, prompt, cwd=run["workspace"], session_dir=session_dir, raw=True, tools=RESEARCH_TOOLS,
-        continue_session=bool(find_most_recent_session(session_dir)), task_id=run["id"], con=con,
+        worker, cfg, prompt, cwd=run["workspace"], session_dir=session_dir, raw=True,
+        continue_session=bool(findMostRecentSession(session_dir)), task_id=run["id"], con=con,
         session_file=lo_session_file(run, node),
         extra_tools=tuple(tool for tool in (followup, dissolve, erratum) if tool is not None),
+        continue_truncated=True,
     )
     if followup is not None and runs.plan_round(con, run["id"], node["id"]) > round:
         return ""                                     # she asked for another round instead of concluding
@@ -1167,7 +1200,7 @@ def review_context(con, run, red, issues, *, round, kind="critique"):
 
 def dispose(con, run, cfg, worker, node, red, issues, *, round, revisions_left):
     """Last Order's dispositions for one review round: every material issue exactly once."""
-    from misaka.core.research import graph
+    from misaka.core.research import views
     key = runs.dispose_key(round)
     accepted = runs.action(con, run["id"], node["id"], key)
     if accepted:
@@ -1199,7 +1232,7 @@ def dispose(con, run, cfg, worker, node, red, issues, *, round, revisions_left):
               "No revision is left on this node: answer every issue another way.")
     prompt = (DISPOSE_CONTRACT.format(revise=revise, branch="" if forks else " Not available: this node is at max_depth.")
               + (DISPOSE_FINAL if revisions_left <= 0 else "")
-              + f"\n# Round {round} of review\nThe graph: `{graph.graph_path(run)}`\n"
+              + f"\n# Round {round} of review\nThe graph: `{views.graph_path(run)}`\n"
               + review_context(con, run, red, issues, round=round) + navigation(run["id"]))
     action, _raw = _command(
         con, run, cfg, worker, node, prompt, key=key, name="misaka_research_dispose",
@@ -1212,7 +1245,7 @@ def dispose(con, run, cfg, worker, node, red, issues, *, round, revisions_left):
 def fill_gaps(con, run, cfg, worker, node, card, gaps, *, version, round, revisions_left):
     """Last Order's answer to divergence round ``round``: every gap it found in version ``version``,
     exactly once -- filled by a revision while the node has gap revisions left, else answered."""
-    from misaka.core.research import graph
+    from misaka.core.research import views
     key = runs.gaps_key(version)
     accepted = runs.action(con, run["id"], node["id"], key)
     if accepted:
@@ -1240,7 +1273,7 @@ def fill_gaps(con, run, cfg, worker, node, card, gaps, *, version, round, revisi
     revise = (f"{revisions_left} gap revision(s) left on this node." if revisions_left > 0 else
               "No gap revision is left on this node: answer every gap another way.")
     prompt = (GAPS_CONTRACT.format(revise=revise)
-              + f"\n# Divergence review of version {version}\nThe graph: `{graph.graph_path(run)}`\n"
+              + f"\n# Divergence review of version {version}\nThe graph: `{views.graph_path(run)}`\n"
               + review_context(con, run, card, gaps, round=round, kind="divergence") + navigation(run["id"]))
     action, _raw = _command(
         con, run, cfg, worker, node, prompt, key=key, name="misaka_research_dispose",
@@ -1303,12 +1336,13 @@ def cards_failed(con, run, cfg, worker, node, *, kind, lost):
 def decide(con, run, cfg, worker, node, *, divergence, proposals, branches):
     """Last Order's decisions after the divergence review: every proposal and every branch-disposed
     red-team issue is taken up by an option or declined with its reason."""
-    from misaka.core.research import graph
+    from misaka.core.research import views
     accepted = runs.action(con, run["id"], node["id"], runs.DECIDE_KEY)
     if accepted:
         return accepted["payload"]
     expected = {item["id"] for item in (*proposals, *branches)}
     known = {row["id"] for row in (*runs.nodes(con, run["id"]), *runs.pending_options(con, run["id"]))}
+    reopenable = views.reopenable(con, run)
 
     def validate(value):
         cited = [source for decision in value["decisions"] for option in decision["options"] for source in option["sources"]]
@@ -1322,6 +1356,15 @@ def decide(con, run, cfg, worker, node, *, divergence, proposals, branches):
             if any(option["own"] and option["sources"] for option in decision["options"]):
                 raise ValueError(f"Decision {index}: this node's own line is its concluded conclusion, made of no "
                                  "proposal.")
+            for option in decision["options"]:
+                if option["own"] and option["answers"]:
+                    raise ValueError(f"Decision {index}: this node's own line is its concluded conclusion; it brings "
+                                     "back no path.")
+                stray = [record for record in option["answers"] if record not in reopenable]
+                if stray:
+                    raise ValueError(f"Decision {index}, option \"{option['label']}\": answers names "
+                                     f"{', '.join(stray)}, which the paths list does not show declined, covered or "
+                                     "left unopened.")
         for item in value["declined"]:
             if item["disposition"] == "covered" and (item["covered_by"] not in known or item["covered_by"] == node["id"]):
                 raise ValueError(f"covered needs the id of another node of this run, or of an option waiting to be "
@@ -1336,8 +1379,9 @@ def decide(con, run, cfg, worker, node, *, divergence, proposals, branches):
                 "pending_options_of_earlier_decisions": [
                     {"option": row["id"], "label": row["label"], "premise": row["premise"],
                      "decision": row["decision_question"]}
-                    for row in runs.pending_options(con, run["id"]) if row["decided_at"] == node["id"]]}
-    prompt = (DECIDE_CONTRACT + f"\n# Node\n{node['id']}: {node['question']}\nThe paths list: `{graph.paths_path(run)}`\nThe graph: `{graph.graph_path(run)}`\n"
+                    for row in runs.pending_options(con, run["id"]) if row["decided_at"] == node["id"]],
+                "on_your_line": on_your_line(con, run, node)}
+    prompt = (DECIDE_CONTRACT + f"\n# Node\n{node['id']}: {node['question']}\nThe paths list: `{views.paths_path(run)}`\nThe graph: `{views.graph_path(run)}`\n"
               + f"Depth {node['depth']} of {runs.current_limits(con, run)['max_depth']}.\n"
               + prompt_guard.untrusted("divergence", _catalog_text(material)) + navigation(run["id"]))
     action, _raw = _command(
@@ -1348,15 +1392,66 @@ def decide(con, run, cfg, worker, node, *, divergence, proposals, branches):
     return action["payload"]
 
 
+def _decided_where(con, run, decision, lineage):
+    """Where the turn that made ``decision`` is, for a node whose conversation continues ``lineage``."""
+    if decision["origin"] == "reconcile":
+        entry = runs.reconcile(con, run["id"], decision["round"])
+        return {"in": f"the root Last Order's conversation (reconciliation {decision['round']})",
+                "session_file": entry["session_file"] if entry else run["root_session"],
+                "tool_call_id": entry["tool_call_id"] if entry else None}
+    key = runs.DECIDE_KEY if decision["origin"] == "decide" else runs.plan_key(decision["round"])
+    recorded = runs.action(con, run["id"], decision["node_id"], key)
+    inside = decision["node_id"] in lineage
+    return {"in": "this conversation, above" if inside else f"node {decision['node_id']}'s conversation",
+            "session_file": recorded["session_file"] if recorded else None,
+            "tool_call_id": recorded["tool_call_id"] if recorded else None}
+
+
+def on_your_line(con, run, node):
+    """What the nodes ``node`` descends from already decided -- every option of their decisions and every
+    possibility their decisions disposed -- each with where it went and where the turn that decided it is:
+    in the conversation the node continues (its lineage), or in another session (a join's parents' lines)."""
+    from misaka.core.research import views
+
+    above = views.ancestors(con, node["id"])
+    if not above:
+        return []
+    lineage = set(views.lineage(con, node))
+    found, decided = [], {}
+    for decision in runs.decisions(con, run["id"]):
+        if decision["node_id"] not in above:
+            continue
+        where = _decided_where(con, run, decision, lineage)
+        for option in runs.options(con, run["id"], decision_id=decision["id"]):
+            found.append({"id": option["id"], "what": "option", "label": option["label"], "premise": option["premise"],
+                          "decided_at": decision["node_id"], "decision": decision["question"],
+                          "went": ("this node" if option["node_id"] == node["id"]
+                                   else "its deciding node's own line" if option["node_id"] == decision["node_id"]
+                                   else views._outcome(con, option, decision["node_id"])),
+                          "answers": option["answers"],
+                          "deliberation": where})
+        if decision["origin"] == "decide":
+            decided[decision["node_id"]] = where
+    for issue in views.possibility_issues(con, run):
+        if issue["branch_id"] not in above or issue["disposition"] not in ("covered", "decline"):
+            continue
+        where = decided.get(issue["branch_id"]) or _decided_where(
+            con, run, {"origin": "decide", "node_id": issue["branch_id"], "round": 1}, lineage)
+        found.append({"id": issue["id"], "what": "proposal", "question": issue["question"],
+                      "premise": views.proposal_premise(issue), "decided_at": issue["branch_id"],
+                      "went": views._proposal_outcome(con, run, issue), "deliberation": where})
+    return found
+
+
 def present_dissolution(con, run, cfg, worker, *, material):
     """One turn of the root Last Order putting a dissolution of the research question to the user."""
     root = runs.root(con, run["id"])
     session_dir = _lo_session(run, root)
     _obj, _text, err = _call(
         worker, cfg, DISSOLUTION_CONTRACT + prompt_guard.untrusted("dissolutions", _catalog_text(material)),
-        cwd=run["workspace"], session_dir=session_dir, tools=RESEARCH_TOOLS, raw=True,
-        continue_session=bool(find_most_recent_session(session_dir)), task_id=run["id"], con=con,
-        session_file=run["root_session"])
+        cwd=run["workspace"], session_dir=session_dir, raw=True,
+        continue_session=bool(findMostRecentSession(session_dir)), task_id=run["id"], con=con,
+        session_file=run["root_session"], continue_truncated=True)
     if err:
         raise RuntimeError(f"Putting the dissolution to the user failed: {err}")
 
@@ -1376,8 +1471,8 @@ def reconcile(con, run, cfg, worker, *, round, material, validate):
     recorded, _text = commanded(
         worker, cfg, prompt, command=command, name="misaka_research_reconcile",
         recorded=lambda: runs.reconcile(con, run["id"], round),
-        cwd=run["workspace"], session_dir=session_dir, tools=RESEARCH_TOOLS, raw=True,
-        continue_session=bool(find_most_recent_session(session_dir)), task_id=run["id"], con=con,
+        cwd=run["workspace"], session_dir=session_dir, raw=True,
+        continue_session=bool(findMostRecentSession(session_dir)), task_id=run["id"], con=con,
         session_file=run["root_session"])
     return recorded
 
@@ -1410,7 +1505,7 @@ when evidence warrants it and explain why. No separate planning submission, file
     if question:
         larger = (f"\n## the larger question\n{question}\n"
                   "This card is one piece of it; the rationale above says which piece.\n")
-    lo_id = (read_session_header(str(home.from_stored(lo_session))) or {}).get("id") if lo_session else None
+    lo_id = (readSessionHeader(str(home.from_stored(lo_session))) or {}).get("id") if lo_session else None
     if lo_id:
         larger += (f"\nYour node's Last Order is session `{lo_id}`: send `SendMessage` to that id, or to "
                    "`last-order`, which inside the run means her.\n")

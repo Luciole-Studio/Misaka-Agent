@@ -1,0 +1,24 @@
+{
+  "question": "个人出走与经济条件如何共同构成自由问题",
+  "intent": "把两篇文本放在一起读：先重建鲁迅对娜拉出走的追问，再分成主体性与经济条件两条线，最后对读，并带着新的理解重读开头的问题。",
+  "sources": [
+    {
+      "title": "娜拉走后怎样",
+      "author": "鲁迅",
+      "language": "zh",
+      "url": "https://zh.wikisource.org/wiki/%E5%A8%9C%E6%8B%89%E8%B5%B0%E5%BE%8C%E6%80%8E%E6%A8%A3",
+      "provenance": "维基文库（Wikisource）页面「娜拉走後怎樣」，1923 年 12 月 26 日在北京女子高等师范学校文艺会的讲演",
+      "licence": "鲁迅于 1936 年去世，作品本身属公有领域；Wikisource 页面的整理依 CC BY-SA 4.0 提供，转载时请保留来源链接。",
+      "note": "页面标题为繁体，维基文库可切换为简体；地址中的百分号编码就是标题本身。"
+    },
+    {
+      "title": "A Doll's House",
+      "author": "Henrik Ibsen",
+      "language": "en",
+      "url": "https://www.gutenberg.org/files/2542/2542-0.txt",
+      "provenance": "Project Gutenberg ebook #2542（纯文本）",
+      "licence": "Project Gutenberg 文本：美国境内属公有领域；在美国以外使用须遵守其许可条款，保留文件抬头与许可说明。",
+      "note": "三幕剧全文，约七万词；阅读模式按页取用，不会一次把全文塞进上下文。"
+    }
+  ]
+}

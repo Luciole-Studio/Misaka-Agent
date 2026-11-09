@@ -27,6 +27,8 @@ def _parser(extension_commands=None):
     # The first thing anyone types after installing. Without it argparse answers the version
     # question with a usage error and exit 2, which reads as "this install is broken".
     p.add_argument("--version", "-V", action="version", version=VERSION)
+    p.add_argument("--offline", action="store_true",
+                   help="Disable startup network operations (same as MISAKA_OFFLINE=1); any command takes it")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     tk = sub.add_parser("task", help="Add a task card, start one, or delete one",
@@ -53,7 +55,9 @@ def _parser(extension_commands=None):
     dmp.add_argument("message", nargs="?", help="Message body (omitted: deliver what is already queued)")
     dmp.add_argument("--from", dest="sender", help="Sender role (default: the user)")
     dmp.add_argument("--model", help="Override the recipient's model")
-    dmp.add_argument("--timeout", type=int, default=600, help="Seconds to wait for a reply")
+    dmp.add_argument("--timeout", type=int, default=None,
+                     help="Stop the turn after this many seconds without activity "
+                          "(default 1800, as Hermes; 0: no limit)")
     dmp.add_argument("--summary", help="Short audit-log summary")
     dmp.add_argument("--task-id", dest="dm_task", help=argparse.SUPPRESS)
     dmp.add_argument("--generation", dest="dm_gen", type=int, help=argparse.SUPPRESS)
@@ -98,11 +102,16 @@ def _parser(extension_commands=None):
     cs.add_argument("task_id")
     cs.add_argument("--resume", action="store_true",
                     help="Resume the card's existing session")
-    cs.add_argument("--say", metavar="TEXT",
-                    help="With --resume: deliver this message as the first turn")
+    cs.add_argument("--say-file", metavar="PATH",
+                    help="With --resume: deliver the message in this file as the first turn")
+    cs.add_argument("--consult", action="store_true",
+                    help="With --say-file: a finished card answering a message (no claim; the card stays)")
     ac = sub.add_parser("ally-card", help="Internal: run an ally's card over ACP inside a pane")
     ac.add_argument("task_id")
-    ac.add_argument("--say", metavar="TEXT", help="Continue the card with this message as the first turn")
+    ac.add_argument("--say-file", metavar="PATH",
+                    help="Continue the card with the message in this file as the first turn")
+    ac.add_argument("--consult", action="store_true",
+                    help="With --say-file: a finished card answering a message (no claim; the card stays)")
     sub.add_parser("ally-bridge", help="Internal: the MCP server lending an ally its card's tools")
 
     sub.add_parser("panel", help="Open the Misaka Network panel (default in a terminal)")
@@ -193,6 +202,9 @@ def _parser(extension_commands=None):
     # "auth"` before argparse runs, because auth has its own Pi-compatible grammar.
     ac = sub.add_parser("auth", help="Check or print provider credentials")
     ac.add_argument("auth_args", nargs=argparse.REMAINDER)
+    # Like auth: listed here, dispatched by `main` before argparse runs, with pi's `config` grammar.
+    cf = sub.add_parser("config", help="Enable or disable extensions, prompts and themes (-l: this project)")
+    cf.add_argument("config_args", nargs=argparse.REMAINDER)
     for name, command in (extension_commands or {}).items():
         sub.add_parser(name, help=(command.__doc__ or "").strip().split("\n")[0]).add_argument(
             "args", nargs=argparse.REMAINDER)
@@ -277,14 +289,23 @@ def _cmd_net_daemon(args):
     daemon.main()
 
 
+def _said(args):
+    """The message a pane's card is continued with: the daemon writes it to a file, since a whole
+    review brief does not fit on a command line (``misaka.utils.prompt_file``)."""
+    if args.say_file is None:
+        return None
+    from misaka.utils.prompt_file import readPromptFile
+    return readPromptFile(args.say_file)
+
+
 def _cmd_card_shell(args):
     from misaka.cli import card_shell
-    card_shell.launch(args.task_id, resume_only=args.resume, say=args.say)
+    card_shell.launch(args.task_id, resume_only=args.resume, say=_said(args), consult=args.consult)
 
 
 def _cmd_ally_card(args):
     from misaka.core.network.ally import card
-    card.launch(args.task_id, say=args.say)
+    card.launch(args.task_id, say=_said(args), consult=args.consult)
 
 
 def _cmd_ally_bridge(args):
@@ -366,7 +387,8 @@ def _cmd_remove(args):
 def _cmd_dm(args):
     from misaka.cli import dm as dm_cli
     sys.exit(dm_cli.deliver(args.to, args.message, sender=args.sender,
-                            model=args.model, timeout=args.timeout,
+                            model=args.model, idle_timeout=(dm_cli.IDLE_TIMEOUT_SECONDS
+                                                            if args.timeout is None else args.timeout),
                             task_id=args.dm_task, generation=args.dm_gen,
                             summary=args.summary, wait_message=args.wait_message))
 
@@ -630,7 +652,15 @@ def _cmd_skills(args):
         import json
         from pathlib import Path
 
+        from misaka.config import get_agent_dir
+        from misaka.core.http_dispatcher import applyHttpProxySettings
+        from misaka.core.settings_manager import SettingsManager
         from misaka.core.skills.operations import execute
+
+        # A skill operation may run a review session in this process: the global HTTP proxy first, as at startup.
+        applyHttpProxySettings(
+            SettingsManager.create(_os.getcwd(), get_agent_dir(), {"projectTrusted": False}).getGlobalSettings().get("httpProxy")
+        )
         role = Path(args.role)
         if role.is_absolute() or ".." in role.parts:
             sys.exit("Role must be relative to roles_root.")
@@ -879,7 +909,7 @@ def _cmd_doc(args):
             print(f"  p{pg['page']:<4} {pg['head']}")
 
 def _cmd_setup(args):
-    from misaka.cli import setup
+    from misaka.cli import setup_wizard as setup
     sys.exit(setup.run(args.section))
 
 
@@ -931,6 +961,12 @@ def main(argv=None):
     """The CLI entry point: one handler per sub-command (``COMMANDS``), each opening the board only
     if it uses it; ``argv`` defaults to the process arguments so tests can drive it directly."""
     argv = list(sys.argv[1:] if argv is None else argv)
+    # pi's `--offline` (`PI_OFFLINE=1`). MISAKA fork: every command takes it, before or after its name, and the
+    # environment carries it to the panel's panes, cards and research nodes this process starts.
+    end = argv.index("--") if "--" in argv else len(argv)
+    if "--offline" in argv[:end]:
+        argv = [arg for index, arg in enumerate(argv) if not (index < end and arg == "--offline")]
+        os.environ["MISAKA_OFFLINE"] = "1"
     # setup, update and uninstall must still run on a settings.json that stops everything else.
     bootstrap.install(check_settings=argv[:1] not in (["setup"], ["update"], ["uninstall"]))
     from misaka.config import env as env_file
@@ -938,7 +974,7 @@ def main(argv=None):
     home.ensure()
     configure_logging()      # warnings go to the log file, never to a TUI's screen (B6)
     env_file.load()          # the home's .env: environment for code that is not MISAKA
-    if argv and argv[0] not in COMMANDS and argv[0] != "auth" and not argv[0].startswith("-"):
+    if argv and argv[0] not in COMMANDS and argv[0] not in ("auth", "config") and not argv[0].startswith("-"):
         # A command a bundled extension offers runs here, before the project layout exists: it
         # decides for itself what it creates (a dry run or read-only operator creates nothing).
         from misaka import extensions
@@ -953,12 +989,18 @@ def main(argv=None):
         # No arguments: open the panel in a terminal, plain chat when piped.
         interactive = sys.stdin.isatty() and sys.stdout.isatty()
         if interactive:
-            from misaka.cli import setup
+            from misaka.cli import setup_wizard as setup
             if not setup.configured_anywhere():
-                # A first run: no credential for the default provider anywhere. The wizard
-                # is the door, and the panel opens once it is done.
-                print("No provider credential is configured yet; starting `misaka setup`.")
-                if setup.run() != 0:
+                # No credential for the default provider anywhere. On a first run the wizard
+                # is the door; once a model was saved, only that section is unfinished, and the
+                # rest of the wizard (Sisters, documents, web) is not asked a second time.
+                if setup.model_saved():
+                    print("The default provider has no credential yet; starting `misaka setup model`.")
+                    code = setup.run("model")
+                else:
+                    print("No provider credential is configured yet; starting `misaka setup`.")
+                    code = setup.run()
+                if code != 0:
                     return 1
             from misaka.ui.panel import ghostty
             if reason := ghostty.unavailable():
@@ -973,9 +1015,18 @@ def main(argv=None):
     if argv[0] == "auth":
         # Auth has its own Pi-compatible grammar; preserve the raw option order instead
         # of sending it through the product CLI's unrelated parser.
-        from misaka.cli.auth import run_auth_command
+        import asyncio
 
-        return run_auth_command(argv[1:])
+        from misaka.cli.engine import runAuthCommand
+
+        raise SystemExit(asyncio.run(runAuthCommand(argv)))
+    if argv[0] == "config":
+        # pi's `config` grammar (`-l`, `-a`, `-na`), parsed by the command itself as upstream does.
+        import asyncio
+
+        from misaka.cli.package_manager import handleConfigCommand
+
+        raise SystemExit(asyncio.run(handleConfigCommand(argv)))
     if argv[0] in ("-h", "--help"):
         from misaka import extensions
         _parser(extensions.commands()).parse_args(argv)

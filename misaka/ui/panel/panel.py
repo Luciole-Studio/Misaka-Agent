@@ -1951,8 +1951,9 @@ def launch():
 
 
     rows, cols = _term_size() or (24, 80)
-    from misaka.ui.tui import terminal as tui_terminal
-    apple_terminal_host = tui_terminal.is_apple_terminal_session()   # the panel's own host
+    from misaka.ui.tui.native_modifiers import isNativeModifierPressed
+    from misaka.ui.tui.terminal import isAppleTerminalSession
+    apple_terminal_host = isAppleTerminalSession()   # the panel's own host
     # Sidebar state (herdr AppState: sidebar_width / sidebar_collapsed / agent_panel_sort / active).
     side = {"w": SIDEBAR_W, "collapsed": False, "sort": "grouped", "ws": None, "sess_mode": "here",
             "reveal": True}
@@ -4255,7 +4256,7 @@ def launch():
             scroll_pane(focused, -lines if key.code == "pageup" else lines)
             return
         if (apple_terminal_host and key.code == "enter" and key.kind == "press"
-                and not key.mods & ~hin.LOCK_MASK and tui_terminal.is_native_modifier_pressed("shift")):
+                and not key.mods & ~hin.LOCK_MASK and isNativeModifierPressed("shift")):
             # MISAKA: Terminal.app sends a bare CR for Shift+Enter. MISAKA's TUI tells them
             # apart by the live modifier state when TERM_PROGRAM is Apple_Terminal; panes
             # carry TERM_PROGRAM=misaka (pane.rs apply_pane_terminal_env), so the panel,

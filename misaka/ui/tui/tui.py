@@ -1,33 +1,39 @@
-"""Minimal terminal UI container with differential rendering."""
+"""Translated from pi-tui's ``packages/tui/src/tui.ts`` (v1.3.0).
+
+MISAKA forks, each marked where it happens:
+
+- D1: the mouse API (``TuiMouseEvent`` ... ``dispatchMouseEvent``, ``Component.handleMouse``, ``Container.handleMouse``,
+  the rendered-overlay layouts), ``TuiMode``/``ViewportTUI`` and the overlay mouse helpers serve the fullscreen
+  renderer, which is not ported. ``TuiMainScreen`` lives in ``tui_main_screen.py``.
+- D11: ``queryTerminalColors`` (OSC 10/11/4 with a DA1 sentinel) belongs to pi's system theme, which is not ported.
+  MISAKA's own background probe (``queryTerminalBackgroundColor``, OSC 11 only) takes its place.
+- Node runs every callback on one thread. Here requests can come from worker threads (streaming, timers), so
+  ``start``/``stop``/``requestRender``/``renderNow``/``doRender`` run on the loop that started the TUI, and
+  ``process.nextTick``/``setTimeout`` are callbacks on that loop (a thread timer without a loop).
+- Frame pacing (``scheduleRender``): a frame also waits as long as the last one took.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import os
-import re
+import math
 import sys
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Any, Literal, Protocol, TypedDict
+from types import SimpleNamespace
+from typing import Any, Literal, Protocol, TypedDict, cast
 
-from misaka.ui.tui.keys import isKeyRelease
+from misaka.ui.tui.keys import isKeyRelease, matchesKey
 from misaka.ui.tui.terminal import Terminal
 from misaka.ui.tui.terminal_colors import (
     RgbColor,
     TerminalColorScheme,
-    is_osc11_background_color_response,
-    parse_osc11_background_color,
-    parse_terminal_color_scheme_report,
+    parseOscColorResponse,
+    parseTerminalColorSchemeReport,
 )
-from misaka.ui.tui.terminal_image import (
-    deleteKittyImage,
-    getCapabilities,
-    isImageLine,
-    setCellDimensions,
-)
+from misaka.ui.tui.terminal_image import getCapabilities, isImageLine, setCellDimensions
 from misaka.ui.tui.utils import (
     extractSegments,
     normalizeTerminalOutput,
@@ -35,83 +41,80 @@ from misaka.ui.tui.utils import (
     sliceWithWidth,
     visibleWidth,
 )
+from misaka.utils import js_regexp
+from misaka.utils.js import liveKeys
+from misaka.utils.js_regexp import RegExp
 
-KITTY_SEQUENCE_PREFIX = "\x1b_G"
-CURSOR_MARKER = "\x1b_misaka:c\x07"
-
-
-def _utc_iso_timestamp() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-@dataclass(slots=True)
-class KittyImageHeader:
-    ids: list[int]
-    rows: int
-
-
-def _parse_kitty_image_header(line: str) -> KittyImageHeader | None:
-    """ids and row count of a kitty graphics escape (pi tui-main-screen.ts:80-98).
-
-    `r=` matters as much as `i=`: `components/image.py` renders a multi-row image as the
-    escape on one line followed by `rows - 1` blank placeholder lines, and every renderer
-    path has to treat that whole run as one block.
-    """
-    sequence_start = line.find(KITTY_SEQUENCE_PREFIX)
-    if sequence_start == -1:
-        return None
-    params_start = sequence_start + len(KITTY_SEQUENCE_PREFIX)
-    params_end = line.find(";", params_start)
-    if params_end == -1:
-        return None
-
-    ids: list[int] = []
-    rows = 1
-    for param in line[params_start:params_end].split(","):
-        if "=" not in param:
-            continue
-        key, value = param.split("=", 1)
-        try:
-            number = int(value)
-        except ValueError:
-            continue
-        if not 0 < number <= 0xFFFFFFFF:
-            continue
-        if key == "i":
-            ids.append(number)
-        elif key == "r":
-            rows = number
-    return KittyImageHeader(ids=ids, rows=rows)
-
-
-def _extract_kitty_image_ids(line: str) -> list[int]:
-    header = _parse_kitty_image_header(line)
-    return header.ids if header is not None else []
-
-
-def _extract_kitty_image_rows(line: str) -> int:
-    header = _parse_kitty_image_header(line)
-    return header.rows if header is not None else 1
+# MISAKA fork (D1): upstream's mouse event types and `dispatchMouseEvent`/`retargetMouseEvent` come first here.
 
 
 class Component(Protocol):
-    wantsKeyRelease: bool | None
+    """``handleInput(data)`` (keyboard input when the component has focus) and ``wantsKeyRelease`` (if true, the
+    component receives key release events (Kitty protocol); default false - release events are filtered out) are
+    optional: read them with ``getattr``."""
 
-    def render(self, width: int) -> list[str]: ...
+    def render(self, width: int) -> list[str]:
+        """Render the component to lines for the given viewport width
+        @param width - Current viewport width
+        @returns Array of strings, each representing a line
+        """
+        ...
 
-    def handleInput(self, data: str) -> None: ...
+    def invalidate(self) -> None:
+        """Invalidate any cached rendering state.
+        Called when theme changes or when component needs to re-render from scratch.
+        """
+        ...
 
-    def invalidate(self) -> None: ...
+
+class TuiInputListenerResultValue(TypedDict, total=False):
+    consume: bool
+    data: str
+
+
+type TuiInputListenerResult = TuiInputListenerResultValue | None
+type TuiInputListener = Callable[[str], TuiInputListenerResult]
+
+# MISAKA fork (D11): `PendingTerminalColorQuery`, `TERMINAL_PALETTE_SIZE`, `TERMINAL_COLOR_REPLY_COUNT`,
+# `TERMINAL_COLOR_QUERY` and `DEVICE_ATTRIBUTES_RESPONSE_PATTERN` (queryTerminalColors) follow here.
 
 
 class Focusable(Protocol):
+    """Interface for components that can receive focus and display a hardware cursor.
+    When focused, the component should emit CURSOR_MARKER at the cursor position
+    in its render output. TUI will find this marker and position the hardware
+    cursor there for proper IME candidate window positioning.
+    """
+
+    # Set by TUI when focus changes. Component should emit CURSOR_MARKER when true.
     focused: bool
 
 
 def isFocusable(component: Component | None) -> bool:
+    """Type guard to check if a component implements Focusable"""
     return component is not None and hasattr(component, "focused")
 
 
+# Cursor position marker - APC (Application Program Command) sequence.
+# This is a zero-width escape sequence that terminals ignore.
+# Components emit this at the cursor position when focused.
+# TUI finds and strips this marker, then positions the hardware cursor there.
+CURSOR_MARKER = "\x1b_pi:c\x07"
+
+# Fake cursor markers - zero-width APC sequences around the text drawn as the cursor. See resolveFakeCursors().
+FAKE_CURSOR_START = "\x1b_pi:fc\x07"
+FAKE_CURSOR_END = "\x1b_pi:/fc\x07"
+# CURSOR_MARKER + FAKE_CURSOR_START + text + FAKE_CURSOR_END. Truncating the line right after the cursor cell drops
+# the end.
+FOCUSED_FAKE_CURSOR = RegExp(r"(\x1b_pi:c\x07)\x1b_pi:fc\x07(.*?)(?:\x1b_pi:\/fc\x07|$)", "s")
+
+
+def renderFakeCursor(text: str) -> str:
+    """Wrap text in fake cursor markers."""
+    return f"{FAKE_CURSOR_START}{text}{FAKE_CURSOR_END}"
+
+
+# Anchor position for overlays
 type OverlayAnchor = Literal[
     "center",
     "top-left",
@@ -123,123 +126,179 @@ type OverlayAnchor = Literal[
     "left-center",
     "right-center",
 ]
-type SizeValue = int | str
 
 
 class OverlayMargin(TypedDict, total=False):
+    """Margin configuration for overlays"""
+
     top: int
     right: int
     bottom: int
     left: int
 
 
+# Value that can be absolute (number) or percentage (string like "50%")
+type SizeValue = int | float | str
+
+
+def parseSizeValue(value: SizeValue | None, referenceSize: int) -> int | float | None:
+    """Parse a SizeValue into absolute value given a reference size"""
+    if value is None:
+        return None
+    if isinstance(value, int | float):
+        return value
+    # Parse percentage string like "50%"
+    match = js_regexp.match(value, RegExp(r"^(\d+(?:\.\d+)?)%$"))
+    if match:
+        return math.floor((referenceSize * float(match[1])) / 100)
+    return None
+
+
 class OverlayOptions(TypedDict, total=False):
+    """Options for overlay positioning and sizing.
+    Values can be absolute numbers or percentage strings (e.g., "50%").
+    """
+
+    # === Sizing ===
+    # Width in columns, or percentage of terminal width (e.g., "50%")
     width: SizeValue
+    # Minimum width in columns
     minWidth: int
+    # Maximum height in rows, or percentage of terminal height (e.g., "50%")
     maxHeight: SizeValue
+
+    # === Positioning - anchor-based ===
+    # Anchor point for positioning (default: 'center')
     anchor: OverlayAnchor
+    # Horizontal offset from anchor position (positive = right)
     offsetX: int
+    # Vertical offset from anchor position (positive = down)
     offsetY: int
+
+    # === Positioning - percentage or absolute ===
+    # Row position: absolute number, or percentage (e.g., "25%" = 25% from top)
     row: SizeValue
+    # Column position: absolute number, or percentage (e.g., "50%" = centered horizontally)
     col: SizeValue
+
+    # === Margin from terminal edges ===
+    # Margin from terminal edges. Number applies to all sides.
     margin: OverlayMargin | int
+
+    # === Visibility ===
+    # Control overlay visibility based on terminal dimensions.
+    # If provided, overlay is only rendered when this returns true.
+    # Called each render cycle with current terminal dimensions.
     visible: Callable[[int, int], bool]
+    # If true, don't capture keyboard focus when shown
     nonCapturing: bool
 
 
-def _parse_size_value(value: SizeValue | None, reference_size: int) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    match = re.fullmatch(r"(\d+(?:\.\d+)?)%", value)
-    if match is None:
-        return None
-    return int((reference_size * float(match.group(1))) // 100)
+class OverlayUnfocusOptions(TypedDict):
+    """Options for {@link OverlayHandle.unfocus}."""
+
+    # Explicit target to focus after releasing this overlay.
+    target: Component | None
 
 
-def _is_termux_session() -> bool:
-    return bool(os.environ.get("TERMUX_VERSION"))
+class OverlayBounds(TypedDict):
+    """Last rendered terminal-relative overlay rectangle."""
 
-
-@dataclass(slots=True)
-class _OverlayLayout:
-    width: int
     row: int
     col: int
-    maxHeight: int | None
+    width: int
+    height: int
 
 
 class OverlayHandle(Protocol):
-    def hide(self) -> None: ...
-    def setHidden(self, hidden: bool) -> None: ...
-    def isHidden(self) -> bool: ...
-    def focus(self) -> None: ...
-    def unfocus(self) -> None: ...
-    def isFocused(self) -> bool: ...
-
-
-class _OverlayHandle:
-    def __init__(self, tui: TUI, entry: dict[str, Any]) -> None:
-        self._tui = tui
-        self._entry = entry
+    """Handle returned by showOverlay for controlling the overlay"""
 
     def hide(self) -> None:
-        if self._entry not in self._tui.overlayStack:
-            return
-        self._tui.overlayStack.remove(self._entry)
-        if self._tui.focusedComponent is self._entry["component"]:
-            top_visible = self._tui._getTopmostVisibleOverlay()
-            self._tui.setFocus(top_visible["component"] if top_visible is not None else self._entry["preFocus"])
-        if not self._tui.overlayStack:
-            self._tui.terminal.hideCursor()
-        self._tui.requestRender()
+        """Permanently remove the overlay (cannot be shown again)"""
+        ...
 
     def setHidden(self, hidden: bool) -> None:
-        if self._entry["hidden"] == hidden:
-            return
-        self._entry["hidden"] = hidden
-        options = self._entry.get("options")
-        if options is None:
-            options = {}
-        component = self._entry["component"]
-        if hidden:
-            if self._tui.focusedComponent is component:
-                top_visible = self._tui._getTopmostVisibleOverlay()
-                self._tui.setFocus(top_visible["component"] if top_visible is not None else self._entry["preFocus"])
-        elif not options.get("nonCapturing") and self._tui._isOverlayVisible(self._entry):
-            self._entry["focusOrder"] = self._tui._nextFocusOrder()
-            self._tui.setFocus(component)
-        self._tui.requestRender()
+        """Temporarily hide or show the overlay"""
+        ...
 
     def isHidden(self) -> bool:
-        return bool(self._entry["hidden"])
+        """Check if overlay is temporarily hidden"""
+        ...
 
     def focus(self) -> None:
-        if self._entry not in self._tui.overlayStack or not self._tui._isOverlayVisible(self._entry):
-            return
-        if self._tui.focusedComponent is not self._entry["component"]:
-            self._tui.setFocus(self._entry["component"])
-        self._entry["focusOrder"] = self._tui._nextFocusOrder()
-        self._tui.requestRender()
+        """Focus this overlay and bring it to the visual front"""
+        ...
 
-    def unfocus(self) -> None:
-        if self._tui.focusedComponent is not self._entry["component"]:
-            return
-        top_visible = self._tui._getTopmostVisibleOverlay()
-        target = (
-            top_visible["component"]
-            if top_visible is not None and top_visible is not self._entry
-            else self._entry["preFocus"]
-        )
-        self._tui.setFocus(target)
-        self._tui.requestRender()
+    def unfocus(self, options: OverlayUnfocusOptions | None = None) -> None:
+        """Release focus to the next visible capturing overlay or previous target, or to an explicit target when
+        provided"""
+        ...
 
     def isFocused(self) -> bool:
-        return self._tui.focusedComponent is self._entry["component"]
+        """Check if this overlay currently has focus"""
+        ...
+
+    def getBounds(self) -> OverlayBounds | None:
+        """Get the most recent rendered bounds for a visible overlay."""
+        ...
+
+
+@dataclass(eq=False)
+class OverlayStackEntry:
+    component: Component
+    options: OverlayOptions | None
+    preFocus: Component | None
+    hidden: bool
+    focusOrder: int
+    bounds: OverlayBounds | None = None
+
+
+# MISAKA fork (D1): upstream's `RenderedOverlayLayout` follows here.
+
+
+class OverlayRestoreOverlayResume(TypedDict):
+    status: Literal["restore-overlay"]
+
+
+class OverlayFocusTargetResume(TypedDict):
+    status: Literal["focus-target"]
+    target: Component | None
+
+
+type OverlayBlockedFocusResume = OverlayRestoreOverlayResume | OverlayFocusTargetResume
+
+
+class EligibleOverlayFocusRestoreState(TypedDict):
+    status: Literal["eligible"]
+    overlay: OverlayStackEntry
+
+
+class BlockedOverlayFocusRestoreState(TypedDict):
+    status: Literal["blocked"]
+    overlay: OverlayStackEntry
+    blockedBy: Component
+    resume: OverlayBlockedFocusResume
+
+
+type ActiveOverlayFocusRestoreState = EligibleOverlayFocusRestoreState | BlockedOverlayFocusRestoreState
+
+
+class InactiveOverlayFocusRestoreState(TypedDict):
+    status: Literal["inactive"]
+
+
+type OverlayFocusRestoreState = InactiveOverlayFocusRestoreState | ActiveOverlayFocusRestoreState
+type OverlayFocusRestorePolicy = Literal["clear", "preserve"]
+
+
+class SetFocusInternalOptions(TypedDict):
+    component: Component | None
+    overlayFocusRestore: OverlayFocusRestorePolicy
 
 
 class Container:
+    """Container - a component that contains other components"""
+
     def __init__(self) -> None:
         self.children: list[Component] = []
 
@@ -247,79 +306,173 @@ class Container:
         self.children.append(component)
 
     def removeChild(self, component: Component) -> None:
-        for index, child in enumerate(self.children):
-            if child is component:
-                del self.children[index]
-                break
+        index = next((i for i, child in enumerate(self.children) if child is component), -1)
+        if index != -1:
+            del self.children[index]
 
     def clear(self) -> None:
-        self.children.clear()
+        self.children = []
 
     def invalidate(self) -> None:
         for child in self.children:
             invalidate = getattr(child, "invalidate", None)
-            if callable(invalidate):
+            if invalidate:
                 invalidate()
+
+    # MISAKA fork (D1): upstream's `handleMouse` follows here.
 
     def render(self, width: int) -> list[str]:
         lines: list[str] = []
         for child in self.children:
-            lines.extend(child.render(width))
+            childLines = child.render(width)
+            lines.extend(childLines)
         return lines
 
 
-class TUI(Container):
-    MIN_RENDER_INTERVAL_MS = 16
-    SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07"
+# TUI - Main class for managing terminal UI with differential rendering
+SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07"
 
-    def __init__(self, terminal: Terminal, showHardwareCursor: bool | None = None) -> None:
+
+def compositeTuiLine(baseLine: str, overlayLine: str, startCol: int, overlayWidth: int, totalWidth: int) -> str:
+    """Composite overlay content into a terminal line at a fixed column."""
+    if isImageLine(baseLine):
+        return baseLine
+
+    afterStart = startCol + overlayWidth
+    base = extractSegments(baseLine, startCol, afterStart, totalWidth - afterStart, True)
+    overlay = sliceWithWidth(overlayLine, 0, overlayWidth, True)
+    beforePad = max(0, startCol - base.beforeWidth)
+    overlayPad = max(0, overlayWidth - overlay.width)
+    actualBeforeWidth = max(startCol, base.beforeWidth)
+    actualOverlayWidth = max(overlayWidth, overlay.width)
+    afterTarget = max(0, totalWidth - actualBeforeWidth - actualOverlayWidth)
+    afterPad = max(0, afterTarget - base.afterWidth)
+    result = (
+        base.before
+        + " " * beforePad
+        + SEGMENT_RESET
+        + overlay.text
+        + " " * overlayPad
+        + SEGMENT_RESET
+        + base.after
+        + " " * afterPad
+    )
+
+    return result if visibleWidth(result) <= totalWidth else sliceByColumn(result, 0, totalWidth, True)
+
+
+# MISAKA fork (D1): upstream's `TuiMode` follows here.
+
+
+class TuiStopOptions(TypedDict, total=False):
+    # Leave renderer output in place for another TUI taking over the same terminal.
+    preserveScreen: bool
+
+
+class TUI(Component, Protocol):
+    children: list[Component]
+    terminal: Terminal
+    onDebug: Callable[[], None] | None
+
+    @property
+    def fullRedraws(self) -> int: ...
+    def addChild(self, component: Component) -> None: ...
+    def removeChild(self, component: Component) -> None: ...
+    def clear(self) -> None: ...
+    def getShowHardwareCursor(self) -> bool: ...
+    def setShowHardwareCursor(self, enabled: bool) -> None: ...
+    def getClearOnShrink(self) -> bool: ...
+    def setClearOnShrink(self, enabled: bool) -> None: ...
+    def setFocus(self, component: Component | None) -> None: ...
+    def showOverlay(self, component: Component, options: OverlayOptions | None = None) -> OverlayHandle: ...
+    def hideOverlay(self) -> None: ...
+    def hasOverlay(self) -> bool: ...
+    def start(self) -> None: ...
+    def stop(self, options: TuiStopOptions | None = None) -> None: ...
+    def renderNow(self, force: bool = False) -> None: ...
+    def requestRender(self, force: bool = False) -> None: ...
+    def addInputListener(self, listener: TuiInputListener) -> Callable[[], None]: ...
+    def removeInputListener(self, listener: TuiInputListener) -> None: ...
+    def onTerminalColorSchemeChange(self, listener: Callable[[TerminalColorScheme], None]) -> Callable[[], None]: ...
+    def setTerminalColorSchemeNotifications(self, enabled: bool) -> None: ...
+
+
+# MISAKA fork (D1): upstream's `VIEWPORT_TUI`, `ViewportTUI` and `isViewportTUI` follow here.
+
+
+def performanceNow() -> float:
+    """MISAKA fork: ``performance.now()``, in milliseconds."""
+    return time.perf_counter() * 1000
+
+
+class TuiBase(Container):
+    MIN_RENDER_INTERVAL_MS = 16
+
+    @property
+    def hasOverlayEntries(self) -> bool:
+        return len(self.overlayStack) > 0
+
+    def __init__(self, terminal: Terminal, showHardwareCursor: bool | None = None, logDirectory: str | None = None):
         super().__init__()
         self.terminal = terminal
-        self.previousLines: list[str] = []
-        self.previousKittyImageIds: set[int] = set()
-        self.previousWidth = 0
-        self.previousHeight = 0
         self.focusedComponent: Component | None = None
-        self.inputListeners: dict[Any, None] = {}
-        self.pendingOsc11BackgroundReplies = 0
-        self.pendingOsc11BackgroundQueries: list[dict] = []
-        self.terminalColorSchemeListeners: dict = {}
-        self.terminalColorSchemeNotificationsEnabled = False
+        self.inputListeners: dict[TuiInputListener, None] = {}
+
+        self.onDebug: Callable[[], None] | None = None
         self.renderRequested = False
         self.immediateRenderScheduled = False
         self.renderTimer: asyncio.TimerHandle | threading.Timer | None = None
+        self.lastRenderAt = 0.0
+        self.showHardwareCursor = False
+        self.clearOnShrink = False
+        self.fullRedrawCount = 0
+        self.stopped = False
+        # MISAKA fork (D11): upstream's `pendingTerminalColorQueries` follows here; MISAKA's OSC 11 probe keeps these.
+        self.pendingOsc11BackgroundReplies = 0
+        self.pendingOsc11BackgroundQueries: list[dict[str, Any]] = []
+        self.terminalColorSchemeListeners: dict[Callable[[TerminalColorScheme], None], None] = {}
+        self.terminalColorSchemeNotificationsEnabled = False
+        # Directory for debug/crash logs. When undefined, debug logging is disabled and crash dumps fall back to the OS
+        # temp directory.
+        # MISAKA fork: without one the crash dump goes to MISAKA's home (`home.path("crash_log")`).
+        self.logDirectory = logDirectory
+
+        # Overlay stack for modal components rendered on top of base content
+        self.focusOrderCounter = 0
+        self.overlayStack: list[OverlayStackEntry] = []
+        self.overlayFocusRestore: OverlayFocusRestoreState = {"status": "inactive"}
+
+        # MISAKA fork: the loop that owns rendering, and the last frame's cost (see `scheduleRender`).
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: int | None = None
         self._capture_loop()
-        self.lastRenderAt = 0.0
         self.lastRenderCostMs = 0.0
         self.lastRenderWallMs = 0.0
-        self._renderLock = threading.Lock()
-        self.cursorRow = 0
-        self.hardwareCursorRow = 0
-        # SettingsManager already resolves these (settings.json first, then the environment)
-        # and hands the answer in; reading the environment again here was a second truth.
-        self.showHardwareCursor = False
-        self.clearOnShrink = False
-        self.maxLinesRendered = 0
-        self.previousViewportTop = 0
-        self.fullRedrawCount = 0
-        # After a resize, the fast viewport frame (renders only the bottom of the transcript)
-        # leaves the scrollback and the diff model to be rebuilt by the next settled full render.
-        self._needs_full_rebuild = False
-        self.stopped = False
-        self.focusOrderCounter = 0
-        self.overlayStack: list[dict[str, Any]] = []
+
         if showHardwareCursor is not None:
             self.showHardwareCursor = showHardwareCursor
+
+    def doRender(self) -> None:
+        raise NotImplementedError
+
+    def resetRenderState(self) -> None:
+        pass
+
+    def beforeTerminalStart(self) -> None:
+        pass
+
+    def afterTerminalStart(self) -> None:
+        pass
+
+    def beforeTerminalStop(self, _options: TuiStopOptions) -> None:
+        pass
+
+    def afterTerminalStop(self, _options: TuiStopOptions) -> None:
+        pass
 
     @property
     def fullRedraws(self) -> int:
         return self.fullRedrawCount
-
-    def _nextFocusOrder(self) -> int:
-        self.focusOrderCounter += 1
-        return self.focusOrderCounter
 
     def getShowHardwareCursor(self) -> bool:
         return self.showHardwareCursor
@@ -329,90 +482,354 @@ class TUI(Container):
             return
         self.showHardwareCursor = enabled
         if not enabled:
-            self.terminal.hideCursor()
+            self.hideTerminalCursor()
         self.requestRender()
 
     def getClearOnShrink(self) -> bool:
         return self.clearOnShrink
 
     def setClearOnShrink(self, enabled: bool) -> None:
+        """Set whether to trigger full re-render when content shrinks.
+        When true, empty rows are cleared when content shrinks.
+        When false (default), empty rows remain (reduces redraws on slower terminals).
+        """
         self.clearOnShrink = enabled
 
+    def getFocusedComponent(self) -> Component | None:
+        return self.focusedComponent
+
     def setFocus(self, component: Component | None) -> None:
+        self.setFocusInternal({"component": component, "overlayFocusRestore": "clear"})
+
+    def setFocusInternal(self, options: SetFocusInternalOptions) -> None:
+        component = options["component"]
+        overlayFocusRestore = options["overlayFocusRestore"]
+        previousFocus = self.focusedComponent
+        nextFocus = component
+        previousFocusedOverlay = (
+            next(
+                (
+                    entry
+                    for entry in self.overlayStack
+                    if entry.component is previousFocus and self.isOverlayVisible(entry)
+                ),
+                None,
+            )
+            if previousFocus
+            else None
+        )
+        nextFocusIsOverlay = (
+            any(entry.component is nextFocus for entry in self.overlayStack) if nextFocus else False
+        )
+        restoreState = self.getVisibleOverlayFocusRestore()
+        if nextFocus and not nextFocusIsOverlay:
+            if restoreState["status"] == "blocked" and restoreState["blockedBy"] is previousFocus:
+                if restoreState["resume"]["status"] == "focus-target" or not self.isComponentMounted(
+                    restoreState["blockedBy"]
+                ):
+                    nextFocus = self.resolveBlockedOverlayFocusResume(restoreState)
+                else:
+                    self.overlayFocusRestore = {
+                        "status": "blocked",
+                        "overlay": restoreState["overlay"],
+                        "blockedBy": nextFocus,
+                        "resume": restoreState["resume"],
+                    }
+            elif (
+                previousFocusedOverlay
+                and restoreState["status"] != "inactive"
+                and restoreState["overlay"] is previousFocusedOverlay
+                and not self.isOverlayFocusAncestor(previousFocusedOverlay, nextFocus)
+            ):
+                self.overlayFocusRestore = {
+                    "status": "blocked",
+                    "overlay": previousFocusedOverlay,
+                    "blockedBy": nextFocus,
+                    "resume": {"status": "restore-overlay"},
+                }
+        elif nextFocus is None:
+            if restoreState["status"] == "blocked" and restoreState["blockedBy"] is previousFocus:
+                nextFocus = self.resolveBlockedOverlayFocusResume(restoreState)
+            elif overlayFocusRestore == "clear":
+                self.clearOverlayFocusRestore()
+
         if isFocusable(self.focusedComponent):
-            self.focusedComponent.focused = False
-        self.focusedComponent = component
-        if isFocusable(component):
-            component.focused = True
+            cast(Any, self.focusedComponent).focused = False
+
+        self.focusedComponent = nextFocus
+
+        if isFocusable(nextFocus):
+            cast(Any, nextFocus).focused = True
+
+        focusedOverlay = (
+            next(
+                (entry for entry in self.overlayStack if entry.component is nextFocus and self.isOverlayVisible(entry)),
+                None,
+            )
+            if nextFocus
+            else None
+        )
+        if focusedOverlay:
+            self.overlayFocusRestore = {"status": "eligible", "overlay": focusedOverlay}
+
+    def clearOverlayFocusRestore(self) -> None:
+        self.overlayFocusRestore = {"status": "inactive"}
+
+    def clearOverlayFocusRestoreFor(self, overlay: OverlayStackEntry) -> None:
+        if self.overlayFocusRestore["status"] != "inactive" and self.overlayFocusRestore["overlay"] is overlay:
+            self.clearOverlayFocusRestore()
+
+    def resolveBlockedOverlayFocusResume(self, restoreState: BlockedOverlayFocusRestoreState) -> Component | None:
+        resume = restoreState["resume"]
+        if resume["status"] == "restore-overlay":
+            return restoreState["overlay"].component
+        self.clearOverlayFocusRestore()
+        return resume["target"]
+
+    def getVisibleOverlayFocusRestore(self) -> OverlayFocusRestoreState:
+        restoreState = self.overlayFocusRestore
+        if restoreState["status"] == "inactive":
+            return restoreState
+        if not any(entry is restoreState["overlay"] for entry in self.overlayStack) or not self.isOverlayVisible(
+            restoreState["overlay"]
+        ):
+            return {"status": "inactive"}
+        return restoreState
+
+    def isOverlayFocusAncestor(self, entry: OverlayStackEntry, component: Component) -> bool:
+        visited: list[Component] = []
+        current = entry.preFocus
+        while current and not any(seen is current for seen in visited):
+            visited.append(current)
+            if current is component:
+                return True
+            owner = next((overlay for overlay in self.overlayStack if overlay.component is current), None)
+            current = owner.preFocus if owner is not None else None
+        return False
+
+    def retargetOverlayPreFocus(self, removed: OverlayStackEntry) -> None:
+        for overlay in self.overlayStack:
+            if overlay is not removed and overlay.preFocus is removed.component:
+                overlay.preFocus = removed.preFocus
+
+    def getMountedRoots(self) -> list[Component]:
+        return self.children
+
+    def isComponentMounted(self, component: Component) -> bool:
+        return any(self.containsComponent(child, component) for child in self.getMountedRoots())
+
+    def containsComponent(self, root: Component, target: Component) -> bool:
+        if root is target:
+            return True
+        if not isinstance(root, Container):
+            return False
+        return any(self.containsComponent(child, target) for child in root.children)
 
     def showOverlay(self, component: Component, options: OverlayOptions | None = None) -> OverlayHandle:
-        entry = {
-            "component": component,
-            "options": options,
-            "preFocus": self.focusedComponent,
-            "hidden": False,
-            "focusOrder": self._nextFocusOrder(),
-        }
+        """Show an overlay component with configurable positioning and sizing.
+        Returns a handle to control the overlay's visibility.
+        """
+        self.focusOrderCounter += 1
+        entry = OverlayStackEntry(
+            component=component,
+            options=options,
+            preFocus=self.focusedComponent,
+            hidden=False,
+            focusOrder=self.focusOrderCounter,
+        )
         self.overlayStack.append(entry)
-        entry_options = entry["options"]
-        if not (entry_options is not None and entry_options.get("nonCapturing")) and self._isOverlayVisible(entry):
+        # Only focus if overlay is actually visible
+        if not (options or {}).get("nonCapturing") and self.isOverlayVisible(entry):
             self.setFocus(component)
-        self.terminal.hideCursor()
+        self.hideTerminalCursor()
         self.requestRender()
-        return _OverlayHandle(self, entry)
+
+        # Return handle for controlling this overlay
+        def hide() -> None:
+            index = next((i for i, overlay in enumerate(self.overlayStack) if overlay is entry), -1)
+            if index != -1:
+                self.clearOverlayFocusRestoreFor(entry)
+                self.retargetOverlayPreFocus(entry)
+                del self.overlayStack[index]
+                # Restore focus if this overlay had focus
+                if self.focusedComponent is component:
+                    topVisible = self.getTopmostVisibleOverlay()
+                    self.setFocus(topVisible.component if topVisible else entry.preFocus)
+                if len(self.overlayStack) == 0:
+                    self.hideTerminalCursor()
+                self.requestRender()
+
+        def setHidden(hidden: bool) -> None:
+            if entry.hidden == hidden:
+                return
+            entry.hidden = hidden
+            # Update focus when hiding/showing
+            if hidden:
+                self.clearOverlayFocusRestoreFor(entry)
+                # If this overlay had focus, move focus to next visible or preFocus
+                if self.focusedComponent is component:
+                    topVisible = self.getTopmostVisibleOverlay()
+                    self.setFocus(topVisible.component if topVisible else entry.preFocus)
+            else:
+                # Restore focus to this overlay when showing (if it's actually visible)
+                if not (options or {}).get("nonCapturing") and self.isOverlayVisible(entry):
+                    self.focusOrderCounter += 1
+                    entry.focusOrder = self.focusOrderCounter
+                    self.setFocus(component)
+            self.requestRender()
+
+        def isHidden() -> bool:
+            return entry.hidden
+
+        def focus() -> None:
+            if not any(overlay is entry for overlay in self.overlayStack) or not self.isOverlayVisible(entry):
+                return
+            self.focusOrderCounter += 1
+            entry.focusOrder = self.focusOrderCounter
+            self.setFocus(component)
+            self.requestRender()
+
+        def unfocus(unfocusOptions: OverlayUnfocusOptions | None = None) -> None:
+            isFocused = self.focusedComponent is component
+            restoreState = self.overlayFocusRestore
+            hasPendingRestore = restoreState["status"] != "inactive" and restoreState["overlay"] is entry
+            if not isFocused and not hasPendingRestore:
+                return
+            if (
+                restoreState["status"] == "blocked"
+                and restoreState["overlay"] is entry
+                and self.focusedComponent is restoreState["blockedBy"]
+            ):
+                if unfocusOptions:
+                    self.overlayFocusRestore = {
+                        "status": "blocked",
+                        "overlay": entry,
+                        "blockedBy": restoreState["blockedBy"],
+                        "resume": {"status": "focus-target", "target": unfocusOptions["target"]},
+                    }
+                else:
+                    self.clearOverlayFocusRestore()
+                self.requestRender()
+                return
+            self.clearOverlayFocusRestoreFor(entry)
+            if isFocused or unfocusOptions:
+                topVisible = self.getTopmostVisibleOverlay()
+                fallbackTarget = topVisible.component if topVisible and topVisible is not entry else entry.preFocus
+                self.setFocus(unfocusOptions["target"] if unfocusOptions else fallbackTarget)
+            self.requestRender()
+
+        def isFocused() -> bool:
+            return self.focusedComponent is component
+
+        def getBounds() -> OverlayBounds | None:
+            if (
+                not any(overlay is entry for overlay in self.overlayStack)
+                or not self.isOverlayVisible(entry)
+                or not entry.bounds
+            ):
+                return None
+            return {**entry.bounds}
+
+        # MISAKA fork: the object literal of closures is a namespace of them.
+        return cast(
+            OverlayHandle,
+            SimpleNamespace(
+                hide=hide,
+                setHidden=setHidden,
+                isHidden=isHidden,
+                focus=focus,
+                unfocus=unfocus,
+                isFocused=isFocused,
+                getBounds=getBounds,
+            ),
+        )
 
     def hideOverlay(self) -> None:
-        if not self.overlayStack:
+        """Hide the topmost overlay and restore previous focus."""
+        overlay = self.overlayStack[len(self.overlayStack) - 1] if self.overlayStack else None
+        if not overlay:
             return
-        overlay = self.overlayStack.pop()
-        if self.focusedComponent is overlay["component"]:
-            top_visible = self._getTopmostVisibleOverlay()
-            self.setFocus(top_visible["component"] if top_visible is not None else overlay["preFocus"])
-        if not self.overlayStack:
-            self.terminal.hideCursor()
+        self.clearOverlayFocusRestoreFor(overlay)
+        self.retargetOverlayPreFocus(overlay)
+        self.overlayStack.pop()
+        if self.focusedComponent is overlay.component:
+            # Find topmost visible overlay, or fall back to preFocus
+            topVisible = self.getTopmostVisibleOverlay()
+            self.setFocus(topVisible.component if topVisible else overlay.preFocus)
+        if len(self.overlayStack) == 0:
+            self.hideTerminalCursor()
         self.requestRender()
 
-    def hasOverlay(self) -> bool:
-        return any(self._isOverlayVisible(entry) for entry in self.overlayStack)
+    def hideTerminalCursor(self) -> None:
+        """Hide the cursor while running. After stop(), the shell owns the cursor and it must stay visible."""
+        if not self.stopped:
+            self.terminal.hideCursor()
 
-    def _isOverlayVisible(self, entry: dict[str, Any]) -> bool:
-        if entry["hidden"]:
+    def hasOverlay(self) -> bool:
+        """Check if there are any visible overlays"""
+        return any(self.isOverlayVisible(o) for o in self.overlayStack)
+
+    # MISAKA fork (D1): upstream's `isOverlayFocused`, `resolveMouseFocusTarget` and `dispatchMouseToOverlay` follow
+    # here.
+
+    def isOverlayVisible(self, entry: OverlayStackEntry) -> bool:
+        """Check if an overlay entry is currently visible"""
+        if entry.hidden:
             return False
-        options = entry["options"]
-        visible = options.get("visible") if options is not None else None
-        if callable(visible):
-            return bool(visible(self.terminal.columns, self.terminal.rows))
+        visible = (entry.options or {}).get("visible")
+        if visible:
+            return visible(self.terminal.columns, self.terminal.rows)
         return True
 
-    def _getTopmostVisibleOverlay(self) -> dict[str, Any] | None:
-        for entry in reversed(self.overlayStack):
-            options = entry["options"]
-            if options is not None and options.get("nonCapturing"):
+    def getTopmostVisibleOverlay(self) -> OverlayStackEntry | None:
+        """Find the visual-frontmost visible capturing overlay, if any"""
+        topmost: OverlayStackEntry | None = None
+        for overlay in self.overlayStack:
+            if (overlay.options or {}).get("nonCapturing") or not self.isOverlayVisible(overlay):
                 continue
-            if self._isOverlayVisible(entry):
-                return entry
-        return None
+            if not topmost or overlay.focusOrder > topmost.focusOrder:
+                topmost = overlay
+        return topmost
 
     def invalidate(self) -> None:
-        super().invalidate()
+        for root in self.getMountedRoots():
+            root.invalidate()
         for overlay in self.overlayStack:
-            invalidate = getattr(overlay["component"], "invalidate", None)
-            if callable(invalidate):
-                invalidate()
+            overlay.component.invalidate()
 
     def start(self) -> None:
         self._capture_loop()
         self.stopped = False
-        self.terminal.start(lambda data: self.handleInput(data), lambda: self.requestRender())
+        self.beforeTerminalStart()
+        self.terminal.start(
+            lambda data: self.handleTerminalInput(data),
+            lambda: self.requestRender(),
+        )
+        self.afterTerminalStart()
         self.terminal.hideCursor()
         if self.terminalColorSchemeNotificationsEnabled:
             self.terminal.write("\x1b[?2031h")
         self.queryCellSize()
         self.requestRender()
 
-    def onTerminalColorSchemeChange(self, listener) -> Callable[[], None]:
+    def addInputListener(self, listener: TuiInputListener) -> Callable[[], None]:
+        self.inputListeners[listener] = None
+
+        def remove() -> None:
+            self.inputListeners.pop(listener, None)
+
+        return remove
+
+    def removeInputListener(self, listener: TuiInputListener) -> None:
+        self.inputListeners.pop(listener, None)
+
+    def onTerminalColorSchemeChange(self, listener: Callable[[TerminalColorScheme], None]) -> Callable[[], None]:
         self.terminalColorSchemeListeners[listener] = None
-        return lambda: self.terminalColorSchemeListeners.pop(listener, None)
+
+        def remove() -> None:
+            self.terminalColorSchemeListeners.pop(listener, None)
+
+        return remove
 
     def setTerminalColorSchemeNotifications(self, enabled: bool) -> None:
         if self.terminalColorSchemeNotificationsEnabled == enabled:
@@ -421,102 +838,493 @@ class TUI(Container):
         if not self.stopped:
             self.terminal.write("\x1b[?2031h" if enabled else "\x1b[?2031l")
 
-    async def queryTerminalBackgroundColor(self, timeoutMs: int = 1000) -> RgbColor | None:
-        """Ask the terminal for its real background color via OSC 11 (pi tui.ts:1199). None on timeout or parse failure."""
-        loop = __import__("asyncio").get_running_loop()
-        fut = loop.create_future()
-        query = {"settled": False, "future": fut, "timer": None}
-
-        def _timeout() -> None:
-            if query["settled"]:
-                return
-            query["settled"] = True
-            if not fut.done():
-                fut.set_result(None)
-
-        query["timer"] = loop.call_later(timeoutMs / 1000.0, _timeout)
-        self.pendingOsc11BackgroundQueries.append(query)
-        self.pendingOsc11BackgroundReplies += 1
-        self.terminal.write("\x1b]11;?\x07")
-        return await fut
-
-    async def queryTerminalColorScheme(self, timeoutMs: int = 1000) -> TerminalColorScheme | None:
-        """Ask for the light/dark color scheme via CSI ?996n (pi tui.ts:1227); supporting terminals reply ?997;1/2 n."""
-        loop = __import__("asyncio").get_running_loop()
-        fut = loop.create_future()
-
-        def _settle(scheme) -> None:
-            if not fut.done():
-                fut.set_result(scheme)
-
-        unsubscribe = self.onTerminalColorSchemeChange(_settle)
-        timer = loop.call_later(timeoutMs / 1000.0, lambda: _settle(None))
-        self.terminal.write("\x1b[?996n")
-        try:
-            return await fut
-        finally:
-            timer.cancel()
-            unsubscribe()
-
-    def addInputListener(self, listener: Any) -> Any:
-        self.inputListeners[listener] = None
-        return lambda: self.removeInputListener(listener)
-
-    def removeInputListener(self, listener: Any) -> None:
-        self.inputListeners.pop(listener, None)
-
-    def _iter_input_listeners(self):
-        visited: set[Any] = set()
-        while True:
-            next_listener = next((listener for listener in self.inputListeners if listener not in visited), None)
-            if next_listener is None:
-                return
-            visited.add(next_listener)
-            yield next_listener
-
     def queryCellSize(self) -> None:
+        # Only query if terminal supports images (cell size is only used for image rendering)
         if not getCapabilities().images:
             return
+        # Query terminal for cell size in pixels: CSI 16 t
+        # Response format: CSI 6 ; height ; width t
         self.terminal.write("\x1b[16t")
 
-    def stop(self) -> None:
-        if self._queue_to_owner(self.stop):
+    def stop(self, options: TuiStopOptions | None = None) -> None:
+        if options is None:
+            options = {}
+        # MISAKA fork: on the loop that owns rendering.
+        if self._queue_to_owner(lambda: self.stop(options)):
             return
         self.stopped = True
-        self._cancel_render_timer()
+        self.cancelRenderTimer()
         if self.terminalColorSchemeNotificationsEnabled:
             self.terminal.write("\x1b[?2031l")
-        if self.previousLines:
-            target_row = len(self.previousLines)
-            line_diff = target_row - self.hardwareCursorRow
-            if line_diff > 0:
-                self.terminal.write(f"\x1b[{line_diff}B")
-            elif line_diff < 0:
-                self.terminal.write(f"\x1b[{-line_diff}A")
-            self.terminal.write("\r\n")
+        self.beforeTerminalStop(options)
         self.terminal.showCursor()
         self.terminal.stop()
+        self.afterTerminalStop(options)
+
+    def renderNow(self, force: bool = False) -> None:
+        # MISAKA fork: on the loop that owns rendering.
+        if self._queue_to_owner(lambda: self.renderNow(force)):
+            return
+        if force:
+            self.resetRenderState()
+        self.renderRequested = False
+        self.cancelRenderTimer()
+        self.lastRenderAt = performanceNow()
+        self.doRender()
 
     def requestRender(self, force: bool = False) -> None:
+        # MISAKA fork: requests from other threads go to the loop that owns rendering; once that loop has closed
+        # (shutdown), nothing can be scheduled on it any more.
         self._capture_loop()
-        if self.stopped or (self._loop is not None and self._loop.is_closed()):
+        if self._loop is not None and self._loop.is_closed():
             return
         if self._queue_to_owner(lambda: self.requestRender(force)):
             return
         if force:
-            self.previousLines = []
-            self.previousWidth = -1
-            self.previousHeight = -1
-            self.cursorRow = 0
-            self.hardwareCursorRow = 0
-            self.maxLinesRendered = 0
-            self.previousViewportTop = 0
-            self._request_immediate_render()
+            self.resetRenderState()
+            self.requestImmediateRender()
             return
         if self.renderRequested:
             return
         self.renderRequested = True
-        self._schedule_next_tick(self._scheduleRender)
+        self._schedule_next_tick(lambda: self.scheduleRender())
+
+    def requestImmediateRender(self) -> None:
+        self.cancelRenderTimer()
+        self.renderRequested = True
+        if self.immediateRenderScheduled:
+            return
+        self.immediateRenderScheduled = True
+
+        def tick() -> None:
+            self.immediateRenderScheduled = False
+            if self.stopped or not self.renderRequested:
+                return
+            # A previously queued scheduleRender() can create a timer before this
+            # callback runs. User input must preempt that throttled frame.
+            self.cancelRenderTimer()
+            self.renderRequested = False
+            self.lastRenderAt = performanceNow()
+            self.doRender()
+
+        self._schedule_next_tick(tick)
+
+    def cancelRenderTimer(self) -> None:
+        if not self.renderTimer:
+            return
+        self.renderTimer.cancel()
+        self.renderTimer = None
+
+    def scheduleRender(self) -> None:
+        if self.stopped or self.renderTimer or not self.renderRequested:
+            return
+        elapsed = performanceNow() - self.lastRenderAt
+        # MISAKA fork: pi waits MIN_RENDER_INTERVAL_MS from the start of the last frame, and in Node that is enough: a
+        # network chunk's promise continuations all run before the next timer. asyncio has no such priority; every
+        # await is a loop callback queued alongside the render timer. A frame slower than the interval (a long reply
+        # is laid out whole every frame) then made frames run back to back, a streaming reply advanced about one event
+        # per frame, fell minutes behind the provider and was cut off ("Connection error.", GitHub issue #6). So a
+        # frame also waits as long as the last one took: painting gets at most half the loop. `elapsed` runs from the
+        # frame's start, and the wait is counted from its end: a frame that took longer than its CPU (a write held
+        # up, threads contending for the GIL) still leaves the loop as long as its CPU took.
+        delay = max(0.0, self.MIN_RENDER_INTERVAL_MS - elapsed, self.lastRenderWallMs + self.lastRenderCostMs - elapsed)
+
+        def onTimeout() -> None:
+            # MISAKA fork: a thread timer cancelled after it fired still runs; only the current one may render.
+            if self.renderTimer is not timer:
+                return
+            self.renderTimer = None
+            if self.stopped or not self.renderRequested:
+                return
+            self.renderRequested = False
+            self.lastRenderAt = performanceNow()
+            self.doRender()
+            if self.renderRequested:
+                self.scheduleRender()
+
+        timer: asyncio.TimerHandle | threading.Timer
+        if self._loop is not None:
+            if self._loop.is_closed():
+                return
+            timer = self._loop.call_later(delay / 1000, self._run_callback, onTimeout)
+        else:
+            timer = threading.Timer(delay / 1000, lambda: self._run_callback(onTimeout))
+            timer.daemon = True
+        self.renderTimer = timer
+        if isinstance(timer, threading.Timer):
+            timer.start()
+
+    def handleTerminalInput(self, data: str) -> None:
+        # MISAKA fork (D11): upstream consumes queryTerminalColors' replies here; MISAKA's OSC 11 probe takes its.
+        if self.consumeOsc11BackgroundResponse(data):
+            return
+        if self.consumeTerminalColorSchemeReport(data):
+            return
+
+        if len(self.inputListeners) > 0:
+            current = data
+            for listener in liveKeys(self.inputListeners):
+                result = listener(current)
+                if result and result.get("consume"):
+                    return
+                if result and result.get("data") is not None:
+                    current = result["data"]
+            if len(current) == 0:
+                return
+            data = current
+
+        # Consume terminal cell size responses without blocking unrelated input.
+        if self.consumeCellSizeResponse(data):
+            return
+
+        # Global debug key handler (Shift+Ctrl+D)
+        if matchesKey(data, "shift+ctrl+d") and self.onDebug:
+            self.onDebug()
+            return
+
+        # If focused component is an overlay, verify it's still visible
+        # (visibility can change due to terminal resize or visible() callback)
+        focusedOverlay = next((o for o in self.overlayStack if o.component is self.focusedComponent), None)
+        if focusedOverlay and not self.isOverlayVisible(focusedOverlay):
+            # Focused overlay is no longer visible, redirect to topmost visible overlay
+            topVisible = self.getTopmostVisibleOverlay()
+            if topVisible:
+                self.setFocus(topVisible.component)
+            else:
+                self.setFocusInternal({"component": focusedOverlay.preFocus, "overlayFocusRestore": "preserve"})
+
+        focusIsOverlay = any(o.component is self.focusedComponent for o in self.overlayStack)
+        if not focusIsOverlay:
+            restoreState = self.getVisibleOverlayFocusRestore()
+            if restoreState["status"] == "eligible":
+                self.setFocus(restoreState["overlay"].component)
+            elif restoreState["status"] == "blocked" and restoreState["blockedBy"] is not self.focusedComponent:
+                resume = restoreState["resume"]
+                if resume["status"] == "restore-overlay":
+                    self.setFocus(restoreState["overlay"].component)
+                else:
+                    self.clearOverlayFocusRestore()
+                    self.setFocus(resume["target"])
+
+        # Pass input to focused component (including Ctrl+C)
+        # The focused component can decide how to handle Ctrl+C
+        handleInput = getattr(self.focusedComponent, "handleInput", None)
+        if handleInput:
+            # Filter out key release events unless component opts in
+            if isKeyRelease(data) and not getattr(self.focusedComponent, "wantsKeyRelease", False):
+                return
+            handleInput(data)
+            # Keyboard input is latency-sensitive. Avoid the throttled timer path,
+            # where even setTimeout(0) can take a full 16 ms tick on Windows.
+            self.requestImmediateRender()
+
+    # MISAKA fork (D11): upstream's `consumeTerminalColorResponse`, `terminalColorQueryResult` and
+    # `completeTerminalColorQuery` follow here.
+
+    def consumeTerminalColorSchemeReport(self, data: str) -> bool:
+        scheme = parseTerminalColorSchemeReport(data)
+        if not scheme:
+            return False
+
+        for listener in liveKeys(self.terminalColorSchemeListeners):
+            listener(scheme)
+        return True
+
+    def consumeCellSizeResponse(self, data: str) -> bool:
+        # Response format: ESC [ 6 ; height ; width t
+        match = js_regexp.match(data, RegExp(r"^\x1b\[6;(\d+);(\d+)t$"))
+        if not match:
+            return False
+
+        heightPx = int(match[1], 10)
+        widthPx = int(match[2], 10)
+        if heightPx <= 0 or widthPx <= 0:
+            return True
+
+        setCellDimensions({"widthPx": widthPx, "heightPx": heightPx})
+        # Invalidate all components so images re-render with correct dimensions.
+        self.invalidate()
+        self.requestRender()
+        return True
+
+    def resolveOverlayLayout(
+        self,
+        options: OverlayOptions | None,
+        overlayHeight: int,
+        termWidth: int,
+        termHeight: int,
+    ) -> dict[str, Any]:
+        """Resolve overlay layout from options.
+        Returns { width, row, col, maxHeight } for rendering.
+        """
+        opt: OverlayOptions = options if options is not None else {}
+
+        # Parse margin (clamp to non-negative)
+        marginOption = opt.get("margin")
+        margin: OverlayMargin = (
+            {"top": marginOption, "right": marginOption, "bottom": marginOption, "left": marginOption}
+            if isinstance(marginOption, int | float)
+            else (marginOption if marginOption is not None else {})
+        )
+        marginTop = max(0, _orZero(margin.get("top")))
+        marginRight = max(0, _orZero(margin.get("right")))
+        marginBottom = max(0, _orZero(margin.get("bottom")))
+        marginLeft = max(0, _orZero(margin.get("left")))
+
+        # Available space after margins
+        availWidth = max(1, termWidth - marginLeft - marginRight)
+        availHeight = max(1, termHeight - marginTop - marginBottom)
+
+        # === Resolve width ===
+        parsedWidth = parseSizeValue(opt.get("width"), termWidth)
+        width = parsedWidth if parsedWidth is not None else min(80, availWidth)
+        # Apply minWidth
+        if opt.get("minWidth") is not None:
+            width = max(width, opt["minWidth"])
+        # Clamp to available space
+        width = max(1, min(width, availWidth))
+
+        # === Resolve maxHeight ===
+        maxHeight = parseSizeValue(opt.get("maxHeight"), termHeight)
+        # Clamp to available space
+        if maxHeight is not None:
+            maxHeight = max(1, min(maxHeight, availHeight))
+
+        # Effective overlay height (may be clamped by maxHeight)
+        effectiveHeight = min(overlayHeight, maxHeight) if maxHeight is not None else overlayHeight
+
+        # === Resolve position ===
+        row: int | float
+        col: int | float
+
+        optRow = opt.get("row")
+        if optRow is not None:
+            if isinstance(optRow, str):
+                # Percentage: 0% = top, 100% = bottom (overlay stays within bounds)
+                match = js_regexp.match(optRow, RegExp(r"^(\d+(?:\.\d+)?)%$"))
+                if match:
+                    maxRow = max(0, availHeight - effectiveHeight)
+                    percent = float(match[1]) / 100
+                    row = marginTop + math.floor(maxRow * percent)
+                else:
+                    # Invalid format, fall back to center
+                    row = self.resolveAnchorRow("center", effectiveHeight, availHeight, marginTop)
+            else:
+                # Absolute row position
+                row = optRow
+        else:
+            # Anchor-based (default: center)
+            anchor = opt.get("anchor") or "center"
+            row = self.resolveAnchorRow(anchor, effectiveHeight, availHeight, marginTop)
+
+        optCol = opt.get("col")
+        if optCol is not None:
+            if isinstance(optCol, str):
+                # Percentage: 0% = left, 100% = right (overlay stays within bounds)
+                match = js_regexp.match(optCol, RegExp(r"^(\d+(?:\.\d+)?)%$"))
+                if match:
+                    maxCol = max(0, availWidth - width)
+                    percent = float(match[1]) / 100
+                    col = marginLeft + math.floor(maxCol * percent)
+                else:
+                    # Invalid format, fall back to center
+                    col = self.resolveAnchorCol("center", width, availWidth, marginLeft)
+            else:
+                # Absolute column position
+                col = optCol
+        else:
+            # Anchor-based (default: center)
+            anchor = opt.get("anchor") or "center"
+            col = self.resolveAnchorCol(anchor, width, availWidth, marginLeft)
+
+        # Apply offsets
+        if opt.get("offsetY") is not None:
+            row += opt["offsetY"]
+        if opt.get("offsetX") is not None:
+            col += opt["offsetX"]
+
+        # Clamp to terminal bounds (respecting margins)
+        row = max(marginTop, min(row, termHeight - marginBottom - effectiveHeight))
+        col = max(marginLeft, min(col, termWidth - marginRight - width))
+
+        return {"width": width, "row": row, "col": col, "maxHeight": maxHeight}
+
+    def resolveAnchorRow(self, anchor: OverlayAnchor, height: float, availHeight: float, marginTop: float) -> float:
+        match anchor:
+            case "top-left" | "top-center" | "top-right":
+                return marginTop
+            case "bottom-left" | "bottom-center" | "bottom-right":
+                return marginTop + availHeight - height
+            case "left-center" | "center" | "right-center":
+                return marginTop + math.floor((availHeight - height) / 2)
+        return marginTop + math.floor((availHeight - height) / 2)
+
+    def resolveAnchorCol(self, anchor: OverlayAnchor, width: float, availWidth: float, marginLeft: float) -> float:
+        match anchor:
+            case "top-left" | "left-center" | "bottom-left":
+                return marginLeft
+            case "top-right" | "right-center" | "bottom-right":
+                return marginLeft + availWidth - width
+            case "top-center" | "center" | "bottom-center":
+                return marginLeft + math.floor((availWidth - width) / 2)
+        return marginLeft + math.floor((availWidth - width) / 2)
+
+    def compositeOverlays(self, lines: list[str], termWidth: int, termHeight: int) -> list[str]:
+        """Composite all overlays into content lines (sorted by focusOrder, higher = on top)."""
+        if len(self.overlayStack) == 0:
+            # MISAKA fork (D1): upstream resets its rendered overlay layouts here.
+            return lines
+        result = [*lines]
+
+        for entry in self.overlayStack:
+            entry.bounds = None
+
+        # Pre-render all visible overlays and calculate positions
+        rendered: list[dict[str, Any]] = []
+        minLinesNeeded = len(result)
+
+        visibleEntries = [e for e in self.overlayStack if self.isOverlayVisible(e)]
+        visibleEntries.sort(key=lambda e: e.focusOrder)
+        for entry in visibleEntries:
+            component, options = entry.component, entry.options
+
+            # Get layout with height=0 first to determine width and maxHeight
+            # (width and maxHeight don't depend on overlay height)
+            layout = self.resolveOverlayLayout(options, 0, termWidth, termHeight)
+            width, maxHeight = layout["width"], layout["maxHeight"]
+
+            # Render component at calculated width
+            overlayLines = self.resolveFakeCursors(component.render(width))
+
+            # Apply maxHeight if specified
+            if maxHeight is not None and len(overlayLines) > maxHeight:
+                overlayLines = overlayLines[:maxHeight]
+
+            # Get final row/col with actual overlay height
+            finalLayout = self.resolveOverlayLayout(options, len(overlayLines), termWidth, termHeight)
+            row, col = finalLayout["row"], finalLayout["col"]
+            entry.bounds = {"row": row, "col": col, "width": width, "height": len(overlayLines)}
+
+            rendered.append({"entry": entry, "overlayLines": overlayLines, "row": row, "col": col, "w": width})
+            minLinesNeeded = max(minLinesNeeded, row + len(overlayLines))
+        # MISAKA fork (D1): upstream records the rendered overlay layouts (for mouse dispatch) here.
+
+        # Pad to at least terminal height so overlays have screen-relative positions.
+        # Excludes maxLinesRendered: the historical high-water mark caused self-reinforcing
+        # inflation that pushed content into scrollback on terminal widen.
+        workingHeight = max(len(result), termHeight, minLinesNeeded)
+
+        # Extend result with empty lines if content is too short for overlay placement or working area
+        while len(result) < workingHeight:
+            result.append("")
+
+        viewportStart = max(0, workingHeight - termHeight)
+
+        # Composite each overlay
+        for item in rendered:
+            overlayLines, row, col, w = item["overlayLines"], item["row"], item["col"], item["w"]
+            for i in range(len(overlayLines)):
+                idx = viewportStart + row + i
+                if idx >= 0 and idx < len(result):
+                    # Defensive: truncate overlay line to declared width before compositing
+                    # (components should already respect width, but this ensures it)
+                    truncatedOverlayLine = (
+                        sliceByColumn(overlayLines[i], 0, w, True) if visibleWidth(overlayLines[i]) > w else overlayLines[i]
+                    )
+                    result[idx] = self.compositeLineAt(result[idx], truncatedOverlayLine, col, w, termWidth)
+
+        return result
+
+    def applyLineResets(self, lines: list[str]) -> list[str]:
+        reset = SEGMENT_RESET
+        for i in range(len(lines)):
+            line = lines[i]
+            if not isImageLine(line):
+                lines[i] = normalizeTerminalOutput(line) + reset
+        return lines
+
+    def compositeLineAt(self, baseLine: str, overlayLine: str, startCol: int, overlayWidth: int, totalWidth: int) -> str:
+        return compositeTuiLine(baseLine, overlayLine, startCol, overlayWidth, totalWidth)
+
+    def extractCursorPosition(self, lines: list[str], height: int) -> dict[str, int] | None:
+        """Find and extract cursor position from rendered lines.
+        Searches for CURSOR_MARKER, calculates its position, and strips it from the output.
+        Only scans the bottom terminal height lines (visible viewport).
+        @param lines - Rendered lines to search
+        @param height - Terminal height (visible viewport size)
+        @returns Cursor position { row, col } or null if no marker found
+        """
+        # Only scan the bottom `height` lines (visible viewport)
+        viewportTop = max(0, len(lines) - height)
+        for row in range(len(lines) - 1, viewportTop - 1, -1):
+            line = lines[row]
+            markerIndex = line.find(CURSOR_MARKER)
+            if markerIndex != -1:
+                # Calculate visual column (width of text before marker)
+                beforeMarker = line[:markerIndex]
+                col = visibleWidth(beforeMarker)
+
+                # Strip marker from the line
+                lines[row] = line[:markerIndex] + line[markerIndex + len(CURSOR_MARKER) :]
+
+                return {"row": row, "col": col}
+        return None
+
+    def resolveFakeCursors(self, lines: list[str]) -> list[str]:
+        """Resolve fake cursor markers to reverse video. When the hardware cursor is shown, a fake cursor
+        directly after CURSOR_MARKER is dropped because the terminal cursor is drawn there. Fake cursors
+        of components without focus have no CURSOR_MARKER and stay visible.
+        """
+
+        def resolve(line: str) -> str:
+            if FAKE_CURSOR_START not in line:
+                return line
+            resolved = js_regexp.replace(line, FOCUSED_FAKE_CURSOR, "$1$2") if self.showHardwareCursor else line
+            return resolved.replace(FAKE_CURSOR_START, "\x1b[7m").replace(FAKE_CURSOR_END, "\x1b[27m")
+
+        return [resolve(line) for line in lines]
+
+    # --- MISAKA fork (D11): the background probe in place of `queryTerminalColors` ----------------------------------
+
+    async def queryTerminalBackgroundColor(self, timeoutMs: int = 1000) -> RgbColor | None:
+        """Ask the terminal for its background color (OSC 11): ``None`` on timeout or an unparseable reply. MISAKA's
+        light/dark palette follows it."""
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[RgbColor | None] = loop.create_future()
+        query: dict[str, Any] = {"settled": False, "future": future, "timer": None}
+
+        def onTimeout() -> None:
+            if query["settled"]:
+                return
+            query["settled"] = True
+            if not future.done():
+                future.set_result(None)
+
+        query["timer"] = loop.call_later(timeoutMs / 1000, onTimeout)
+        self.pendingOsc11BackgroundQueries.append(query)
+        self.pendingOsc11BackgroundReplies += 1
+        self.terminal.write("\x1b]11;?\x07")
+        return await future
+
+    def consumeOsc11BackgroundResponse(self, data: str) -> bool:
+        if self.pendingOsc11BackgroundReplies <= 0:
+            return False
+        reply = parseOscColorResponse(data)
+        if reply is None or reply["target"] != "background":
+            return False
+        self.pendingOsc11BackgroundReplies -= 1
+        query = self.pendingOsc11BackgroundQueries.pop(0) if self.pendingOsc11BackgroundQueries else None
+        if query and not query["settled"]:
+            query["settled"] = True
+            timer = query.get("timer")
+            if timer is not None:
+                timer.cancel()
+            future = query["future"]
+            if not future.done():
+                future.set_result(reply["rgb"])
+        return True
+
+    # --- MISAKA fork: the loop that owns rendering --------------------------------------------------------------------
 
     def _capture_loop(self) -> None:
         if self._loop is not None:
@@ -549,6 +1357,7 @@ class TUI(Container):
             sys.excepthook(*sys.exc_info())
 
     def _schedule_next_tick(self, callback: Callable[[], None]) -> None:
+        """``process.nextTick``."""
         if self._loop is not None:
             if not self._loop.is_closed():
                 self._loop.call_soon_threadsafe(self._run_callback, callback)
@@ -557,809 +1366,34 @@ class TUI(Container):
         timer.daemon = True
         timer.start()
 
-    def _request_immediate_render(self) -> None:
-        """Render path that bypasses the 16ms throttle timer (pi 29d9f08: keyboard input is latency-sensitive)."""
-        self._cancel_render_timer()
-        self.renderRequested = True
-        if self.immediateRenderScheduled:
-            return
-        self.immediateRenderScheduled = True
-        self._schedule_next_tick(self._run_immediate_render)
 
-    def _run_immediate_render(self) -> None:
-        self.immediateRenderScheduled = False
-        if self.stopped or not self.renderRequested:
-            return
-        # A previously queued scheduleRender() can create a timer before this
-        # callback runs.  User input must preempt that throttled frame.
-        self._cancel_render_timer()
-        self.renderRequested = False
-        self.lastRenderAt = time.perf_counter() * 1000
-        self.doRender()
-
-    def _cancel_render_timer(self) -> None:
-        if self.renderTimer is None:
-            return
-        self.renderTimer.cancel()
-        self.renderTimer = None
-
-    def _run_scheduled_render(self, timer: asyncio.TimerHandle | threading.Timer) -> None:
-        if self.renderTimer is not timer:
-            return
-        self.renderTimer = None
-        if self.stopped or not self.renderRequested:
-            return
-        self.renderRequested = False
-        self.lastRenderAt = time.perf_counter() * 1000
-        self.doRender()
-        if self.renderRequested:
-            self._scheduleRender()
-
-    def _scheduleRender(self) -> None:
-        if self.stopped or self.renderTimer is not None or not self.renderRequested:
-            return
-        elapsed = (time.perf_counter() * 1000) - self.lastRenderAt
-        # PORT-NOTE: pi waits MIN_RENDER_INTERVAL_MS from the start of the last frame, and in
-        # Node that is enough: a network chunk's promise continuations all run before the next
-        # timer. asyncio has no such priority; every await is a loop callback queued alongside
-        # the render timer. A frame slower than the interval (a long reply is laid out whole
-        # every frame) then made frames run back to back, a streaming reply advanced about one
-        # event per frame, fell minutes behind the provider and was cut off ("Connection
-        # error.", GitHub issue #6). So a frame also waits as long as the last one took: painting
-        # gets at most half the loop. ``elapsed`` runs from the frame's start, and the wait is
-        # counted from its end: a frame that took longer than its CPU (a write held up, threads
-        # contending for the GIL) still leaves the loop as long as its CPU took.
-        delay_ms = max(0.0, self.MIN_RENDER_INTERVAL_MS - elapsed,
-                       self.lastRenderWallMs + self.lastRenderCostMs - elapsed)
-        callback = lambda: self._run_scheduled_render(timer)
-        if self._loop is not None:
-            if self._loop.is_closed():
-                return
-            timer = self._loop.call_later(delay_ms / 1000.0, self._run_callback, callback)
-        else:
-            timer = threading.Timer(delay_ms / 1000.0, lambda: self._run_callback(callback))
-            timer.daemon = True
-        self.renderTimer = timer
-        if isinstance(timer, threading.Timer):
-            timer.start()
-
-    def handleInput(self, data: str) -> None:
-        if self.consumeOsc11BackgroundResponse(data):
-            return
-        if self.consumeTerminalColorSchemeReport(data):
-            return
-
-        if self.inputListeners:
-            current = data
-            for listener in self._iter_input_listeners():
-                result = listener(current)
-                if isinstance(result, dict):
-                    if result.get("consume"):
-                        return
-                    if "data" in result:
-                        current = result["data"]
-            if current == "":
-                return
-            data = current
-
-        if self.consumeCellSizeResponse(data):
-            return
-
-        focused_overlay = next(
-            (entry for entry in self.overlayStack if entry["component"] is self.focusedComponent),
-            None,
-        )
-        if focused_overlay is not None and not self._isOverlayVisible(focused_overlay):
-            top_visible = self._getTopmostVisibleOverlay()
-            if top_visible is not None:
-                self.setFocus(top_visible["component"])
-            else:
-                self.setFocus(focused_overlay["preFocus"])
-
-        if self.focusedComponent is not None and hasattr(self.focusedComponent, "handleInput"):
-            if isKeyRelease(data) and not bool(getattr(self.focusedComponent, "wantsKeyRelease", False)):
-                return
-            self.focusedComponent.handleInput(data)
-            # Keyboard input is latency-sensitive.  Avoid the throttled timer path.
-            self._request_immediate_render()
-
-    def consumeOsc11BackgroundResponse(self, data: str) -> bool:
-        if self.pendingOsc11BackgroundReplies <= 0:
-            return False
-        if not is_osc11_background_color_response(data):
-            return False
-        rgb = parse_osc11_background_color(data)
-        self.pendingOsc11BackgroundReplies -= 1
-        query = self.pendingOsc11BackgroundQueries.pop(0) if self.pendingOsc11BackgroundQueries else None
-        if query and not query["settled"]:
-            query["settled"] = True
-            timer = query.get("timer")
-            if timer is not None:
-                timer.cancel()
-            fut = query["future"]
-            if not fut.done():
-                fut.set_result(rgb)
-        return True
-
-    def consumeTerminalColorSchemeReport(self, data: str) -> bool:
-        scheme = parse_terminal_color_scheme_report(data)
-        if not scheme:
-            return False
-        for listener in list(self.terminalColorSchemeListeners):
-            listener(scheme)
-        return True
-
-    def consumeCellSizeResponse(self, data: str) -> bool:
-        match = re.fullmatch(r"\x1b\[6;(\d+);(\d+)t", data)
-        if match is None:
-            return False
-        height_px = int(match.group(1))
-        width_px = int(match.group(2))
-        if height_px <= 0 or width_px <= 0:
-            return True
-        setCellDimensions({"widthPx": width_px, "heightPx": height_px})
-        self.invalidate()
-        self.requestRender()
-        return True
-
-    def resolveOverlayLayout(
-        self,
-        options: dict[str, Any] | None,
-        overlayHeight: int,
-        termWidth: int,
-        termHeight: int,
-    ) -> _OverlayLayout:
-        opt = options or {}
-        margin_opt = opt.get("margin", {})
-        if isinstance(margin_opt, int):
-            margin = {"top": margin_opt, "right": margin_opt, "bottom": margin_opt, "left": margin_opt}
-        else:
-            margin = margin_opt
-
-        margin_top = max(0, int(margin.get("top", 0)))
-        margin_right = max(0, int(margin.get("right", 0)))
-        margin_bottom = max(0, int(margin.get("bottom", 0)))
-        margin_left = max(0, int(margin.get("left", 0)))
-        avail_width = max(1, termWidth - margin_left - margin_right)
-        avail_height = max(1, termHeight - margin_top - margin_bottom)
-
-        width = _parse_size_value(opt.get("width"), termWidth)
-        if width is None:
-            width = min(80, avail_width)
-        if opt.get("minWidth") is not None:
-            width = max(width, int(opt["minWidth"]))
-        width = max(1, min(width, avail_width))
-
-        max_height = _parse_size_value(opt.get("maxHeight"), termHeight)
-        if max_height is not None:
-            max_height = max(1, min(max_height, avail_height))
-        effective_height = min(overlayHeight, max_height) if max_height is not None else overlayHeight
-
-        if opt.get("row") is not None:
-            row_value = opt["row"]
-            if isinstance(row_value, str):
-                match = re.fullmatch(r"(\d+(?:\.\d+)?)%", row_value)
-                if match is not None:
-                    max_row = max(0, avail_height - effective_height)
-                    row = margin_top + int(max_row * (float(match.group(1)) / 100))
-                else:
-                    row = self.resolveAnchorRow("center", effective_height, avail_height, margin_top)
-            else:
-                row = int(row_value)
-        else:
-            row = self.resolveAnchorRow(opt.get("anchor", "center"), effective_height, avail_height, margin_top)
-
-        if opt.get("col") is not None:
-            col_value = opt["col"]
-            if isinstance(col_value, str):
-                match = re.fullmatch(r"(\d+(?:\.\d+)?)%", col_value)
-                if match is not None:
-                    max_col = max(0, avail_width - width)
-                    col = margin_left + int(max_col * (float(match.group(1)) / 100))
-                else:
-                    col = self.resolveAnchorCol("center", width, avail_width, margin_left)
-            else:
-                col = int(col_value)
-        else:
-            col = self.resolveAnchorCol(opt.get("anchor", "center"), width, avail_width, margin_left)
-
-        if opt.get("offsetY") is not None:
-            row += int(opt["offsetY"])
-        if opt.get("offsetX") is not None:
-            col += int(opt["offsetX"])
-
-        row = max(margin_top, min(row, termHeight - margin_bottom - effective_height))
-        col = max(margin_left, min(col, termWidth - margin_right - width))
-        return _OverlayLayout(width=width, row=row, col=col, maxHeight=max_height)
-
-    def resolveAnchorRow(self, anchor: OverlayAnchor, height: int, availHeight: int, marginTop: int) -> int:
-        if anchor in {"top-left", "top-center", "top-right"}:
-            return marginTop
-        if anchor in {"bottom-left", "bottom-center", "bottom-right"}:
-            return marginTop + availHeight - height
-        return marginTop + ((availHeight - height) // 2)
-
-    def resolveAnchorCol(self, anchor: OverlayAnchor, width: int, availWidth: int, marginLeft: int) -> int:
-        if anchor in {"top-left", "left-center", "bottom-left"}:
-            return marginLeft
-        if anchor in {"top-right", "right-center", "bottom-right"}:
-            return marginLeft + availWidth - width
-        return marginLeft + ((availWidth - width) // 2)
-
-    def compositeOverlays(self, lines: list[str], termWidth: int, termHeight: int) -> list[str]:
-        if not self.overlayStack:
-            return lines
-        result = list(lines)
-        rendered: list[dict[str, Any]] = []
-        min_lines_needed = len(result)
-        visible_entries = [entry for entry in self.overlayStack if self._isOverlayVisible(entry)]
-        visible_entries.sort(key=lambda entry: entry["focusOrder"])
-        for entry in visible_entries:
-            component = entry["component"]
-            options = entry["options"]
-            layout = self.resolveOverlayLayout(options, 0, termWidth, termHeight)
-            overlay_lines = component.render(layout.width)
-            if layout.maxHeight is not None and len(overlay_lines) > layout.maxHeight:
-                overlay_lines = overlay_lines[: layout.maxHeight]
-            final_layout = self.resolveOverlayLayout(options, len(overlay_lines), termWidth, termHeight)
-            rendered.append(
-                {
-                    "overlayLines": overlay_lines,
-                    "row": final_layout.row,
-                    "col": final_layout.col,
-                    "width": final_layout.width,
-                }
-            )
-            min_lines_needed = max(min_lines_needed, final_layout.row + len(overlay_lines))
-
-        working_height = max(len(result), termHeight, min_lines_needed)
-        while len(result) < working_height:
-            result.append("")
-        viewport_start = max(0, working_height - termHeight)
-
-        for overlay in rendered:
-            for index, overlay_line in enumerate(overlay["overlayLines"]):
-                line_index = viewport_start + overlay["row"] + index
-                if 0 <= line_index < len(result):
-                    truncated_overlay = (
-                        sliceByColumn(overlay_line, 0, overlay["width"], True)
-                        if visibleWidth(overlay_line) > overlay["width"]
-                        else overlay_line
-                    )
-                    result[line_index] = self.compositeLineAt(
-                        result[line_index],
-                        truncated_overlay,
-                        overlay["col"],
-                        overlay["width"],
-                        termWidth,
-                    )
-        return result
-
-    def applyLineResets(self, lines: list[str]) -> list[str]:
-        reset = self.SEGMENT_RESET
-        for index, line in enumerate(lines):
-            if not isImageLine(line):
-                lines[index] = normalizeTerminalOutput(line) + reset
-        return lines
-
-    def collectKittyImageIds(self, lines: list[str]) -> set[int]:
-        ids: set[int] = set()
-        for line in lines:
-            ids.update(_extract_kitty_image_ids(line))
-        return ids
-
-    def deleteKittyImages(self, ids: set[int] | list[int]) -> str:
-        return "".join(deleteKittyImage(image_id) for image_id in ids)
-
-    def getKittyImageReservedRows(self, lines: list[str], index: int, maxIndex: int | None = None) -> int:
-        """How many lines the kitty image starting at ``index`` occupies (pi :195-207).
-
-        `components/image.py` emits the escape on the image's first line and pads with blank
-        placeholder lines; the run stops early if a real line turns up before `r=` is used up.
-        """
-        resolved_max_index = len(lines) - 1 if maxIndex is None else maxIndex
-        rows = _extract_kitty_image_rows(lines[index] if index < len(lines) else "")
-        if rows <= 1:
-            return 1
-
-        max_rows = min(rows, resolved_max_index - index + 1, len(lines) - index)
-        reserved_rows = 1
-        while reserved_rows < max_rows:
-            line = lines[index + reserved_rows]
-            if isImageLine(line) or visibleWidth(line) > 0:
-                break
-            reserved_rows += 1
-        return reserved_rows
-
-    def expandChangedRangeForKittyImages(
-        self, firstChanged: int, lastChanged: int, newLines: list[str]
-    ) -> tuple[int, int]:
-        """Widen the diff range so no image block is ever half-inside it (pi :209-230).
-
-        An image whose *start* sits above ``firstChanged`` but whose block reaches into the
-        changed range has to be repainted whole, so ``firstChanged`` moves backwards as well
-        as ``lastChanged`` forwards — otherwise the `\\x1b[2K` sweep erases the bottom of the
-        image and nothing ever redraws it. Both the previous and the new frame are scanned:
-        the old one to know what is on screen, the new one to know what is about to be.
-        """
-        expanded_first = firstChanged
-        expanded_last = lastChanged
-
-        def expand_for(lines: list[str]) -> None:
-            nonlocal expanded_first, expanded_last
-            for index in range(len(lines)):
-                if not _extract_kitty_image_ids(lines[index]):
-                    continue
-                block_end = index + self.getKittyImageReservedRows(lines, index) - 1
-                if index >= firstChanged or (index <= lastChanged and block_end >= firstChanged):
-                    expanded_first = min(expanded_first, index)
-                    expanded_last = max(expanded_last, block_end)
-
-        expand_for(self.previousLines)
-        expand_for(newLines)
-        return expanded_first, expanded_last
-
-    def deleteChangedKittyImages(self, firstChanged: int, lastChanged: int) -> str:
-        if firstChanged < 0 or lastChanged < firstChanged:
-            return ""
-        ids: set[int] = set()
-        max_line = min(lastChanged, len(self.previousLines) - 1)
-        for index in range(firstChanged, max_line + 1):
-            ids.update(_extract_kitty_image_ids(self.previousLines[index] if index < len(self.previousLines) else ""))
-        return self.deleteKittyImages(ids)
-
-    def compositeLineAt(
-        self,
-        baseLine: str,
-        overlayLine: str,
-        startCol: int,
-        overlayWidth: int,
-        totalWidth: int,
-    ) -> str:
-        if isImageLine(baseLine):
-            return baseLine
-
-        after_start = startCol + overlayWidth
-        base = extractSegments(baseLine, startCol, after_start, totalWidth - after_start, True)
-        overlay = sliceWithWidth(overlayLine, 0, overlayWidth, True)
-        before_pad = max(0, startCol - base.beforeWidth)
-        overlay_pad = max(0, overlayWidth - overlay.width)
-        actual_before_width = max(startCol, base.beforeWidth)
-        actual_overlay_width = max(overlayWidth, overlay.width)
-        after_target = max(0, totalWidth - actual_before_width - actual_overlay_width)
-        after_pad = max(0, after_target - base.afterWidth)
-
-        result = (
-            base.before
-            + (" " * before_pad)
-            + self.SEGMENT_RESET
-            + overlay.text
-            + (" " * overlay_pad)
-            + self.SEGMENT_RESET
-            + base.after
-            + (" " * after_pad)
-        )
-        return result if visibleWidth(result) <= totalWidth else sliceByColumn(result, 0, totalWidth, True)
-
-    def extractCursorPosition(self, lines: list[str], height: int) -> dict[str, int] | None:
-        viewport_top = max(0, len(lines) - height)
-        for row in range(len(lines) - 1, viewport_top - 1, -1):
-            line = lines[row]
-            marker_index = line.find(CURSOR_MARKER)
-            if marker_index == -1:
-                continue
-            before_marker = line[:marker_index]
-            col = visibleWidth(before_marker)
-            lines[row] = line[:marker_index] + line[marker_index + len(CURSOR_MARKER) :]
-            return {"row": row, "col": col}
-        return None
-
-    def _leaf_chunks_reverse(self, comp: Any, width: int):
-        """Yield each visible component's rendered lines, bottom-up. Descends only into plain
-        containers -- those whose ``render`` is the base ``Container.render``, which passes
-        ``width`` straight through -- and renders every other component (Box, Markdown, message
-        components, the editor, the footer) whole at ``width``, exactly as the full render does.
-        So concatenating these chunks top-to-bottom reproduces the full render, and taking the
-        last rows of them reproduces its tail without rendering the whole transcript."""
-        if type(comp).render is Container.render and getattr(comp, "children", None) is not None:
-            for child in reversed(comp.children):
-                yield from self._leaf_chunks_reverse(child, width)
-        else:
-            yield comp.render(width)
-
-    def _render_tail(self, width: int, height: int) -> list[str]:
-        """The bottom ``height`` lines of a full render, produced by rendering only the
-        components that reach the viewport (validated to equal ``render(width)[-height:]``).
-        The generator is lazy and the break is per chunk, so components above the viewport are
-        never rendered -- that is the whole point (a few ms instead of the whole transcript)."""
-        chunks: list[list[str]] = []
-        total = 0
-        for chunk in self._leaf_chunks_reverse(self, width):
-            chunks.append(chunk)
-            total += len(chunk)
-            if total >= height:
-                break
-        lines: list[str] = []
-        for chunk in reversed(chunks):
-            lines.extend(chunk)
-        return lines[-height:] if len(lines) > height else lines
-
-    def _try_viewport_render(self, width: int, height: int) -> bool:
-        """A fast frame after a resize: repaint only the visible screen from the transcript's
-        tail, leaving the scrollback to the terminal's own reflow until the next settled render
-        rebuilds it. Returns False (fall back to the full render) when the tail holds a kitty
-        image, which needs the whole-buffer path. pi lays a full frame out in well under a
-        frame, so it never needs this; the Python port re-wraps a long transcript in hundreds
-        of ms, which made a drag lurch, so the tail (a handful of ms) is drawn per step and the
-        full buffer is rebuilt once the size settles (``_needs_full_rebuild``)."""
-        tail = self._render_tail(width, height)
-        if (self.terminal.columns, self.terminal.rows) != (width, height):
-            self.requestRender()      # the size moved while we laid out: try again for the new one
-            return True
-        if any(isImageLine(line) for line in tail):
-            return False
-        cursor_pos = self.extractCursorPosition(tail, height)
-        tail = self.applyLineResets(tail)
-        buffer = "\x1b[?2026h\x1b[2J\x1b[H"     # clear the visible screen only (2J, not 3J): keep scrollback
-        for index, line in enumerate(tail):
-            if index > 0:
-                buffer += "\r\n"
-            buffer += line
-        buffer += "\x1b[?2026l"
-        self.terminal.write(buffer)
-        self.cursorRow = max(0, len(tail) - 1)
-        self.hardwareCursorRow = self.cursorRow
-        self.positionHardwareCursor(cursor_pos, len(tail))
-        self.previousWidth = width
-        self.previousHeight = height
-        self._needs_full_rebuild = True
-        self.requestRender()          # a full, clean frame (and scrollback) once the size holds
-        return True
-
-    def doRender(self) -> None:
-        if self._queue_to_owner(self.doRender):
-            return
-        if self.stopped:
-            return
-
-        # Production renders run on the owning event loop. Synchronous embedders
-        # without a loop can still call doRender() from different timer threads.
-        # Without this lock, two renders can interleave their reads of
-        # previousLines/hardwareCursorRow and their writes to the terminal,
-        # producing duplicated lines, mispositioned footers, and scattered
-        # content fragments.
-        if not self._renderLock.acquire(blocking=False):
-            # Another render is in progress.  Do NOT drop the frame: callers
-            # (immediate/throttled runners) have already cleared renderRequested,
-            # so "wait for the next requestRender()" can strand the last frame —
-            # e.g. a typed key never appearing.  Re-request and let the throttle
-            # path retry shortly.  (pi has no such lock: its doRender is
-            # single-threaded and unconditionally renders.)
-            self.renderRequested = True
-            self._schedule_next_tick(self._scheduleRender)
-            return
-
-        # The frame's cost is the CPU this thread spent laying it out: a terminal write held up for
-        # seconds (a Windows console with text selected, a stalled ssh link) is not work the loop
-        # must be left time for, and counted it held the next frame back as long again.
-        started, wall = time.thread_time(), time.perf_counter()
-        try:
-            self._doRenderInner()
-        finally:
-            self.lastRenderCostMs = (time.thread_time() - started) * 1000
-            self.lastRenderWallMs = (time.perf_counter() - wall) * 1000
-            self._renderLock.release()
-
-    def _doRenderInner(self) -> None:
-        width = self.terminal.columns
-        height = self.terminal.rows
-        width_changed = self.previousWidth != 0 and self.previousWidth != width
-        height_changed = self.previousHeight != 0 and self.previousHeight != height
-        # A resize: paint the viewport from the transcript's tail (a few ms) instead of
-        # re-wrapping the whole transcript (hundreds of ms). The full buffer is rebuilt on the
-        # next render once the size settles. _try_viewport_render runs only if the guards pass
-        # (short-circuit) and returns False to fall through to the full render (kitty images).
-        if ((width_changed or height_changed) and self.previousLines
-                and not self.overlayStack and self._try_viewport_render(width, height)):
-            return
-        previous_buffer_length = self.previousViewportTop + self.previousHeight if self.previousHeight > 0 else height
-        prev_viewport_top = max(0, previous_buffer_length - height) if height_changed else self.previousViewportTop
-        viewport_top = prev_viewport_top
-        hardware_cursor_row = self.hardwareCursorRow
-
-        def compute_line_diff(target_row: int) -> int:
-            current_screen_row = hardware_cursor_row - prev_viewport_top
-            target_screen_row = target_row - viewport_top
-            return target_screen_row - current_screen_row
-
-        new_lines = self.render(width)
-        if self.overlayStack:
-            new_lines = self.compositeOverlays(new_lines, width, height)
-        if (self.terminal.columns, self.terminal.rows) != (width, height):
-            # PORT-NOTE: pi lays a frame out in well under a frame, so a resize during
-            # render() is invisible there. Here a long transcript takes a second or more,
-            # and a frame laid out for the old width written into the new one wraps every
-            # row. Nothing was written, so the terminal still holds the previous frame
-            # (reflowed to its new width by the panel's terminal, as ghostty would): render
-            # again for the size we have now. pi's own bookkeeping stays untouched.
-            self.requestRender()
-            return
-
-        cursor_pos = self.extractCursorPosition(new_lines, height)
-        new_lines = self.applyLineResets(new_lines)
-
-        def full_render(clear: bool) -> None:
-            self.fullRedrawCount += 1
-            buffer = "\x1b[?2026h"
-            if clear:
-                buffer += self.deleteKittyImages(self.previousKittyImageIds)
-                buffer += "\x1b[2J\x1b[H\x1b[3J"
-            index = 0
-            while index < len(new_lines):
-                if index > 0:
-                    buffer += "\r\n"
-                line = new_lines[index]
-                reserved_rows = (
-                    self.getKittyImageReservedRows(new_lines, index) if isImageLine(line) else 1
-                )
-                if 1 < reserved_rows <= height:
-                    # Scroll the image's rows into existence first, then come back up and emit
-                    # the escape (pi :287-298). Writing the escape where it stands leaves the
-                    # rows below it unwritten, so a following line overwrites the image.
-                    buffer += "\r\n" * (reserved_rows - 1)
-                    buffer += f"\x1b[{reserved_rows - 1}A"
-                    buffer += line
-                    buffer += f"\x1b[{reserved_rows - 1}B"
-                    index += reserved_rows
-                    continue
-                buffer += line
-                index += 1
-            buffer += "\x1b[?2026l"
-            self.terminal.write(buffer)
-            self.cursorRow = max(0, len(new_lines) - 1)
-            self.hardwareCursorRow = self.cursorRow
-            self.maxLinesRendered = len(new_lines) if clear else max(self.maxLinesRendered, len(new_lines))
-            buffer_length = max(height, len(new_lines))
-            self.previousViewportTop = max(0, buffer_length - height)
-            self.positionHardwareCursor(cursor_pos, len(new_lines))
-            self.previousLines = new_lines
-            self.previousKittyImageIds = self.collectKittyImageIds(new_lines)
-            self.previousWidth = width
-            self.previousHeight = height
-
-        if self._needs_full_rebuild:
-            # The size has settled after one or more fast viewport frames: rebuild the whole
-            # buffer once, cleanly, so the scrollback and the diff model are correct again.
-            self._needs_full_rebuild = False
-            full_render(True)
-            return
-        if not self.previousLines and not width_changed and not height_changed:
-            full_render(False)
-            return
-        if width_changed:
-            full_render(True)
-            return
-        if height_changed and not _is_termux_session():
-            full_render(True)
-            return
-        if self.clearOnShrink and len(new_lines) < self.maxLinesRendered and not self.overlayStack:
-            full_render(True)
-            return
-
-        first_changed = -1
-        last_changed = -1
-        max_lines = max(len(new_lines), len(self.previousLines))
-        for index in range(max_lines):
-            old_line = self.previousLines[index] if index < len(self.previousLines) else ""
-            new_line = new_lines[index] if index < len(new_lines) else ""
-            if old_line != new_line:
-                if first_changed == -1:
-                    first_changed = index
-                last_changed = index
-
-        appended_lines = len(new_lines) > len(self.previousLines)
-        if appended_lines:
-            if first_changed == -1:
-                first_changed = len(self.previousLines)
-            last_changed = len(new_lines) - 1
-        if first_changed != -1:
-            first_changed, last_changed = self.expandChangedRangeForKittyImages(
-                first_changed, last_changed, new_lines
-            )
-        append_start = appended_lines and first_changed == len(self.previousLines) and first_changed > 0
-
-        if first_changed == -1:
-            self.positionHardwareCursor(cursor_pos, len(new_lines))
-            self.previousViewportTop = prev_viewport_top
-            self.previousHeight = height
-            return
-
-        if first_changed >= len(new_lines):
-            if len(self.previousLines) > len(new_lines):
-                buffer = "\x1b[?2026h"
-                buffer += self.deleteChangedKittyImages(first_changed, last_changed)
-                target_row = max(0, len(new_lines) - 1)
-                if target_row < prev_viewport_top:
-                    full_render(True)
-                    return
-                line_diff = compute_line_diff(target_row)
-                if line_diff > 0:
-                    buffer += f"\x1b[{line_diff}B"
-                elif line_diff < 0:
-                    buffer += f"\x1b[{-line_diff}A"
-                buffer += "\r"
-                extra_lines = len(self.previousLines) - len(new_lines)
-                if extra_lines > height:
-                    full_render(True)
-                    return
-                # pi tui-main-screen.ts:422-431: the cursor sits on the last *new* line, so the
-                # stale rows start one below it -- except when there are no new lines at all,
-                # where the cursor is already on the first row to clear. Stepping down anyway
-                # left the old first row on screen and wiped one row below our own area.
-                clear_start_offset = 0 if not new_lines else 1
-                if extra_lines > 0 and clear_start_offset:
-                    buffer += f"\x1b[{clear_start_offset}B"
-                for index in range(extra_lines):
-                    buffer += "\r\x1b[2K"
-                    if index < extra_lines - 1:
-                        buffer += "\x1b[1B"
-                back_up = max(0, extra_lines - 1 + clear_start_offset)
-                if extra_lines > 0 and back_up:
-                    buffer += f"\x1b[{back_up}A"
-                buffer += "\x1b[?2026l"
-                self.terminal.write(buffer)
-                self.cursorRow = target_row
-                self.hardwareCursorRow = target_row
-            self.positionHardwareCursor(cursor_pos, len(new_lines))
-            self.previousLines = new_lines
-            self.previousKittyImageIds = self.collectKittyImageIds(new_lines)
-            self.previousWidth = width
-            self.previousHeight = height
-            self.previousViewportTop = prev_viewport_top
-            return
-
-        if first_changed < prev_viewport_top:
-            full_render(True)
-            return
-
-        buffer = "\x1b[?2026h"
-        buffer += self.deleteChangedKittyImages(first_changed, last_changed)
-        prev_viewport_bottom = prev_viewport_top + height - 1
-        move_target_row = first_changed - 1 if append_start else first_changed
-        if move_target_row > prev_viewport_bottom:
-            current_screen_row = max(0, min(height - 1, hardware_cursor_row - prev_viewport_top))
-            move_to_bottom = height - 1 - current_screen_row
-            if move_to_bottom > 0:
-                buffer += f"\x1b[{move_to_bottom}B"
-            scroll = move_target_row - prev_viewport_bottom
-            buffer += "\r\n" * scroll
-            prev_viewport_top += scroll
-            viewport_top += scroll
-            hardware_cursor_row = move_target_row
-
-        line_diff = compute_line_diff(move_target_row)
-        if line_diff > 0:
-            buffer += f"\x1b[{line_diff}B"
-        elif line_diff < 0:
-            buffer += f"\x1b[{-line_diff}A"
-        buffer += "\r\n" if append_start else "\r"
-
-        render_end = min(last_changed, len(new_lines) - 1)
-        index = first_changed
-        while index <= render_end:
-            if index > first_changed:
-                buffer += "\r\n"
-            line = new_lines[index]
-            is_image = isImageLine(line)
-            reserved_rows = (
-                self.getKittyImageReservedRows(new_lines, index, render_end) if is_image else 1
-            )
-            if reserved_rows > 1:
-                image_start_screen_row = index - viewport_top
-                if image_start_screen_row < 0 or image_start_screen_row + reserved_rows > height:
-                    # Pre-clearing the block would scroll the screen and desync every row
-                    # number we are about to use; repaint everything instead (pi :493-499).
-                    full_render(True)
-                    return
-                buffer += "\x1b[2K"
-                buffer += "\r\n\x1b[2K" * (reserved_rows - 1)
-                buffer += f"\x1b[{reserved_rows - 1}A"
-                buffer += line
-                buffer += f"\x1b[{reserved_rows - 1}B"
-                index += reserved_rows
-                continue
-            buffer += "\x1b[2K"
-            if not is_image and visibleWidth(line) > width:
-                # Imported here, on the crash path only, so `ui/tui` keeps no import-time
-                # dependency on `config`.
-                from misaka.config import home
-
-                crash_log_path = home.path("crash_log")
-                crash_log_path.parent.mkdir(parents=True, exist_ok=True)
-                crash_data = [
-                    f"Crash at {_utc_iso_timestamp()}",
-                    f"Terminal width: {width}",
-                    f"Line {index} visible width: {visibleWidth(line)}",
-                    "",
-                    "=== All rendered lines ===",
-                    *[f"[{idx}] (w={visibleWidth(value)}) {value}" for idx, value in enumerate(new_lines)],
-                    "",
-                ]
-                crash_log_path.write_text("\n".join(crash_data), encoding="utf-8")
-                self.stop()
-                raise RuntimeError(
-                    "\n".join(
-                        [
-                            f"Rendered line {index} exceeds terminal width ({visibleWidth(line)} > {width}).",
-                            "",
-                            "This is likely caused by a custom TUI component not truncating its output.",
-                            "Use visibleWidth() to measure and truncateToWidth() to truncate lines.",
-                            "",
-                            f"Debug log written to: {crash_log_path}",
-                        ]
-                    )
-                )
-            buffer += line
-            index += 1
-
-        final_cursor_row = render_end
-        if len(self.previousLines) > len(new_lines):
-            if render_end < len(new_lines) - 1:
-                move_down = len(new_lines) - 1 - render_end
-                buffer += f"\x1b[{move_down}B"
-                final_cursor_row = len(new_lines) - 1
-            extra_lines = len(self.previousLines) - len(new_lines)
-            for _index in range(len(new_lines), len(self.previousLines)):
-                buffer += "\r\n\x1b[2K"
-            buffer += f"\x1b[{extra_lines}A"
-
-        buffer += "\x1b[?2026l"
-
-        self.terminal.write(buffer)
-        self.cursorRow = max(0, len(new_lines) - 1)
-        self.hardwareCursorRow = final_cursor_row
-        self.maxLinesRendered = max(self.maxLinesRendered, len(new_lines))
-        self.previousViewportTop = max(prev_viewport_top, final_cursor_row - height + 1)
-        self.positionHardwareCursor(cursor_pos, len(new_lines))
-        self.previousLines = new_lines
-        self.previousKittyImageIds = self.collectKittyImageIds(new_lines)
-        self.previousWidth = width
-        self.previousHeight = height
-
-    def positionHardwareCursor(self, cursorPos: dict[str, int] | None, totalLines: int) -> None:
-        if cursorPos is None or totalLines <= 0:
-            self.terminal.hideCursor()
-            return
-
-        target_row = max(0, min(int(cursorPos["row"]), totalLines - 1))
-        target_col = max(0, int(cursorPos["col"]))
-        row_delta = target_row - self.hardwareCursorRow
-        buffer = ""
-        if row_delta > 0:
-            buffer += f"\x1b[{row_delta}B"
-        elif row_delta < 0:
-            buffer += f"\x1b[{-row_delta}A"
-        buffer += f"\x1b[{target_col + 1}G"
-        if buffer:
-            self.terminal.write(buffer)
-        self.hardwareCursorRow = target_row
-        if self.showHardwareCursor:
-            self.terminal.showCursor()
-        else:
-            self.terminal.hideCursor()
+def _orZero(value: float | None) -> float:
+    """``value ?? 0``."""
+    return value if value is not None else 0
 
 
 __all__ = [
     "CURSOR_MARKER",
+    "FAKE_CURSOR_END",
+    "FAKE_CURSOR_START",
+    "SEGMENT_RESET",
     "TUI",
     "Component",
     "Container",
     "Focusable",
     "OverlayAnchor",
+    "OverlayBounds",
     "OverlayHandle",
     "OverlayMargin",
     "OverlayOptions",
+    "OverlayUnfocusOptions",
     "SizeValue",
+    "TuiBase",
+    "TuiInputListener",
+    "TuiInputListenerResult",
+    "TuiStopOptions",
+    "compositeTuiLine",
     "isFocusable",
+    "renderFakeCursor",
     "visibleWidth",
 ]

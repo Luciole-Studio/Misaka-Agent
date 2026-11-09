@@ -1,15 +1,8 @@
-"""The default credential store, translated from pi's ``auth/credential-store.ts``.
+"""Translated from pi's ``packages/ai/src/auth/credential-store.ts`` (v1.1.0).
 
-Apps inject persistent stores; this one is the fallback and the reference for what
-``CredentialStore`` promises. The promise upstream cares about is serialization: writes
-for one provider happen one at a time, because ``Models.getAuth()`` runs OAuth refresh
-inside ``modify`` and two concurrent requests must not both spend the same refresh token.
-
-Upstream serializes by chaining promises per provider id and hands the caller a race
-between its own chain entry and the signal, so giving up on the wait neither breaks the
-chain nor publishes an active task's late result. Here that is an ``asyncio.Lock`` per
-provider id plus the same outer race: ``_acquire`` removes an aborted queued waiter,
-while an active callback keeps the lock until it settles and then fails its write guard.
+MISAKA fork: a queued task is an asyncio Task the caller's wait is raced against, shielded from the caller's own
+cancellation the way a JavaScript promise cannot be cancelled by an awaiter. A caller whose task is cancelled before its
+turn comes is treated like one whose signal aborted: its task does not run later.
 """
 
 from __future__ import annotations
@@ -17,138 +10,94 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
-from misaka.ai.auth.types import (
-    AuthOperationOptions,
-    CredentialInfo,
-    CredentialValue,
-)
-from misaka.ai.utils.abort import race_with_abort_signal, wait_for_abort
-from misaka.utils.values import signal_aborted
-
-
-def _throwIfAborted(options: AuthOperationOptions | None) -> None:
-    if options is not None and signal_aborted(options.signal):
-        raise RuntimeError("Request was aborted")
-    task = asyncio.current_task()
-    if task is not None and task.cancelling():
-        raise asyncio.CancelledError
+from misaka.ai.auth.types import AuthOperationOptions, Credential, CredentialInfo
+from misaka.ai.utils.abort import operationSignal, raceWithAbortSignal
+from misaka.utils.js import throwIfAborted
 
 
 class InMemoryCredentialStore:
-    """Keyed by provider id, one credential per provider. Writes serialized per key."""
+    """Default in-memory credential store. Apps inject persistent stores.
+    Keyed by `Provider.id`, one credential per provider; see `CredentialStore`.
+    Writes are serialized per provider through a promise chain.
+    """
 
     def __init__(self) -> None:
-        self._credentials: dict[str, CredentialValue] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._credentials: dict[str, Credential] = {}
+        self._chains: dict[str, asyncio.Future[None]] = {}
 
-    def _lock(self, providerId: str) -> asyncio.Lock:
-        lock = self._locks.get(providerId)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._locks[providerId] = lock
-        return lock
+    def _enqueue[T](
+        self, providerId: str, task: Callable[[], Awaitable[T]], options: AuthOperationOptions | None = None
+    ) -> asyncio.Future[T]:
+        """Serialize tasks per provider id without releasing the chain before active work settles."""
+        signal = operationSignal(options.signal if options is not None else None)
+        previous = self._chains.get(providerId)
+        abandoned = False
 
-    async def _acquire(self, providerId: str, options: AuthOperationOptions | None) -> asyncio.Lock:
-        """Wait for the provider's turn, but stop waiting if the caller gives up.
+        async def run() -> T:
+            if previous is not None:
+                await asyncio.gather(previous, return_exceptions=True)
+            throwIfAborted(signal)
+            if abandoned:
+                raise asyncio.CancelledError
+            return await task()
 
-        A caller that aborts while queued raises here instead of blocking until an
-        unrelated refresh finishes -- upstream's `raceWithAbortSignal` around the queued task.
-        """
-        _throwIfAborted(options)
-        lock = self._lock(providerId)
-        signal = options.signal if options is not None else None
-        if signal is None:
-            await lock.acquire()
-            return lock
-        acquisition = asyncio.ensure_future(lock.acquire())
-        aborted = asyncio.ensure_future(wait_for_abort(signal))
+        queued = asyncio.ensure_future(run())
+        tail: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
-        def _release_acquisition(task: asyncio.Task[bool]) -> None:
-            if task.cancelled():
-                return
-            try:
-                acquired = task.result()
-            except Exception:  # noqa: BLE001 - failed acquisition owns no lock to release
-                return
-            if acquired:
-                lock.release()
+        def settle(done: asyncio.Future[T]) -> None:
+            if not done.cancelled():
+                done.exception()
+            tail.set_result(None)
+            if self._chains.get(providerId) is tail:
+                del self._chains[providerId]
 
-        def _abandon_acquisition() -> None:
-            # Whatever ends this wait without the lock must not leave `acquisition`
-            # running: it would win the lock later with nobody left to release it,
-            # wedging every subsequent writer for this provider. `Lock.acquire` is
-            # cancellation-safe (a cancelled acquire wakes the next waiter), and the
-            # callback covers the race where it completed before the cancel landed.
-            if acquisition.done():
-                _release_acquisition(acquisition)
-                return
-            acquisition.add_done_callback(_release_acquisition)
-            acquisition.cancel()
+        queued.add_done_callback(settle)
+        self._chains[providerId] = tail
+        waiting = raceWithAbortSignal(asyncio.shield(queued), signal)
 
-        try:
-            done, _ = await asyncio.wait(
-                {acquisition, aborted}, return_when=asyncio.FIRST_COMPLETED
-            )
-        except BaseException:
-            # The caller's own task was cancelled while queued -- the path the abort
-            # signal never sees. This used to leak `acquisition`, which then took the
-            # lock with nobody left to release it: every later writer deadlocked.
-            _abandon_acquisition()
-            raise
-        finally:
-            aborted.cancel()
-        if signal_aborted(signal) or aborted in done:
-            _abandon_acquisition()
-            raise RuntimeError("Request was aborted")
-        if acquisition in done:
-            acquisition.result()
-            return lock
-        # The signal won.
-        _abandon_acquisition()
-        raise RuntimeError("Request was aborted")
+        def onWaitingDone(done: asyncio.Future[T]) -> None:
+            nonlocal abandoned
+            if done.cancelled():
+                abandoned = True
 
-    async def read(
-        self, providerId: str, options: AuthOperationOptions | None = None
-    ) -> CredentialValue | None:
-        _throwIfAborted(options)
+        waiting.add_done_callback(onWaitingDone)
+        return waiting
+
+    async def read(self, providerId: str, options: AuthOperationOptions | None = None) -> Credential | None:
+        if options is not None:
+            throwIfAborted(options.signal)
         return self._credentials.get(providerId)
 
     async def list(self, options: AuthOperationOptions | None = None) -> list[CredentialInfo]:
-        _throwIfAborted(options)
+        if options is not None:
+            throwIfAborted(options.signal)
         return [
             CredentialInfo(providerId=providerId, type=credential.type)
             for providerId, credential in self._credentials.items()
         ]
 
-    async def modify(
+    def modify(
         self,
         providerId: str,
-        fn: Callable[[CredentialValue | None], Awaitable[CredentialValue | None]],
+        fn: Callable[[Credential | None], Awaitable[Credential | None]],
         options: AuthOperationOptions | None = None,
-    ) -> CredentialValue | None:
-        async def operation() -> CredentialValue | None:
-            lock = await self._acquire(providerId, options)
-            try:
-                current = self._credentials.get(providerId)
-                produced = await fn(current)
-                _throwIfAborted(options)
-                if produced is not None:
-                    self._credentials[providerId] = produced
-                # `next ?? current`: declining to write returns what is still stored, so a
-                # caller cannot tell "I wrote this" from "someone else's write stands".
-                return produced if produced is not None else current
-            finally:
-                lock.release()
+    ) -> asyncio.Future[Credential | None]:
+        async def task() -> Credential | None:
+            current = self._credentials.get(providerId)
+            next = await fn(current)
+            if options is not None:
+                throwIfAborted(options.signal)
+            if next is not None:
+                self._credentials[providerId] = next
+            return next if next is not None else current
 
-        signal = options.signal if options is not None else None
-        return await race_with_abort_signal(operation(), signal)
+        return self._enqueue(providerId, task, options)
 
-    async def delete(self, providerId: str, options: AuthOperationOptions | None = None) -> None:
-        lock = await self._acquire(providerId, options)
-        try:
+    def delete(self, providerId: str, options: AuthOperationOptions | None = None) -> asyncio.Future[None]:
+        async def task() -> None:
             self._credentials.pop(providerId, None)
-        finally:
-            lock.release()
+
+        return self._enqueue(providerId, task, options)
 
 
 __all__ = ["InMemoryCredentialStore"]

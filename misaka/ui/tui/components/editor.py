@@ -1,164 +1,261 @@
-"""Multi-line editor component and layout helpers."""
+"""Translated from pi-tui's ``components/editor.ts`` (v1.3.0).
+
+MISAKA forks, each marked where it happens:
+
+- No alt screen (D1): ``handleMouse``, the render geometry only it reads (``renderedVisibleLineCount``,
+  ``renderedAutocompleteHeight``) and the autocomplete list's ``onSelect`` (reached only by a mouse click) are not
+  ported; only the alt screen produces mouse events.
+- Prompt history persists in a file when ``MISAKA_INPUT_HISTORY`` names one.
+- String offsets count code points (Python strings), where upstream counts UTF-16 code units.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
+import math
 import os
-import re
-import unicodedata
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, TypedDict, cast
 
 from misaka.ui.tui.autocomplete import (
     AutocompleteItem,
     AutocompleteProvider,
     AutocompleteSuggestions,
 )
-from misaka.ui.tui.components.select_list import (
+from misaka.ui.tui.keybindings import KeybindingsManager, getKeybindings
+from misaka.ui.tui.keys import decodePrintableKey, matchesKey
+from misaka.ui.tui.kill_ring import KillRing
+from misaka.ui.tui.tui import CURSOR_MARKER, TUI, Component, renderFakeCursor
+from misaka.ui.tui.undo_stack import UndoStack
+from misaka.ui.tui.utils import (
+    SegmentData,
+    Segmenter,
+    autocompleteBoundaryRegex,
+    autocompleteSeparatorRegex,
+    cjkBreakRegex,
+    getGraphemeSegmenter,
+    getWordSegmenter,
+    isWhitespaceChar,
+    sliceByColumn,
+    visibleWidth,
+)
+from misaka.ui.tui.word_navigation import (
+    WordNavigationOptions,
+    findWordBackward,
+    findWordForward,
+)
+from misaka.utils import js_regexp
+from misaka.utils.js import (
+    AbortController,
+    eager,
+    jsIndex,
+    jsTrim,
+    jsTrimStart,
+    startTask,
+)
+from misaka.utils.js_regexp import RegExp
+
+from .select_list import (
     SelectItem,
     SelectList,
     SelectListLayoutOptions,
     SelectListTheme,
 )
-from misaka.ui.tui.keybindings import getKeybindings
-from misaka.ui.tui.keys import decodePrintableKey, matchesKey
-from misaka.ui.tui.kill_ring import KillRing
-from misaka.ui.tui.tui import CURSOR_MARKER, TUI
-from misaka.ui.tui.undo_stack import UndoStack
-from misaka.ui.tui.utils import (
-    _CJK_BREAK_RE,
-    SegmentData,
-    getSegmenter,
-    isPunctuationChar,
-    isWhitespaceChar,
-    truncateToWidth,
-    visibleWidth,
-)
 
-_BASE_SEGMENTER = getSegmenter()
+graphemeSegmenter = getGraphemeSegmenter()
+wordSegmenter = getWordSegmenter()
 
-def _is_word_nav_punct(segment: str) -> bool:
-    """Punctuation for word navigation: ASCII punctuation plus Unicode P* classes.
+PASTE_MARKER_REGEX = RegExp(r"\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]", "g")
+"""Regex matching paste markers like `[paste #1 +123 lines]` or `[paste #2 1234 chars]`."""
 
-    PORT-NOTE: upstream uses Intl.Segmenter word granularity (with a CJK dictionary).
-    Python has no dictionary segmentation, so approximate with "each CJK character is a
-    word, Unicode punctuation is a boundary": slightly finer jumps than ICU words, but it
-    fixes alt+backspace swallowing a whole Chinese sentence.
+PASTE_MARKER_SINGLE = RegExp(r"^\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]$")
+"""Non-global version for single-segment testing."""
+
+
+def isPasteMarker(segment: str) -> bool:
+    """Check if a segment is a paste marker (i.e. was merged by segmentWithMarkers)."""
+    return len(segment) >= 10 and PASTE_MARKER_SINGLE.test(segment)
+
+
+def segmentWithMarkers(text: str, baseSegmenter: Segmenter, validIds: set[int]) -> Iterable[SegmentData]:
+    """A segmenter that wraps Intl.Segmenter and merges graphemes that fall
+    within paste markers into single atomic segments.  This makes cursor
+    movement, deletion, word-wrap, etc. treat paste markers as single units.
+
+    Only markers whose numeric ID exists in `validIds` are merged.
     """
-    if not segment:
-        return False
-    if isPunctuationChar(segment):
-        return True
-    # P* = punctuation; S* = symbols (emoji, currency, ±). Upstream's ASCII table already puts
-    # +-=$#@~ in S, so the equivalent class is P ∪ S
-    return unicodedata.category(segment[0])[0] in ("P", "S")
+    # Fast path: no paste markers in the text or no valid IDs.
+    if len(validIds) == 0 or "[paste #" not in text:
+        return baseSegmenter.segment(text)
 
-
-PASTE_MARKER_REGEX = re.compile(r"\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]")
-PASTE_MARKER_SINGLE = re.compile(r"^\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]$")
-SLASH_COMMAND_SELECT_LIST_LAYOUT = SelectListLayoutOptions(minPrimaryColumnWidth=12, maxPrimaryColumnWidth=32)
-ATTACHMENT_AUTOCOMPLETE_DEBOUNCE_MS = 20
-
-
-class _AutocompleteAbortSignal:
-    def __init__(self) -> None:
-        self.aborted = False
-        self._listeners: list[Callable[[], None]] = []
-
-    def addEventListener(
-        self,
-        event: str,
-        callback: Callable[[], None],
-        _options: dict[str, object] | None = None,
-    ) -> None:
-        if event != "abort":
-            return
-        if self.aborted:
-            callback()
-            return
-        self._listeners.append(callback)
-
-    def removeEventListener(self, event: str, callback: Callable[[], None]) -> None:
-        if event != "abort":
-            return
-        self._listeners = [listener for listener in self._listeners if listener is not callback]
-
-    def dispatch(self) -> None:
-        if self.aborted:
-            return
-        self.aborted = True
-        listeners = list(self._listeners)
-        self._listeners.clear()
-        for callback in listeners:
-            callback()
-
-
-class _AutocompleteAbortController:
-    def __init__(self) -> None:
-        self.signal = _AutocompleteAbortSignal()
-
-    def abort(self) -> None:
-        self.signal.dispatch()
-
-
-def _get_running_loop() -> asyncio.AbstractEventLoop | None:
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return None
-
-
-def is_paste_marker(segment: str) -> bool:
-    return len(segment) >= 10 and PASTE_MARKER_SINGLE.fullmatch(segment) is not None
-
-
-def segment_with_markers(text: str, valid_ids: set[int]) -> list[SegmentData]:
-    if not valid_ids or "[paste #" not in text:
-        return list(_BASE_SEGMENTER.segment(text))
-
+    # Find all marker spans with valid IDs.
     markers: list[tuple[int, int]] = []
-    for match in PASTE_MARKER_REGEX.finditer(text):
-        marker_id = int(match.group(1))
-        if marker_id not in valid_ids:
+    for m in js_regexp.matchAll(text, PASTE_MARKER_REGEX):
+        id = int(m[1], 10)
+        if id not in validIds:
             continue
-        markers.append((match.start(), match.end()))
+        markers.append((m.index, m.index + len(m[0])))
+    if len(markers) == 0:
+        return baseSegmenter.segment(text)
 
-    if not markers:
-        return list(_BASE_SEGMENTER.segment(text))
-
-    base_segments = list(_BASE_SEGMENTER.segment(text))
+    # Build merged segment list.
+    baseSegments = baseSegmenter.segment(text)
     result: list[SegmentData] = []
-    marker_index = 0
+    markerIdx = 0
 
-    for segment in base_segments:
-        while marker_index < len(markers) and markers[marker_index][1] <= segment.index:
-            marker_index += 1
+    for seg in baseSegments:
+        # Skip past markers that are entirely before this segment.
+        while markerIdx < len(markers) and markers[markerIdx][1] <= seg.index:
+            markerIdx += 1
 
-        marker = markers[marker_index] if marker_index < len(markers) else None
-        if marker is not None and marker[0] <= segment.index < marker[1]:
-            if segment.index == marker[0]:
-                result.append(SegmentData(segment=text[marker[0] : marker[1]], index=marker[0], input=text))
-            continue
+        marker = markers[markerIdx] if markerIdx < len(markers) else None
 
-        result.append(segment)
+        if marker and seg.index >= marker[0] and seg.index < marker[1]:
+            # This segment falls inside a marker.
+            # If this is the first segment of the marker, emit a merged segment.
+            if seg.index == marker[0]:
+                markerText = text[marker[0] : marker[1]]
+                result.append(SegmentData(segment=markerText, index=marker[0], input=text))
+            # Otherwise skip (already merged into the first segment).
+        else:
+            result.append(seg)
 
     return result
 
 
 @dataclass(slots=True)
 class TextChunk:
+    """Represents a chunk of text for word-wrap layout.
+    Tracks both the text content and its position in the original line.
+    """
+
     text: str
     startIndex: int
     endIndex: int
 
 
+def wordWrapLine(line: str, maxWidth: int, preSegmented: Sequence[SegmentData] | None = None) -> list[TextChunk]:
+    """Split a line into word-wrapped chunks.
+    Wraps at word boundaries when possible, falling back to character-level
+    wrapping for words longer than the available width.
+
+    @param line - The text line to wrap
+    @param maxWidth - Maximum visible width per chunk
+    @param preSegmented - Optional pre-segmented graphemes (e.g. with paste-marker awareness).
+                          When omitted the default Intl.Segmenter is used.
+    @returns Array of chunks with text and position information
+    """
+    if not line or maxWidth <= 0:
+        return [TextChunk(text="", startIndex=0, endIndex=0)]
+
+    lineWidth = visibleWidth(line)
+    if lineWidth <= maxWidth:
+        return [TextChunk(text=line, startIndex=0, endIndex=len(line))]
+
+    chunks: list[TextChunk] = []
+    segments = preSegmented if preSegmented is not None else [*graphemeSegmenter.segment(line)]
+
+    # MISAKA fork: a line that is one grapheme wider than `maxWidth` (a wide character at width 1) cannot be split;
+    # upstream recurses on that same grapheme below until the stack overflows. Overflow the column by a cell instead.
+    # The base segmenter decides, so a line holding exactly one paste marker (one segment under the marker-aware
+    # segmenter, many graphemes under the base one) still re-wraps at grapheme granularity.
+    if len(segments) <= 1 and len(graphemeSegmenter.segment(line)) <= 1:
+        return [TextChunk(text=line, startIndex=0, endIndex=len(line))]
+
+    currentWidth = 0
+    chunkStart = 0
+
+    # Wrap opportunity: the position after the last whitespace before a non-whitespace
+    # grapheme, i.e. where a line break is allowed.
+    wrapOppIndex = -1
+    wrapOppWidth = 0
+
+    for i in range(len(segments)):
+        seg = segments[i]
+        grapheme = seg.segment
+        gWidth = visibleWidth(grapheme)
+        charIndex = seg.index
+        isWs = not isPasteMarker(grapheme) and isWhitespaceChar(grapheme)
+
+        # Overflow check before advancing.
+        if currentWidth + gWidth > maxWidth:
+            if wrapOppIndex >= 0 and currentWidth - wrapOppWidth + gWidth <= maxWidth:
+                # Backtrack to last wrap opportunity (the remaining content
+                # plus the current grapheme still fits within maxWidth).
+                chunks.append(TextChunk(text=line[chunkStart:wrapOppIndex], startIndex=chunkStart, endIndex=wrapOppIndex))
+                chunkStart = wrapOppIndex
+                currentWidth -= wrapOppWidth
+            elif chunkStart < charIndex:
+                # No viable wrap opportunity: force-break at current position.
+                # This also handles the case where backtracking to a word
+                # boundary wouldn't help because the remaining content plus
+                # the current grapheme (e.g. a wide character) still exceeds
+                # maxWidth.
+                chunks.append(TextChunk(text=line[chunkStart:charIndex], startIndex=chunkStart, endIndex=charIndex))
+                chunkStart = charIndex
+                currentWidth = 0
+            wrapOppIndex = -1
+
+        if gWidth > maxWidth:
+            # Single atomic segment wider than maxWidth (e.g. paste marker
+            # in a narrow terminal). Re-wrap it at grapheme granularity.
+
+            # The segment remains logically atomic for cursor
+            # movement / editing — the split is purely visual for word-wrap layout.
+            subChunks = wordWrapLine(grapheme, maxWidth)
+            for j in range(len(subChunks) - 1):
+                sc = subChunks[j]
+                chunks.append(
+                    TextChunk(text=sc.text, startIndex=charIndex + sc.startIndex, endIndex=charIndex + sc.endIndex)
+                )
+            last = subChunks[len(subChunks) - 1]
+            chunkStart = charIndex + last.startIndex
+            currentWidth = visibleWidth(last.text)
+            wrapOppIndex = -1
+            continue
+
+        # Advance.
+        currentWidth += gWidth
+
+        # Record wrap opportunity: whitespace followed by non-whitespace
+        # (multiple spaces join; the break point is after the last space),
+        # or at a boundary where either side is CJK (CJK allows breaking
+        # between any adjacent characters).
+        next = jsIndex(segments, i + 1)
+        if isWs and next and (isPasteMarker(next.segment) or not isWhitespaceChar(next.segment)):
+            wrapOppIndex = next.index
+            wrapOppWidth = currentWidth
+        elif not isWs and next and not isWhitespaceChar(next.segment):
+            isCjk = not isPasteMarker(grapheme) and cjkBreakRegex.test(grapheme)
+            nextIsCjk = not isPasteMarker(next.segment) and cjkBreakRegex.test(next.segment)
+            if isCjk or nextIsCjk:
+                wrapOppIndex = next.index
+                wrapOppWidth = currentWidth
+
+    # Push final chunk.
+    chunks.append(TextChunk(text=line[chunkStart:], startIndex=chunkStart, endIndex=len(line)))
+
+    return chunks
+
+
+# Kitty CSI-u sequences for printable keys, including optional shifted/base codepoints.
 @dataclass(slots=True)
 class EditorState:
     lines: list[str] = field(default_factory=lambda: [""])
     cursorLine: int = 0
     cursorCol: int = 0
+
+
+@dataclass(slots=True)
+class EditorSnapshot:
+    """Undo snapshot: editor text state plus the paste registry."""
+
+    state: EditorState
+    pastes: dict[int, str]
+    pasteCounter: int
 
 
 @dataclass(slots=True)
@@ -176,189 +273,206 @@ class EditorTheme:
 
 @dataclass(slots=True)
 class EditorOptions:
-    paddingX: int | None = None
-    autocompleteMaxVisible: int | None = None
+    paddingX: float | None = None
+    autocompleteMaxVisible: float | None = None
 
 
-def word_wrap_line(
-    line: str,
-    max_width: int,
-    pre_segmented: Iterable[SegmentData] | None = None,
-) -> list[TextChunk]:
-    if not line or max_width <= 0:
-        return [TextChunk(text="", startIndex=0, endIndex=0)]
+class _VisualLine(TypedDict):
+    """MISAKA fork: a name for upstream's inline ``{ logicalLine; startCol; length }`` type."""
 
-    if visibleWidth(line) <= max_width:
-        return [TextChunk(text=line, startIndex=0, endIndex=len(line))]
-
-    segments = list(pre_segmented) if pre_segmented is not None else list(_BASE_SEGMENTER.segment(line))
-    if len(segments) <= 1 and len(list(_BASE_SEGMENTER.segment(line))) <= 1:
-        # A single grapheme cluster wider than the column: a CJK ideograph or an emoji at
-        # `max_width == 1`. There is nothing left to split, so the `grapheme_width > max_width`
-        # branch below would hand the very same string back to this function forever — pi
-        # (editor.ts wordWrapLine) recurses the same way and blows the stack too. Overflow the
-        # column by a cell instead; the render thread stays alive.
-        #
-        # The base-segmenter re-check is what keeps this guard off the paste-marker path: a line
-        # holding exactly one `[paste #N …]` marker is a *single* segment under
-        # `segment_with_markers`, but many graphemes under the base segmenter, so the
-        # `grapheme_width > max_width` branch recurses with `pre_segmented=None` and terminates.
-        return [TextChunk(text=line, startIndex=0, endIndex=len(line))]
-
-    chunks: list[TextChunk] = []
-    current_width = 0
-    chunk_start = 0
-    wrap_opp_index = -1
-    wrap_opp_width = 0
-
-    for index, segment in enumerate(segments):
-        grapheme = segment.segment
-        grapheme_width = visibleWidth(grapheme)
-        char_index = segment.index
-        is_whitespace = not is_paste_marker(grapheme) and isWhitespaceChar(grapheme)
-
-        if current_width + grapheme_width > max_width:
-            if wrap_opp_index >= 0 and current_width - wrap_opp_width + grapheme_width <= max_width:
-                chunks.append(
-                    TextChunk(
-                        text=line[chunk_start:wrap_opp_index],
-                        startIndex=chunk_start,
-                        endIndex=wrap_opp_index,
-                    )
-                )
-                chunk_start = wrap_opp_index
-                current_width -= wrap_opp_width
-            elif chunk_start < char_index:
-                chunks.append(TextChunk(text=line[chunk_start:char_index], startIndex=chunk_start, endIndex=char_index))
-                chunk_start = char_index
-                current_width = 0
-            wrap_opp_index = -1
-
-        if grapheme_width > max_width:
-            sub_chunks = word_wrap_line(grapheme, max_width)
-            for sub_chunk in sub_chunks[:-1]:
-                chunks.append(
-                    TextChunk(
-                        text=sub_chunk.text,
-                        startIndex=char_index + sub_chunk.startIndex,
-                        endIndex=char_index + sub_chunk.endIndex,
-                    )
-                )
-            last_chunk = sub_chunks[-1]
-            chunk_start = char_index + last_chunk.startIndex
-            current_width = visibleWidth(last_chunk.text)
-            wrap_opp_index = -1
-            continue
-
-        current_width += grapheme_width
-        next_segment = segments[index + 1] if index + 1 < len(segments) else None
-        if (
-            is_whitespace
-            and next_segment is not None
-            and (is_paste_marker(next_segment.segment) or not isWhitespaceChar(next_segment.segment))
-        ):
-            wrap_opp_index = next_segment.index
-            wrap_opp_width = current_width
-        elif not is_whitespace and next_segment is not None and not isWhitespaceChar(next_segment.segment):
-            # any two adjacent CJK characters are a break opportunity (TS cjkBreakRegex branch)
-            is_cjk = not is_paste_marker(grapheme) and _CJK_BREAK_RE.search(grapheme)
-            next_is_cjk = (not is_paste_marker(next_segment.segment)
-                           and _CJK_BREAK_RE.search(next_segment.segment))
-            if is_cjk or next_is_cjk:
-                wrap_opp_index = next_segment.index
-                wrap_opp_width = current_width
-
-    chunks.append(TextChunk(text=line[chunk_start:], startIndex=chunk_start, endIndex=len(line)))
-    return chunks
+    logicalLine: int
+    startCol: int
+    length: int
 
 
-class Editor:
-    wantsKeyRelease = False
+class _AutocompleteRequestOptions(TypedDict):
+    """MISAKA fork: a name for upstream's inline ``{ force; explicitTab }`` type."""
 
+    force: bool
+    explicitTab: bool
+
+
+SLASH_COMMAND_SELECT_LIST_LAYOUT = SelectListLayoutOptions(
+    minPrimaryColumnWidth=12,
+    maxPrimaryColumnWidth=32,
+)
+
+ATTACHMENT_AUTOCOMPLETE_DEBOUNCE_MS = 20
+DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS = ["@", "#"]
+# Unquoted completions end at whitespace or CJK punctuation; quoted paths may contain either.
+unquotedAutocompleteSuffixRegex = RegExp(f"(?:(?!{autocompleteSeparatorRegex.source}).)*", "u")
+# Trigger tokens may be wrapped in prose, e.g. "(@src/foo" or "`@src/foo".
+autocompleteTokenStartSource = f"{autocompleteBoundaryRegex.source}[([{{<`]*"
+
+
+def escapeCharacterClass(value: str) -> str:
+    return js_regexp.replace(value, RegExp(r"[\\^$.*+?()[\]{}|-]", "g"), "\\$&")
+
+
+def buildTriggerPattern(triggerCharacters: list[str]) -> RegExp:
+    return RegExp(
+        f'{autocompleteTokenStartSource}(?:@"[^"]*|[{"".join(map(escapeCharacterClass, triggerCharacters))}]'
+        f"{unquotedAutocompleteSuffixRegex.source})$",
+        "u",
+    )
+
+
+def buildDebouncePattern(triggerCharacters: list[str]) -> RegExp:
+    escapedWithoutAt = [escapeCharacterClass(character) for character in triggerCharacters if character != "@"]
+    return RegExp(
+        f'{autocompleteTokenStartSource}(?:@(?:"[^"]*|{unquotedAutocompleteSuffixRegex.source})'
+        f"|[{''.join(escapedWithoutAt)}]{unquotedAutocompleteSuffixRegex.source})$",
+        "u",
+    )
+
+
+def createScrollBorder(direction: Literal["↑", "↓"], hiddenLineCount: int, width: int) -> str:
+    availableWidth = max(0, width)
+    label = f" {direction} {hiddenLineCount} more "
+    labelWidth = visibleWidth(label)
+    if labelWidth + 2 <= availableWidth:
+        leftWidth = (availableWidth - labelWidth) // 2
+        return "─" * leftWidth + label + "─" * (availableWidth - leftWidth - labelWidth)
+
+    indicator = f"─── {direction} {hiddenLineCount} more "
+    remaining = availableWidth - visibleWidth(indicator)
+    if remaining >= 0:
+        return indicator + "─" * remaining
+
+    ellipsis = "..."[:availableWidth]
+    indicatorWidth = availableWidth - visibleWidth(ellipsis)
+    return sliceByColumn(indicator, 0, indicatorWidth, True) + ellipsis
+
+
+def _finitePadding(value: float) -> int:
+    """MISAKA fork: ``Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0``."""
+    return max(0, math.floor(value)) if math.isfinite(value) else 0
+
+
+def _finiteMaxVisible(value: float) -> int:
+    """MISAKA fork: ``Number.isFinite(value) ? Math.max(3, Math.min(20, Math.floor(value))) : 5``."""
+    return max(3, min(20, math.floor(value))) if math.isfinite(value) else 5
+
+
+class Editor(Component):
     def __init__(self, tui: TUI, theme: EditorTheme, options: EditorOptions | None = None) -> None:
-        self.state = EditorState()
-        self.focused = False
-        self.tui = tui
-        self.theme = theme
-        self.paddingX = 0
-        self.lastWidth = 80
-        self.scrollOffset = 0
-        self.borderColor = theme.borderColor
+        if options is None:
+            options = EditorOptions()
+        self.state = EditorState(lines=[""], cursorLine=0, cursorCol=0)
+
+        self.focused: bool = False
+        """Focusable interface - set by TUI when focus changes"""
+
+        self.paddingX: int = 0
+
+        # Store last render geometry for cursor navigation and mouse hit-testing.
+        self.lastWidth: int = 80
+        # MISAKA fork (D1): upstream's `renderedVisibleLineCount` and `renderedAutocompleteHeight` follow here.
+
+        # Vertical scrolling support
+        self.scrollOffset: int = 0
+
+        # Autocomplete support
         self.autocompleteProvider: AutocompleteProvider | None = None
+        self.autocompleteTriggerCharacters = [*DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS]
+        self.autocompleteTriggerPattern = buildTriggerPattern(self.autocompleteTriggerCharacters)
+        self.autocompleteDebouncePattern = buildDebouncePattern(self.autocompleteTriggerCharacters)
         self.autocompleteList: SelectList | None = None
-        self.autocompleteState: str | None = None
-        self.autocompletePrefix = ""
-        self.autocompleteMaxVisible = 5
-        self.autocompleteAbort: _AutocompleteAbortController | None = None
+        self.autocompleteState: Literal["regular", "force"] | None = None
+        self.autocompletePrefix: str = ""
+        self.autocompleteMaxVisible: int = 5
+        self.autocompleteAbort: AbortController | None = None
         self.autocompleteDebounceTimer: asyncio.TimerHandle | None = None
+        # MISAKA fork: upstream starts from `Promise.resolve()`; a future needs a running loop, so `None` stands in.
         self.autocompleteRequestTask: asyncio.Future[None] | None = None
-        self.autocompleteStartToken = 0
-        self.autocompleteRequestId = 0
+        self.autocompleteStartToken: int = 0
+        self.autocompleteRequestId: int = 0
+
+        # Paste tracking for large pastes
         self.pastes: dict[int, str] = {}
-        self.pasteCounter = 0
-        self.pasteBuffer = ""
-        self.isInPaste = False
+        self.pasteCounter: int = 0
+
+        # Bracketed paste mode buffering
+        self.pasteBuffer: str = ""
+        self.isInPaste: bool = False
+
+        # Prompt history for up/down navigation
         self.history: list[str] = []
-        self.historyIndex = -1
+        self.historyIndex: int = -1  # -1 = not browsing, 0 = most recent, 1 = older, etc.
         self.historyDraft: EditorState | None = None
-        # MISAKA: input history persists across sessions (as in Claude Code). Enabled only when MISAKA_INPUT_HISTORY is set.
+        # MISAKA fork: prompt history persists across sessions when MISAKA_INPUT_HISTORY names a file.
         self.historyFile = os.environ.get("MISAKA_INPUT_HISTORY") or None
         if self.historyFile:
             self.history = self._readHistoryFile() or []
+
+        # Kill ring for Emacs-style kill/yank operations
         self.killRing = KillRing()
-        self.lastAction: str | None = None
-        self.jumpMode: str | None = None
+        self.lastAction: Literal["kill", "yank", "type-word"] | None = None
+
+        # Character jump mode
+        self.jumpMode: Literal["forward", "backward"] | None = None
+
+        # Preferred visual column for vertical cursor movement (sticky column)
         self.preferredVisualCol: int | None = None
+
+        # When the cursor is snapped to the start of an atomic segment, e.g. a
+        # paste marker, cursorCol no longer reflects where the cursor would have
+        # landed. This field stores the pre-snap cursorCol so that the next
+        # vertical move can resolve it to a visual column on whatever VL it belongs
+        # to.
         self.snappedFromCursorCol: int | None = None
-        self.undoStack: UndoStack[dict[str, Any]] = UndoStack()
+
+        # Undo support
+        self.undoStack: UndoStack[EditorSnapshot] = UndoStack()
+
         self.onSubmit: Callable[[str], None] | None = None
         self.onChange: Callable[[str], None] | None = None
-        self.disableSubmit = False
+        self.disableSubmit: bool = False
 
-        resolved_options = options or EditorOptions()
-        self.paddingX = self._normalizePadding(
-            resolved_options.paddingX if resolved_options.paddingX is not None else 0
-        )
-        self.autocompleteMaxVisible = self._normalizeAutocompleteMaxVisible(
-            resolved_options.autocompleteMaxVisible if resolved_options.autocompleteMaxVisible is not None else 5
-        )
+        self.tui = tui
+        self.theme = theme
+        # Border color (can be changed dynamically)
+        self.borderColor: Callable[[str], str] = theme.borderColor
+        paddingX = options.paddingX if options.paddingX is not None else 0
+        self.paddingX = _finitePadding(paddingX)
+        maxVisible = options.autocompleteMaxVisible if options.autocompleteMaxVisible is not None else 5
+        self.autocompleteMaxVisible = _finiteMaxVisible(maxVisible)
 
     def validPasteIds(self) -> set[int]:
-        return set(self.pastes)
+        """Set of currently valid paste IDs, for marker-aware segmentation."""
+        return set(self.pastes.keys())
 
-    def segment(self, text: str) -> list[SegmentData]:
-        return segment_with_markers(text, self.validPasteIds())
-
-    def _normalizePadding(self, padding: float) -> int:
-        return max(0, int(padding)) if isinstance(padding, (int, float)) else 0
-
-    def _normalizeAutocompleteMaxVisible(self, max_visible: float) -> int:
-        return max(3, min(20, int(max_visible))) if isinstance(max_visible, (int, float)) else 5
+    def segment(self, text: str, mode: Literal["word", "grapheme"]) -> Iterable[SegmentData]:
+        """Segment text with paste-marker awareness, only merging markers with valid IDs."""
+        return segmentWithMarkers(text, wordSegmenter if mode == "word" else graphemeSegmenter, self.validPasteIds())
 
     def getPaddingX(self) -> int:
         return self.paddingX
 
-    def setPaddingX(self, padding: int) -> None:
-        new_padding = self._normalizePadding(padding)
-        if self.paddingX != new_padding:
-            self.paddingX = new_padding
+    def setPaddingX(self, padding: float) -> None:
+        newPadding = _finitePadding(padding)
+        if self.paddingX != newPadding:
+            self.paddingX = newPadding
             self.tui.requestRender()
 
     def getAutocompleteMaxVisible(self) -> int:
         return self.autocompleteMaxVisible
 
-    def setAutocompleteMaxVisible(self, maxVisible: int) -> None:
-        new_max_visible = self._normalizeAutocompleteMaxVisible(maxVisible)
-        if self.autocompleteMaxVisible != new_max_visible:
-            self.autocompleteMaxVisible = new_max_visible
+    def setAutocompleteMaxVisible(self, maxVisible: float) -> None:
+        newMaxVisible = _finiteMaxVisible(maxVisible)
+        if self.autocompleteMaxVisible != newMaxVisible:
+            self.autocompleteMaxVisible = newMaxVisible
             self.tui.requestRender()
 
     def setAutocompleteProvider(self, provider: AutocompleteProvider) -> None:
         self.cancelAutocomplete()
         self.autocompleteProvider = provider
+        triggerCharacters = getattr(provider, "triggerCharacters", None)
+        self.setAutocompleteTriggerCharacters(triggerCharacters if triggerCharacters is not None else [])
 
     def _readHistoryFile(self) -> list[str] | None:
-        """The persisted history, newest first; None when there is none to read."""
+        """MISAKA fork: the persisted history, newest first; None when there is none to read."""
+        assert self.historyFile is not None
         try:
             with open(self.historyFile, encoding="utf-8") as f:
                 loaded = json.load(f)
@@ -367,21 +481,26 @@ class Editor:
         return [x for x in loaded if isinstance(x, str)][:100] if isinstance(loaded, list) else None
 
     def addToHistory(self, text: str) -> None:
-        trimmed = text.strip()
+        """Add a prompt to history for up/down arrow navigation.
+        Called after successful submission.
+        """
+        trimmed = jsTrim(text)
         if not trimmed:
             return
-        if self.historyFile and (latest := self._readHistoryFile()) is not None and self.historyIndex == -1:
-            # Several windows share one role's history file (a root Last Order and her fork nodes):
-            # start from what is on disk, or this window's copy from its own start overwrites what
-            # the others have added since.
+        # MISAKA fork: several windows share one role's history file (a root Last Order and her fork nodes): start
+        # from what is on disk, or this window's copy from its own start overwrites what the others have added since.
+        if self.historyFile and self.historyIndex == -1 and (latest := self._readHistoryFile()) is not None:
             self.history = latest
-        if self.history and self.history[0] == trimmed:
+        # Don't add consecutive duplicates
+        if len(self.history) > 0 and self.history[0] == trimmed:
             return
         self.history.insert(0, trimmed)
+        # Limit history size
         if len(self.history) > 100:
             self.history.pop()
+        # MISAKA fork: written atomically; a failed history save must not block the submit.
         if self.historyFile:
-            try:  # atomic write; a failed history save must not block the submit
+            try:
                 os.makedirs(os.path.dirname(self.historyFile), exist_ok=True)
                 tmp = self.historyFile + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as f:
@@ -394,175 +513,203 @@ class Editor:
         return len(self.state.lines) == 1 and self.state.lines[0] == ""
 
     def isOnFirstVisualLine(self) -> bool:
-        visual_lines = self.buildVisualLineMap(self.lastWidth)
-        return self.findCurrentVisualLine(visual_lines) == 0
+        visualLines = self.buildVisualLineMap(self.lastWidth)
+        currentVisualLine = self.findCurrentVisualLine(visualLines)
+        return currentVisualLine == 0
 
     def isOnLastVisualLine(self) -> bool:
-        visual_lines = self.buildVisualLineMap(self.lastWidth)
-        return self.findCurrentVisualLine(visual_lines) == len(visual_lines) - 1
+        visualLines = self.buildVisualLineMap(self.lastWidth)
+        currentVisualLine = self.findCurrentVisualLine(visualLines)
+        return currentVisualLine == len(visualLines) - 1
 
-    def navigateHistory(self, direction: int) -> None:
+    def navigateHistory(self, direction: Literal[1, -1]) -> None:
         self.lastAction = None
-        if not self.history:
+        if len(self.history) == 0:
             return
 
-        new_index = self.historyIndex - direction
-        if new_index < -1 or new_index >= len(self.history):
+        newIndex = self.historyIndex - direction  # Up(-1) increases index, Down(1) decreases
+        if newIndex < -1 or newIndex >= len(self.history):
             return
 
-        if self.historyIndex == -1 and new_index >= 0:
+        # Capture state when first entering history browsing mode
+        if self.historyIndex == -1 and newIndex >= 0:
             self.pushUndoSnapshot()
-            from copy import deepcopy as _dc
-            self.historyDraft = _dc(self.state)  # save the draft before entering history so Down returns it intact
+            self.historyDraft = copy.deepcopy(self.state)
 
-        self.historyIndex = new_index
+        self.historyIndex = newIndex
+
         if self.historyIndex == -1:
-            draft, self.historyDraft = self.historyDraft, None
-            if draft is not None:
+            draft = self.historyDraft
+            self.historyDraft = None
+            if draft:
                 self.state = draft
                 self.preferredVisualCol = None
                 self.snappedFromCursorCol = None
                 self.scrollOffset = 0
-                if self.onChange is not None:
+                if self.onChange:
                     self.onChange(self.getText())
             else:
                 self.setTextInternal("")
         else:
-            # Going up (-1) puts the cursor at the start: on a multi-line entry, Up again moves
-            # straight to the previous entry instead of climbing through the whole text
-            self.setTextInternal(self.history[self.historyIndex],
-                                 "start" if direction == -1 else "end")
+            self.setTextInternal(self.history[self.historyIndex] or "", "start" if direction == -1 else "end")
 
     def exitHistoryBrowsing(self) -> None:
         self.historyIndex = -1
         self.historyDraft = None
 
-    def setTextInternal(self, text: str, cursor_placement: str = "end") -> None:
+    def setTextInternal(self, text: str, cursorPlacement: Literal["start", "end"] = "end") -> None:
+        """Internal setText that doesn't reset history state - used by navigateHistory"""
         lines = text.split("\n")
-        self.state.lines = lines if lines else [""]
-        if cursor_placement == "start":
-            self.state.cursorLine = 0
-            self.setCursorCol(0)
-        else:
-            self.state.cursorLine = len(self.state.lines) - 1
-            self.setCursorCol(len(self.state.lines[self.state.cursorLine] if self.state.lines else ""))
+        self.state.lines = [""] if len(lines) == 0 else lines
+        self.state.cursorLine = 0 if cursorPlacement == "start" else len(self.state.lines) - 1
+        cursorLineText = jsIndex(self.state.lines, self.state.cursorLine)
+        self.setCursorCol(0 if cursorPlacement == "start" else len(cursorLineText) if cursorLineText else 0)
+        # Reset scroll - render() will adjust to show cursor
         self.scrollOffset = 0
-        if self.onChange is not None:
+
+        if self.onChange:
             self.onChange(self.getText())
 
     def invalidate(self) -> None:
-        return None
+        # No cached state to invalidate currently
+        pass
+
+    def renderTopBorder(self, width: int, hiddenLineCount: int) -> str:
+        border = createScrollBorder("↑", hiddenLineCount, width) if hiddenLineCount > 0 else "─" * width
+        return self.borderColor(border)
+
+    def renderBottomBorder(self, width: int, hiddenLineCount: int) -> str:
+        border = createScrollBorder("↓", hiddenLineCount, width) if hiddenLineCount > 0 else "─" * width
+        return self.borderColor(border)
 
     def render(self, width: int) -> list[str]:
-        max_padding = max(0, (width - 1) // 2)
-        padding_x = min(self.paddingX, max_padding)
-        content_width = max(1, width - padding_x * 2)
-        layout_width = max(1, content_width - (0 if padding_x else 1))
-        self.lastWidth = layout_width
+        maxPadding = max(0, (width - 1) // 2)
+        paddingX = min(self.paddingX, maxPadding)
+        contentWidth = max(1, width - paddingX * 2)
 
-        horizontal = self.borderColor("─")
-        layout_lines = self.layoutText(layout_width)
-        terminal_rows = self.tui.terminal.rows
-        max_visible_lines = max(5, int(terminal_rows * 0.3))
+        # Layout width: with padding the cursor can overflow into it,
+        # without padding we reserve 1 column for the cursor.
+        layoutWidth = max(1, contentWidth - (0 if paddingX else 1))
 
-        cursor_line_index = next((index for index, line in enumerate(layout_lines) if line.hasCursor), 0)
-        if cursor_line_index < self.scrollOffset:
-            self.scrollOffset = cursor_line_index
-        elif cursor_line_index >= self.scrollOffset + max_visible_lines:
-            self.scrollOffset = cursor_line_index - max_visible_lines + 1
+        # Store for cursor navigation (must match wrapping width)
+        self.lastWidth = layoutWidth
 
-        max_scroll_offset = max(0, len(layout_lines) - max_visible_lines)
-        self.scrollOffset = max(0, min(self.scrollOffset, max_scroll_offset))
+        # Layout the text
+        layoutLines = self.layoutText(layoutWidth)
 
-        visible_lines = layout_lines[self.scrollOffset : self.scrollOffset + max_visible_lines]
+        # Calculate max visible lines: 30% of terminal height, minimum 5 lines
+        terminalRows = self.tui.terminal.rows
+        maxVisibleLines = max(5, math.floor(terminalRows * 0.3))
+
+        # Find the cursor line index in layoutLines
+        cursorLineIndex = next((index for index, line in enumerate(layoutLines) if line.hasCursor), -1)
+        if cursorLineIndex == -1:
+            cursorLineIndex = 0
+
+        # Adjust scroll offset to keep cursor visible
+        if cursorLineIndex < self.scrollOffset:
+            self.scrollOffset = cursorLineIndex
+        elif cursorLineIndex >= self.scrollOffset + maxVisibleLines:
+            self.scrollOffset = cursorLineIndex - maxVisibleLines + 1
+
+        # Clamp scroll offset to valid range
+        maxScrollOffset = max(0, len(layoutLines) - maxVisibleLines)
+        self.scrollOffset = max(0, min(self.scrollOffset, maxScrollOffset))
+
+        # Get visible lines slice
+        visibleLines = layoutLines[self.scrollOffset : self.scrollOffset + maxVisibleLines]
+
         result: list[str] = []
-        left_padding = " " * padding_x
-        right_padding = left_padding
+        leftPadding = " " * paddingX
+        rightPadding = leftPadding
 
-        if self.scrollOffset > 0:
-            indicator = f"─── ↑ {self.scrollOffset} more "
-            remaining = width - visibleWidth(indicator)
-            result.append(
-                self.borderColor(indicator + ("─" * remaining))
-                if remaining >= 0
-                else self.borderColor(truncateToWidth(indicator, width))
-            )
-        else:
-            result.append(horizontal * width)
+        # Render top border (with scroll indicator if scrolled down)
+        result.append(self.renderTopBorder(width, self.scrollOffset))
 
-        emit_cursor_marker = self.focused  # emit even with the completion menu open: the IME candidate window is positioned by it
-        for layout_line in visible_lines:
-            display_text = layout_line.text
-            line_visible_width = visibleWidth(layout_line.text)
-            cursor_in_padding = False
+        # Render each visible layout line
+        # Emit hardware cursor marker when focused so TUI can position the
+        # hardware cursor for IME candidate-window placement even while
+        # autocomplete (e.g. slash-command menu) is visible.
+        emitCursorMarker = self.focused
 
-            if layout_line.hasCursor and layout_line.cursorPos is not None:
-                before = display_text[: layout_line.cursorPos]
-                after = display_text[layout_line.cursorPos :]
-                marker = CURSOR_MARKER if emit_cursor_marker else ""
+        for layoutLine in visibleLines:
+            displayText = layoutLine.text
+            lineVisibleWidth = visibleWidth(layoutLine.text)
+            cursorInPadding = False
 
-                if after:
-                    after_graphemes = self.segment(after)
-                    first_grapheme = after_graphemes[0].segment if after_graphemes else ""
-                    rest_after = after[len(first_grapheme) :]
-                    cursor = f"\x1b[7m{first_grapheme}\x1b[0m"
-                    display_text = before + marker + cursor + rest_after
+            # Add cursor if this line has it
+            if layoutLine.hasCursor and layoutLine.cursorPos is not None:
+                before = displayText[: layoutLine.cursorPos]
+                after = displayText[layoutLine.cursorPos :]
+
+                # Hardware cursor marker (zero-width, emitted before fake cursor for IME positioning)
+                marker = CURSOR_MARKER if emitCursorMarker else ""
+
+                if len(after) > 0:
+                    # Cursor is on a character (grapheme) - replace it with highlighted version
+                    # Get the first grapheme from 'after'
+                    afterGraphemes = [*self.segment(after, "grapheme")]
+                    firstGrapheme = afterGraphemes[0].segment if afterGraphemes else ""
+                    restAfter = after[len(firstGrapheme) :]
+                    cursor = renderFakeCursor(firstGrapheme)
+                    displayText = before + marker + cursor + restAfter
+                    # lineVisibleWidth stays the same - we're replacing, not adding
                 else:
-                    cursor = "\x1b[7m \x1b[0m"
-                    display_text = before + marker + cursor
-                    line_visible_width += 1
-                    if line_visible_width > content_width and padding_x > 0:
-                        cursor_in_padding = True
+                    # Cursor is at the end - add highlighted space
+                    cursor = renderFakeCursor(" ")
+                    displayText = before + marker + cursor
+                    lineVisibleWidth = lineVisibleWidth + 1
+                    # If cursor overflows content width into the padding, flag it
+                    if lineVisibleWidth > contentWidth and paddingX > 0:
+                        cursorInPadding = True
 
-            padding = " " * max(0, content_width - line_visible_width)
-            line_right_padding = right_padding[1:] if cursor_in_padding else right_padding
-            result.append(f"{left_padding}{display_text}{padding}{line_right_padding}")
+            # Calculate padding based on actual visible width
+            padding = " " * max(0, contentWidth - lineVisibleWidth)
+            lineRightPadding = rightPadding[1:] if cursorInPadding else rightPadding
 
-        lines_below = len(layout_lines) - (self.scrollOffset + len(visible_lines))
-        left = f"─── ↓ {lines_below} more " if lines_below > 0 else ""
-        # MISAKA: while browsing history, show a position indicator on the right of the bottom border (Claude Code style "History N/M")
-        label = (f" History {self.historyIndex + 1}/{len(self.history)} "
-                 if self.historyIndex > -1 and self.history else "")
-        if left and visibleWidth(left) > width:
-            result.append(self.borderColor(truncateToWidth(left, width)))
-        else:
-            avail = width - visibleWidth(left)
-            if label and visibleWidth(label) + 1 <= avail:
-                bottom = left + "─" * (avail - visibleWidth(label) - 1) + label + "─"
-            else:
-                bottom = left + "─" * avail
-            result.append(self.borderColor(bottom))
+            # Render the line (no side borders, just horizontal lines above and below)
+            result.append(f"{leftPadding}{displayText}{padding}{lineRightPadding}")
 
-        if self.autocompleteState and self.autocompleteList is not None:
-            autocomplete_result = self.autocompleteList.render(content_width)
-            for line in autocomplete_result:
-                line_width = visibleWidth(line)
-                line_padding = " " * max(0, content_width - line_width)
-                result.append(f"{left_padding}{line}{line_padding}{right_padding}")
+        # Render bottom border (with scroll indicator if more content below)
+        linesBelow = len(layoutLines) - (self.scrollOffset + len(visibleLines))
+        result.append(self.renderBottomBorder(width, linesBelow))
+
+        # Add autocomplete list if active
+        if self.autocompleteState and self.autocompleteList:
+            autocompleteResult = self.autocompleteList.render(contentWidth)
+            for line in autocompleteResult:
+                lineWidth = visibleWidth(line)
+                linePadding = " " * max(0, contentWidth - lineWidth)
+                result.append(f"{leftPadding}{line}{linePadding}{rightPadding}")
 
         return result
+
+    # MISAKA fork (D1): upstream's `handleMouse` follows here.
 
     def handleInput(self, data: str) -> None:
         kb = getKeybindings()
 
+        # Handle character jump mode (awaiting next character to jump to)
         if self.jumpMode is not None:
+            # Cancel if the hotkey is pressed again
             if kb.matches(data, "tui.editor.jumpForward") or kb.matches(data, "tui.editor.jumpBackward"):
                 self.jumpMode = None
                 return
 
-            printable = (
-                decodePrintableKey(data)
-                if decodePrintableKey(data) is not None
-                else (data if data and ord(data[0]) >= 32 else None)
-            )
+            printable = decodePrintableKey(data)
+            if printable is None:
+                printable = data if len(data) > 0 and ord(data[0]) >= 32 else None
             if printable is not None:
+                # Printable character - perform the jump
                 direction = self.jumpMode
                 self.jumpMode = None
                 self.jumpToChar(printable, direction)
                 return
 
+            # Control character - cancel and fall through to normal handling
             self.jumpMode = None
 
+        # Handle bracketed paste mode
         if "\x1b[200~" in data:
             self.isInPaste = True
             self.pasteBuffer = ""
@@ -570,60 +717,89 @@ class Editor:
 
         if self.isInPaste:
             self.pasteBuffer += data
-            end_index = self.pasteBuffer.find("\x1b[201~")
-            if end_index != -1:
-                paste_content = self.pasteBuffer[:end_index]
-                if paste_content:
-                    self.handlePaste(paste_content)
+            endIndex = self.pasteBuffer.find("\x1b[201~")
+            if endIndex != -1:
+                pasteContent = self.pasteBuffer[:endIndex]
+                if len(pasteContent) > 0:
+                    self.handlePaste(pasteContent)
                 self.isInPaste = False
-                remaining = self.pasteBuffer[end_index + 6 :]
+                remaining = self.pasteBuffer[endIndex + 6 :]
                 self.pasteBuffer = ""
-                if remaining:
+                if len(remaining) > 0:
                     self.handleInput(remaining)
+                return
             return
 
+        # Ctrl+C - let parent handle (exit/clear)
         if kb.matches(data, "tui.input.copy"):
             return
 
+        # Undo
         if kb.matches(data, "tui.editor.undo"):
             self.undo()
             return
 
-        if self.autocompleteState and self.autocompleteList is not None:
+        # Handle autocomplete mode
+        if self.autocompleteState and self.autocompleteList:
             if kb.matches(data, "tui.select.cancel"):
                 self.cancelAutocomplete()
                 return
+
             if kb.matches(data, "tui.select.up") or kb.matches(data, "tui.select.down"):
                 self.autocompleteList.handleInput(data)
                 return
+
             if kb.matches(data, "tui.input.tab"):
-                selected = self.autocompleteList.getSelectedItem()
-                if selected is not None and self.autocompleteProvider is not None:
+                selected = cast("AutocompleteItem | None", self.autocompleteList.getSelectedItem())
+                if selected and self.autocompleteProvider:
                     self.pushUndoSnapshot()
                     self.lastAction = None
-                    self.applyAutocompleteSelection(selected)
+                    result = self.autocompleteProvider.applyCompletion(
+                        self.state.lines,
+                        self.state.cursorLine,
+                        self.state.cursorCol,
+                        selected,
+                        self.autocompletePrefix,
+                    )
+                    self.state.lines = result["lines"]
+                    self.state.cursorLine = result["cursorLine"]
+                    self.setCursorCol(result["cursorCol"])
                     self.cancelAutocomplete()
-                    if self.onChange is not None:
+                    if self.onChange:
                         self.onChange(self.getText())
                 return
+
             if kb.matches(data, "tui.select.confirm"):
-                selected = self.autocompleteList.getSelectedItem()
-                if selected is not None and self.autocompleteProvider is not None:
+                selected = cast("AutocompleteItem | None", self.autocompleteList.getSelectedItem())
+                if selected and self.autocompleteProvider:
                     self.pushUndoSnapshot()
                     self.lastAction = None
-                    self.applyAutocompleteSelection(selected)
+                    result = self.autocompleteProvider.applyCompletion(
+                        self.state.lines,
+                        self.state.cursorLine,
+                        self.state.cursorCol,
+                        selected,
+                        self.autocompletePrefix,
+                    )
+                    self.state.lines = result["lines"]
+                    self.state.cursorLine = result["cursorLine"]
+                    self.setCursorCol(result["cursorCol"])
+
                     if self.autocompletePrefix.startswith("/"):
                         self.cancelAutocomplete()
+                        # Fall through to submit
                     else:
                         self.cancelAutocomplete()
-                        if self.onChange is not None:
+                        if self.onChange:
                             self.onChange(self.getText())
                         return
 
+        # Tab - trigger completion
         if kb.matches(data, "tui.input.tab") and not self.autocompleteState:
             self.handleTabCompletion()
             return
 
+        # Deletion actions
         if kb.matches(data, "tui.editor.deleteToLineEnd"):
             self.deleteToEndOfLine()
             return
@@ -643,6 +819,7 @@ class Editor:
             self.handleForwardDelete()
             return
 
+        # Kill ring actions
         if kb.matches(data, "tui.editor.yank"):
             self.yank()
             return
@@ -650,6 +827,17 @@ class Editor:
             self.yankPop()
             return
 
+        # Dedicated history actions always browse entries instead of moving the cursor.
+        if kb.matches(data, "tui.editor.historyPrevious"):
+            self.cancelAutocomplete()
+            self.navigateHistory(-1)
+            return
+        if kb.matches(data, "tui.editor.historyNext"):
+            self.cancelAutocomplete()
+            self.navigateHistory(1)
+            return
+
+        # Cursor movement actions
         if kb.matches(data, "tui.editor.cursorLineStart"):
             self.moveToLineStart()
             return
@@ -663,13 +851,14 @@ class Editor:
             self.moveWordForwards()
             return
 
+        # New line
         if (
             kb.matches(data, "tui.input.newLine")
             or (len(data) > 1 and ord(data[0]) == 10)
             or data == "\x1b\r"
             or data == "\x1b[13;2~"
             or (len(data) > 1 and "\x1b" in data and "\r" in data)
-            or data == "\n"
+            or (data == "\n" and len(data) == 1)
         ):
             if self.shouldSubmitOnBackslashEnter(data, kb):
                 self.handleBackspace()
@@ -678,48 +867,43 @@ class Editor:
             self.addNewLine()
             return
 
+        # Submit (Enter)
         if kb.matches(data, "tui.input.submit"):
             if self.disableSubmit:
                 return
-            current_line = (
-                self.state.lines[self.state.cursorLine] if self.state.cursorLine < len(self.state.lines) else ""
-            )
-            if self.state.cursorCol > 0 and current_line[self.state.cursorCol - 1] == "\\":
+
+            # Workaround for terminals without Shift+Enter support:
+            # If char before cursor is \, delete it and insert newline instead of submitting.
+            currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+            if self.state.cursorCol > 0 and jsIndex(currentLine, self.state.cursorCol - 1) == "\\":
                 self.handleBackspace()
                 self.addNewLine()
                 return
+
             self.submitValue()
             return
 
-        # Dedicated history actions always browse entries instead of moving the cursor.  (pi 16ad96a)
-        if kb.matches(data, "tui.editor.historyPrevious"):
-            self.cancelAutocomplete()
-            self.navigateHistory(-1)
-            return
-        if kb.matches(data, "tui.editor.historyNext"):
-            self.cancelAutocomplete()
-            self.navigateHistory(1)
-            return
-
+        # Arrow key navigation (with history support)
         if kb.matches(data, "tui.editor.cursorUp"):
             if self.isOnFirstVisualLine() and (
-                    self.isEditorEmpty() or self.historyIndex > -1 or self.state.cursorCol == 0):
+                self.isEditorEmpty() or self.historyIndex > -1 or self.state.cursorCol == 0
+            ):
                 self.navigateHistory(-1)
             elif self.isOnFirstVisualLine():
+                # Already at top - jump to start of line
                 self.moveToLineStart()
             else:
                 self.moveCursor(-1, 0)
             return
-
         if kb.matches(data, "tui.editor.cursorDown"):
             if self.historyIndex > -1 and self.isOnLastVisualLine():
                 self.navigateHistory(1)
             elif self.isOnLastVisualLine():
+                # Already at bottom - jump to end of line
                 self.moveToLineEnd()
             else:
                 self.moveCursor(1, 0)
             return
-
         if kb.matches(data, "tui.editor.cursorRight"):
             self.moveCursor(0, 1)
             return
@@ -727,6 +911,7 @@ class Editor:
             self.moveCursor(0, -1)
             return
 
+        # Page up/down - scroll by page and move cursor
         if kb.matches(data, "tui.editor.pageUp"):
             self.pageScroll(-1)
             return
@@ -734,6 +919,7 @@ class Editor:
             self.pageScroll(1)
             return
 
+        # Character jump mode triggers
         if kb.matches(data, "tui.editor.jumpForward"):
             self.jumpMode = "forward"
             return
@@ -741,6 +927,7 @@ class Editor:
             self.jumpMode = "backward"
             return
 
+        # Shift+Space - insert regular space
         if matchesKey(data, "shift+space"):
             self.insertCharacter(" ")
             return
@@ -750,67 +937,86 @@ class Editor:
             self.insertCharacter(printable)
             return
 
-        if data and ord(data[0]) >= 32:
+        # Regular characters
+        if len(data) > 0 and ord(data[0]) >= 32:
             self.insertCharacter(data)
 
     def layoutText(self, contentWidth: int) -> list[LayoutLine]:
-        layout_lines: list[LayoutLine] = []
-        if not self.state.lines or (len(self.state.lines) == 1 and self.state.lines[0] == ""):
-            return [LayoutLine(text="", hasCursor=True, cursorPos=0)]
+        layoutLines: list[LayoutLine] = []
 
-        for line_index, line in enumerate(self.state.lines):
-            is_current_line = line_index == self.state.cursorLine
-            if visibleWidth(line) <= contentWidth:
-                layout_lines.append(
-                    LayoutLine(
-                        text=line,
-                        hasCursor=is_current_line,
-                        cursorPos=self.state.cursorCol if is_current_line else None,
-                    )
-                )
-                continue
+        if len(self.state.lines) == 0 or (len(self.state.lines) == 1 and self.state.lines[0] == ""):
+            # Empty editor
+            layoutLines.append(LayoutLine(text="", hasCursor=True, cursorPos=0))
+            return layoutLines
 
-            chunks = word_wrap_line(line, contentWidth, self.segment(line))
-            for chunk_index, chunk in enumerate(chunks):
-                cursor_pos = self.state.cursorCol
-                is_last_chunk = chunk_index == len(chunks) - 1
-                has_cursor_in_chunk = False
-                adjusted_cursor_pos = 0
+        # Process each logical line
+        for i in range(len(self.state.lines)):
+            line = self.state.lines[i] or ""
+            isCurrentLine = i == self.state.cursorLine
+            lineVisibleWidth = visibleWidth(line)
 
-                if is_current_line:
-                    if is_last_chunk:
-                        has_cursor_in_chunk = cursor_pos >= chunk.startIndex
-                        adjusted_cursor_pos = cursor_pos - chunk.startIndex
+            if lineVisibleWidth <= contentWidth:
+                # Line fits in one layout line
+                if isCurrentLine:
+                    layoutLines.append(LayoutLine(text=line, hasCursor=True, cursorPos=self.state.cursorCol))
+                else:
+                    layoutLines.append(LayoutLine(text=line, hasCursor=False))
+            else:
+                # Line needs wrapping - use word-aware wrapping
+                chunks = wordWrapLine(line, contentWidth, [*self.segment(line, "grapheme")])
+
+                for chunkIndex in range(len(chunks)):
+                    chunk = chunks[chunkIndex]
+
+                    cursorPos = self.state.cursorCol
+                    isLastChunk = chunkIndex == len(chunks) - 1
+
+                    # Determine if cursor is in this chunk
+                    # For word-wrapped chunks, we need to handle the case where
+                    # cursor might be in trimmed whitespace at end of chunk
+                    hasCursorInChunk = False
+                    adjustedCursorPos = 0
+
+                    if isCurrentLine:
+                        if isLastChunk:
+                            # Last chunk: cursor belongs here if >= startIndex
+                            hasCursorInChunk = cursorPos >= chunk.startIndex
+                            adjustedCursorPos = cursorPos - chunk.startIndex
+                        else:
+                            # Non-last chunk: cursor belongs here if in range [startIndex, endIndex)
+                            # But we need to handle the visual position in the trimmed text
+                            hasCursorInChunk = cursorPos >= chunk.startIndex and cursorPos < chunk.endIndex
+                            if hasCursorInChunk:
+                                adjustedCursorPos = cursorPos - chunk.startIndex
+                                # Clamp to text length (in case cursor was in trimmed whitespace)
+                                if adjustedCursorPos > len(chunk.text):  # noqa: PLR1730 - upstream if
+                                    adjustedCursorPos = len(chunk.text)
+
+                    if hasCursorInChunk:
+                        layoutLines.append(LayoutLine(text=chunk.text, hasCursor=True, cursorPos=adjustedCursorPos))
                     else:
-                        has_cursor_in_chunk = chunk.startIndex <= cursor_pos < chunk.endIndex
-                        if has_cursor_in_chunk:
-                            adjusted_cursor_pos = min(cursor_pos - chunk.startIndex, len(chunk.text))
+                        layoutLines.append(LayoutLine(text=chunk.text, hasCursor=False))
 
-                layout_lines.append(
-                    LayoutLine(
-                        text=chunk.text,
-                        hasCursor=has_cursor_in_chunk,
-                        cursorPos=adjusted_cursor_pos if has_cursor_in_chunk else None,
-                    )
-                )
-
-        return layout_lines
+        return layoutLines
 
     def getText(self) -> str:
         return "\n".join(self.state.lines)
 
     def expandPasteMarkers(self, text: str) -> str:
         result = text
-        for paste_id, paste_content in self.pastes.items():
-            marker_regex = re.compile(rf"\[paste #{paste_id}( (\+\d+ lines|\d+ chars))?\]")
-            result = marker_regex.sub(lambda _match, content=paste_content: content, result)
+        for pasteId, pasteContent in self.pastes.items():
+            markerRegex = RegExp(f"\\[paste #{pasteId}( (\\+\\d+ lines|\\d+ chars))?\\]", "g")
+            result = js_regexp.replace(result, markerRegex, lambda *_match, content=pasteContent: content)
         return result
 
     def getExpandedText(self) -> str:
-        return self.expandPasteMarkers(self.getText())
+        """Get text with paste markers expanded to their actual content.
+        Use this when you need the full content (e.g., for external editor).
+        """
+        return self.expandPasteMarkers("\n".join(self.state.lines))
 
     def getLines(self) -> list[str]:
-        return list(self.state.lines)
+        return [*self.state.lines]
 
     def getCursor(self) -> dict[str, int]:
         return {"line": self.state.cursorLine, "col": self.state.cursorCol}
@@ -818,8 +1024,9 @@ class Editor:
     def setText(self, text: str) -> None:
         self.cancelAutocomplete()
         self.lastAction = None
-        self.historyIndex = -1
+        self.exitHistoryBrowsing()
         normalized = self.normalizeText(text)
+        # Push undo snapshot if content differs (makes programmatic changes undoable)
         if self.getText() != normalized:
             self.pushUndoSnapshot()
         self.pastes.clear()
@@ -827,315 +1034,459 @@ class Editor:
         self.setTextInternal(normalized)
 
     def insertTextAtCursor(self, text: str) -> None:
+        """Insert text at the current cursor position.
+        Used for programmatic insertion (e.g., clipboard image markers).
+        This is atomic for undo - single undo restores entire pre-insert state.
+        """
         if not text:
             return
         self.cancelAutocomplete()
         self.pushUndoSnapshot()
         self.lastAction = None
-        self.historyIndex = -1
+        self.exitHistoryBrowsing()
         self.insertTextAtCursorInternal(text)
 
     def normalizeText(self, text: str) -> str:
+        """Normalize text for editor storage:
+        - Normalize line endings (\\r\\n and \\r -> \\n)
+        - Expand tabs to 4 spaces
+        """
         return text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
 
     def insertTextAtCursorInternal(self, text: str) -> None:
+        """Internal text insertion at cursor. Handles single and multi-line text.
+        Does not push undo snapshots or trigger autocomplete - caller is responsible.
+        Normalizes line endings and calls onChange once at the end.
+        """
         if not text:
             return
-        normalized = self.normalizeText(text)
-        inserted_lines = normalized.split("\n")
-        current_line = self.state.lines[self.state.cursorLine]
-        before_cursor = current_line[: self.state.cursorCol]
-        after_cursor = current_line[self.state.cursorCol :]
 
-        if len(inserted_lines) == 1:
-            self.state.lines[self.state.cursorLine] = before_cursor + normalized + after_cursor
+        # Normalize line endings and tabs
+        normalized = self.normalizeText(text)
+        insertedLines = normalized.split("\n")
+
+        currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+        beforeCursor = currentLine[: self.state.cursorCol]
+        afterCursor = currentLine[self.state.cursorCol :]
+
+        if len(insertedLines) == 1:
+            # Single line - insert at cursor position
+            self.state.lines[self.state.cursorLine] = beforeCursor + normalized + afterCursor
             self.setCursorCol(self.state.cursorCol + len(normalized))
         else:
+            # Multi-line insertion
             self.state.lines = [
+                # All lines before current line
                 *self.state.lines[: self.state.cursorLine],
-                before_cursor + inserted_lines[0],
-                *inserted_lines[1:-1],
-                inserted_lines[-1] + after_cursor,
+                # The first inserted line merged with text before cursor
+                beforeCursor + insertedLines[0],
+                # All middle inserted lines
+                *insertedLines[1:-1],
+                # The last inserted line with text after cursor
+                insertedLines[len(insertedLines) - 1] + afterCursor,
+                # All lines after current line
                 *self.state.lines[self.state.cursorLine + 1 :],
             ]
-            self.state.cursorLine += len(inserted_lines) - 1
-            self.setCursorCol(len(inserted_lines[-1]))
 
-        if self.onChange is not None:
+            self.state.cursorLine += len(insertedLines) - 1
+            self.setCursorCol(len(insertedLines[len(insertedLines) - 1] or ""))
+
+        if self.onChange:
             self.onChange(self.getText())
 
+    # All the editor methods from before...
     def insertCharacter(self, char: str, skipUndoCoalescing: bool = False) -> None:
-        self.historyIndex = -1
+        self.exitHistoryBrowsing()
+
+        # Undo coalescing (fish-style):
+        # - Consecutive word chars coalesce into one undo unit
+        # - Space captures state before itself (so undo removes space+following word together)
+        # - Each space is separately undoable
+        # Skip coalescing when called from atomic operations (e.g., handlePaste)
         if not skipUndoCoalescing:
             if isWhitespaceChar(char) or self.lastAction != "type-word":
                 self.pushUndoSnapshot()
             self.lastAction = "type-word"
 
-        line = self.state.lines[self.state.cursorLine]
+        line = jsIndex(self.state.lines, self.state.cursorLine) or ""
+
         before = line[: self.state.cursorCol]
         after = line[self.state.cursorCol :]
+
         self.state.lines[self.state.cursorLine] = before + char + after
         self.setCursorCol(self.state.cursorCol + len(char))
 
-        if self.onChange is not None:
+        if self.onChange:
             self.onChange(self.getText())
 
+        # Check if we should trigger or update autocomplete
         if not self.autocompleteState:
+            # Auto-trigger for "/" at the start of a line (slash commands)
             if char == "/" and self.isAtStartOfMessage():
                 self.tryTriggerAutocomplete()
-            elif char in {"@", "#"}:
-                current_line = self.state.lines[self.state.cursorLine]
-                text_before_cursor = current_line[: self.state.cursorCol]
-                char_before_symbol = text_before_cursor[-2] if len(text_before_cursor) > 1 else None
-                if len(text_before_cursor) == 1 or char_before_symbol in {" ", "\t"}:
+            # Auto-trigger for symbol-based completion like @, #, or provider triggers at token boundaries
+            elif char in self.autocompleteTriggerCharacters:
+                currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+                textBeforeCursor = currentLine[: self.state.cursorCol]
+                if self.autocompleteTriggerPattern.test(textBeforeCursor):
                     self.tryTriggerAutocomplete()
-            elif re.fullmatch(r"[A-Za-z0-9._-]", char):
-                current_line = self.state.lines[self.state.cursorLine]
-                text_before_cursor = current_line[: self.state.cursorCol]
-                if self.isInSlashCommandContext(text_before_cursor) or re.search(r"(?:^|[\s])[@#][^\s]*$", text_before_cursor):
+            # Also auto-trigger when typing letters in a slash command or symbol completion context
+            elif RegExp(r"[a-zA-Z0-9.\-_]").test(char) or cjkBreakRegex.test(char):
+                currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+                textBeforeCursor = currentLine[: self.state.cursorCol]
+                # Check if we're in a slash command (with or without space for arguments)
+                if self.isInSlashCommandContext(textBeforeCursor):  # noqa: SIM114 - upstream branches
+                    self.tryTriggerAutocomplete()
+                # Check if we're in a symbol-based completion context like @, #, or provider triggers
+                elif self.autocompleteTriggerPattern.test(textBeforeCursor):
                     self.tryTriggerAutocomplete()
         else:
             self.updateAutocomplete()
 
     def handlePaste(self, pastedText: str) -> None:
         self.cancelAutocomplete()
-        self.historyIndex = -1
+        self.exitHistoryBrowsing()
         self.lastAction = None
+
         self.pushUndoSnapshot()
 
-        decoded_text = re.sub(
-            r"\x1b\[(\d+);5u",
-            lambda match: self._decodePasteControlSequence(match.group(0), int(match.group(1))),
-            pastedText,
-        )
-        clean_text = self.normalizeText(decoded_text)
-        filtered_text = "".join(char for char in clean_text if char == "\n" or ord(char) >= 32)
+        # Some terminals (e.g. tmux popups with extended-keys-format=csi-u) re-encode
+        # control bytes inside bracketed paste as CSI-u Ctrl+<letter> sequences
+        # (ESC [ <codepoint> ; 5 u). Decode those back to their literal byte so the
+        # per-char filter below preserves newlines instead of stripping ESC and
+        # leaking the printable tail (e.g. "[106;5u") into the editor.
+        def decode(match: str, code: str) -> str:
+            cp = int(code)
+            if cp >= 97 and cp <= 122:
+                return chr(cp - 96)
+            if cp >= 65 and cp <= 90:
+                return chr(cp - 64)
+            return match
 
-        if re.match(r"^[/~.]", filtered_text):
-            current_line = self.state.lines[self.state.cursorLine]
-            char_before_cursor = current_line[self.state.cursorCol - 1] if self.state.cursorCol > 0 else ""
-            if char_before_cursor and re.match(r"\w", char_before_cursor):
-                filtered_text = f" {filtered_text}"
+        decodedText = js_regexp.replace(pastedText, RegExp(r"\x1b\[(\d+);5u", "g"), decode)
 
-        pasted_lines = filtered_text.split("\n")
-        total_chars = len(filtered_text)
-        if len(pasted_lines) > 10 or total_chars > 1000:
+        # Clean the pasted text: normalize line endings, expand tabs
+        cleanText = self.normalizeText(decodedText)
+
+        # Filter out non-printable characters except newlines
+        filteredText = "".join(char for char in cleanText if char == "\n" or ord(char) >= 32)
+
+        # If pasting a file path (starts with /, ~, or .) and the character before
+        # the cursor is a word character, prepend a space for better readability
+        if RegExp(r"^[/~.]").test(filteredText):
+            currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+            charBeforeCursor = (jsIndex(currentLine, self.state.cursorCol - 1) or "") if self.state.cursorCol > 0 else ""
+            if charBeforeCursor and RegExp(r"\w").test(charBeforeCursor):
+                filteredText = f" {filteredText}"
+
+        # Split into lines to check for large paste
+        pastedLines = filteredText.split("\n")
+
+        # Check if this is a large paste (> 10 lines or > 1000 characters)
+        totalChars = len(filteredText)
+        if len(pastedLines) > 10 or totalChars > 1000:
+            # Store the paste and insert a marker
             self.pasteCounter += 1
-            paste_id = self.pasteCounter
-            self.pastes[paste_id] = filtered_text
+            pasteId = self.pasteCounter
+            self.pastes[pasteId] = filteredText
+
+            # Insert marker like "[paste #1 +123 lines]" or "[paste #1 1234 chars]"
             marker = (
-                f"[paste #{paste_id} +{len(pasted_lines)} lines]"
-                if len(pasted_lines) > 10
-                else f"[paste #{paste_id} {total_chars} chars]"
+                f"[paste #{pasteId} +{len(pastedLines)} lines]"
+                if len(pastedLines) > 10
+                else f"[paste #{pasteId} {totalChars} chars]"
             )
             self.insertTextAtCursorInternal(marker)
             return
 
-        self.insertTextAtCursorInternal(filtered_text)
+        if len(pastedLines) == 1:
+            # Single line - insert atomically (do not trigger autocomplete during paste)
+            self.insertTextAtCursorInternal(filteredText)
+            return
 
-    def _decodePasteControlSequence(self, original: str, codepoint: int) -> str:
-        if 97 <= codepoint <= 122:
-            return chr(codepoint - 96)
-        if 65 <= codepoint <= 90:
-            return chr(codepoint - 64)
-        return original
+        # Multi-line paste - use direct state manipulation
+        self.insertTextAtCursorInternal(filteredText)
 
     def addNewLine(self) -> None:
         self.cancelAutocomplete()
-        self.historyIndex = -1
+        self.exitHistoryBrowsing()
         self.lastAction = None
+
         self.pushUndoSnapshot()
 
-        current_line = self.state.lines[self.state.cursorLine]
-        before = current_line[: self.state.cursorCol]
-        after = current_line[self.state.cursorCol :]
+        currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+
+        before = currentLine[: self.state.cursorCol]
+        after = currentLine[self.state.cursorCol :]
+
+        # Split current line
         self.state.lines[self.state.cursorLine] = before
         self.state.lines.insert(self.state.cursorLine + 1, after)
+
+        # Move cursor to start of new line
         self.state.cursorLine += 1
         self.setCursorCol(0)
 
-        if self.onChange is not None:
+        if self.onChange:
             self.onChange(self.getText())
 
-    def shouldSubmitOnBackslashEnter(self, data: str, kb: Any) -> bool:
-        if self.disableSubmit or not matchesKey(data, "enter"):
+    def shouldSubmitOnBackslashEnter(self, data: str, kb: KeybindingsManager) -> bool:
+        if self.disableSubmit:
             return False
-        submit_keys = kb.getKeys("tui.input.submit")
-        has_shift_enter = "shift+enter" in submit_keys or "shift+return" in submit_keys
-        if not has_shift_enter:
+        if not matchesKey(data, "enter"):
             return False
-        current_line = self.state.lines[self.state.cursorLine]
-        return self.state.cursorCol > 0 and current_line[self.state.cursorCol - 1] == "\\"
+        submitKeys = kb.getKeys("tui.input.submit")
+        hasShiftEnter = "shift+enter" in submitKeys or "shift+return" in submitKeys
+        if not hasShiftEnter:
+            return False
+
+        currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+        return self.state.cursorCol > 0 and jsIndex(currentLine, self.state.cursorCol - 1) == "\\"
 
     def submitValue(self) -> None:
         self.cancelAutocomplete()
-        result = self.expandPasteMarkers(self.getText()).strip()
-        self.state = EditorState()
+        result = jsTrim(self.expandPasteMarkers("\n".join(self.state.lines)))
+
+        self.state = EditorState(lines=[""], cursorLine=0, cursorCol=0)
         self.pastes.clear()
         self.pasteCounter = 0
-        self.historyIndex = -1
+        self.exitHistoryBrowsing()
         self.scrollOffset = 0
         self.undoStack.clear()
         self.lastAction = None
 
-        if self.onChange is not None:
+        if self.onChange:
             self.onChange("")
-        if self.onSubmit is not None:
+        if self.onSubmit:
             self.onSubmit(result)
 
     def handleBackspace(self) -> None:
-        self.historyIndex = -1
+        self.exitHistoryBrowsing()
         self.lastAction = None
 
         if self.state.cursorCol > 0:
             self.pushUndoSnapshot()
-            line = self.state.lines[self.state.cursorLine]
-            before_cursor = line[: self.state.cursorCol]
-            graphemes = self.segment(before_cursor)
-            last_grapheme = graphemes[-1] if graphemes else None
-            grapheme_length = len(last_grapheme.segment) if last_grapheme is not None else 1
-            marker = PASTE_MARKER_SINGLE.match(last_grapheme.segment) if last_grapheme else None
-            if marker:  # deleting a whole [paste #N …] block: drop it from the registry and renumber higher ids down by one
-                target_id = int(marker.group(1))
-                self.pastes.pop(target_id, None)
+
+            # Delete grapheme before cursor (handles emojis, combining characters, etc.)
+            line = jsIndex(self.state.lines, self.state.cursorLine) or ""
+            beforeCursor = line[: self.state.cursorCol]
+
+            # Find the last grapheme in the text before cursor
+            graphemes = [*self.segment(beforeCursor, "grapheme")]
+            lastGrapheme = graphemes[len(graphemes) - 1] if graphemes else None
+            graphemeLength = len(lastGrapheme.segment) if lastGrapheme else 1
+            isPastedSegmented = PASTE_MARKER_SINGLE.exec(lastGrapheme.segment) if lastGrapheme else None
+
+            if isPastedSegmented:
+                # This contains the id part e.g 4 from [paste #4 +123 lines]
+                targetId = int(isPastedSegmented[1])
+                self.pastes.pop(targetId, None)
                 self.pasteCounter -= 1
-                for pid in sorted(k for k in self.pastes if k > target_id):
-                    self.pastes[pid - 1] = self.pastes.pop(pid)
 
-                def renumber(text: str, *, above: int = target_id) -> str:
-                    return PASTE_MARKER_REGEX.sub(
-                        lambda m: m.group(0) if int(m.group(1)) <= above
-                        else f"[paste #{int(m.group(1)) - 1}{m.group(2) or ''}]",
-                        text)
+                # Shift registry entries down in ascending id order, independent
+                # of marker order in the text ([paste #3] becomes [paste #2] when
+                # [paste #1] is removed).
+                higherIds = sorted(id for id in self.pastes if id > targetId)
+                for id in higherIds:
+                    self.pastes[id - 1] = self.pastes[id]
+                    del self.pastes[id]
 
-                # Cut the marker out at the *old* coordinates, then renumber the two halves
-                # separately. Renumbering first (what pi does) shortens markers left of the
-                # cursor -- "[paste #10]" becomes "[paste #9]" -- so the line moves out from
-                # under cursorCol and the slice leaves half the deleted marker behind.
-                before = renumber(line[: self.state.cursorCol - grapheme_length])
+                # Renumber markers with ids greater than the removed one.
+                def renumber(text: str) -> str:
+                    def replacer(fullMatch: str, idGroup: str, suffixGroup: str | None) -> str:
+                        x = int(idGroup)
+                        if x <= targetId:
+                            return fullMatch
+                        return f"[paste #{x - 1}{suffixGroup or ''}]"
+
+                    return js_regexp.replace(text, PASTE_MARKER_REGEX, replacer)
+
+                # MISAKA fork: cut the marker out at the old coordinates and renumber both halves. Upstream renumbers
+                # every line first and then slices at the old cursor column; a renumbered marker left of the cursor
+                # ("[paste #10 ...]" becoming "[paste #9 ...]") is shorter by then, so the slice leaves part of the
+                # deleted marker behind.
+                before = renumber(line[: self.state.cursorCol - graphemeLength])
                 after = renumber(line[self.state.cursorCol :])
-                self.state.lines = [renumber(ln) for ln in self.state.lines]
+                self.state.lines = [renumber(line) for line in self.state.lines]
                 self.state.lines[self.state.cursorLine] = before + after
                 self.setCursorCol(len(before))
             else:
-                before = line[: self.state.cursorCol - grapheme_length]
+                line = jsIndex(self.state.lines, self.state.cursorLine) or ""
+
+                before = line[: self.state.cursorCol - graphemeLength]
                 after = line[self.state.cursorCol :]
+
                 self.state.lines[self.state.cursorLine] = before + after
-                self.setCursorCol(self.state.cursorCol - grapheme_length)
+                self.setCursorCol(self.state.cursorCol - graphemeLength)
         elif self.state.cursorLine > 0:
             self.pushUndoSnapshot()
-            current_line = self.state.lines[self.state.cursorLine]
-            previous_line = self.state.lines[self.state.cursorLine - 1]
-            self.state.lines[self.state.cursorLine - 1] = previous_line + current_line
-            del self.state.lines[self.state.cursorLine]
-            self.state.cursorLine -= 1
-            self.setCursorCol(len(previous_line))
 
-        if self.onChange is not None:
+            # Merge with previous line
+            currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+            previousLine = jsIndex(self.state.lines, self.state.cursorLine - 1) or ""
+
+            self.state.lines[self.state.cursorLine - 1] = previousLine + currentLine
+            del self.state.lines[self.state.cursorLine]
+
+            self.state.cursorLine -= 1
+            self.setCursorCol(len(previousLine))
+
+        if self.onChange:
             self.onChange(self.getText())
 
+        # Update or re-trigger autocomplete after backspace
         if self.autocompleteState:
             self.updateAutocomplete()
         else:
-            current_line = self.state.lines[self.state.cursorLine]
-            text_before_cursor = current_line[: self.state.cursorCol]
-            if self.isInSlashCommandContext(text_before_cursor) or re.search(r"(?:^|[\s])[@#][^\s]*$", text_before_cursor):
+            # If autocomplete was cancelled (no matches), re-trigger if we're in a completable context
+            currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+            textBeforeCursor = currentLine[: self.state.cursorCol]
+            # Slash command context
+            if self.isInSlashCommandContext(textBeforeCursor):  # noqa: SIM114 - upstream branches
+                self.tryTriggerAutocomplete()
+            # Symbol-based completion context like @, #, or provider triggers
+            elif self.autocompleteTriggerPattern.test(textBeforeCursor):
                 self.tryTriggerAutocomplete()
 
     def setCursorCol(self, col: int) -> None:
+        """Set cursor column and clear preferredVisualCol.
+        Use this for all non-vertical cursor movements to reset sticky column behavior.
+        """
         self.state.cursorCol = col
         self.preferredVisualCol = None
         self.snappedFromCursorCol = None
 
     def moveToVisualLine(
         self,
-        visualLines: list[dict[str, int]],
+        visualLines: list[_VisualLine],
         currentVisualLine: int,
         targetVisualLine: int,
     ) -> None:
-        current_vl = visualLines[currentVisualLine] if 0 <= currentVisualLine < len(visualLines) else None
-        target_vl = visualLines[targetVisualLine] if 0 <= targetVisualLine < len(visualLines) else None
-        if current_vl is None or target_vl is None:
+        """Move cursor to a target visual line, applying sticky column logic.
+        Shared by moveCursor() and pageScroll().
+        """
+        currentVL = jsIndex(visualLines, currentVisualLine)
+        targetVL = jsIndex(visualLines, targetVisualLine)
+        if not (currentVL and targetVL):
             return
 
+        # When the cursor was snapped to a segment start, resolve the pre-snap
+        # position against the VL it belongs to. This gives the correct visual
+        # column even after a resize reshuffles VLs.
+        currentVisualCol: int
         if self.snappedFromCursorCol is not None:
-            visual_line_index = self.findVisualLineAt(
-                visualLines,
-                current_vl["logicalLine"],
-                self.snappedFromCursorCol,
-            )
-            current_visual_col = self.snappedFromCursorCol - visualLines[visual_line_index]["startCol"]
+            vlIndex = self.findVisualLineAt(visualLines, currentVL["logicalLine"], self.snappedFromCursorCol)
+            currentVisualCol = self.snappedFromCursorCol - visualLines[vlIndex]["startCol"]
         else:
-            current_visual_col = self.state.cursorCol - current_vl["startCol"]
+            currentVisualCol = self.state.cursorCol - currentVL["startCol"]
 
-        is_last_source_segment = (
-            currentVisualLine == len(visualLines) - 1
-            or visualLines[currentVisualLine + 1]["logicalLine"] != current_vl["logicalLine"]
+        # For non-last segments, clamp to length-1 to stay within the segment
+        nextSource = jsIndex(visualLines, currentVisualLine + 1)
+        isLastSourceSegment = currentVisualLine == len(visualLines) - 1 or (
+            nextSource is None or nextSource["logicalLine"] != currentVL["logicalLine"]
         )
-        source_max_visual_col = current_vl["length"] if is_last_source_segment else max(0, current_vl["length"] - 1)
+        sourceMaxVisualCol = currentVL["length"] if isLastSourceSegment else max(0, currentVL["length"] - 1)
 
-        is_last_target_segment = (
-            targetVisualLine == len(visualLines) - 1
-            or visualLines[targetVisualLine + 1]["logicalLine"] != target_vl["logicalLine"]
+        nextTarget = jsIndex(visualLines, targetVisualLine + 1)
+        isLastTargetSegment = targetVisualLine == len(visualLines) - 1 or (
+            nextTarget is None or nextTarget["logicalLine"] != targetVL["logicalLine"]
         )
-        target_max_visual_col = target_vl["length"] if is_last_target_segment else max(0, target_vl["length"] - 1)
+        targetMaxVisualCol = targetVL["length"] if isLastTargetSegment else max(0, targetVL["length"] - 1)
 
-        move_to_visual_col = self.computeVerticalMoveColumn(
-            current_visual_col,
-            source_max_visual_col,
-            target_max_visual_col,
-        )
-        self.state.cursorLine = target_vl["logicalLine"]
-        target_col = target_vl["startCol"] + move_to_visual_col
-        logical_line = self.state.lines[target_vl["logicalLine"]]
-        self.state.cursorCol = min(target_col, len(logical_line))
+        moveToVisualCol = self.computeVerticalMoveColumn(currentVisualCol, sourceMaxVisualCol, targetMaxVisualCol)
 
-        segments = self.segment(logical_line)
-        for segment in segments:
-            if segment.index > self.state.cursorCol:
+        # Set cursor position
+        self.state.cursorLine = targetVL["logicalLine"]
+        targetCol = targetVL["startCol"] + moveToVisualCol
+        logicalLine = jsIndex(self.state.lines, targetVL["logicalLine"]) or ""
+        self.state.cursorCol = min(targetCol, len(logicalLine))
+
+        # Snap cursor to atomic segment boundary (e.g. paste markers)
+        # so the cursor never lands in the middle of a multi-grapheme unit.
+        # Single-grapheme segments don't need snapping.
+        segments = [*self.segment(logicalLine, "grapheme")]
+        for seg in segments:
+            if seg.index > self.state.cursorCol:
                 break
-            if len(segment.segment) <= 1:
+            if len(seg.segment) <= 1:
                 continue
-            if self.state.cursorCol < segment.index + len(segment.segment):
-                is_continuation = segment.index < target_vl["startCol"]
-                is_moving_down = targetVisualLine > currentVisualLine
+            if self.state.cursorCol < seg.index + len(seg.segment):
+                isContinuation = seg.index < targetVL["startCol"]
+                isMovingDown = targetVisualLine > currentVisualLine
 
-                if is_continuation and is_moving_down:
-                    segment_end = segment.index + len(segment.segment)
-                    next_index = targetVisualLine + 1
+                if isContinuation and isMovingDown:
+                    # The segment started on a previous visual line, and we
+                    # already visited it on the way down. Skip all remaining
+                    # continuation VLs and land on the first VL past it.
+                    segEnd = seg.index + len(seg.segment)
+                    next = targetVisualLine + 1
                     while (
-                        next_index < len(visualLines)
-                        and visualLines[next_index]["logicalLine"] == target_vl["logicalLine"]
-                        and visualLines[next_index]["startCol"] < segment_end
+                        next < len(visualLines)
+                        and visualLines[next]["logicalLine"] == targetVL["logicalLine"]
+                        and visualLines[next]["startCol"] < segEnd
                     ):
-                        next_index += 1
-                    if next_index < len(visualLines):
-                        self.moveToVisualLine(visualLines, currentVisualLine, next_index)
+                        next += 1
+                    if next < len(visualLines):
+                        self.moveToVisualLine(visualLines, currentVisualLine, next)
                         return
 
+                # Snap to the start of the segment so it gets highlighted.
+                # Store the pre-snap position so the next vertical move can
+                # resolve it to the correct visual column.
                 self.snappedFromCursorCol = self.state.cursorCol
-                self.state.cursorCol = segment.index
+                self.state.cursorCol = seg.index
                 return
 
+        # No snap occurred – we moved out of the atomic segment.
         self.snappedFromCursorCol = None
 
-    def computeVerticalMoveColumn(self, currentVisualCol: int, sourceMaxVisualCol: int, targetMaxVisualCol: int) -> int:
-        has_preferred = self.preferredVisualCol is not None
-        cursor_in_middle = currentVisualCol < sourceMaxVisualCol
-        target_too_short = targetMaxVisualCol < currentVisualCol
+    def computeVerticalMoveColumn(
+        self,
+        currentVisualCol: int,
+        sourceMaxVisualCol: int,
+        targetMaxVisualCol: int,
+    ) -> int:
+        """Compute the target visual column for vertical cursor movement.
+        Implements the sticky column decision table:
 
-        if not has_preferred or cursor_in_middle:
-            if target_too_short:
+        | P | S | T | U | Scenario                                             | Set Preferred | Move To     |
+        |---|---|---|---| ---------------------------------------------------- |---------------|-------------|
+        | 0 | * | 0 | - | Start nav, target fits                               | null          | current     |
+        | 0 | * | 1 | - | Start nav, target shorter                            | current       | target end  |
+        | 1 | 0 | 0 | 0 | Clamped, target fits preferred                       | null          | preferred   |
+        | 1 | 0 | 0 | 1 | Clamped, target longer but still can't fit preferred | keep          | target end  |
+        | 1 | 0 | 1 | - | Clamped, target even shorter                         | keep          | target end  |
+        | 1 | 1 | 0 | - | Rewrapped, target fits current                       | null          | current     |
+        | 1 | 1 | 1 | - | Rewrapped, target shorter than current               | current       | target end  |
+
+        Where:
+        - P = preferred col is set
+        - S = cursor in middle of source line (not clamped to end)
+        - T = target line shorter than current visual col
+        - U = target line shorter than preferred col
+        """
+        hasPreferred = self.preferredVisualCol is not None  # P
+        cursorInMiddle = currentVisualCol < sourceMaxVisualCol  # S
+        targetTooShort = targetMaxVisualCol < currentVisualCol  # T
+
+        if not hasPreferred or cursorInMiddle:
+            if targetTooShort:
+                # Cases 2 and 7
                 self.preferredVisualCol = currentVisualCol
                 return targetMaxVisualCol
+
+            # Cases 1 and 6
             self.preferredVisualCol = None
             return currentVisualCol
 
-        target_cant_fit_preferred = targetMaxVisualCol < (self.preferredVisualCol or 0)
-        if target_too_short or target_cant_fit_preferred:
+        assert self.preferredVisualCol is not None
+        targetCantFitPreferred = targetMaxVisualCol < self.preferredVisualCol  # U
+        if targetTooShort or targetCantFitPreferred:
+            # Cases 4 and 5
             return targetMaxVisualCol
 
-        result = self.preferredVisualCol or 0
+        # Case 3
+        result = self.preferredVisualCol
         self.preferredVisualCol = None
         return result
 
@@ -1145,625 +1496,725 @@ class Editor:
 
     def moveToLineEnd(self) -> None:
         self.lastAction = None
-        self.setCursorCol(len(self.state.lines[self.state.cursorLine]))
+        currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+        self.setCursorCol(len(currentLine))
 
     def deleteToStartOfLine(self) -> None:
-        self.historyIndex = -1
-        current_line = self.state.lines[self.state.cursorLine]
+        self.exitHistoryBrowsing()
+
+        currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+
         if self.state.cursorCol > 0:
             self.pushUndoSnapshot()
-            deleted_text = current_line[: self.state.cursorCol]
-            self.killRing.push(deleted_text, {"prepend": True, "accumulate": self.lastAction == "kill"})
+
+            # Calculate text to be deleted and save to kill ring (backward deletion = prepend)
+            deletedText = currentLine[: self.state.cursorCol]
+            self.killRing.push(deletedText, {"prepend": True, "accumulate": self.lastAction == "kill"})
             self.lastAction = "kill"
-            self.state.lines[self.state.cursorLine] = current_line[self.state.cursorCol :]
+
+            # Delete from start of line up to cursor
+            self.state.lines[self.state.cursorLine] = currentLine[self.state.cursorCol :]
             self.setCursorCol(0)
         elif self.state.cursorLine > 0:
             self.pushUndoSnapshot()
+
+            # At start of line - merge with previous line, treating newline as deleted text
             self.killRing.push("\n", {"prepend": True, "accumulate": self.lastAction == "kill"})
             self.lastAction = "kill"
-            previous_line = self.state.lines[self.state.cursorLine - 1]
-            self.state.lines[self.state.cursorLine - 1] = previous_line + current_line
+
+            previousLine = jsIndex(self.state.lines, self.state.cursorLine - 1) or ""
+            self.state.lines[self.state.cursorLine - 1] = previousLine + currentLine
             del self.state.lines[self.state.cursorLine]
             self.state.cursorLine -= 1
-            self.setCursorCol(len(previous_line))
+            self.setCursorCol(len(previousLine))
 
-        if self.onChange is not None:
+        if self.onChange:
             self.onChange(self.getText())
 
     def deleteToEndOfLine(self) -> None:
-        self.historyIndex = -1
-        current_line = self.state.lines[self.state.cursorLine]
-        if self.state.cursorCol < len(current_line):
+        self.exitHistoryBrowsing()
+
+        currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+
+        if self.state.cursorCol < len(currentLine):
             self.pushUndoSnapshot()
-            deleted_text = current_line[self.state.cursorCol :]
-            self.killRing.push(deleted_text, {"prepend": False, "accumulate": self.lastAction == "kill"})
+
+            # Calculate text to be deleted and save to kill ring (forward deletion = append)
+            deletedText = currentLine[self.state.cursorCol :]
+            self.killRing.push(deletedText, {"prepend": False, "accumulate": self.lastAction == "kill"})
             self.lastAction = "kill"
-            self.state.lines[self.state.cursorLine] = current_line[: self.state.cursorCol]
+
+            # Delete from cursor to end of line
+            self.state.lines[self.state.cursorLine] = currentLine[: self.state.cursorCol]
         elif self.state.cursorLine < len(self.state.lines) - 1:
             self.pushUndoSnapshot()
+
+            # At end of line - merge with next line, treating newline as deleted text
             self.killRing.push("\n", {"prepend": False, "accumulate": self.lastAction == "kill"})
             self.lastAction = "kill"
-            next_line = self.state.lines[self.state.cursorLine + 1]
-            self.state.lines[self.state.cursorLine] = current_line + next_line
+
+            nextLine = jsIndex(self.state.lines, self.state.cursorLine + 1) or ""
+            self.state.lines[self.state.cursorLine] = currentLine + nextLine
             del self.state.lines[self.state.cursorLine + 1]
 
-        if self.onChange is not None:
+        if self.onChange:
             self.onChange(self.getText())
 
     def deleteWordBackwards(self) -> None:
-        self.historyIndex = -1
-        current_line = self.state.lines[self.state.cursorLine]
+        self.exitHistoryBrowsing()
 
+        currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+
+        # If at start of line, behave like backspace at column 0 (merge with previous line)
         if self.state.cursorCol == 0:
             if self.state.cursorLine > 0:
                 self.pushUndoSnapshot()
+
+                # Treat newline as deleted text (backward deletion = prepend)
                 self.killRing.push("\n", {"prepend": True, "accumulate": self.lastAction == "kill"})
                 self.lastAction = "kill"
-                previous_line = self.state.lines[self.state.cursorLine - 1]
-                self.state.lines[self.state.cursorLine - 1] = previous_line + current_line
+
+                previousLine = jsIndex(self.state.lines, self.state.cursorLine - 1) or ""
+                self.state.lines[self.state.cursorLine - 1] = previousLine + currentLine
                 del self.state.lines[self.state.cursorLine]
                 self.state.cursorLine -= 1
-                self.setCursorCol(len(previous_line))
+                self.setCursorCol(len(previousLine))
         else:
             self.pushUndoSnapshot()
-            was_kill = self.lastAction == "kill"
-            old_cursor_col = self.state.cursorCol
-            self.moveWordBackwards()
-            delete_from = self.state.cursorCol
-            self.setCursorCol(old_cursor_col)
-            deleted_text = current_line[delete_from : self.state.cursorCol]
-            self.killRing.push(deleted_text, {"prepend": True, "accumulate": was_kill})
-            self.lastAction = "kill"
-            self.state.lines[self.state.cursorLine] = current_line[:delete_from] + current_line[self.state.cursorCol :]
-            self.setCursorCol(delete_from)
 
-        if self.onChange is not None:
+            # Save lastAction before cursor movement (moveWordBackwards resets it)
+            wasKill = self.lastAction == "kill"
+
+            oldCursorCol = self.state.cursorCol
+            self.moveWordBackwards()
+            deleteFrom = self.state.cursorCol
+            self.setCursorCol(oldCursorCol)
+
+            deletedText = currentLine[deleteFrom : self.state.cursorCol]
+            self.killRing.push(deletedText, {"prepend": True, "accumulate": wasKill})
+            self.lastAction = "kill"
+
+            self.state.lines[self.state.cursorLine] = currentLine[:deleteFrom] + currentLine[self.state.cursorCol :]
+            self.setCursorCol(deleteFrom)
+
+        if self.onChange:
             self.onChange(self.getText())
 
     def deleteWordForward(self) -> None:
-        self.historyIndex = -1
-        current_line = self.state.lines[self.state.cursorLine]
+        self.exitHistoryBrowsing()
 
-        if self.state.cursorCol >= len(current_line):
+        currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+
+        # If at end of line, merge with next line (delete the newline)
+        if self.state.cursorCol >= len(currentLine):
             if self.state.cursorLine < len(self.state.lines) - 1:
                 self.pushUndoSnapshot()
+
+                # Treat newline as deleted text (forward deletion = append)
                 self.killRing.push("\n", {"prepend": False, "accumulate": self.lastAction == "kill"})
                 self.lastAction = "kill"
-                next_line = self.state.lines[self.state.cursorLine + 1]
-                self.state.lines[self.state.cursorLine] = current_line + next_line
+
+                nextLine = jsIndex(self.state.lines, self.state.cursorLine + 1) or ""
+                self.state.lines[self.state.cursorLine] = currentLine + nextLine
                 del self.state.lines[self.state.cursorLine + 1]
         else:
             self.pushUndoSnapshot()
-            was_kill = self.lastAction == "kill"
-            old_cursor_col = self.state.cursorCol
-            self.moveWordForwards()
-            delete_to = self.state.cursorCol
-            self.setCursorCol(old_cursor_col)
-            deleted_text = current_line[self.state.cursorCol : delete_to]
-            self.killRing.push(deleted_text, {"prepend": False, "accumulate": was_kill})
-            self.lastAction = "kill"
-            self.state.lines[self.state.cursorLine] = current_line[: self.state.cursorCol] + current_line[delete_to:]
 
-        if self.onChange is not None:
+            # Save lastAction before cursor movement (moveWordForwards resets it)
+            wasKill = self.lastAction == "kill"
+
+            oldCursorCol = self.state.cursorCol
+            self.moveWordForwards()
+            deleteTo = self.state.cursorCol
+            self.setCursorCol(oldCursorCol)
+
+            deletedText = currentLine[self.state.cursorCol : deleteTo]
+            self.killRing.push(deletedText, {"prepend": False, "accumulate": wasKill})
+            self.lastAction = "kill"
+
+            self.state.lines[self.state.cursorLine] = currentLine[: self.state.cursorCol] + currentLine[deleteTo:]
+
+        if self.onChange:
             self.onChange(self.getText())
 
     def handleForwardDelete(self) -> None:
-        self.historyIndex = -1
+        self.exitHistoryBrowsing()
         self.lastAction = None
-        current_line = self.state.lines[self.state.cursorLine]
 
-        if self.state.cursorCol < len(current_line):
+        currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+
+        if self.state.cursorCol < len(currentLine):
             self.pushUndoSnapshot()
-            after_cursor = current_line[self.state.cursorCol :]
-            graphemes = self.segment(after_cursor)
-            first_grapheme = graphemes[0] if graphemes else None
-            grapheme_length = len(first_grapheme.segment) if first_grapheme is not None else 1
-            before = current_line[: self.state.cursorCol]
-            after = current_line[self.state.cursorCol + grapheme_length :]
+
+            # Delete grapheme at cursor position (handles emojis, combining characters, etc.)
+            afterCursor = currentLine[self.state.cursorCol :]
+
+            # Find the first grapheme at cursor
+            graphemes = [*self.segment(afterCursor, "grapheme")]
+            firstGrapheme = jsIndex(graphemes, 0)
+            graphemeLength = len(firstGrapheme.segment) if firstGrapheme else 1
+
+            before = currentLine[: self.state.cursorCol]
+            after = currentLine[self.state.cursorCol + graphemeLength :]
             self.state.lines[self.state.cursorLine] = before + after
         elif self.state.cursorLine < len(self.state.lines) - 1:
             self.pushUndoSnapshot()
-            next_line = self.state.lines[self.state.cursorLine + 1]
-            self.state.lines[self.state.cursorLine] = current_line + next_line
+
+            # At end of line - merge with next line
+            nextLine = jsIndex(self.state.lines, self.state.cursorLine + 1) or ""
+            self.state.lines[self.state.cursorLine] = currentLine + nextLine
             del self.state.lines[self.state.cursorLine + 1]
 
-        if self.onChange is not None:
+        if self.onChange:
             self.onChange(self.getText())
 
+        # Update or re-trigger autocomplete after forward delete
         if self.autocompleteState:
             self.updateAutocomplete()
         else:
-            current_line = self.state.lines[self.state.cursorLine]
-            text_before_cursor = current_line[: self.state.cursorCol]
-            if self.isInSlashCommandContext(text_before_cursor) or re.search(r"(?:^|[\s])[@#][^\s]*$", text_before_cursor):
+            currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+            textBeforeCursor = currentLine[: self.state.cursorCol]
+            # Slash command context
+            if self.isInSlashCommandContext(textBeforeCursor):  # noqa: SIM114 - upstream branches
+                self.tryTriggerAutocomplete()
+            # Symbol-based completion context like @, #, or provider triggers
+            elif self.autocompleteTriggerPattern.test(textBeforeCursor):
                 self.tryTriggerAutocomplete()
 
-    def buildVisualLineMap(self, width: int) -> list[dict[str, int]]:
-        visual_lines: list[dict[str, int]] = []
-        for logical_line, line in enumerate(self.state.lines):
-            if line == "":
-                visual_lines.append({"logicalLine": logical_line, "startCol": 0, "length": 0})
-            elif visibleWidth(line) <= width:
-                visual_lines.append({"logicalLine": logical_line, "startCol": 0, "length": len(line)})
+    def buildVisualLineMap(self, width: int) -> list[_VisualLine]:
+        """Build a mapping from visual lines to logical positions.
+        Returns an array where each element represents a visual line with:
+        - logicalLine: index into this.state.lines
+        - startCol: starting column in the logical line
+        - length: length of this visual line segment
+        """
+        visualLines: list[_VisualLine] = []
+
+        for i in range(len(self.state.lines)):
+            line = self.state.lines[i] or ""
+            lineVisWidth = visibleWidth(line)
+            if len(line) == 0:
+                # Empty line still takes one visual line
+                visualLines.append({"logicalLine": i, "startCol": 0, "length": 0})
+            elif lineVisWidth <= width:
+                visualLines.append({"logicalLine": i, "startCol": 0, "length": len(line)})
             else:
-                chunks = word_wrap_line(line, width, self.segment(line))
+                # Line needs wrapping - use word-aware wrapping
+                chunks = wordWrapLine(line, width, [*self.segment(line, "grapheme")])
                 for chunk in chunks:
-                    visual_lines.append(
+                    visualLines.append(
                         {
-                            "logicalLine": logical_line,
+                            "logicalLine": i,
                             "startCol": chunk.startIndex,
                             "length": chunk.endIndex - chunk.startIndex,
                         }
                     )
-        return visual_lines
 
-    def findVisualLineAt(self, visualLines: list[dict[str, int]], line: int, col: int) -> int:
-        for index, visual_line in enumerate(visualLines):
-            if visual_line["logicalLine"] != line:
+        return visualLines
+
+    def findVisualLineAt(self, visualLines: list[_VisualLine], line: int, col: int) -> int:
+        """Find the visual line index that contains the given logical position."""
+        for i in range(len(visualLines)):
+            vl = visualLines[i]
+            if not vl or vl["logicalLine"] != line:
                 continue
-            offset = col - visual_line["startCol"]
-            is_last_segment_of_line = (
-                index == len(visualLines) - 1 or visualLines[index + 1]["logicalLine"] != visual_line["logicalLine"]
+            offset = col - vl["startCol"]
+            # Cursor is in this segment if it's within range. For the last
+            # segment of a logical line, cursor can be at length (end position)
+            nextVl = jsIndex(visualLines, i + 1)
+            isLastSegmentOfLine = i == len(visualLines) - 1 or (
+                nextVl is None or nextVl["logicalLine"] != vl["logicalLine"]
             )
-            if offset >= 0 and (
-                offset < visual_line["length"] or (is_last_segment_of_line and offset == visual_line["length"])
-            ):
-                return index
+            if offset >= 0 and (offset < vl["length"] or (isLastSegmentOfLine and offset == vl["length"])):
+                return i
         return len(visualLines) - 1
 
-    def findCurrentVisualLine(self, visualLines: list[dict[str, int]]) -> int:
+    def findCurrentVisualLine(self, visualLines: list[_VisualLine]) -> int:
+        """Find the visual line index for the current cursor position."""
         return self.findVisualLineAt(visualLines, self.state.cursorLine, self.state.cursorCol)
 
     def moveCursor(self, deltaLine: int, deltaCol: int) -> None:
         self.lastAction = None
-        visual_lines = self.buildVisualLineMap(self.lastWidth)
-        current_visual_line = self.findCurrentVisualLine(visual_lines)
+        visualLines = self.buildVisualLineMap(self.lastWidth)
+        currentVisualLine = self.findCurrentVisualLine(visualLines)
 
         if deltaLine != 0:
-            target_visual_line = current_visual_line + deltaLine
-            if 0 <= target_visual_line < len(visual_lines):
-                self.moveToVisualLine(visual_lines, current_visual_line, target_visual_line)
+            targetVisualLine = currentVisualLine + deltaLine
+
+            if targetVisualLine >= 0 and targetVisualLine < len(visualLines):
+                self.moveToVisualLine(visualLines, currentVisualLine, targetVisualLine)
 
         if deltaCol != 0:
-            current_line = self.state.lines[self.state.cursorLine]
+            currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+
             if deltaCol > 0:
-                if self.state.cursorCol < len(current_line):
-                    after_cursor = current_line[self.state.cursorCol :]
-                    graphemes = self.segment(after_cursor)
-                    first_grapheme = graphemes[0] if graphemes else None
-                    self.setCursorCol(self.state.cursorCol + (len(first_grapheme.segment) if first_grapheme else 1))
+                # Moving right - move by one grapheme (handles emojis, combining characters, etc.)
+                if self.state.cursorCol < len(currentLine):
+                    afterCursor = currentLine[self.state.cursorCol :]
+                    graphemes = [*self.segment(afterCursor, "grapheme")]
+                    firstGrapheme = jsIndex(graphemes, 0)
+                    self.setCursorCol(self.state.cursorCol + (len(firstGrapheme.segment) if firstGrapheme else 1))
                 elif self.state.cursorLine < len(self.state.lines) - 1:
+                    # Wrap to start of next logical line
                     self.state.cursorLine += 1
                     self.setCursorCol(0)
                 else:
-                    current_visual = visual_lines[current_visual_line]
-                    self.preferredVisualCol = self.state.cursorCol - current_visual["startCol"]
+                    # At end of last line - can't move, but set preferredVisualCol for up/down navigation
+                    currentVL = jsIndex(visualLines, currentVisualLine)
+                    if currentVL:
+                        self.preferredVisualCol = self.state.cursorCol - currentVL["startCol"]
             else:
+                # Moving left - move by one grapheme (handles emojis, combining characters, etc.)
                 if self.state.cursorCol > 0:
-                    before_cursor = current_line[: self.state.cursorCol]
-                    graphemes = self.segment(before_cursor)
-                    last_grapheme = graphemes[-1] if graphemes else None
-                    self.setCursorCol(self.state.cursorCol - (len(last_grapheme.segment) if last_grapheme else 1))
+                    beforeCursor = currentLine[: self.state.cursorCol]
+                    graphemes = [*self.segment(beforeCursor, "grapheme")]
+                    lastGrapheme = jsIndex(graphemes, len(graphemes) - 1)
+                    self.setCursorCol(self.state.cursorCol - (len(lastGrapheme.segment) if lastGrapheme else 1))
                 elif self.state.cursorLine > 0:
+                    # Wrap to end of previous logical line
                     self.state.cursorLine -= 1
-                    self.setCursorCol(len(self.state.lines[self.state.cursorLine]))
+                    prevLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+                    self.setCursorCol(len(prevLine))
 
+        # Keep an open autocomplete picker in sync with the new cursor
+        # position: cursor movement changes the text before the cursor, so a
+        # picker computed for the old position is stale. Re-query so it
+        # refreshes — or closes when the new position yields no suggestions —
+        # mirroring insertCharacter()/handleBackspace(). Without this, arrowing
+        # left from `/cmd ` back into the command name leaves the argument
+        # picker showing against a `/cmd` prefix (and a Tab there would
+        # concatenate the stale suggestion onto the partial command name).
         if self.autocompleteState:
-            self.updateAutocomplete()  # cursor moved: re-query, or close a stale menu (Tab completing a stale candidate is a real hazard)
+            self.updateAutocomplete()
 
-    def pageScroll(self, direction: int) -> None:
+    def pageScroll(self, direction: Literal[-1, 1]) -> None:
+        """Scroll by a page (direction: -1 for up, 1 for down).
+        Moves cursor by the page size while keeping it in bounds.
+        """
         self.lastAction = None
-        terminal_rows = self.tui.terminal.rows
-        page_size = max(5, int(terminal_rows * 0.3))
-        visual_lines = self.buildVisualLineMap(self.lastWidth)
-        current_visual_line = self.findCurrentVisualLine(visual_lines)
-        target_visual_line = max(0, min(len(visual_lines) - 1, current_visual_line + direction * page_size))
-        self.moveToVisualLine(visual_lines, current_visual_line, target_visual_line)
+        terminalRows = self.tui.terminal.rows
+        pageSize = max(5, math.floor(terminalRows * 0.3))
+
+        visualLines = self.buildVisualLineMap(self.lastWidth)
+        currentVisualLine = self.findCurrentVisualLine(visualLines)
+        targetVisualLine = max(0, min(len(visualLines) - 1, currentVisualLine + direction * pageSize))
+
+        self.moveToVisualLine(visualLines, currentVisualLine, targetVisualLine)
 
     def moveWordBackwards(self) -> None:
         self.lastAction = None
-        current_line = self.state.lines[self.state.cursorLine]
+        currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+
+        # If at start of line, move to end of previous line
         if self.state.cursorCol == 0:
             if self.state.cursorLine > 0:
                 self.state.cursorLine -= 1
-                self.setCursorCol(len(self.state.lines[self.state.cursorLine]))
+                prevLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+                self.setCursorCol(len(prevLine))
             return
 
-        text_before_cursor = current_line[: self.state.cursorCol]
-        graphemes = self.segment(text_before_cursor)
-        new_col = self.state.cursorCol
-
-        while graphemes and not is_paste_marker(graphemes[-1].segment) and isWhitespaceChar(graphemes[-1].segment):
-            new_col -= len(graphemes.pop().segment)
-
-        if graphemes:
-            last_grapheme = graphemes[-1].segment
-            if is_paste_marker(last_grapheme):
-                new_col -= len(graphemes.pop().segment)
-            elif _is_word_nav_punct(last_grapheme):
-                while (
-                    graphemes
-                    and _is_word_nav_punct(graphemes[-1].segment)
-                    and not is_paste_marker(graphemes[-1].segment)
-                ):
-                    new_col -= len(graphemes.pop().segment)
-            elif _CJK_BREAK_RE.search(last_grapheme):
-                new_col -= len(graphemes.pop().segment)   # each CJK character is a word
-            else:
-                while (
-                    graphemes
-                    and not isWhitespaceChar(graphemes[-1].segment)
-                    and not _is_word_nav_punct(graphemes[-1].segment)
-                    and not is_paste_marker(graphemes[-1].segment)
-                    and not _CJK_BREAK_RE.search(graphemes[-1].segment)
-                ):
-                    new_col -= len(graphemes.pop().segment)
-
-        self.setCursorCol(new_col)
+        self.setCursorCol(
+            findWordBackward(
+                currentLine,
+                self.state.cursorCol,
+                WordNavigationOptions(
+                    segment=lambda text: self.segment(text, "word"),
+                    isAtomicSegment=isPasteMarker,
+                ),
+            )
+        )
 
     def yank(self) -> None:
+        """Yank (paste) the most recent kill ring entry at cursor position."""
         if self.killRing.length == 0:
             return
+
         self.pushUndoSnapshot()
+
         text = self.killRing.peek()
-        if text is None:
-            return
+        assert text is not None
         self.insertYankedText(text)
+
         self.lastAction = "yank"
 
     def yankPop(self) -> None:
+        """Cycle through kill ring (only works immediately after yank or yank-pop).
+        Replaces the last yanked text with the previous entry in the ring.
+        """
+        # Only works if we just yanked and have more than one entry
         if self.lastAction != "yank" or self.killRing.length <= 1:
             return
+
         self.pushUndoSnapshot()
+
+        # Delete the previously yanked text (still at end of ring before rotation)
         self.deleteYankedText()
+
+        # Rotate the ring: move end to front
         self.killRing.rotate()
+
+        # Insert the new most recent entry (now at end after rotation)
         text = self.killRing.peek()
-        if text is None:
-            return
+        assert text is not None
         self.insertYankedText(text)
+
         self.lastAction = "yank"
 
     def insertYankedText(self, text: str) -> None:
-        self.historyIndex = -1
+        """Insert text at cursor position (used by yank operations)."""
+        self.exitHistoryBrowsing()
         lines = text.split("\n")
+
         if len(lines) == 1:
-            current_line = self.state.lines[self.state.cursorLine]
-            before = current_line[: self.state.cursorCol]
-            after = current_line[self.state.cursorCol :]
+            # Single line - insert at cursor
+            currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+            before = currentLine[: self.state.cursorCol]
+            after = currentLine[self.state.cursorCol :]
             self.state.lines[self.state.cursorLine] = before + text + after
             self.setCursorCol(self.state.cursorCol + len(text))
         else:
-            current_line = self.state.lines[self.state.cursorLine]
-            before = current_line[: self.state.cursorCol]
-            after = current_line[self.state.cursorCol :]
-            self.state.lines[self.state.cursorLine] = before + lines[0]
-            for index, line in enumerate(lines[1:-1], start=1):
-                self.state.lines.insert(self.state.cursorLine + index, line)
-            last_line_index = self.state.cursorLine + len(lines) - 1
-            self.state.lines.insert(last_line_index, lines[-1] + after)
-            self.state.cursorLine = last_line_index
-            self.setCursorCol(len(lines[-1]))
+            # Multi-line insert
+            currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+            before = currentLine[: self.state.cursorCol]
+            after = currentLine[self.state.cursorCol :]
 
-        if self.onChange is not None:
+            # First line merges with text before cursor
+            self.state.lines[self.state.cursorLine] = before + (lines[0] or "")
+
+            # Insert middle lines
+            for i in range(1, len(lines) - 1):
+                self.state.lines.insert(self.state.cursorLine + i, lines[i] or "")
+
+            # Last line merges with text after cursor
+            lastLineIndex = self.state.cursorLine + len(lines) - 1
+            self.state.lines.insert(lastLineIndex, (lines[len(lines) - 1] or "") + after)
+
+            # Update cursor position
+            self.state.cursorLine = lastLineIndex
+            self.setCursorCol(len(lines[len(lines) - 1] or ""))
+
+        if self.onChange:
             self.onChange(self.getText())
 
     def deleteYankedText(self) -> None:
-        yanked_text = self.killRing.peek()
-        if not yanked_text:
+        """Delete the previously yanked text (used by yank-pop).
+        The yanked text is derived from killRing[end] since it hasn't been rotated yet.
+        """
+        yankedText = self.killRing.peek()
+        if not yankedText:
             return
-        yank_lines = yanked_text.split("\n")
 
-        if len(yank_lines) == 1:
-            current_line = self.state.lines[self.state.cursorLine]
-            delete_len = len(yanked_text)
-            before = current_line[: self.state.cursorCol - delete_len]
-            after = current_line[self.state.cursorCol :]
+        yankLines = yankedText.split("\n")
+
+        if len(yankLines) == 1:
+            # Single line - delete backward from cursor
+            currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+            deleteLen = len(yankedText)
+            before = currentLine[: self.state.cursorCol - deleteLen]
+            after = currentLine[self.state.cursorCol :]
             self.state.lines[self.state.cursorLine] = before + after
-            self.setCursorCol(self.state.cursorCol - delete_len)
+            self.setCursorCol(self.state.cursorCol - deleteLen)
         else:
-            start_line = self.state.cursorLine - (len(yank_lines) - 1)
-            start_col = len(self.state.lines[start_line]) - len(yank_lines[0])
-            after_cursor = self.state.lines[self.state.cursorLine][self.state.cursorCol :]
-            before_yank = self.state.lines[start_line][:start_col]
-            self.state.lines[start_line : self.state.cursorLine + 1] = [before_yank + after_cursor]
-            self.state.cursorLine = start_line
-            self.setCursorCol(start_col)
+            # Multi-line delete - cursor is at end of last yanked line
+            startLine = self.state.cursorLine - (len(yankLines) - 1)
+            startCol = len(jsIndex(self.state.lines, startLine) or "") - len(yankLines[0] or "")
 
-        if self.onChange is not None:
+            # Get text after cursor on current line
+            afterCursor = (jsIndex(self.state.lines, self.state.cursorLine) or "")[self.state.cursorCol :]
+
+            # Get text before yank start position
+            beforeYank = (jsIndex(self.state.lines, startLine) or "")[:startCol]
+
+            # Remove all lines from startLine to cursorLine and replace with merged line
+            self.state.lines[startLine : startLine + len(yankLines)] = [beforeYank + afterCursor]
+
+            # Update cursor
+            self.state.cursorLine = startLine
+            self.setCursorCol(startCol)
+
+        if self.onChange:
             self.onChange(self.getText())
 
     def pushUndoSnapshot(self) -> None:
-        # Copy exactly what editing rebinds: the line list and the paste table. Their
-        # contents are immutable strings, so a shallow copy is enough and a deep one
-        # would clone every paste payload on every keystroke.
-        self.undoStack.push({
-            "state": EditorState(lines=list(self.state.lines), cursorLine=self.state.cursorLine,
-                                 cursorCol=self.state.cursorCol),
-            "pastes": dict(self.pastes),
-            "pasteCounter": self.pasteCounter,
-        })
+        self.undoStack.push(EditorSnapshot(state=self.state, pastes=self.pastes, pasteCounter=self.pasteCounter))
 
     def undo(self) -> None:
-        self.historyIndex = -1
+        self.exitHistoryBrowsing()
         snapshot = self.undoStack.pop()
-        if snapshot is None:
+        if not snapshot:
             return
-        self.state = snapshot["state"]
-        self.pastes = snapshot["pastes"]
-        self.pasteCounter = snapshot["pasteCounter"]
+        # `Object.assign(this.state, snapshot.state)`
+        self.state.lines = snapshot.state.lines
+        self.state.cursorLine = snapshot.state.cursorLine
+        self.state.cursorCol = snapshot.state.cursorCol
+        self.pastes = snapshot.pastes
+        self.pasteCounter = snapshot.pasteCounter
         self.lastAction = None
         self.preferredVisualCol = None
-        if self.onChange is not None:
+        if self.onChange:
             self.onChange(self.getText())
 
-    def jumpToChar(self, char: str, direction: str) -> None:
+    def jumpToChar(self, char: str, direction: Literal["forward", "backward"]) -> None:
+        """Jump to the first occurrence of a character in the specified direction.
+        Multi-line search. Case-sensitive. Skips the current cursor position.
+        """
         self.lastAction = None
-        is_forward = direction == "forward"
-        end = len(self.state.lines) if is_forward else -1
-        step = 1 if is_forward else -1
+        isForward = direction == "forward"
+        lines = self.state.lines
 
-        line_idx = self.state.cursorLine
-        while line_idx != end:
-            line = self.state.lines[line_idx]
-            is_current_line = line_idx == self.state.cursorLine
-            search_from = (
-                self.state.cursorCol + 1
-                if is_current_line and is_forward
-                else self.state.cursorCol - 1
-                if is_current_line
-                else None
+        end = len(lines) if isForward else -1
+        step = 1 if isForward else -1
+
+        lineIdx = self.state.cursorLine
+        while lineIdx != end:
+            line = jsIndex(lines, lineIdx) or ""
+            isCurrentLine = lineIdx == self.state.cursorLine
+
+            # Current line: start after/before cursor; other lines: search full line
+            searchFrom = (
+                (self.state.cursorCol + 1 if isForward else self.state.cursorCol - 1) if isCurrentLine else None
             )
-            found_index = (
-                line.find(char, search_from)
-                if is_forward
-                else (line.rfind(char) if search_from is None else line.rfind(char, 0, search_from + 1))
-            )
-            if found_index != -1:
-                self.state.cursorLine = line_idx
-                self.setCursorCol(found_index)
+
+            if isForward:
+                idx = line.find(char, searchFrom if searchFrom is not None else 0)
+            else:
+                # `lastIndexOf(char, searchFrom)`: the last match starting at or before `searchFrom` (clamped to the
+                # string), the whole string when it is undefined.
+                position = len(line) if searchFrom is None else min(max(searchFrom, 0), len(line))
+                idx = line.rfind(char, 0, position + len(char))
+
+            if idx != -1:
+                self.state.cursorLine = lineIdx
+                self.setCursorCol(idx)
                 return
-            line_idx += step
+            lineIdx += step
+        # No match found - cursor stays in place
 
     def moveWordForwards(self) -> None:
         self.lastAction = None
-        current_line = self.state.lines[self.state.cursorLine]
-        if self.state.cursorCol >= len(current_line):
+        currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+
+        # If at end of line, move to start of next line
+        if self.state.cursorCol >= len(currentLine):
             if self.state.cursorLine < len(self.state.lines) - 1:
                 self.state.cursorLine += 1
                 self.setCursorCol(0)
             return
 
-        segments = iter(self.segment(current_line[self.state.cursorCol :]))
-        next_segment = next(segments, None)
-        new_col = self.state.cursorCol
+        self.setCursorCol(
+            findWordForward(
+                currentLine,
+                self.state.cursorCol,
+                WordNavigationOptions(
+                    segment=lambda text: self.segment(text, "word"),
+                    isAtomicSegment=isPasteMarker,
+                ),
+            )
+        )
 
-        while (
-            next_segment is not None
-            and not is_paste_marker(next_segment.segment)
-            and isWhitespaceChar(next_segment.segment)
-        ):
-            new_col += len(next_segment.segment)
-            next_segment = next(segments, None)
-
-        if next_segment is not None:
-            first_grapheme = next_segment.segment
-            if is_paste_marker(first_grapheme):
-                new_col += len(first_grapheme)
-            elif _is_word_nav_punct(first_grapheme):
-                while (
-                    next_segment is not None
-                    and _is_word_nav_punct(next_segment.segment)
-                    and not is_paste_marker(next_segment.segment)
-                ):
-                    new_col += len(next_segment.segment)
-                    next_segment = next(segments, None)
-            elif _CJK_BREAK_RE.search(first_grapheme):
-                new_col += len(first_grapheme)             # each CJK character is a word
-            else:
-                while (
-                    next_segment is not None
-                    and not isWhitespaceChar(next_segment.segment)
-                    and not _is_word_nav_punct(next_segment.segment)
-                    and not is_paste_marker(next_segment.segment)
-                    and not _CJK_BREAK_RE.search(next_segment.segment)
-                ):
-                    new_col += len(next_segment.segment)
-                    next_segment = next(segments, None)
-
-        self.setCursorCol(new_col)
-
+    # Slash menu only allowed on the first line of the editor
     def isSlashMenuAllowed(self) -> bool:
         return self.state.cursorLine == 0
 
+    # Helper method to check if cursor is at start of message (for slash command detection)
     def isAtStartOfMessage(self) -> bool:
         if not self.isSlashMenuAllowed():
             return False
-        current_line = self.state.lines[self.state.cursorLine]
-        before_cursor = current_line[: self.state.cursorCol]
-        return before_cursor.strip() in {"", "/"}
+        currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+        beforeCursor = currentLine[: self.state.cursorCol]
+        return jsTrim(beforeCursor) == "" or jsTrim(beforeCursor) == "/"
 
     def isInSlashCommandContext(self, textBeforeCursor: str) -> bool:
-        return self.isSlashMenuAllowed() and textBeforeCursor.lstrip().startswith("/")
+        return self.isSlashMenuAllowed() and jsTrimStart(textBeforeCursor).startswith("/")
+
+    # Autocomplete methods
+    def getBestAutocompleteMatchIndex(self, items: Sequence[Any], prefix: str) -> int:
+        """Find the best autocomplete item index for the given prefix.
+        Returns -1 if no match is found.
+
+        Match priority:
+        1. Exact match (prefix === item.value) -> always selected
+        2. Prefix match -> first item whose value starts with prefix
+        3. No match -> -1 (keep default highlight)
+
+        Matching is case-sensitive and checks item.value only.
+        """
+        if not prefix:
+            return -1
+
+        firstPrefixIndex = -1
+
+        for i in range(len(items)):
+            value = items[i].value
+            if value == prefix:
+                return i  # Exact match always wins
+            if firstPrefixIndex == -1 and value.startswith(prefix):
+                firstPrefixIndex = i
+
+        return firstPrefixIndex
+
+    def createAutocompleteList(self, prefix: str, items: Sequence[Any]) -> SelectList:
+        layout = SLASH_COMMAND_SELECT_LIST_LAYOUT if prefix.startswith("/") else None
+        # The autocomplete items go in as they are, as upstream passes them: they have a select item's fields.
+        selectList = SelectList(cast("list[SelectItem]", list(items)), self.autocompleteMaxVisible, self.theme.selectList, layout)
+        # MISAKA fork (D1): upstream's `list.onSelect` follows here; the list calls it only on a mouse click (the
+        # editor handles confirm itself).
+        return selectList
+
+    def tryTriggerAutocomplete(self, explicitTab: bool = False) -> None:
+        self.requestAutocomplete({"force": False, "explicitTab": explicitTab})
 
     def handleTabCompletion(self) -> None:
-        if self.autocompleteProvider is None:
+        if not self.autocompleteProvider:
             return
-        current_line = self.state.lines[self.state.cursorLine]
-        before_cursor = current_line[: self.state.cursorCol]
 
-        if self.isInSlashCommandContext(before_cursor) and " " not in before_cursor.lstrip():
+        currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+        beforeCursor = currentLine[: self.state.cursorCol]
+
+        if self.isInSlashCommandContext(beforeCursor) and " " not in jsTrimStart(beforeCursor):
             self.handleSlashCommandCompletion()
         else:
             self.forceFileAutocomplete(True)
 
     def handleSlashCommandCompletion(self) -> None:
-        if self.autocompleteProvider is None:
-            return
-        self.requestAutocomplete(force=False, explicitTab=True)
+        self.requestAutocomplete({"force": False, "explicitTab": True})
 
     def forceFileAutocomplete(self, explicitTab: bool = False) -> None:
-        if self.autocompleteProvider is None:
-            return
-        self.requestAutocomplete(force=True, explicitTab=explicitTab)
+        self.requestAutocomplete({"force": True, "explicitTab": explicitTab})
 
-    def getBestAutocompleteMatchIndex(self, items: list[AutocompleteItem], prefix: str) -> int:
-        if not prefix:
-            return -1
-
-        first_prefix_index = -1
-        for index, item in enumerate(items):
-            value = item.value
-            if value == prefix:
-                return index
-            if first_prefix_index == -1 and value.startswith(prefix):
-                first_prefix_index = index
-        return first_prefix_index
-
-    def createAutocompleteList(self, prefix: str, items: list[AutocompleteItem]) -> SelectList:
-        layout = SLASH_COMMAND_SELECT_LIST_LAYOUT if prefix.startswith("/") else None
-        select_items = [SelectItem(value=item.value, label=item.label, description=item.description) for item in items]
-        return SelectList(select_items, self.autocompleteMaxVisible, self.theme.selectList, layout)
-
-    def tryTriggerAutocomplete(self, explicitTab: bool = False) -> None:
-        if self.autocompleteProvider is None:
-            return
-        self.requestAutocomplete(force=False, explicitTab=explicitTab)
-
-    def requestAutocomplete(self, *, force: bool, explicitTab: bool) -> None:
-        if self.autocompleteProvider is None:
+    def requestAutocomplete(self, options: _AutocompleteRequestOptions) -> None:
+        if not self.autocompleteProvider:
             return
 
-        if force:
-            should_trigger = getattr(self.autocompleteProvider, "shouldTriggerFileCompletion", None)
-            if callable(should_trigger) and not should_trigger(
+        if options["force"]:
+            shouldTriggerFileCompletion = getattr(self.autocompleteProvider, "shouldTriggerFileCompletion", None)
+            shouldTrigger = not shouldTriggerFileCompletion or shouldTriggerFileCompletion(
                 self.state.lines,
                 self.state.cursorLine,
                 self.state.cursorCol,
-            ):
+            )
+            if not shouldTrigger:
                 return
 
         self.cancelAutocompleteRequest()
-        start_token = self.autocompleteStartToken + 1
-        self.autocompleteStartToken = start_token
-        debounce_ms = self.getAutocompleteDebounceMs(force=force, explicitTab=explicitTab)
-        loop = _get_running_loop()
-        if loop is None:
+        self.autocompleteStartToken += 1
+        startToken = self.autocompleteStartToken
+
+        # MISAKA fork: `setTimeout` and an async function's start need an asyncio loop; without one (an editor driven
+        # from synchronous code) nothing is requested.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
             return
 
-        if debounce_ms > 0:
-            self.autocompleteDebounceTimer = loop.call_later(
-                debounce_ms / 1000,
-                self.startAutocompleteRequest,
-                start_token,
-                force,
-                explicitTab,
-            )
+        debounceMs = self.getAutocompleteDebounceMs(options)
+        if debounceMs > 0:
+
+            def onTimeout() -> None:
+                self.autocompleteDebounceTimer = None
+                self.startAutocompleteRequest(startToken, options)
+
+            self.autocompleteDebounceTimer = loop.call_later(debounceMs / 1000, onTimeout)
             return
 
-        self.startAutocompleteRequest(start_token, force, explicitTab)
+        self.startAutocompleteRequest(startToken, options)
 
-    def startAutocompleteRequest(self, startToken: int, force: bool, explicitTab: bool) -> None:
-        if startToken != self.autocompleteStartToken or self.autocompleteProvider is None:
-            return
+    @eager
+    async def startAutocompleteRequest(self, startToken: int, options: _AutocompleteRequestOptions) -> None:
+        previousTask = self.autocompleteRequestTask
 
-        loop = _get_running_loop()
-        if loop is None:
-            return
-
-        previous_task = self.autocompleteRequestTask
-
-        async def run() -> None:
-            if previous_task is not None:
-                await previous_task
-
-            if startToken != self.autocompleteStartToken or self.autocompleteProvider is None:
+        async def task() -> None:
+            if previousTask is not None:
+                await previousTask
+            if startToken != self.autocompleteStartToken or not self.autocompleteProvider:
                 return
 
-            controller = _AutocompleteAbortController()
+            controller = AbortController()
             self.autocompleteAbort = controller
-            request_id = self.autocompleteRequestId + 1
-            self.autocompleteRequestId = request_id
-            snapshot_text = self.getText()
-            snapshot_line = self.state.cursorLine
-            snapshot_col = self.state.cursorCol
+            self.autocompleteRequestId += 1
+            requestId = self.autocompleteRequestId
+            snapshotText = self.getText()
+            snapshotLine = self.state.cursorLine
+            snapshotCol = self.state.cursorCol
 
-            await self.runAutocompleteRequest(
-                request_id=request_id,
-                controller=controller,
-                snapshotText=snapshot_text,
-                snapshotLine=snapshot_line,
-                snapshotCol=snapshot_col,
-                force=force,
-                explicitTab=explicitTab,
-            )
+            await self.runAutocompleteRequest(requestId, controller, snapshotText, snapshotLine, snapshotCol, options)
 
-        task = loop.create_task(run())
-        self.autocompleteRequestTask = task
+        self.autocompleteRequestTask = startTask(task())
+        await self.autocompleteRequestTask
 
-    def getAutocompleteDebounceMs(self, *, force: bool, explicitTab: bool) -> int:
-        if explicitTab or force:
+    def setAutocompleteTriggerCharacters(self, triggerCharacters: list[str]) -> None:
+        next = [*DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS]
+        for character in triggerCharacters:
+            if len(character) != 1 or character == "/" or isWhitespaceChar(character) or character in next:
+                continue
+            next.append(character)
+        self.autocompleteTriggerCharacters = next
+        self.autocompleteTriggerPattern = buildTriggerPattern(next)
+        self.autocompleteDebouncePattern = buildDebouncePattern(next)
+
+    def getAutocompleteDebounceMs(self, options: _AutocompleteRequestOptions) -> int:
+        if options["explicitTab"] or options["force"]:
             return 0
-        current_line = self.state.lines[self.state.cursorLine]
-        text_before_cursor = current_line[: self.state.cursorCol]
-        is_symbol_autocomplete = (
-            re.search(r'(?:^|[ \t])(?:@(?:"[^"]*|[^\s]*)|#[^\s]*)$', text_before_cursor) is not None
-        )
-        return ATTACHMENT_AUTOCOMPLETE_DEBOUNCE_MS if is_symbol_autocomplete else 0
+
+        currentLine = jsIndex(self.state.lines, self.state.cursorLine) or ""
+        textBeforeCursor = currentLine[: self.state.cursorCol]
+        return ATTACHMENT_AUTOCOMPLETE_DEBOUNCE_MS if self.autocompleteDebouncePattern.test(textBeforeCursor) else 0
 
     async def runAutocompleteRequest(
         self,
-        *,
-        request_id: int,
-        controller: _AutocompleteAbortController,
+        requestId: int,
+        controller: AbortController,
         snapshotText: str,
         snapshotLine: int,
         snapshotCol: int,
-        force: bool,
-        explicitTab: bool,
+        options: _AutocompleteRequestOptions,
     ) -> None:
-        if self.autocompleteProvider is None:
+        if not self.autocompleteProvider:
             return
 
         suggestions = await self.autocompleteProvider.getSuggestions(
             self.state.lines,
             self.state.cursorLine,
             self.state.cursorCol,
-            {"signal": controller.signal, "force": force},
+            {"signal": controller.signal, "force": options["force"]},
         )
 
-        if not self.isAutocompleteRequestCurrent(
-            requestId=request_id,
-            controller=controller,
-            snapshotText=snapshotText,
-            snapshotLine=snapshotLine,
-            snapshotCol=snapshotCol,
-        ):
+        if not self.isAutocompleteRequestCurrent(requestId, controller, snapshotText, snapshotLine, snapshotCol):
             return
 
         self.autocompleteAbort = None
 
-        if suggestions is None or not isinstance(suggestions.items, list) or not suggestions.items:
+        if not suggestions or not isinstance(suggestions.items, list) or len(suggestions.items) == 0:
             self.cancelAutocomplete()
             self.tui.requestRender()
             return
 
-        if force and explicitTab and len(suggestions.items) == 1:
+        if options["force"] and options["explicitTab"] and len(suggestions.items) == 1:
+            item = suggestions.items[0]
             self.pushUndoSnapshot()
             self.lastAction = None
-            self.applyAutocompleteSelection(suggestions.items[0], suggestions.prefix)
-            if self.onChange is not None:
+            result = self.autocompleteProvider.applyCompletion(
+                self.state.lines,
+                self.state.cursorLine,
+                self.state.cursorCol,
+                item,
+                suggestions.prefix,
+            )
+            self.state.lines = result["lines"]
+            self.state.cursorLine = result["cursorLine"]
+            self.setCursorCol(result["cursorCol"])
+            if self.onChange:
                 self.onChange(self.getText())
             self.tui.requestRender()
             return
 
-        self.applyAutocompleteSuggestions(suggestions, "force" if force else "regular")
+        self.applyAutocompleteSuggestions(suggestions, "force" if options["force"] else "regular")
         self.tui.requestRender()
 
     def isAutocompleteRequestCurrent(
         self,
-        *,
         requestId: int,
-        controller: _AutocompleteAbortController,
+        controller: AbortController,
         snapshotText: str,
         snapshotLine: int,
         snapshotCol: int,
@@ -1776,27 +2227,26 @@ class Editor:
             and self.state.cursorCol == snapshotCol
         )
 
-    def applyAutocompleteSelection(self, item: AutocompleteItem | SelectItem, prefix: str | None = None) -> None:
-        if self.autocompleteProvider is None:
-            return
-        result = self.autocompleteProvider.applyCompletion(
-            self.state.lines,
-            self.state.cursorLine,
-            self.state.cursorCol,
-            item,
-            self.autocompletePrefix if prefix is None else prefix,
-        )
-        self.state.lines = list(result["lines"])  # type: ignore[index]
-        self.state.cursorLine = int(result["cursorLine"])  # type: ignore[index]
-        self.setCursorCol(int(result["cursorCol"]))  # type: ignore[index]
-
-    def applyAutocompleteSuggestions(self, suggestions: AutocompleteSuggestions, state: str) -> None:
+    def applyAutocompleteSuggestions(
+        self, suggestions: AutocompleteSuggestions, state: Literal["regular", "force"]
+    ) -> None:
         self.autocompletePrefix = suggestions.prefix
         self.autocompleteList = self.createAutocompleteList(suggestions.prefix, suggestions.items)
-        best_match_index = self.getBestAutocompleteMatchIndex(suggestions.items, suggestions.prefix)
-        if best_match_index >= 0 and self.autocompleteList is not None:
-            self.autocompleteList.setSelectedIndex(best_match_index)
+
+        bestMatchIndex = self.getBestAutocompleteMatchIndex(suggestions.items, suggestions.prefix)
+        if bestMatchIndex >= 0:
+            self.autocompleteList.setSelectedIndex(bestMatchIndex)
+
         self.autocompleteState = state
+
+    def cancelAutocompleteRequest(self) -> None:
+        self.autocompleteStartToken += 1
+        if self.autocompleteDebounceTimer:
+            self.autocompleteDebounceTimer.cancel()
+            self.autocompleteDebounceTimer = None
+        if self.autocompleteAbort is not None:
+            self.autocompleteAbort.abort()
+        self.autocompleteAbort = None
 
     def clearAutocompleteUi(self) -> None:
         self.autocompleteState = None
@@ -1807,22 +2257,13 @@ class Editor:
         self.cancelAutocompleteRequest()
         self.clearAutocompleteUi()
 
-    def cancelAutocompleteRequest(self) -> None:
-        self.autocompleteStartToken += 1
-        if self.autocompleteDebounceTimer is not None:
-            self.autocompleteDebounceTimer.cancel()
-            self.autocompleteDebounceTimer = None
-        if self.autocompleteAbort is not None:
-            self.autocompleteAbort.abort()
-            self.autocompleteAbort = None
-
     def isShowingAutocomplete(self) -> bool:
         return self.autocompleteState is not None
 
     def updateAutocomplete(self) -> None:
-        if self.autocompleteProvider is None or self.autocompleteState is None:
+        if not self.autocompleteState or not self.autocompleteProvider:
             return
-        self.requestAutocomplete(force=self.autocompleteState == "force", explicitTab=False)
+        self.requestAutocomplete({"force": self.autocompleteState == "force", "explicitTab": False})
 
 
 __all__ = [
@@ -1830,4 +2271,5 @@ __all__ = [
     "EditorOptions",
     "EditorTheme",
     "TextChunk",
-    ]
+    "wordWrapLine",
+]

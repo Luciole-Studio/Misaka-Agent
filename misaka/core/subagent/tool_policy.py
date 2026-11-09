@@ -33,6 +33,10 @@ _ALIASES = {
     "doc_list": "Glob", "doc_outline": "Read", "doc_read": "Read", "doc_page_image": "Read",
     "doc_find": "Grep", "doc_verify": "Grep", "doc_add": "Write",
     "browser_exec": "ExecuteExtraTool", "ask_user": "AskUserQuestion",
+    # The MCP extension's doors to tools it does not declare directly (exposure `codemode`, `deferred`): to an
+    # async child they are what CCB's extra-tool search and execution are, so MCP stays in reach as it was when
+    # every MCP tool was an `mcp__` tool.
+    "tool_search": "SearchExtraTools", "codemode": "ExecuteExtraTool",
 }
 _CANONICAL = {name.casefold(): name for name in (
     ALL_AGENT_DISALLOWED_TOOLS | ASYNC_AGENT_ALLOWED_TOOLS | IN_PROCESS_TEAMMATE_ALLOWED_TOOLS | {"Agent", "Workflow"}

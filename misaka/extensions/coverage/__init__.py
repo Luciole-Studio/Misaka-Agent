@@ -23,8 +23,12 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from itertools import combinations
 
-from misaka.ai.utils.user_agent import get_misaka_user_agent
+from misaka.ai.utils.pi_user_agent import getPiUserAgent
+from misaka.ai.utils.typebox_helpers import typeboxSchema
 
+# `builtin:coverage`, like every bundled extension: hidden from the startup list, and disabled with
+# `-builtin:coverage` in the `extensions` setting.
+BUILTIN = True
 SESSION_KINDS = {"foreground", "dm", "card", "bare"}
 API = "https://api.openalex.org"
 LIMIT = 8
@@ -74,7 +78,7 @@ def _get(path, **params):
         params["api_key"] = os.environ[KEY_ENV]
     url = f"{API}{path}?{urllib.parse.urlencode(params)}"
     request = urllib.request.Request(
-        url, headers={"User-Agent": f"{get_misaka_user_agent()} coverage-scan"})
+        url, headers={"User-Agent": f"{getPiUserAgent()} coverage-scan"})
     try:
         with urllib.request.urlopen(request, timeout=25) as response:
             return json.load(response)
@@ -233,7 +237,7 @@ def register(harn):
         description="Show where a question lives in the literature (OpenAlex titles and abstracts): each facet of "
                     "the question alone, all together and in pairs, grouped by subfield, topic, language and "
                     "publication type, to help check a research design for overlooked fields.",
-        parameters=ScanParams.model_json_schema(), execute=execute,
+        parameters=typeboxSchema(ScanParams), execute=execute,
         promptSnippet="See which fields of the literature discuss a question",
         promptGuidelines=[("Use coverage_scan when checking a research design for overlooked fields: cut the "
                           "question into facets and give each its alternative terms, in the languages its "

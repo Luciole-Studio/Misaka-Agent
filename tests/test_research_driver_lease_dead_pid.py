@@ -29,7 +29,7 @@ def _dead_pid():
 
 
 def _hold(con, run_id, lock):
-    con.execute("UPDATE research_runs SET driver_lock=?, driver_expires=? WHERE id=?",
+    con.execute("UPDATE graphs SET lease_token=?, lease_expires=? WHERE id=?",
                 (lock, int(time.time()) + 300, run_id))
 
 

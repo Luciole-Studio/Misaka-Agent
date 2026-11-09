@@ -17,21 +17,9 @@ import hashlib
 import json
 import os
 import re
-from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
-
+from misaka.core.network.card_contract import Finding
 from misaka.core.research import runs
-
-
-class Finding(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    text: str = Field(min_length=1)
-    claim_type: Literal["fact", "inference", "interpretation", "normative"] = "fact"
-    quote: str = ""
-    source_file: str | None = Field(None, description="Source path or locator, if applicable.")
-    doc_id: str | None = None
-    page: int | None = Field(None, ge=1, strict=True)
 
 
 def findings(con, run_id, *, branch_id=None, task_id=None, limit=None, offset=0):
@@ -98,7 +86,7 @@ def ingest_report(con, run, task, report):
         if source:
             artifacts[source] = row
     link = con.execute(
-        "SELECT branch_id FROM research_run_tasks WHERE run_id=? AND task_id=?",
+        "SELECT branch_id FROM research_cards WHERE run_id=? AND task_id=?",
         (run["id"], task["id"]),
     ).fetchone()
     made, made_claims = 0, 0

@@ -17,14 +17,14 @@ import json
 
 import pytest
 
-from misaka.core.tools.office import create_office_tool_definition
+from misaka.core.tools.office import createOfficeToolDefinition
 
 importlib.import_module("docx")
 importlib.import_module("openpyxl")
 
 
 async def _office(cwd, **params):
-    tool = create_office_tool_definition(str(cwd))
+    tool = createOfficeToolDefinition(str(cwd))
     result = await tool.execute("call-1", params, None, None, None)
     return "\n".join(part.text for part in result.content if hasattr(part, "text"))
 
@@ -260,22 +260,23 @@ def test_office_is_a_registered_tool_with_a_prompt_snippet():
     learns it exists."""
     from misaka.core import tools
 
-    assert "office" in tools.all_tool_names
-    assert tools.create_tool_definition("office", ".").promptSnippet
+    assert "office" in tools.allToolNames
+    assert tools.createToolDefinition("office", ".").promptSnippet
 
 
 async def test_office_is_active_by_default(tmp_path):
     """It is the only way to produce a deliverable, so it has to be in the default set --
-    behind a flag it would be a capability nobody uses. Three lists decide that and they
-    are separate: the sdk's default, and the hardcoded fallbacks in system_prompt and
-    agent_session that apply when no list was configured."""
-    import inspect
+    behind a flag it would be a capability nobody uses. settings_manager's DEFAULT_TOOL_NAMES
+    decides it for the sdk and for the fallbacks of system_prompt and agent_session that apply
+    when no list was configured."""
+    from misaka.core.settings_manager import DEFAULT_TOOL_NAMES
+    from misaka.core.system_prompt import normalizeBuildSystemPromptOptions
+    from tests.suite_harness import createHarness
 
-    from misaka.core import agent_session, sdk, system_prompt
-
-    for module in (sdk, system_prompt, agent_session):
-        source = inspect.getsource(module)
-        assert '"read", "bash", "edit", "write", "office"' in source, module.__name__
+    assert "office" in DEFAULT_TOOL_NAMES
+    assert "office" in normalizeBuildSystemPromptOptions({"cwd": "."})["selectedTools"]
+    async with createHarness() as harness:
+        assert "office" in harness.session.getActiveToolNames()
 
 
 def test_office_is_governed_like_the_other_mutating_tools():
@@ -304,7 +305,7 @@ def test_the_prompt_contribution_is_direct_module_api(tmp_path):
     from misaka.core.tools import office as office_module
 
     contribution = office_module.officeToolSystemPromptContribution
-    definition = create_office_tool_definition(str(tmp_path))
+    definition = createOfficeToolDefinition(str(tmp_path))
 
     assert contribution is office_module.office_tool_system_prompt_contribution
     assert definition.promptSnippet == contribution["snippet"]

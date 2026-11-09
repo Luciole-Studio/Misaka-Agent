@@ -6,7 +6,7 @@ literal `path` key. Used by execution and permission checks so secondary outputs
 import os
 from copy import deepcopy
 
-from misaka.core.tools.path_utils import resolve_to_cwd
+from misaka.core.tools.path_utils import resolveToCwd
 
 
 def pdf_path(path, args):
@@ -23,7 +23,7 @@ def resolve_ops(ops, cwd):
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"Office path field {key!r} must be a string")
             if value:
-                args[key] = resolve_to_cwd(value, cwd)
+                args[key] = resolveToCwd(value, cwd)
 
     for item in resolved:
         op, args = next(iter(item.items()))

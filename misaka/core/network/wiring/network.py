@@ -10,6 +10,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from misaka.ai.utils.typebox_helpers import typeboxSchema
 from misaka.config import CFG, current_config, sisters
 from misaka.config.identity import (
     COORDINATOR_APPROVAL,
@@ -18,10 +19,10 @@ from misaka.config.identity import (
 )
 from misaka.core.network import validate
 from misaka.core.network.sister_runtime import SisterRuntime
-from misaka.core.platform import budget, toolkit
+from misaka.core.platform import budget, owners, toolkit
 from misaka.core.platform import tasks as db
 from misaka.core.platform.prompt_guard import untrusted
-from misaka.core.research.tool_policy import DRIVER_OWNED_TOOLS
+from misaka.core.platform.vocabulary import DRIVER_OWNED_TOOLS
 from misaka.core.wiring import ToolCollector
 
 _CON = None
@@ -56,12 +57,12 @@ def _session_line(ctx, limit=10):
     current = getattr(getattr(ctx, "sessionManager", None), "sessionFile", None)
     if not current:
         return ids
-    from misaka.core.session_manager import read_session_header
+    from misaka.core.session_manager import readSessionHeader
     for _ in range(limit):
-        current = (read_session_header(current) or {}).get("parentSession")
+        current = (readSessionHeader(current) or {}).get("parentSession")
         if not current:
             break
-        parent_id = (read_session_header(current) or {}).get("id")
+        parent_id = (readSessionHeader(current) or {}).get("id")
         if parent_id and parent_id not in ids:
             ids.append(parent_id)
     return ids
@@ -118,7 +119,7 @@ def _text(s):
 
 def _schema(model):
     "Convert a Pydantic model to the JSON schema expected by the harness."
-    return model.model_json_schema()
+    return typeboxSchema(model)
 
 
 def _task_ids(args):
@@ -154,20 +155,15 @@ def _require_project_tasks(ctx, args):
 
 
 def _require_ordinary_tasks(task_ids):
-    """A normal Board entry point must not take over cards owned by a research run."""
+    """A normal Board entry point must not take over cards a workflow drives: their
+    owner refuses (``platform.owners``)."""
     if not task_ids:
         return
-    from misaka.core.research import runs
-
-    contexts = runs.task_contexts(_con())
+    con = _con()
     for task_id in task_ids:
-        context = contexts.get(task_id)
-        if context:
-            raise ValueError(
-                f"Card {task_id} belongs to research run {context['run_id']}; its driver owns "
-                "assignment, dependencies and review. Use the current research phase tools, "
-                f"or ask the user to run /research resume {context['run_id']} for a paused run."
-            )
+        owner, context = owners.card(con, task_id)
+        if owner is not None:
+            owner.guard(con, task_id, context)
 
 
 def _register(harn, name, label, description, parameters, snippet=None, guidelines=None):
@@ -238,9 +234,11 @@ def _install(harn, runtime):
             lines.insert(0, f"(showing the last {len(rows)} of {total} cards)")
         if mine and any(line.startswith("*") for line in lines):
             lines.append("* = created in this conversation")
-        # The cap is each research run's (``/research status`` reads a run against it); the board's
-        # total is everything recorded, contact turns and plain cards included, and has no mode.
+        # The cap is each workflow run's, as its owner sets it; the board's total is everything
+        # recorded, contact turns and plain cards included, and has no mode.
         spent = budget.spent(con)
+        caps = "; ".join(f"{owner.token_cap_setting} applies to each {owner.scope_label}"
+                         for owner in owners.registered() if owner.token_cap_setting)
         from misaka.core.network import roster as roster_mod
         named = ", ".join(
             f"{s} ({roster_mod.describe_line(s, root=_cfg()['profiles_root']) or 'no description'})"
@@ -250,7 +248,7 @@ def _install(harn, runtime):
             f"Sister roster: {named or '(empty)'}"
             f"{' (use misaka_sister_view for introduction excerpts)' if named else ''}\n"
             + (f"Allies (external agents, assigned cards like a Sister): {allies}\n" if allies else "") +
-            f"Tokens recorded on this board: {spent:,} (research.token_cap applies to each research run)\n\n"
+            f"Tokens recorded on this board: {spent:,}" + (f" ({caps})" if caps else "") + "\n\n"
         )
         return _text(header + ("\n".join(lines) if lines else "(no task cards)"))
 
@@ -516,9 +514,10 @@ def _install(harn, runtime):
         block: bool = Field(False, description=(
             "Leave false to inspect the task's current state and return immediately. "
             "Set true only when the user asked to wait for the result, or when you asked its "
-            "Sister something you must hear before going on (a finished card woken by your "
-            "SendMessage answers and completes again): the call then holds until the task "
-            "reaches an accepted, failed, or stopped state."
+            "Sister something you must hear before going on (a finished card your SendMessage "
+            "reached answers it and stays finished): the call then holds until the task reaches "
+            "an accepted, failed, or stopped state, and until a message it is answering is "
+            "answered (its `consultation` says how that ended)."
         ))
         timeout: int = Field(30_000, ge=0, le=600_000, description=(
             "Maximum wait in milliseconds; applies only when block is true."
@@ -722,8 +721,8 @@ def _install(harn, runtime):
         row = db.get(_con(), params.task_id)
         if row is not None and not row["session_file"]:
             from misaka.config import sessions as session_roots
-            from misaka.core.session_manager import find_most_recent_session
-            if find_most_recent_session(session_roots.card_session_dir(row)) is None:
+            from misaka.core.session_manager import findMostRecentSession
+            if findMostRecentSession(session_roots.card_session_dir(row)) is None:
                 return _text(f"Card {params.task_id} never ran: it was stopped before its first turn, so "
                              "there is no session to show. misaka_sister_message (confirmed=true) starts "
                              "its first attempt with your note; misaka_card_requeue puts it back in the "
@@ -989,8 +988,9 @@ def _install(harn, runtime):
         harn,
         name="misaka_card_requeue", label="Requeue task card",
         description="Put a stopped or failed card back in the queue as a fresh attempt, the way the board "
-                    "reopens one itself. Research cards are not requeued here: their run is resumed by the "
-                    "user with /research resume.",
+                    "reopens one itself. Cards a workflow drives are not requeued here: the user resumes "
+                    "their run" + "".join(f" ({owner.name}: {owner.resume_command})" for owner in owners.registered()
+                                          if owner.resume_command) + ".",
         snippet="Requeue a stopped or failed card",
         guidelines=[COORDINATOR_BOARD_STATUS + " Requeue a stopped or failed card with misaka_card_requeue, and "
                     "ask the user first. Requeueing only puts the card back in the queue; misaka_dispatch is what "
@@ -1100,7 +1100,9 @@ class NetworkPart:
         self._pending_watch = asyncio.ensure_future(self._watch_pending(ctx))
 
     async def before_agent_start(self, event, ctx):
-        if self.receive_notifications:
+        # A user's turn collects what is pending. A run a notification woke does not: the watcher
+        # below already delivers, and each wake would repeat the board hint.
+        if self.receive_notifications and event.get("messageType", "user") == "user":
             asyncio.ensure_future(self._collect_pending(ctx))
 
     async def session_shutdown(self, event, ctx):

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 def usage_key(entry, profile):
-    origin = Path(entry.get("origin_dir", entry["dir"])).resolve()
+    origin = Path(entry["dir"]).resolve()
     root = (Path(profile) / "skills").resolve()
     if origin.is_relative_to(root):
         return origin.relative_to(root).as_posix()
@@ -205,7 +205,7 @@ async def _run_review_session(scope, prompt):
         settle_after_prompt,
     )
     from misaka.core.resource_loader import DefaultResourceLoader
-    from misaka.core.sdk import create_agent_session
+    from misaka.core.sdk import createAgentSession
     from misaka.core.session_manager import SessionManager
     from misaka.utils.async_lifecycle import settle
 
@@ -231,9 +231,9 @@ async def _run_review_session(scope, prompt):
         options = {}
         if scope.model is not None:
             options["model"] = scope.model
-        if scope.model_registry is not None:
-            options.update(modelRegistry=scope.model_registry, authStorage=scope.model_registry.authStorage)
-        built = await create_agent_session({"cwd": str(scope.workspace), "agentDir": str(scope.profile),
+        if scope.model_runtime is not None:
+            options.update(modelRuntime=scope.model_runtime)
+        built = await createAgentSession({"cwd": str(scope.workspace), "agentDir": str(scope.profile),
             "noTools": "builtin", "tools": [tool.name for tool in part.tools], "customTools": part.tools,
             "parts": [part], "resourceLoader": loader,
             "sessionManager": SessionManager.inMemory(str(scope.workspace)), **options})

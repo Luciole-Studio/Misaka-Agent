@@ -1,78 +1,73 @@
-"""Interactive session picker entry point for CLI resume flows."""
+"""Translated from pi's ``coding-agent/src/cli/session-picker.ts`` (v1.1.0).
+
+TUI session selector for --resume flag
+"""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Protocol
+from typing import Any
 
 from misaka.core.keybindings import KeybindingsManager
 from misaka.core.session_manager import SessionInfo, SessionListProgress
-from misaka.ui.tui import TUI, ProcessTerminal, setKeybindings
-from misaka.ui.tui.interactive.components.session_selector import (
+from misaka.core.settings_manager import SettingsManager
+from misaka.modes.interactive.components.session_selector import (
     SessionSelectorComponent,
 )
+from misaka.ui.tui import setKeybindings
 
-type SessionsLoader = Callable[[SessionListProgress | None], Awaitable[list[SessionInfo]]]
+from .startup_ui import createStartupTui, startStartupTui
+
+type SessionsLoader = Callable[[SessionListProgress | None, Any], Awaitable[list[SessionInfo]]]
 
 
-class _SessionSelectorComponentLike(Protocol):
-    def getSessionList(self) -> object: ...
-
-
-async def select_session(
+async def selectSession(
     currentSessionsLoader: SessionsLoader,
     allSessionsLoader: SessionsLoader,
+    settingsManager: SettingsManager,
 ) -> str | None:
-    return await _select_session(currentSessionsLoader, allSessionsLoader)
+    """Show TUI session selector and return selected session path or null if cancelled"""
+    ui = await createStartupTui(settingsManager)
+    result: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
+    keybindings = KeybindingsManager.create()
+    setKeybindings(keybindings)
+    resolved = False
 
+    def onSelect(path: str) -> None:
+        nonlocal resolved
+        if not resolved:
+            resolved = True
+            ui.stop()
+            result.set_result(path)
 
-async def _select_session(
-    currentSessionsLoader: SessionsLoader,
-    allSessionsLoader: SessionsLoader,
-    *,
-    terminalFactory: type[ProcessTerminal] = ProcessTerminal,
-    uiFactory: type[TUI] = TUI,
-    componentFactory: type[SessionSelectorComponent] = SessionSelectorComponent,
-    keybindingsFactory: Callable[[], KeybindingsManager] = KeybindingsManager.create,
-    setKeybindingsFn: Callable[[KeybindingsManager], None] = setKeybindings,
-) -> str | None:
-    loop = asyncio.get_running_loop()
-    done: asyncio.Future[str | None] = loop.create_future()
-    ui = uiFactory(terminalFactory())
-    keybindings = keybindingsFactory()
-    setKeybindingsFn(keybindings)
-    closed = False
+    def onCancel() -> None:
+        nonlocal resolved
+        if not resolved:
+            resolved = True
+            ui.stop()
+            result.set_result(None)
 
-    def finish(result: str | None = None, *, exit_immediately: bool = False) -> None:
-        nonlocal closed
-        if closed:
-            return
-        closed = True
+    def onExit() -> None:
         ui.stop()
-        if exit_immediately:
-            done.set_exception(SystemExit(0))
-            return
-        done.set_result(result)
+        # MISAKA fork: `SystemExit` in place of `process.exit(0)`.
+        if not result.done():
+            result.set_exception(SystemExit(0))
 
-    selector: _SessionSelectorComponentLike = componentFactory(
+    selector = SessionSelectorComponent(
         currentSessionsLoader,
         allSessionsLoader,
-        lambda path: finish(path, exit_immediately=False),
-        lambda: finish(None, exit_immediately=False),
-        lambda: finish(None, exit_immediately=True),
+        onSelect,
+        onCancel,
+        onExit,
         lambda: ui.requestRender(),
         {"showRenameHint": False, "keybindings": keybindings},
     )
+
     ui.addChild(selector)
     ui.setFocus(selector.getSessionList())
-    try:
-        ui.start()
-        return await done
-    finally:
-        if not closed:
-            closed = True
-            ui.stop()
+    startStartupTui(ui, settingsManager)
+    return await result
 
 
-__all__ = ["select_session"]
+__all__ = ["selectSession"]

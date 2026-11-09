@@ -42,6 +42,39 @@ def addUsageToTotals(totals: UsageTotals, usage: Usage | Mapping[str, Any]) -> N
     totals.cost += float(read_field(cost, "total", 0) or 0)
 
 
+def combineUsage(first: Usage, second: Usage) -> Usage:
+    """Sum of two usages, keeping the optional token splits when either side reports them."""
+    from misaka.ai.types import Usage
+
+    # A tool may report its usage as a plain mapping.
+    first = Usage.model_validate(first) if isinstance(first, Mapping) else first
+    second = Usage.model_validate(second) if isinstance(second, Mapping) else second
+    return Usage(
+        input=first.input + second.input,
+        output=first.output + second.output,
+        cacheRead=first.cacheRead + second.cacheRead,
+        cacheWrite=first.cacheWrite + second.cacheWrite,
+        cacheWrite1h=(
+            (first.cacheWrite1h or 0) + (second.cacheWrite1h or 0)
+            if first.cacheWrite1h is not None or second.cacheWrite1h is not None
+            else None
+        ),
+        reasoning=(
+            (first.reasoning or 0) + (second.reasoning or 0)
+            if first.reasoning is not None or second.reasoning is not None
+            else None
+        ),
+        totalTokens=first.totalTokens + second.totalTokens,
+        cost={
+            "input": first.cost.input + second.cost.input,
+            "output": first.cost.output + second.cost.output,
+            "cacheRead": first.cost.cacheRead + second.cost.cacheRead,
+            "cacheWrite": first.cost.cacheWrite + second.cost.cacheWrite,
+            "total": first.cost.total + second.cost.total,
+        },
+    )
+
+
 def getUsageCostBreakdown(
     entries: Sequence[SessionEntry],
 ) -> list[UsageCostBreakdownEntry]:
@@ -97,6 +130,7 @@ __all__ = [
     "UsageCostBreakdownEntry",
     "UsageTotals",
     "addUsageToTotals",
+    "combineUsage",
     "createUsageTotals",
     "getUsageCostBreakdown",
 ]

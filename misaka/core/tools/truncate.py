@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
+
+from misaka.utils.js import formatNumber
 
 DEFAULT_MAX_LINES = 2000
 DEFAULT_MAX_BYTES = 50 * 1024
@@ -30,7 +34,7 @@ class TruncationOptions:
     maxBytes: int | None = None
 
 
-def _split_lines_for_counting(content: str) -> list[str]:
+def splitLinesForCounting(content: str) -> list[str]:
     if not content:
         return []
     lines = content.split("\n")
@@ -39,21 +43,26 @@ def _split_lines_for_counting(content: str) -> list[str]:
     return lines
 
 
-def format_size(bytes_count: int) -> str:
+def formatSize(bytes_count: int) -> str:
     if bytes_count < 1024:
-        return f"{bytes_count}B"
+        return f"{formatNumber(bytes_count)}B"
     if bytes_count < 1024 * 1024:
-        return f"{bytes_count / 1024:.1f}KB"
-    return f"{bytes_count / (1024 * 1024):.1f}MB"
+        return f"{_to_fixed_1(bytes_count / 1024)}KB"
+    return f"{_to_fixed_1(bytes_count / (1024 * 1024))}MB"
 
 
-def truncate_head(content: str, options: TruncationOptions | None = None) -> TruncationResult:
+def _to_fixed_1(value: float) -> str:
+    """``value.toFixed(1)``: on an exact tie the larger digit wins, where ``format`` rounds to even."""
+    return str(Decimal(value).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+
+
+def truncateHead(content: str, options: TruncationOptions | None = None) -> TruncationResult:
     resolved = options or TruncationOptions()
     max_lines = resolved.maxLines if resolved.maxLines is not None else DEFAULT_MAX_LINES
     max_bytes = resolved.maxBytes if resolved.maxBytes is not None else DEFAULT_MAX_BYTES
 
     total_bytes = len(content.encode("utf-8"))
-    lines = _split_lines_for_counting(content)
+    lines = splitLinesForCounting(content)
     total_lines = len(lines)
 
     if total_lines <= max_lines and total_bytes <= max_bytes:
@@ -118,13 +127,13 @@ def truncate_head(content: str, options: TruncationOptions | None = None) -> Tru
     )
 
 
-def truncate_tail(content: str, options: TruncationOptions | None = None) -> TruncationResult:
+def truncateTail(content: str, options: TruncationOptions | None = None) -> TruncationResult:
     resolved = options or TruncationOptions()
     max_lines = resolved.maxLines if resolved.maxLines is not None else DEFAULT_MAX_LINES
     max_bytes = resolved.maxBytes if resolved.maxBytes is not None else DEFAULT_MAX_BYTES
 
     total_bytes = len(content.encode("utf-8"))
-    lines = _split_lines_for_counting(content)
+    lines = splitLinesForCounting(content)
     total_lines = len(lines)
 
     if total_lines <= max_lines and total_bytes <= max_bytes:
@@ -154,7 +163,7 @@ def truncate_tail(content: str, options: TruncationOptions | None = None) -> Tru
         if output_bytes + line_bytes > max_bytes:
             truncated_by = "bytes"
             if not output_lines:
-                truncated_line = _truncate_string_to_bytes_from_end(line, max_bytes)
+                truncated_line = truncateStringToBytesFromEnd(line, max_bytes)
                 output_lines.insert(0, truncated_line)
                 output_bytes = len(truncated_line.encode("utf-8"))
                 last_line_partial = True
@@ -181,7 +190,7 @@ def truncate_tail(content: str, options: TruncationOptions | None = None) -> Tru
     )
 
 
-def _truncate_string_to_bytes_from_end(value: str, max_bytes: int) -> str:
+def truncateStringToBytesFromEnd(value: str, max_bytes: int) -> str:
     encoded = value.encode("utf-8")
     if len(encoded) <= max_bytes:
         return value
@@ -192,25 +201,74 @@ def _truncate_string_to_bytes_from_end(value: str, max_bytes: int) -> str:
     return encoded[start:].decode("utf-8")
 
 
-def truncate_line(line: str, max_chars: int = GREP_MAX_LINE_LENGTH) -> dict[str, str | bool]:
+def truncateLine(line: str, max_chars: int = GREP_MAX_LINE_LENGTH) -> dict[str, str | bool]:
     if len(line) <= max_chars:
         return {"text": line, "wasTruncated": False}
     return {"text": f"{line[:max_chars]}... [truncated]", "wasTruncated": True}
 
 
-formatSize = format_size
-truncateHead = truncate_head
-truncateTail = truncate_tail
-truncateLine = truncate_line
+@dataclass(slots=True)
+class MiddleTruncationResult:
+    # The start and end of the content with a `…N chars truncated…` marker between them.
+    content: str
+    truncated: bool
+    # Characters left out.
+    removedChars: int
+    totalBytes: int
+    totalLines: int
+
+
+# `Buffer.from(content, "utf-8")` writes a lone surrogate as U+FFFD, where `str.encode` would raise.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def truncateMiddle(content: str, max_bytes: int) -> MiddleTruncationResult:
+    """Keep the start and the end of ``content``, half of ``max_bytes`` each, and replace the middle
+    with a ``…N chars truncated…`` marker, like Codex does for tool output. Cuts only at character
+    boundaries."""
+    buf = _LONE_SURROGATE.sub("�", content).encode("utf-8")
+    total_lines = len(splitLinesForCounting(content))
+    if len(buf) <= max_bytes:
+        return MiddleTruncationResult(
+            content=content, truncated=False, removedChars=0, totalBytes=len(buf), totalLines=total_lines
+        )
+
+    # Continuation bytes (10xxxxxx) are not character starts.
+    def is_boundary(index: int) -> bool:
+        return index >= len(buf) or (buf[index] & 0xC0) != 0x80
+
+    head_end = max_bytes // 2
+    while head_end > 0 and not is_boundary(head_end):
+        head_end -= 1
+    tail_start = len(buf) - (max_bytes - max_bytes // 2)
+    while tail_start < len(buf) and not is_boundary(tail_start):
+        tail_start += 1
+    head = buf[:head_end].decode("utf-8")
+    tail = buf[tail_start:].decode("utf-8")
+    removed_chars = len(buf[head_end:tail_start].decode("utf-8"))
+    return MiddleTruncationResult(
+        content=f"{head}…{removed_chars} chars truncated…{tail}",
+        truncated=True,
+        removedChars=removed_chars,
+        totalBytes=len(buf),
+        totalLines=total_lines,
+    )
+
+
 
 __all__ = [
     "DEFAULT_MAX_BYTES",
     "DEFAULT_MAX_LINES",
     "GREP_MAX_LINE_LENGTH",
+    "MiddleTruncationResult",
     "TruncationOptions",
     "TruncationResult",
     "formatSize",
     "truncateHead",
     "truncateLine",
+    "truncateMiddle",
     "truncateTail",
 ]
+
+# Kept for misaka/core/subagent, which imports these names.
+truncate_head = truncateHead

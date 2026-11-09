@@ -1,4 +1,8 @@
-"""Text extraction from message content, translated from pi's ``utils/text.ts``."""
+"""Translated from pi's ``packages/ai/src/utils/text.ts`` (v1.1.0).
+
+MISAKA fork: blocks and messages may be plain mappings as well as models (hand-built histories, extensions, durable
+records); upstream reads ``block.type`` either way.
+"""
 
 from __future__ import annotations
 
@@ -6,12 +10,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-def content_text(content: str | list[Any], separator: str = "\n") -> str:
-    """The text blocks of a message, joined.
-
-    Non-text blocks -- images, thinking, tool calls -- are dropped rather than rendered:
-    callers use this to read what was said, and a stringified tool call is not that.
-    """
+def contentText(content: str | list[Any], separator: str = "\n") -> str:
+    """Extract and join text from message content."""
     if isinstance(content, str):
         return content
     texts: list[str] = []
@@ -27,23 +27,23 @@ def content_text(content: str | list[Any], separator: str = "\n") -> str:
     return separator.join(texts)
 
 
-def get_system_message_text(message: Any) -> str:
+def getSystemMessageText(message: Any) -> str:
     """Render a system message as a complete prompt: its content followed by its sections."""
-    parts = [content_text(_field(message, "content"))]
+    parts = [contentText(_field(message, "content"))]
     for text in (_field(message, "sections") or {}).values():
         if text is not None:
             parts.append(text)
     return "\n\n".join(part for part in parts if len(part) > 0)
 
 
-def render_system_message_update(message: Any) -> str:
+def renderSystemMessageUpdate(message: Any) -> str:
     """Render a later system message for APIs that accept system messages mid-conversation.
 
     Section changes are framed by name so the model can relate them to the leading prompt.
     This framing is request-time only and may change between versions.
     """
     parts: list[str] = []
-    text = content_text(_field(message, "content"))
+    text = contentText(_field(message, "content"))
     if len(text) > 0:
         parts.append(text)
     for name, value in (_field(message, "sections") or {}).items():
@@ -63,4 +63,4 @@ def _field(message: Any, name: str) -> Any:
     return getattr(message, name, None)
 
 
-__all__ = ["content_text", "get_system_message_text", "render_system_message_update"]
+__all__ = ["contentText", "getSystemMessageText", "renderSystemMessageUpdate"]

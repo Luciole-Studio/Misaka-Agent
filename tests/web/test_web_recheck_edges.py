@@ -173,36 +173,54 @@ async def test_a_blocked_cached_redirect_does_not_discard_other_pages(monkeypatc
     assert len(list(tmp_path.rglob("*.md"))) == 1
 
 
-async def test_cancelled_xai_force_refresh_releases_lock_without_publishing(monkeypatch, tmp_path):
-    import asyncio
-    from types import SimpleNamespace
+async def _put(store, provider, record):
+    """Write one auth.json record through the store's CredentialStore ``modify``."""
+    from misaka.core.auth_storage import _to_runtime_credential
 
-    from misaka.ai.utils.oauth import OAuthCredentials
+    async def replace(_current):
+        return _to_runtime_credential(record, resolve_api_key=False)
+
+    await store.modify(provider, replace)
+
+
+async def test_cancelled_xai_force_refresh_still_persists_the_refresh_it_started(monkeypatch, tmp_path):
+    """pi's refreshStoredOAuthCredential: once the refresh starts the provider may already have rotated the refresh
+    token, so a caller that gives up does not discard it; the lock is released once it is persisted."""
+    import asyncio
+
+    from misaka.ai.auth.oauth import xai as xai_oauth
+    from misaka.ai.auth.types import OAuthCredential
     from misaka.core import auth_storage
     from misaka.core.web.backends import xai
 
     path = str(tmp_path / "auth.json")
     store = auth_storage.AuthStorage.create(path)
     original = {"type": "oauth", "access": "old", "refresh": "refresh", "expires": 9999999999999}
-    store.set("xai", original)
-    entered = asyncio.Event()
+    await _put(store, "xai", original)
+    entered, release = asyncio.Event(), asyncio.Event()
 
-    async def refresh(_credentials):
+    async def refresh(_refreshToken, _signal):
         entered.set()
-        await asyncio.Future()
-        return OAuthCredentials(access="unexpected", refresh="unexpected", expires=9999999999999)
+        await release.wait()
+        return OAuthCredential(type="oauth", access="rotated", refresh="rotated-refresh", expires=9999999999999)
 
-    monkeypatch.setattr(auth_storage, "getOAuthProvider", lambda _: SimpleNamespace(
-        refreshToken=refresh, getApiKey=lambda c: c.access))
+    monkeypatch.setattr(xai_oauth, "_refreshXaiToken", refresh)
     task = asyncio.create_task(xai._force_refresh_oauth_token(xai.OAuthAccount(store, None), "old"))
     await asyncio.wait_for(entered.wait(), 2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, 2)
+    release.set()
+    for _ in range(200):
+        # While the refresh holds the store lock a fresh reader cannot load the file and reads nothing.
+        current = auth_storage.AuthStorage.create(path).readState.data.get("xai")
+        if current is not None and current["access"] == "rotated":
+            break
+        await asyncio.sleep(0.01)
     writer = auth_storage.AuthStorage.create(path)
-    assert writer.get("xai") == original
-    await asyncio.wait_for(asyncio.to_thread(writer.logout, "xai"), 2)
-    assert auth_storage.AuthStorage.create(path).get("xai") is None
+    assert (writer.readState.data.get("xai")["access"], writer.readState.data.get("xai")["refresh"]) == ("rotated", "rotated-refresh")
+    await asyncio.wait_for(writer.delete("xai"), 2)
+    assert auth_storage.AuthStorage.create(path).readState.data.get("xai") is None
 
 
 def test_concurrent_download_publications_keep_every_complete_file(tmp_path):

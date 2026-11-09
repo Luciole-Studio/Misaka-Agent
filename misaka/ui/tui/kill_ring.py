@@ -1,37 +1,58 @@
-"""Ring buffer for Emacs-style kill and yank behavior."""
+"""Translated from pi-tui's ``packages/tui/src/kill-ring.ts`` (v1.1.0)."""
 
 from __future__ import annotations
 
-from collections import deque
+from typing import NotRequired, TypedDict
 
-MAX_KILLS = 60          # as in Emacs: old kills fall off the far end
+
+class KillRingPushOptions(TypedDict):
+    """The inline ``opts`` type of ``KillRing.push``."""
+
+    prepend: bool
+    accumulate: NotRequired[bool]
 
 
 class KillRing:
-    def __init__(self, limit: int = MAX_KILLS) -> None:
-        self._ring: deque[str] = deque(maxlen=max(1, limit))
+    """Ring buffer for Emacs-style kill/yank operations.
 
-    def push(self, text: str, opts: dict[str, bool]) -> None:
+    Tracks killed (deleted) text entries. Consecutive kills can accumulate
+    into a single entry. Supports yank (paste most recent) and yank-pop
+    (cycle through older entries).
+    """
+
+    def __init__(self) -> None:
+        self.ring: list[str] = []
+
+    def push(self, text: str, opts: KillRingPushOptions) -> None:
+        """Add text to the kill ring.
+
+        @param text - The killed text to add
+        @param opts - Push options
+        @param opts.prepend - If accumulating, prepend (backward deletion) or append (forward deletion)
+        @param opts.accumulate - Merge with the most recent entry instead of creating a new one
+        """
         if not text:
             return
 
-        if opts.get("accumulate") and self._ring:
-            last = self._ring.pop()
-            self._ring.append(text + last if opts["prepend"] else last + text)
-            return
-
-        self._ring.append(text)
+        if opts.get("accumulate") and len(self.ring) > 0:
+            last = self.ring.pop()
+            self.ring.append(text + last if opts["prepend"] else last + text)
+        else:
+            self.ring.append(text)
 
     def peek(self) -> str | None:
-        return self._ring[-1] if self._ring else None
+        """Get most recent entry without modifying the ring."""
+        return self.ring[len(self.ring) - 1] if len(self.ring) > 0 else None
 
     def rotate(self) -> None:
-        if len(self._ring) > 1:
-            self._ring.appendleft(self._ring.pop())
+        """Move last entry to front (for yank-pop cycling)."""
+        if len(self.ring) > 1:
+            last = self.ring.pop()
+            self.ring.insert(0, last)
 
     @property
     def length(self) -> int:
-        return len(self._ring)
+        return len(self.ring)
 
 
-__all__ = ["MAX_KILLS", "KillRing"]
+__all__ = ["KillRing", "KillRingPushOptions"]

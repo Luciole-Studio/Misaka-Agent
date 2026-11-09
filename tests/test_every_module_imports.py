@@ -15,7 +15,13 @@ import misaka
 # The vendored LCM upstream is checked against its own pins; its modules are not misaka's.
 SKIP = ("misaka.extensions.misaka_lcm.vendor", "misaka.extensions.misaka_lcm.native")
 # Windows-only modules, imported only there.
-WINDOWS_ONLY = {"misaka.ui.panel.conpty", "misaka.utils.win_clipboard", "misaka.utils.win_console"}
+WINDOWS_ONLY = {
+    "misaka.env.daemon.system.windows",
+    "misaka.ui.panel.conpty",
+    "misaka.utils.libuv_windows",
+    "misaka.utils.win_clipboard",
+    "misaka.utils.win_console",
+}
 failed = []
 for info in pkgutil.walk_packages(misaka.__path__, "misaka.", onerror=lambda name: failed.append(name)):
     name = info.name

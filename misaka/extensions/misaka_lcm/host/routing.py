@@ -46,8 +46,8 @@ def scope(registry, main_runtime, provider, base_url, auth):
 def provider_names():
     registry = llm._REGISTRY.get()
     if registry is None:
-        from misaka.ai.models import get_providers
-        return set(get_providers())
+        from misaka.ai.compat import getProviders
+        return set(getProviders())
     return {model.provider for model in registry.getAll()}
 
 
@@ -67,11 +67,11 @@ def _normalize_chain_label(provider):
 
 
 def _custom_health_base_url(provider, explicit_base_url=None):
-    from misaka.ai.models import get_providers
+    from misaka.ai.compat import getProviders
 
     from ..native.route_identity import normalize_route_base_url
     provider = _normalize_chain_label(provider)
-    if provider not in get_providers() or provider in {'custom', 'local/custom'}:
+    if provider not in getProviders() or provider in {'custom', 'local/custom'}:
         state = _STATE.get()
         return normalize_route_base_url(explicit_base_url or (state.base_url if state.provider == provider else ''))
     return ''
@@ -161,8 +161,8 @@ def _get_provider_chain():
     registry = _STATE.get().registry
     names = list(dict.fromkeys(model.provider for model in registry.getAll()))
     # Same discovery tiers as Hermes; Codex OAuth is explicit/main-only.
-    from misaka.ai.models import get_providers
-    builtin = set(get_providers())
+    from misaka.ai.compat import getProviders
+    builtin = set(getProviders())
     names.sort(key=lambda name: 0 if name == 'openrouter' else 1 if name == 'nous' else 2 if name not in builtin else 3)
     return [(name, lambda name=name: resolve_provider_client(name))
             for name in names if name != 'openai-codex']

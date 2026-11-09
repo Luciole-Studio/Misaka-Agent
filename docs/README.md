@@ -13,6 +13,7 @@ Find the page for what you want to do. If you have not installed MISAKA yet, sta
 | find my way around the panel: tabs, panes, keys, saved conversations | [The panel](guide/panel.md) |
 | sign in to a provider, pick models, use a local model | [Models](guide/models.md) |
 | give agents my PDFs and books, set up web search | [Documents and the web](guide/sources.md) |
+| read materials closely with Last Order, compare and reread readings | [Reading materials](guide/reading.md) |
 | fix something that went wrong | [Troubleshooting](guide/troubleshooting.md) |
 | look up a command | [Commands](reference/commands.md) |
 | change a setting | [Configuration](reference/configuration.md) |
@@ -38,7 +39,8 @@ Find the page for what you want to do. If you have not installed MISAKA yet, sta
 ## All pages
 
 - [Getting started](getting-started.md) (also in [简体中文](getting-started.zh-CN.md) and [日本語](getting-started.ja.md)): install, first run, first research question, updating and uninstalling
-- Guides: [research runs](guide/research.md), [the team](guide/team.md), [the panel](guide/panel.md),
+- Guides: [research runs](guide/research.md), [reading materials](guide/reading.md) (also in
+  [简体中文](guide/reading.zh-CN.md)), [the team](guide/team.md), [the panel](guide/panel.md),
   [models](guide/models.md), [documents and the web](guide/sources.md),
   [troubleshooting](guide/troubleshooting.md)
 - Reference: [commands](reference/commands.md), [configuration](reference/configuration.md)

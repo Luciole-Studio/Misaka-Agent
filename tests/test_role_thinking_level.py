@@ -14,7 +14,7 @@ from test_subagent_native_startup import isolated as isolated  # noqa: PLC0414
 from misaka.config import home
 from misaka.core.network import roster
 from misaka.core.settings_manager import SettingsManager
-from misaka.ui.tui.interactive import interactive_mode
+from misaka.modes.interactive import interactive_mode
 
 
 def _reasoning_models():
@@ -94,12 +94,12 @@ def test_a_failed_save_changes_neither_the_file_nor_the_session():
               session=NS(setThinkingLevel=lambda *args: calls.append(args)),
               footer=NS(invalidate=lambda: None), updateEditorBorderColor=lambda: None,
               showStatus=lambda text: calls.append(("status", text)), showError=errors.append)
-    interactive_mode.InteractiveMode._apply_thinking_level(mode, "high", persist=True)
+    interactive_mode.InteractiveMode.selectThinkingLevel(mode, "high", True)
     assert calls == [] and errors == ["Thinking level not saved: settings.json does not parse"]
 
     saved = []
     mode.settingsManager = NS(setDefaultThinkingLevel=saved.append, getModelProfile=lambda: "/p")
-    interactive_mode.InteractiveMode._apply_thinking_level(mode, "high", persist=True)
+    interactive_mode.InteractiveMode.selectThinkingLevel(mode, "high", True)
     assert saved == ["high"]
     assert calls == [("high",), ("status", "Default thinking level for this agent: high")]
 

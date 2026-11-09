@@ -5,10 +5,10 @@ from jsonschema import Draft202012Validator
 import pytest
 
 from misaka.ai.types import Tool
-from misaka.ai.providers.google_shared import convert_tools as google_tools
-from misaka.ai.providers.openai_completions import convert_tools as openrouter_tools
+from misaka.ai.api.google_shared import convertTools as google_tools
+from misaka.ai.api.openai_completions import _convertTools as openrouter_tools
 from misaka.extensions.misaka_lcm.host.tools import _definition
-from misaka.ai.providers.constrained_sampling import _portable_json_schema
+from misaka.ai.api.constrained_sampling import _portable_json_schema
 from misaka.extensions.misaka_lcm.vendor.engine import LCMEngine
 from misaka.extensions.misaka_lcm.vendor.schemas import LCM_RETRIEVE
 
@@ -37,10 +37,10 @@ def test_registration_and_both_request_paths_have_independent_object_branches():
     for schema in LCMEngine.get_tool_schemas():
         definition = _definition(schema)
         tools.append(Tool(name=definition.name, description=definition.description, parameters=definition.parameters))
-    converted = openrouter_tools(tools, {"supportsStrictMode": False})
+    converted = openrouter_tools(tools, {"supportsStrictMode": False, "supportsOpenAIGrammarTools": False})
     for declaration in converted:
         _check_google_required(declaration["function"]["parameters"])
-    for declaration in google_tools(tools, use_parameters=True)[0]["functionDeclarations"]:
+    for declaration in google_tools(tools, useParameters=True)[0]["functionDeclarations"]:
         _check_google_required(declaration["parameters"])
     assert LCMEngine.get_tool_schemas() == before
     adapted = _operand(next(item["function"]["parameters"] for item in converted if item["function"]["name"] == "lcm_retrieve"))

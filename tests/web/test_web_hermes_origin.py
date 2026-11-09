@@ -121,8 +121,8 @@ async def test_xai_web_refresh_uses_profile_network(scope, monkeypatch):
 async def test_xai_login_abort_drains_owned_request(scope, monkeypatch):
     import asyncio
 
-    from misaka.ai.utils.abort import AbortController
-    from misaka.ai.utils.oauth.xai import _http_post_form
+    from misaka.ai.auth.oauth.xai import _postForm
+    from misaka.utils.js import AbortController
     entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
     actual_clients = []
     real_client = httpx.AsyncClient
@@ -139,7 +139,7 @@ async def test_xai_login_abort_drains_owned_request(scope, monkeypatch):
         return value
     monkeypatch.setattr(httpx, 'AsyncClient', client)
     signal = AbortController()
-    task = asyncio.create_task(_http_post_form('https://auth.example.test/token', {'device_code': 'fixture'}, signal))
+    task = asyncio.create_task(_postForm('https://auth.example.test/token', {'device_code': 'fixture'}, signal.signal))
     try:
         await entered.wait()
         signal.abort()
@@ -177,9 +177,9 @@ async def web_session(scope, monkeypatch):
     import sys
 
     from misaka.core.auth_storage import AuthStorage
-    from misaka.core.model_registry import ModelRegistry
+    from misaka.core.model_runtime import ModelRuntime
     from misaka.core.resource_loader import DefaultResourceLoader
-    from misaka.core.sdk import create_agent_session
+    from misaka.core.sdk import createAgentSession
     from misaka.core.session_manager import SessionManager
     from misaka.core.web import WebPart
     from misaka.core.web.browser import settings
@@ -192,8 +192,9 @@ async def web_session(scope, monkeypatch):
     loader = DefaultResourceLoader({'cwd': str(scope), 'agentDir': str(scope), 'noExtensions': True,
                                     'noContextFiles': True, 'noPromptTemplates': True, 'noThemes': True})
     await loader.reload()
-    session = (await create_agent_session({'cwd': str(scope), 'agentDir': str(scope), 'authStorage': auth,
-        'modelRegistry': ModelRegistry.inMemory(auth), 'resourceLoader': loader, 'parts': [owner],
+    session = (await createAgentSession({'cwd': str(scope), 'agentDir': str(scope),
+        'modelRuntime': await ModelRuntime.create({"authStorage": auth, "modelsPath": None}),
+        'resourceLoader': loader, 'parts': [owner],
         'customTools': list(owner.tools), 'sessionManager': SessionManager.inMemory(str(scope))}))['session']
     try:
         yield session
@@ -203,7 +204,7 @@ async def web_session(scope, monkeypatch):
 
 
 async def _tool_batch(session, calls, execution="sequential"):
-    from misaka.agent.agent_loop import execute_tool_calls
+    from misaka.agent.agent_loop import _executeToolCalls
     from misaka.agent.types import AgentContext, AgentLoopConfig
     from misaka.ai.types import AssistantMessage, Usage
     message = AssistantMessage(content=calls, api='test', provider='test', model='test',
@@ -214,7 +215,7 @@ async def _tool_batch(session, calls, execution="sequential"):
     cfg = AgentLoopConfig(model=None, convertToLlm=lambda messages: messages, toolExecution=execution,
                           beforeToolCall=session.agent.beforeToolCall, afterToolCall=session.agent.afterToolCall)
     events = []
-    return await execute_tool_calls(context, message, cfg, None, events.append), events
+    return await _executeToolCalls(context, message, cfg, None, events.append), events
 
 
 @pytest.mark.parametrize('tool_name', ['browser_click', 'x_search'])
@@ -397,7 +398,7 @@ async def test_duplicate_ids_are_normalized_before_final_message_is_persisted(te
     from test_agent_loop_truncated_tools import _assistant
 
     from misaka.agent.agent import Agent
-    from misaka.agent.agent_loop import stream_assistant_response
+    from misaka.agent.agent_loop import _streamAssistantResponse
     from misaka.agent.types import AgentContext, AgentLoopConfig
     from misaka.ai.types import ToolCall
     from misaka.ai.utils.event_stream import EventStream
@@ -410,7 +411,7 @@ async def test_duplicate_ids_are_normalized_before_final_message_is_persisted(te
         stream.end(message)
     context = AgentContext(messages=[], tools=[])
     events = []
-    result = await stream_assistant_response(context,
+    result = await _streamAssistantResponse(context,
         AgentLoopConfig(model=Agent().state.model, convertToLlm=lambda m: m), None, events.append,
         lambda *_: stream)
     expected = ['call|item_a', 'call_d2|item_b', 'call_d3|item_c', 'call_d4|item_d']
@@ -420,7 +421,7 @@ async def test_duplicate_ids_are_normalized_before_final_message_is_persisted(te
 
 
 async def test_xai_request_task_cancellation_drains_client(scope, monkeypatch):
-    from misaka.ai.utils.oauth.xai import _http_post_form
+    from misaka.ai.auth.oauth.xai import _postForm
     entered, finished = asyncio.Event(), asyncio.Event()
     real_client = httpx.AsyncClient
     clients = []
@@ -435,7 +436,7 @@ async def test_xai_request_task_cancellation_drains_client(scope, monkeypatch):
         clients.append(value)
         return value
     monkeypatch.setattr(httpx, 'AsyncClient', client)
-    task = asyncio.create_task(_http_post_form('https://auth.example.test/token', {}))
+    task = asyncio.create_task(_postForm('https://auth.example.test/token', {}, None))
     try:
         await asyncio.wait_for(entered.wait(), 2)
         task.cancel()
@@ -448,7 +449,8 @@ async def test_xai_request_task_cancellation_drains_client(scope, monkeypatch):
 
 
 async def test_oauth_profile_route_is_context_local_and_not_left_on_other_logins(scope, monkeypatch):
-    from misaka.ai.utils.oauth.xai import _http_post_form, with_http_options
+    from misaka.ai.auth.oauth._fetch import with_http_options
+    from misaka.ai.auth.oauth.xai import _postForm
     from misaka.core.web.network import api_network_options
     route = 'http://proxy.example.test:8080'
     write_web({'env': {'HTTPS_PROXY': route}}, profile=scope)
@@ -459,10 +461,10 @@ async def test_oauth_profile_route_is_context_local_and_not_left_on_other_logins
         return real_client(transport=httpx.MockTransport(lambda req: httpx.Response(200, json={}, request=req)), trust_env=False)
     monkeypatch.setattr(httpx, 'AsyncClient', client)
     with with_http_options(api_network_options):
-        await _http_post_form('https://auth.example.test/token', {})
-    await _http_post_form('https://auth.example.test/token', {})
+        await _postForm('https://auth.example.test/token', {}, None)
+    await _postForm('https://auth.example.test/token', {}, None)
     assert seen[0]['proxy'] == route and seen[0]['trust_env'] is False
-    assert seen[1] == {'timeout': 30}
+    assert 'proxy' not in seen[1] and seen[1]['trust_env'] is True
 
 
 @pytest.mark.parametrize('name', ['web_search', 'web_extract'])
@@ -484,11 +486,11 @@ async def test_json_web_error_contract_reaches_host_without_judging_prose(web_se
 def test_id_normalization_matches_hermes_whitespace_and_preserves_arguments():
     from test_agent_loop_truncated_tools import _assistant
 
-    from misaka.agent.agent_loop import _uniquify_tool_call_ids
+    from misaka.agent.agent_loop import _uniquifyToolCallIds
     from misaka.ai.types import ToolCall
     message = _assistant([ToolCall(id=value, name='browser_type', arguments={'text': 'same content'})
                           for value in [' call ', 'call', 'call_d2', '', 'call| item ']], 'toolUse')
-    _uniquify_tool_call_ids(message)
+    _uniquifyToolCallIds(message)
     assert [block.id for block in message.content] == [' call ', 'call_d2', 'call_d2_d2', '', 'call_d3| item ']
     assert all(block.arguments == {'text': 'same content'} for block in message.content)
 

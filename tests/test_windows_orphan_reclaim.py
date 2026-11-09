@@ -22,6 +22,7 @@ def test_a_gone_or_reused_pid_is_absent_and_a_live_one_is_ended():
     finally:
         if child.poll() is None:
             child.kill()
+        child.wait(5)
 
 
 def test_a_dead_leaders_children_are_ended_too(monkeypatch):
@@ -52,6 +53,7 @@ def test_a_dead_leaders_children_are_ended_too(monkeypatch):
         for process in (child, stranger):
             if process.poll() is None:
                 process.kill()
+            process.wait(5)
 
 
 def test_this_process_holding_a_dead_roots_pid_reclaims_it():

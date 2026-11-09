@@ -44,31 +44,31 @@ def test_every_knob_read_in_the_code_is_registered_with_its_type():
 
 
 def test_a_bad_value_read_at_runtime_warns_once_and_uses_the_default(caplog):
-    _write({"mcp": {"call_timeout": "soon"}})
+    _write({"mcp": {"required_wait": "soon"}})
     with caplog.at_level(logging.WARNING, logger="misaka.config.product"):
-        assert product.setting("mcp", "call_timeout", 120.0, float) == 120.0
-        assert product.setting("mcp", "call_timeout", 120.0, float) == 120.0
+        assert product.setting("mcp", "required_wait", 120.0, float) == 120.0
+        assert product.setting("mcp", "required_wait", 120.0, float) == 120.0
     assert [r.getMessage() for r in caplog.records].count(
-        "settings.json: mcp.call_timeout='soon' is not a number; using the default 120.0") == 1
+        "settings.json: mcp.required_wait='soon' is not a number; using the default 120.0") == 1
 
 
 def test_good_values_are_still_read():
-    _write({"mcp": {"call_timeout": "45"}, "subagents": {"simple": "yes"}})
-    assert product.setting("mcp", "call_timeout", 120.0, float) == 45.0
+    _write({"mcp": {"required_wait": "45"}, "subagents": {"simple": "yes"}})
+    assert product.setting("mcp", "required_wait", 120.0, float) == 45.0
     assert product.setting("subagents", "simple", False, bool) is True
 
 
 def test_the_entry_refuses_to_start_and_names_every_bad_value():
-    _write({"mcp": {"call_timeout": "soon"}, "subagents": {"max_concurrent": True, "simple": "maybe"},
+    _write({"mcp": {"required_wait": "soon"}, "subagents": {"max_concurrent": True, "simple": "maybe"},
             "research": {"token_cap": 5}})
     assert sorted(product.validate_settings()) == [
-        "mcp.call_timeout='soon' is not a number",
+        "mcp.required_wait='soon' is not a number",
         "subagents.max_concurrent=True is not an integer",
         "subagents.simple='maybe' is not a boolean",
     ]
     with pytest.raises(SystemExit) as refused:
         bootstrap.install()
-    assert "mcp.call_timeout" in str(refused.value) and "subagents.simple" in str(refused.value)
+    assert "mcp.required_wait" in str(refused.value) and "subagents.simple" in str(refused.value)
     bootstrap.install(check_settings=False)
 
 

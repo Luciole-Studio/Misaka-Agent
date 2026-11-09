@@ -1,28 +1,45 @@
-"""Interactive settings list with optional search and submenus."""
+"""Translated from pi-tui's ``components/settings-list.ts`` (v1.1.0).
+
+MISAKA fork: no alt screen (D1), so ``mousePressedIndex`` and ``handleMouse`` are not ported; only the alt screen
+produces mouse events.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import TypedDict
 
 from misaka.ui.tui.fuzzy import fuzzyFilter
 from misaka.ui.tui.keybindings import getKeybindings
 from misaka.ui.tui.tui import Component
 from misaka.ui.tui.utils import truncateToWidth, visibleWidth, wrapTextWithAnsi
+from misaka.utils.js import jsIndex
 
 from .input import Input
 
-type SubmenuFactory = Callable[[str, Callable[[str | None], None]], Component]
+
+class SubmenuDoneOptions(TypedDict, total=False):
+    """MISAKA fork: a name for the inline type of ``done``'s ``options`` in ``SettingItem.submenu``."""
+
+    navigateTo: str
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class SettingItem:
     id: str
+    """Unique identifier for this setting"""
     label: str
+    """Display label (left side)"""
     description: str | None = None
-    currentValue: str = ""
+    """Optional description shown when selected"""
+    currentValue: str
+    """Current value to display (right side)"""
     values: list[str] | None = None
-    submenu: SubmenuFactory | None = None
+    """If provided, Enter/Space cycles through these values"""
+    submenu: Callable[[str, Callable[[str | None, SubmenuDoneOptions | None], None]], Component] | None = None
+    """If provided, Enter opens this submenu. Receives current value and done callback.
+    done() accepts an optional selectedValue and an optional navigateTo id to move the cursor after close."""
 
 
 @dataclass(slots=True)
@@ -36,7 +53,12 @@ class SettingsListTheme:
 
 @dataclass(slots=True)
 class SettingsListOptions:
-    enableSearch: bool = False
+    enableSearch: bool | None = None
+
+
+class _VisibleRange(TypedDict):
+    startIndex: int
+    endIndex: int
 
 
 class SettingsList(Component):
@@ -49,22 +71,38 @@ class SettingsList(Component):
         onCancel: Callable[[], None],
         options: SettingsListOptions | None = None,
     ) -> None:
-        self.items = items
-        self.filteredItems = items
-        self.theme = theme
+        if options is None:
+            options = SettingsListOptions()
         self.selectedIndex = 0
-        self.maxVisible = maxVisible
-        self.onChange = onChange
-        self.onCancel = onCancel
-        self.searchEnabled = (options or SettingsListOptions()).enableSearch
-        self.searchInput = Input() if self.searchEnabled else None
+        self.searchInput: Input | None = None
+
+        # Submenu state
         self.submenuComponent: Component | None = None
         self.submenuItemIndex: int | None = None
+        self.navigateAfterClose: str | None = None
+
+        self.items = items
+        self.filteredItems = items
+        self.maxVisible = maxVisible
+        self.theme = theme
+        self.onChange = onChange
+        self.onCancel = onCancel
+        self.searchEnabled = options.enableSearch if options.enableSearch is not None else False
+        if self.searchEnabled:
+            self.searchInput = Input()
 
     def updateValue(self, id: str, newValue: str) -> None:
-        item = next((entry for entry in self.items if entry.id == id), None)
+        """Update an item's currentValue"""
+        item = next((i for i in self.items if i.id == id), None)
         if item is not None:
             item.currentValue = newValue
+
+    def selectItem(self, id: str) -> None:
+        """Move selection to the item with the given id (no-op if not found)."""
+        items = self.filteredItems if self.searchEnabled else self.items
+        index = next((index for index, i in enumerate(items) if i.id == id), -1)
+        if index != -1:
+            self.selectedIndex = index
 
     def invalidate(self) -> None:
         invalidate = getattr(self.submenuComponent, "invalidate", None)
@@ -72,8 +110,10 @@ class SettingsList(Component):
             invalidate()
 
     def render(self, width: int) -> list[str]:
+        # If submenu is active, render it instead
         if self.submenuComponent is not None:
             return self.submenuComponent.render(width)
+
         return self.renderMainList(width)
 
     def renderMainList(self, width: int) -> list[str]:
@@ -89,65 +129,84 @@ class SettingsList(Component):
                 self.addHintLine(lines, width)
             return lines
 
-        display_items = self.filteredItems if self.searchEnabled else self.items
-        if len(display_items) == 0:
+        displayItems = self.getDisplayItems()
+        if len(displayItems) == 0:
             lines.append(truncateToWidth(self.theme.hint("  No matching settings"), width))
             self.addHintLine(lines, width)
             return lines
 
-        start_index = max(
-            0,
-            min(self.selectedIndex - (self.maxVisible // 2), len(display_items) - self.maxVisible),
-        )
-        end_index = min(start_index + self.maxVisible, len(display_items))
-        max_label_width = min(30, max((visibleWidth(item.label) for item in self.items), default=0))
+        # Calculate visible range with scrolling
+        visibleRange = self.getVisibleRange(displayItems)
+        startIndex, endIndex = visibleRange["startIndex"], visibleRange["endIndex"]
 
-        for index in range(start_index, end_index):
-            item = display_items[index]
-            is_selected = index == self.selectedIndex
-            prefix = self.theme.cursor if is_selected else "  "
-            prefix_width = visibleWidth(prefix)
-            label_padded = item.label + (" " * max(0, max_label_width - visibleWidth(item.label)))
-            label_text = self.theme.label(label_padded, is_selected)
+        # Calculate max label width for alignment
+        maxLabelWidth = min(36, max(visibleWidth(item.label) for item in self.items))
+
+        # Render visible items
+        for i in range(startIndex, endIndex):
+            item = jsIndex(displayItems, i)
+            if item is None:
+                continue
+
+            isSelected = i == self.selectedIndex
+            prefix = self.theme.cursor if isSelected else "  "
+            prefixWidth = visibleWidth(prefix)
+
+            # Pad label to align values
+            labelPadded = item.label + " " * max(0, maxLabelWidth - visibleWidth(item.label))
+            labelText = self.theme.label(labelPadded, isSelected)
+
+            # Calculate space for value
             separator = "  "
-            used_width = prefix_width + max_label_width + visibleWidth(separator)
-            value_max_width = width - used_width - 2
-            value_text = self.theme.value(truncateToWidth(item.currentValue, value_max_width, ""), is_selected)
-            lines.append(truncateToWidth(prefix + label_text + separator + value_text, width))
+            usedWidth = prefixWidth + maxLabelWidth + visibleWidth(separator)
+            valueMaxWidth = width - usedWidth - 2
 
-        if start_index > 0 or end_index < len(display_items):
-            scroll_text = f"  ({self.selectedIndex + 1}/{len(display_items)})"
-            lines.append(self.theme.hint(truncateToWidth(scroll_text, width - 2, "")))
+            valueText = self.theme.value(truncateToWidth(item.currentValue, valueMaxWidth, ""), isSelected)
 
-        selected_item = display_items[self.selectedIndex] if 0 <= self.selectedIndex < len(display_items) else None
-        if selected_item is not None and selected_item.description:
+            lines.append(truncateToWidth(prefix + labelText + separator + valueText, width))
+
+        # Add scroll indicator if needed
+        if startIndex > 0 or endIndex < len(displayItems):
+            scrollText = f"  ({self.selectedIndex + 1}/{len(displayItems)})"
+            lines.append(self.theme.hint(truncateToWidth(scrollText, width - 2, "")))
+
+        # Add description for selected item
+        selectedItem = jsIndex(displayItems, self.selectedIndex)
+        if selectedItem is not None and selectedItem.description:
             lines.append("")
-            for line in wrapTextWithAnsi(selected_item.description, width - 4):
+            wrappedDesc = wrapTextWithAnsi(selectedItem.description, width - 4)
+            for line in wrappedDesc:
                 lines.append(self.theme.description(f"  {line}"))
 
+        # Add hint
         self.addHintLine(lines, width)
+
         return lines
 
     def handleInput(self, data: str) -> None:
+        # If submenu is active, delegate all input to it
+        # The submenu's onCancel (triggered by escape) will call done() which closes it
         if self.submenuComponent is not None:
-            handle_input = getattr(self.submenuComponent, "handleInput", None)
-            if callable(handle_input):
-                handle_input(data)
+            handleInput = getattr(self.submenuComponent, "handleInput", None)
+            if callable(handleInput):
+                handleInput(data)
             return
 
+        # Main list input handling
         kb = getKeybindings()
-        display_items = self.filteredItems if self.searchEnabled else self.items
-
+        displayItems = self.getDisplayItems()
         if kb.matches(data, "tui.select.up"):
-            if len(display_items) == 0:
+            if len(displayItems) == 0:
                 return
-            self.selectedIndex = len(display_items) - 1 if self.selectedIndex == 0 else self.selectedIndex - 1
+            self.selectedIndex = len(displayItems) - 1 if self.selectedIndex == 0 else self.selectedIndex - 1
         elif kb.matches(data, "tui.select.down"):
-            if len(display_items) == 0:
+            if len(displayItems) == 0:
                 return
-            self.selectedIndex = 0 if self.selectedIndex == len(display_items) - 1 else self.selectedIndex + 1
+            self.selectedIndex = 0 if self.selectedIndex == len(displayItems) - 1 else self.selectedIndex + 1
         elif kb.matches(data, "tui.select.confirm") or (
-                data == " " and (not self.searchEnabled or not (self.searchInput and self.searchInput.getValue()))):
+            data == " "
+            and (not self.searchEnabled or (self.searchInput is not None and len(self.searchInput.getValue()) == 0))
+        ):
             self.activateItem()
         elif kb.matches(data, "tui.select.cancel"):
             self.onCancel()
@@ -155,35 +214,53 @@ class SettingsList(Component):
             self.searchInput.handleInput(data)
             self.applyFilter(self.searchInput.getValue())
 
+    def getDisplayItems(self) -> list[SettingItem]:
+        return self.filteredItems if self.searchEnabled else self.items
+
+    def getVisibleRange(self, displayItems: Sequence[SettingItem]) -> _VisibleRange:
+        startIndex = max(
+            0,
+            min(self.selectedIndex - self.maxVisible // 2, len(displayItems) - self.maxVisible),
+        )
+        return {"startIndex": startIndex, "endIndex": min(startIndex + self.maxVisible, len(displayItems))}
+
     def activateItem(self) -> None:
-        source = self.filteredItems if self.searchEnabled else self.items
-        if not (0 <= self.selectedIndex < len(source)):
+        item = jsIndex(self.getDisplayItems(), self.selectedIndex)
+        if item is None:
             return
-        item = source[self.selectedIndex]
-        if item.submenu is not None:
+
+        if item.submenu:
+            # Open submenu, passing current value so it can pre-select correctly
             self.submenuItemIndex = self.selectedIndex
-            self.submenuComponent = item.submenu(item.currentValue, self._finishSubmenu(item))
-            return
 
-        if item.values:
-            current_index = item.values.index(item.currentValue) if item.currentValue in item.values else -1
-            next_index = (current_index + 1) % len(item.values)
-            new_value = item.values[next_index]
-            item.currentValue = new_value
-            self.onChange(item.id, new_value)
+            def done(selectedValue: str | None = None, options: SubmenuDoneOptions | None = None) -> None:
+                if selectedValue is not None:
+                    item.currentValue = selectedValue
+                    self.onChange(item.id, selectedValue)
+                if options and options.get("navigateTo"):
+                    self.navigateAfterClose = options["navigateTo"]
+                self.closeSubmenu()
 
-    def _finishSubmenu(self, item: SettingItem) -> Callable[[str | None], None]:
-        def done(selectedValue: str | None = None) -> None:
-            if selectedValue is not None:
-                item.currentValue = selectedValue
-                self.onChange(item.id, selectedValue)
-            self.closeSubmenu()
-
-        return done
+            self.submenuComponent = item.submenu(item.currentValue, done)
+        elif item.values and len(item.values) > 0:
+            # Cycle through values
+            currentIndex = item.values.index(item.currentValue) if item.currentValue in item.values else -1
+            nextIndex = (currentIndex + 1) % len(item.values)
+            newValue = item.values[nextIndex]
+            item.currentValue = newValue
+            self.onChange(item.id, newValue)
 
     def closeSubmenu(self) -> None:
         self.submenuComponent = None
-        if self.submenuItemIndex is not None:
+        if self.navigateAfterClose is not None:
+            id = self.navigateAfterClose
+            self.navigateAfterClose = None
+            self.submenuItemIndex = None
+            self.selectItem(id)
+            # Open the target item's submenu automatically
+            self.activateItem()
+        elif self.submenuItemIndex is not None:
+            # Restore selection to the item that opened the submenu
             self.selectedIndex = self.submenuItemIndex
             self.submenuItemIndex = None
 
@@ -193,12 +270,16 @@ class SettingsList(Component):
 
     def addHintLine(self, lines: list[str], width: int) -> None:
         lines.append("")
-        hint = (
-            "  Type to search · Enter/Space to change · Esc to cancel"
-            if self.searchEnabled
-            else "  Enter/Space to change · Esc to cancel"
+        lines.append(
+            truncateToWidth(
+                self.theme.hint(
+                    "  Type to search · Enter/Space to change · Esc to cancel"
+                    if self.searchEnabled
+                    else "  Enter/Space to change · Esc to cancel",
+                ),
+                width,
+            ),
         )
-        lines.append(truncateToWidth(self.theme.hint(hint), width))
 
 
 __all__ = [
@@ -206,4 +287,5 @@ __all__ = [
     "SettingsList",
     "SettingsListOptions",
     "SettingsListTheme",
+    "SubmenuDoneOptions",
 ]

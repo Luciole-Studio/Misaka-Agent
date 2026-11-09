@@ -1,6 +1,6 @@
 """The project's Git history, written only when the user asks.
 
-Research and cards write directly into the project and never commit: the history is the
+Workflows and cards write directly into the project and never commit: the history is the
 user's. ``misaka init`` creates the repository; ``project_commit`` and ``/commit`` commit what the
 user confirms, under the user's own git identity. Commits record selected files, never deliver
 them through branches or merges.
@@ -18,7 +18,7 @@ def _git(cwd, *args):
     fails and the caller stops."""
     for attempt in range(5):
         done = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8",
-                              check=False)
+                              errors="replace", check=False)
         if done.returncode == 0 or "index.lock" not in done.stderr or attempt == 4:
             return done
         time.sleep(0.2 * (attempt + 1))

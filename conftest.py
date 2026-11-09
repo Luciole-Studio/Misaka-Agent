@@ -59,6 +59,37 @@ def unwatched_loops():
             loop_watchdog._file = None
 
 
+@pytest.fixture(autouse=True)
+def default_tui_keybindings():
+    """Each test starts with the TUI's default keybindings, as each of pi's test files does in its own process: an
+    interactive session under test installs the app's keybindings globally (``setKeybindings``), and on Windows those
+    bind undo differently."""
+    from misaka.ui.tui import keybindings
+
+    keybindings.globalKeybindings = None
+    yield
+
+
+@pytest.fixture(autouse=True)
+def fresh_shared_auth_read_state():
+    """Each test starts with no auth.json read state shared between stores, as each of pi's test files does in its own
+    process: the first store a test builds on a path claims the shared slot (``_sharedAuthFileReadState``)."""
+    from misaka.core import auth_storage
+
+    auth_storage._sharedAuthFileReadState = None
+    yield
+
+
+@pytest.fixture(autouse=True)
+def default_http_dispatcher():
+    """Each test starts with the default HTTP idle timeout: a session under test configures the process-wide
+    dispatcher from its settings (``configureHttpDispatcher``), as pi's does in its own process."""
+    from misaka.core import http_dispatcher
+
+    http_dispatcher.configureHttpDispatcher()
+    yield
+
+
 def pytest_sessionfinish(session, exitstatus):
     shutil.rmtree(_SESSION_HOME, ignore_errors=True)
 
@@ -74,3 +105,12 @@ def pytest_runtest_makereport(item, call):
         report.longrepr = (str(item.path), item.location[1] or 0,
                            "Skipped: creating a symlink needs Developer Mode on Windows")
     return report
+
+
+@pytest.fixture(autouse=True, scope="session")
+def card_owners():
+    """Research owns its cards in every test process, as ``misaka.cli.bootstrap`` makes it in every
+    real one."""
+    from misaka.core.research import owner
+
+    owner.install()

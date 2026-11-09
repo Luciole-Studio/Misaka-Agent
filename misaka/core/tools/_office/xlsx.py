@@ -116,7 +116,7 @@ def _typed(value, kind):
             return value
         for fmt in _DATE_FORMATS:
             try:
-                return _dt.datetime.strptime(str(value), fmt)  # noqa: DTZ007 - a cell has no zone
+                return _dt.datetime.strptime(str(value), fmt)
             except ValueError:
                 continue
         return value

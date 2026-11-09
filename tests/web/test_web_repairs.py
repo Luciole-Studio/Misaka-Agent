@@ -137,7 +137,7 @@ async def test_fresh_and_cached_sources_share_the_same_gate(scope, tmp_path, mon
 async def test_direct_tool_http_failure_is_error_in_agent_loop(scope, tmp_path, monkeypatch, name, suffix):
     import functools
 
-    from misaka.agent.agent_loop import execute_prepared_tool_call
+    from misaka.agent.agent_loop import _executePreparedToolCall
     from misaka.core.tools import download_file, web_fetch
     from misaka.core.web import WebPart, bounded
     async def resolve(*args): return ['93.184.216.34']
@@ -150,7 +150,7 @@ async def test_direct_tool_http_failure_is_error_in_agent_loop(scope, tmp_path, 
     prepared = SimpleNamespace(tool=next(t for t in part.tools if t.name == name),
         toolCall=SimpleNamespace(id='fixture', name=name, arguments={}), args={'url': 'https://93.184.216.34' + suffix})
     try:
-        outcome = await execute_prepared_tool_call(prepared, None, lambda event: None)
+        outcome = await _executePreparedToolCall(prepared, None, lambda event: None)
         assert '503' in outcome.result.content[0].text
         assert outcome.isError is True
     finally:
@@ -342,3 +342,14 @@ async def test_outer_extract_cancellation_does_not_start_rescue(scope, monkeypat
     with pytest.raises(asyncio.CancelledError):
         await task
     assert cleaned.is_set()
+
+async def test_a_browser_failure_with_no_message_still_names_itself(scope, tmp_path, monkeypatch):
+    """A timeout can carry no message at all (asyncio's, httpx's read timeout): the tool said
+    nothing about what went wrong (R8)."""
+    from misaka.core.web.browser import tools
+    async def perform(*args):
+        raise TimeoutError()
+    monkeypatch.setattr(tools, 'current_runtime', lambda: SimpleNamespace(browser=SimpleNamespace(perform=perform)))
+    harness = Harness(); tools.register(harness, str(tmp_path))
+    result = await harness.tools['browser_snapshot'].execute('id', {}, None, None, None)
+    assert result['isError'] and 'TimeoutError' in result['content'][0]['text'], result

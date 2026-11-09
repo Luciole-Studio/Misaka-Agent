@@ -115,3 +115,24 @@ def test_a_run_still_going_is_counted_to_now(tmp_path, monkeypatch, status):
         con.execute("UPDATE research_runs SET status=?, created_at=1000, updated_at=1100 WHERE id=?",
                     (status, run["id"]))
         assert usage.run_usage(con, runs.get(con, run["id"]))["total"]["cost"] == 8.0
+
+
+def test_usage_outside_assistant_messages_is_counted(tmp_path):
+    """pi 0.99+ records spending outside assistant messages too: a cache warm-up as a ``usage``
+    entry, a compaction or branch summary's call on that entry, a tool's own call on its result."""
+    def row(tokens, cost):
+        return {"input": tokens, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": tokens,
+                "cost": {"total": cost}}
+    path = _session(tmp_path / "s.jsonl",
+                    {"type": "session"},
+                    _call("big", 100, 1.0, 1_000),
+                    {"type": "usage", "kind": "cache_warm", "provider": "p", "model": "big",
+                     "usage": row(10, 0.1), "timestamp": "1970-01-01T00:00:02.000Z"},
+                    {"type": "compaction", "summary": "s", "usage": row(20, 0.2), "timestamp": "1970-01-01T00:00:03.000Z"},
+                    {"type": "message", "message": {"role": "toolResult", "usage": row(30, 0.3), "timestamp": 4_000}},
+                    {"type": "message", "message": {"role": "user", "content": "hi", "timestamp": 5_000}})
+    models = {}
+    total = usage.session_usage([str(path)], by_model=models)
+    assert total["tokens"] == 160 and total["calls"] == 4
+    assert models["p/big"]["tokens"] == 110 and models["Tools/summaries"]["tokens"] == 50
+    assert usage.session_usage([str(path)], since_ms=2_500)["tokens"] == 50

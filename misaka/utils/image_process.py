@@ -6,11 +6,11 @@ import base64
 from dataclasses import dataclass, field
 from typing import Literal
 
-from misaka.utils.image_convert import convert_image_bytes_to_png
+from misaka.utils.image_convert import convertImageBytesToPng
 from misaka.utils.image_resize import (
     ImageResizeOptions,
-    format_dimension_note,
-    resize_image_bytes,
+    formatDimensionNote,
+    resizeImage,
 )
 
 
@@ -37,12 +37,12 @@ class ProcessImageFailure:
 type ProcessImageResult = ProcessImageSuccess | ProcessImageFailure
 
 
-def _base_mime_type(mime_type: str) -> str:
+def baseMimeType(mime_type: str) -> str:
     return mime_type.split(";", 1)[0].strip().lower()
 
 
-def _normalize_supported_image_mime_type(mime_type: str) -> str | None:
-    match _base_mime_type(mime_type):
+def normalizeSupportedImageMimeType(mime_type: str) -> str | None:
+    match baseMimeType(mime_type):
         case "image/png":
             return "image/png"
         case "image/jpeg" | "image/jpg":
@@ -55,30 +55,30 @@ def _normalize_supported_image_mime_type(mime_type: str) -> str | None:
             return None
 
 
-def _conversion_hint(converted_from: str | None, converted_to: str) -> str | None:
+def conversionHint(converted_from: str | None, converted_to: str) -> str | None:
     if not converted_from or converted_from == converted_to:
         return None
     return f"[Image converted from {converted_from} to {converted_to}.]"
 
 
-async def process_image(
+async def processImage(
     image_bytes: bytes | bytearray | memoryview,
     mime_type: str,
     options: ProcessImageOptions | None = None,
 ) -> ProcessImageResult:
     raw_bytes = bytes(image_bytes)
-    normalized_mime_type = _normalize_supported_image_mime_type(mime_type)
+    normalized_mime_type = normalizeSupportedImageMimeType(mime_type)
     converted_from: str | None = None
 
     if normalized_mime_type is None:
-        converted_bytes = await convert_image_bytes_to_png(raw_bytes)
+        converted_bytes = await convertImageBytesToPng(raw_bytes)
         if converted_bytes is None:
             return ProcessImageFailure(
                 message="[Image omitted: could not be converted to a supported inline image format.]"
             )
         raw_bytes = converted_bytes
         normalized_mime_type = "image/png"
-        converted_from = _base_mime_type(mime_type)
+        converted_from = baseMimeType(mime_type)
 
     auto_resize_images = (
         True
@@ -86,7 +86,7 @@ async def process_image(
         else options.autoResizeImages
     )
     if auto_resize_images:
-        resized = await resize_image_bytes(
+        resized = await resizeImage(
             raw_bytes,
             normalized_mime_type,
             options.resizeOptions if options is not None else None,
@@ -97,10 +97,10 @@ async def process_image(
             )
 
         hints: list[str] = []
-        converted_hint = _conversion_hint(converted_from, resized.mimeType)
+        converted_hint = conversionHint(converted_from, resized.mimeType)
         if converted_hint is not None:
             hints.append(converted_hint)
-        dimension_note = format_dimension_note(resized)
+        dimension_note = formatDimensionNote(resized)
         if dimension_note is not None:
             hints.append(dimension_note)
         return ProcessImageSuccess(
@@ -108,7 +108,7 @@ async def process_image(
         )
 
     hints = []
-    converted_hint = _conversion_hint(converted_from, normalized_mime_type)
+    converted_hint = conversionHint(converted_from, normalized_mime_type)
     if converted_hint is not None:
         hints.append(converted_hint)
     return ProcessImageSuccess(
@@ -123,5 +123,5 @@ __all__ = [
     "ProcessImageOptions",
     "ProcessImageResult",
     "ProcessImageSuccess",
-    "process_image",
+    "processImage",
 ]

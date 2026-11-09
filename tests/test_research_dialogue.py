@@ -11,18 +11,20 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from misaka.core import graph as graph_core
 from misaka.core.network import worker
 from misaka.core.platform import cards, repo, tasks
 from misaka.core.research import (
     commands,
     context,
-    graph,
     planner,
     report,
     runs,
+    views,
     workflow,
 )
 from misaka.core.session_manager import SessionManager
+from misaka.utils.prompt_file import readPromptFile
 
 
 @pytest.fixture
@@ -79,7 +81,7 @@ def test_a_node_is_told_its_rival_options_and_what_became_of_them(lab):
 def test_a_join_is_told_to_confront_its_parents_not_to_average_them(lab):
     a, b = _frames(lab)
     for node in (a, b):
-        lab.con.execute("UPDATE research_branches SET status='closing' WHERE id=?", (node["id"],))
+        lab.con.execute("UPDATE research_execution SET status='closing' WHERE id=?", (node["id"],))
     join = runs.create_node(lab.con, lab.run["id"], question="How did money and alliances lock each other?",
                             parents=[a["id"], b["id"]])
     text = planner.position(lab.con, lab.run, join)
@@ -95,12 +97,12 @@ def test_a_dissolution_belongs_to_the_conclusion_it_was_written_with(lab):
     a, _b = _frames(lab)
     _conclude(lab.con, lab.run, a)
     _dissolve(lab, a, "research_question")
-    assert graph.dissolution(lab.con, lab.run, a)["question"] == "research_question"
-    assert [n["id"] for n in graph.dissolving_nodes(lab.con, lab.run)] == [a["id"]]
+    assert views.dissolution(lab.con, lab.run, a)["question"] == "research_question"
+    assert [n["id"] for n in views.dissolving_nodes(lab.con, lab.run)] == [a["id"]]
     runs.write_text(lab.con, lab.run["id"], "synthesis", "Revised", runs.generated_path("synthesis-2.md", node_id=a["id"]),
                     "Revised conclusion", branch_id=a["id"])
-    assert graph.dissolution(lab.con, lab.run, a) is None        # the revision answers the question after all
-    assert graph.dissolving_nodes(lab.con, lab.run) == []
+    assert views.dissolution(lab.con, lab.run, a) is None        # the revision answers the question after all
+    assert views.dissolving_nodes(lab.con, lab.run) == []
 
 
 async def test_the_root_s_dissolution_is_always_of_the_research_question(lab):
@@ -157,7 +159,7 @@ async def test_a_node_s_own_question_dissolving_needs_no_consent(lab):
 async def test_the_survey_records_connections_once(lab):
     a, b = _frames(lab)
     tool = commands.relate_tool(lab.con, lab.run, session_file=lab.run["root_session"],
-                                validate=lambda value: graph.resolve_relations(lab.con, lab.run, value))
+                                validate=lambda value: views.resolve_relations(lab.con, lab.run, value))
     ctx = SimpleNamespace(sessionManager=SimpleNamespace(sessionFile=lab.run["root_session"]))
     relation = {"kind": "resonates", "nodes": [a["id"], b["id"]], "note": "both read the same petitions"}
     await tool.execute("c1", {"relations": [relation]}, None, None, ctx)
@@ -169,7 +171,7 @@ async def test_the_survey_records_connections_once(lab):
 
 def _red_card(lab):
     con, run, root = lab.con, lab.run, lab.root
-    runs.prepare_runner(con, "research_branches", root["id"])
+    runs.prepare_runner(con, "research_execution", root["id"])
     root = runs.node(con, root["id"])
     tid = cards.create(con, run["workspace"], "Red team", "## deliverable\ncritique.md\n", "10033",
                        after_row=lambda tid: runs.link_task(con, run["id"], tid, kind="red_team", node=root, round=1))
@@ -227,11 +229,79 @@ async def test_the_runners_continue_a_card_the_way_the_sister_tools_do(lab):
     assert sent == [("pane.continue_card", {"task_id": "t_1", "say": "go on", "expected_generation": 3,
                                             "place": {"grid": "p1"}})]
     headless = node_module.HeadlessRunner(lab.con, {})
-    spawned = []
+    spawned, exited = [], []
     lab.monkeypatch.setattr(headless._processes, "spawn", lambda argv, **k: spawned.append(argv) or SimpleNamespace(
-        poll=lambda: None, pid=1))
+        poll=lambda: 0 if exited else None, pid=1))
     await headless.continue_card("t_1", "go on", expected_generation=3)
-    assert spawned == [[*node_module.CARD_ARGV, "t_1", "--say", "go on"]] and "t_1" in headless.flying
+    # The message travels in a file, never on the command line (issue #13: WinError 206).
+    [argv] = spawned
+    assert argv[:-1] == [*node_module.CARD_ARGV, "t_1", "--say-file"] and "t_1" in headless.flying
+    assert readPromptFile(argv[-1]) == "go on"
+    exited.append(True)
+    headless._reap()
+    assert "t_1" not in headless.flying and not os.path.exists(argv[-1])
+    assert not os.path.exists(os.path.dirname(argv[-1]))
+
+
+async def test_a_review_brief_too_long_for_a_command_line_reaches_the_card_whole(lab, tmp_path):
+    """Issue #13: a red-team brief carries the node's whole evidence ledger -- 20,000 to 460,000
+    characters measured on real runs -- and Windows refuses a command line past 32,767
+    (WinError 206). The child reads it from the file, every character of it."""
+    from misaka.cli import research_node
+    from misaka.core.research import node as node_module
+    brief = ("证据 " + "x" * 97 + "\r\n") * 5000 + "\ufeff-- end"
+    headless = node_module.HeadlessRunner(lab.con, {})
+    spawned, exited = [], []
+    lab.monkeypatch.setattr(headless._processes, "spawn", lambda argv, **k: spawned.append(argv) or SimpleNamespace(
+        poll=lambda: 0 if exited else None, pid=1))
+    await headless.continue_card("t_1", brief, expected_generation=1)
+    [argv] = spawned
+    assert sum(len(arg) for arg in argv) < 1000
+    seen = []
+    from misaka.config import env as env_file
+    from misaka.utils import loop_watchdog
+    for owner, name in ((research_node, "setupCli"), (research_node.bootstrap, "install"),
+                        (loop_watchdog, "configure"), (env_file, "load")):
+        lab.monkeypatch.setattr(owner, name, lambda *a, **k: None)   # process-wide entry wiring
+    lab.monkeypatch.setattr(research_node.node, "main_card", lambda task_id, *, say: seen.append((task_id, say)) or 0)
+    assert research_node.main(argv[3:]) == 0
+    assert seen == [("t_1", brief)]
+    exited.append(True)
+    headless._reap()
+    assert not os.path.exists(os.path.dirname(argv[-1]))
+
+
+async def test_a_card_child_that_will_not_start_ends_the_node_at_the_failure_limit(lab):
+    """Hermes' dispatcher counts a worker that will not start against the card's failure limit
+    (outcome "spawn_failed") and parks it there; the drive loop's retry used to ask again every
+    poll for as long as the run lived (issue #13: tens of thousands of retries)."""
+    from misaka.core.platform import tasks as task_store
+    from misaka.core.research import node as node_module
+    headless = node_module.HeadlessRunner(lab.con, {})
+    files = []
+
+    def refuse(argv, **_kwargs):
+        files.append(argv[-1])
+        raise OSError(206, "The filename or extension is too long")
+
+    lab.monkeypatch.setattr(headless._processes, "spawn", refuse)
+    for _ in range(task_store.FAILURE_LIMIT - 1):
+        with pytest.raises(OSError):
+            await headless.continue_card("t_1", "go on", expected_generation=1)
+    with pytest.raises(node_module.CardNotStarted, match="could not be started 3 times in a row") as raised:
+        await headless.continue_card("t_1", "go on", expected_generation=1)
+    assert not isinstance(raised.value, (ValueError, RuntimeError, OSError)), "the drive loop must not retry it"
+    assert not any(os.path.exists(path) for path in files), "no message file outlives a child that never started"
+    # A child that does start begins the count again.
+    exited = []
+    lab.monkeypatch.setattr(headless._processes, "spawn", lambda argv, **k: SimpleNamespace(
+        poll=lambda: 0 if exited else None, pid=1))
+    await headless.continue_card("t_2", "go on", expected_generation=1)
+    assert headless._spawn_failures == {"t_1": task_store.FAILURE_LIMIT}
+    directory, _path = headless._prompt_files["t_2"]
+    exited.append(True)
+    headless._reap()
+    assert not os.path.exists(directory)
 
 
 def test_a_card_goes_on_in_its_newest_own_conversation(tmp_path):
@@ -253,14 +323,14 @@ def test_the_final_report_is_written_from_indexed_documents_one_command_per_part
     a, b = _frames(lab)
     for node, text in ((root, "Root conclusion.\n"), (a, "Money constrained it.\n"), (b, "Alliances blocked it.\n")):
         _conclude(con, run, node, text)
-        con.execute("UPDATE research_branches SET status='closed' WHERE id=?", (node["id"],))
+        con.execute("UPDATE research_execution SET status='closed' WHERE id=?", (node["id"],))
     seen, tool_calls = [], []
     ctx = SimpleNamespace(sessionManager=SimpleNamespace(sessionFile=run["root_session"]))
 
     def run_llm_json(_profile, prompt, _provider, _model, **options):
         seen.append(prompt)
         names = [tool.name for tool in options["extra_tools"]]
-        assert "misaka_research_report" in names and "doc_read" in options["tools"]
+        assert "misaka_research_report" in names
         assert "declared_findings" not in prompt                  # no material catalog inlined
         assert '"conclusion": ' in prompt or "ended without calling" in prompt   # the doc-id catalog, or the nudge
         assert '"rationale"' not in prompt.split("# Catalog")[-1].split("# Corrections")[0]   # counts, not issue texts
@@ -284,7 +354,7 @@ def test_the_final_report_is_written_from_indexed_documents_one_command_per_part
     survey = report._checkpoint(con, run, "survey")
     assert Path(survey["path"]).read_text(encoding="utf-8").count("## Part") == 3 and Path(draft["path"]).read_text(encoding="utf-8").startswith("## Part 5")
     assert f"document `{report.doc_id(run, survey['path'])}`" in seen[-1]  # the draft reads the survey by its id
-    keys = {row[0] for row in con.execute("SELECT action_key FROM research_actions WHERE run_id=?", (run["id"],))}
+    keys = {entry.key for entry in graph_core.entries(con, run["id"])}
     assert {f"survey:{n['id']}" for n in (root, a, b)} <= keys and "draft" in keys
     # The run's products are in the corpus: the three conclusions, then the survey and draft themselves.
     docs = report.index_run(con, run)

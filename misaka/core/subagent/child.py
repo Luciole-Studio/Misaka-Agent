@@ -26,29 +26,6 @@ from misaka.utils.values import read_field
 PROTOCOL_VERSION = 2
 PROCESS_GROUP_IDENTITY = "process-group|"
 
-_SMALL_FAST_DEFAULTS: dict[str, tuple[str, ...]] = {
-    "anthropic": (
-        "claude-haiku-4-5",
-        "claude-haiku-4-5-20251001",
-        "claude-3-5-haiku-latest",
-    ),
-    "openai": ("gpt-5.4-mini", "gpt-5-mini", "gpt-4.1-mini"),
-    "openai-codex": ("gpt-5.4-mini",),
-    "azure-openai-responses": ("gpt-5.4-mini", "gpt-5-mini"),
-    "google": (
-        "gemini-flash-latest",
-        "gemini-3.5-flash",
-        "gemini-3.1-flash-lite",
-        "gemini-3-flash-preview",
-    ),
-    "google-vertex": (
-        "gemini-3-flash-preview",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-    ),
-}
-
-
 def _disallowed_tool_names(raw: str | None) -> list[str]:
     """Decode frontmatter ``disallowedTools`` passed by the parent."""
 
@@ -104,6 +81,39 @@ def _requested_tool_names(flags: list[str]) -> list[str]:
     return names
 
 
+def inherited_tool_names(session: Any, *, card: bool, fork: bool) -> list[str]:
+    """Every registered tool, for a child without a tool list of its own -- MISAKA fork: but codemode only as the
+    session's kind has it (`roles.<kind>.codemode`).
+
+    A card is a Sister's session: her role is bound, and her settings already decided codemode for the tools the
+    session started with. A sub-agent is bound to no role, so it asks for the sub-agents' switch. Either way an
+    MCP server reached through codemode, which turned it on as the session started, keeps it on, as pi's MCP
+    extension wants. A fork keeps its parent's tools exactly, codemode with them: they are its prompt cache. And a
+    resumed child keeps codemode when its transcript declared it: the switch is for new sessions, and taking a
+    declared tool back sends a `tool_removal`, which sub2api refuses once a request has more than five tools.
+    """
+    from misaka.ai.utils.transcript import getCurrentTools
+    from misaka.core.settings_manager import CODEMODE_TOOL, DEFAULT_TOOL_NAMES
+
+    names = [tool.name for tool in session.getAllTools()]
+    if fork or CODEMODE_TOOL not in names:
+        return names
+    started = CODEMODE_TOOL in session.getActiveToolNames()
+    declared = any(
+        read_field(tool, "name") == CODEMODE_TOOL
+        for tool in getCurrentTools([read_field(entry, "message") for entry in session.sessionManager.getBranch()
+                                     if read_field(entry, "type") == "message"])
+    )
+    if card or declared:
+        keep = started or declared
+    else:
+        settings = session.settingsManager
+        configured = settings.getDefaultTools()
+        byMcp = started and CODEMODE_TOOL not in (DEFAULT_TOOL_NAMES if configured is None else configured)
+        keep = settings.getRoleCodemode("subagents") or byMcp
+    return names if keep else [name for name in names if name != CODEMODE_TOOL]
+
+
 def _hook_tools(kind: str, tools: list[Any]) -> list[Any]:
     """Prompt hooks are tool-free; agent hooks cannot spawn descendants."""
 
@@ -123,7 +133,8 @@ def _hook_tools(kind: str, tools: list[Any]) -> list[Any]:
 
 
 def _small_fast_hook_model(parent: Any, available: list[Any]) -> Any:
-    """Resolve the configured small-fast tier within the active provider."""
+    """Resolve the configured small-fast tier within the active provider: the configured model, else
+    the newest of the provider's small-fast family (``haiku``, ``mini``, ``flash``...) it lists."""
 
     parent_provider = str(read_field(parent, "provider", ""))
     provider_models = [
@@ -136,7 +147,7 @@ def _small_fast_hook_model(parent: Any, available: list[Any]) -> Any:
         for model in provider_models
     }
 
-    if parent_provider in {"openai", "openai-codex", "azure-openai-responses"}:
+    if parent_provider in {"openai", "openai-codex", "azure"}:
         provider_override = os.environ.get("OPENAI_SMALL_FAST_MODEL")
         keywords = ("mini", "nano", "small", "fast")
     elif parent_provider in {"google", "google-vertex"}:
@@ -152,25 +163,24 @@ def _small_fast_hook_model(parent: Any, available: list[Any]) -> Any:
     if override and override.casefold() in by_id:
         return by_id[override.casefold()]
 
-    for model_id in _SMALL_FAST_DEFAULTS.get(parent_provider, ()):
-        if model_id.casefold() in by_id:
-            return by_id[model_id.casefold()]
+    from misaka.core.subagent.model import bedrock_region_prefix, newest_in_family
 
+    # The newest of the tier's family in this provider's catalog, by the rule a sub-agent's
+    # "haiku" resolves with (R19). A pinned list chose claude-haiku-4-5 and
+    # gemini-3-flash-preview where newer were configured, and ranking any "*-latest" ID first
+    # chose old aliases (2026-10-28). A keyword is a whole word of the ID ("mini" is not in
+    # "gemini"); on Bedrock the parent's inference-profile region is kept when the catalog has it.
+    ids = [str(read_field(model, "id", "")) for model in provider_models]
+    region = bedrock_region_prefix(str(read_field(parent, "id", "")))
     for keyword in keywords:
-        candidates = [
-            model
-            for model in provider_models
-            if keyword in str(read_field(model, "id", "")).casefold()
-        ]
+        word = re.compile(rf"(?<![a-z]){keyword}(?![a-z])")
+        candidates = [model_id for model_id in ids if word.search(model_id.casefold())]
         if not candidates:
             continue
-
-        def freshness(model: Any) -> tuple[int, tuple[int, ...], str]:
-            model_id = str(read_field(model, "id", "")).casefold()
-            numbers = tuple(int(value) for value in re.findall(r"\d+", model_id))
-            return (1 if "latest" in model_id else 0, numbers, model_id)
-
-        return max(candidates, key=freshness)
+        same_region = [model_id for model_id in candidates if bedrock_region_prefix(model_id) == region]
+        _provider, model_id = newest_in_family([(parent_provider, model_id) for model_id in same_region or candidates],
+                                               keyword)
+        return by_id[model_id.casefold()]
     # Third-party providers should retain their configured primary model rather
     # than silently crossing credentials into another provider.
     return parent
@@ -445,7 +455,6 @@ async def amain() -> int:
     workspace = os.environ.get("MISAKA_WORKSPACE") or os.getcwd()
     mcp_role = os.environ.get("MISAKA_MCP_ROLE") or role
     card = os.environ.get("MISAKA_SISTER_OWNER_TASK_ID")    # set only on the child that is a card's own session
-    sandbox = os.environ.get("MISAKA_SKILL_SANDBOX")         # a Sister card: the parent's read-only skill copies
     from misaka.core import session_overrides
     from misaka.core.wiring import SessionSpec, assemble, spec_overrides
     runtime, session, error = await engine_session.open_session(
@@ -460,8 +469,7 @@ async def amain() -> int:
             mcp_role=mcp_role,
             receive_messages=bool(card),
             task_id=card,
-            research_context=bool(card) and os.environ.get("MISAKA_RESEARCH_CONTEXT") == "1",
-            skill_roots=(("sandbox", sandbox),) if sandbox else None,
+            workflow_context=bool(card) and os.environ.get("MISAKA_WORKFLOW_CONTEXT") == "1",
             overrides=spec_overrides(session_overrides.from_env()) if card else (),
         )),
     )
@@ -530,7 +538,7 @@ async def amain() -> int:
     if os.environ.get("MISAKA_SUBAGENT_INHERIT_ALL_TOOLS") == "1":
         # No frontmatter allow/deny list means Claude's complete independently
         # assembled worker pool, not harn's four-tool interactive default.
-        session.setActiveToolsByName([tool.name for tool in session.getAllTools()])
+        session.setActiveToolsByName(inherited_tool_names(session, card=bool(card), fork=fork_snapshot is not None))
 
     async def evaluate_model_hook(
         kind: str,
@@ -557,7 +565,10 @@ async def amain() -> int:
             )
             model = session.modelRegistry.find(provider, normalize_model_for_api(model_id))
             if model is None:
-                raise RuntimeError(f"Hook model is not available: {provider}/{model_id}")
+                from misaka.core.model_runtime import personalizedCatalogHint
+
+                hint = personalizedCatalogHint(provider)
+                raise RuntimeError(f"Hook model is not available: {provider}/{model_id}" + (f".{hint}" if hint else ""))
             if not session.modelRegistry.hasConfiguredAuth(model):
                 raise RuntimeError(f"No configured authentication for hook model: {provider}/{model_id}")
         else:
@@ -694,7 +705,7 @@ async def amain() -> int:
                 },
                 convertToLlm=session.agent.convertToLlm,
                 onPayload=output_format,
-                streamFn=getattr(session.agent, "_subagent_base_stream_fn", session.agent.streamFn),
+                streamFn=getattr(session.agent, "_subagent_base_stream_fn", session.agent.streamFunction),
                 getApiKey=session.agent.getApiKey,
                 beforeToolCall=before_tool if tools else None,
                 finishTurn=finish_turn_from_stop_predicate(should_stop),
@@ -724,7 +735,7 @@ async def amain() -> int:
     subagent_hooks.set_hook_evaluator(evaluate_model_hook)
 
     async def classify_auto_permission(payload: dict[str, Any]) -> bool:
-        from misaka.modes.jsonl import to_jsonable
+        from misaka.modes.json_event import to_jsonable
 
         transcript = json.dumps(
             to_jsonable(session.state.messages),
@@ -947,7 +958,7 @@ async def amain() -> int:
             }
         )
 
-    from misaka.core import mcp
+    from misaka.core.subagent import agents as agent_roster
 
     def mcp_server_names() -> list[str]:
         try:
@@ -956,7 +967,7 @@ async def amain() -> int:
                 dict.fromkeys(
                     server
                     for tool in registered
-                    if (server := mcp.server_of(read_field(tool, "name", "")))
+                    if read_field(tool, "exposure") != "hidden" and (server := agent_roster.mcp_server_of(tool))
                 )
             )
         except (AttributeError, RuntimeError):
@@ -970,7 +981,7 @@ async def amain() -> int:
         required_mcp = []
     if fork_snapshot is not None:
         required_mcp.extend(
-            server for item in fork_snapshot["tools"] if (server := mcp.server_of(item.get("name")))
+            server for item in fork_snapshot["tools"] if (server := agent_roster.mcp_server_of(item.get("name")))
         )
     from misaka.config.product import setting
 
@@ -978,7 +989,7 @@ async def amain() -> int:
     while required_mcp:
         active_mcp_servers = mcp_server_names()
         if all(
-            any(mcp.server_matches(pattern, name) for name in active_mcp_servers)
+            any(agent_roster.mcp_server_matches(pattern, name) for name in active_mcp_servers)
             for pattern in required_mcp
         ):
             break
@@ -1026,8 +1037,8 @@ async def amain() -> int:
             await asyncio.gather(parent_watch, return_exceptions=True)
             return 2
 
-    # Discovery/sealing is complete before this handshake. The parent retains
-    # ownership of blocking preload work, but resolves against THIS child's roots.
+    # Discovery is complete before this handshake. The parent retains ownership of
+    # blocking preload work, but resolves against THIS child's roots.
     from misaka.core.skills.wiring.skills import SkillsPart
     skills_part = next((p for p in session.moments.parts if isinstance(p, SkillsPart)), None)
     skill_roots = skills_part.resolution_roots() if skills_part is not None else []

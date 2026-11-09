@@ -329,8 +329,8 @@ async def test_lcm_child_inherits_resumed_project_not_launcher(isolated, endpoin
     died importing it)."""
     from misaka.core.event_bus import createEventBus
     from misaka.core.extensions.loader import (
-        create_extension_runtime,
-        load_extension_from_factory,
+        createExtensionRuntime,
+        loadExtensionFromFactory,
     )
     from misaka.core.extensions.runner import ExtensionRunner
     from misaka.core.session_manager import SessionManager
@@ -339,8 +339,8 @@ async def test_lcm_child_inherits_resumed_project_not_launcher(isolated, endpoin
     project = isolated / 'original-project'
     project.mkdir()
     parent.sessionManager.appendCustomEntry('lcm-project', {'workspace': str(project.resolve())})
-    runtime = create_extension_runtime()
-    lcm = await load_extension_from_factory(misaka_lcm.activate(NS(workspace=parent.cwd, kind='foreground')),
+    runtime = createExtensionRuntime()
+    lcm = await loadExtensionFromFactory(misaka_lcm.activate(NS(workspace=parent.cwd, kind='foreground')),
                                             parent.cwd, createEventBus(), runtime)
     parent.extensionRunner = ExtensionRunner([lcm], runtime, parent.cwd, parent.sessionManager, None)
     try:

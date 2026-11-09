@@ -12,12 +12,12 @@ from misaka.core.session_manager import (
     _dump_json,
 )
 from misaka.utils import atomic
-from misaka.utils.paths import resolve_path
+from misaka.utils.paths import resolvePath
 
 type CreateTrailingEntries = Callable[[str | None, str], Sequence[object] | None]
 
 
-def serialize_session_branch(
+def serializeSessionBranch(
     session_manager: SessionManager,
     create_trailing_entries: CreateTrailingEntries | None = None,
 ) -> str:
@@ -54,7 +54,7 @@ def serialize_session_branch(
     return "\n".join(lines) + "\n"
 
 
-def export_session_to_jsonl(
+def exportSessionToJsonl(
     session_manager: SessionManager,
     output_path: str | None = None,
     create_trailing_entries: CreateTrailingEntries | None = None,
@@ -63,18 +63,14 @@ def export_session_to_jsonl(
     resolved_output = output_path or (
         f"session-{datetime.now(UTC).isoformat(timespec='milliseconds').replace(':', '-').replace('.', '-')}.jsonl"
     )
-    file_path = resolve_path(resolved_output, os.getcwd())
-    atomic.write_text(file_path, serialize_session_branch(session_manager, create_trailing_entries))
+    file_path = resolvePath(resolved_output, os.getcwd())
+    atomic.write_text(file_path, serializeSessionBranch(session_manager, create_trailing_entries))
     return file_path
 
 
-exportSessionToJsonl = export_session_to_jsonl
-serializeSessionBranch = serialize_session_branch
 
 __all__ = [
     "CreateTrailingEntries",
     "exportSessionToJsonl",
-    "export_session_to_jsonl",
     "serializeSessionBranch",
-    "serialize_session_branch",
 ]

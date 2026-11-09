@@ -1,4 +1,8 @@
-"""Public coding-agent SDK entrypoints."""
+"""Translated from pi's ``packages/coding-agent/src/core/sdk.ts`` (v1.1.0).
+
+MISAKA forks (marked where they act): the home's credential and session layout, role-bound settings and a role's pinned model and thinking level, the context engine and core
+parts in the context transform, and a session catalog for sessions without a product assembly.
+"""
 
 from __future__ import annotations
 
@@ -7,21 +11,19 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
 
 from misaka.agent.agent import Agent
+from misaka.agent.stream_fn import setDefaultStreamFn
 from misaka.agent.types import AgentMessage, ThinkingLevel
-from misaka.ai.auth.resolve import AuthResolutionOverrides
-from misaka.ai.models import clamp_thinking_level
+from misaka.ai.compat import streamSimple
+from misaka.ai.models import clampThinkingLevel
 from misaka.ai.types import (
     Model,
-    ProviderStreamOptions,
     TextContent,
     validate_message,
 )
-from misaka.ai.utils.headers import provider_headers_to_record
 from misaka.config import get_agent_dir
 from misaka.core.agent_session import AgentSession
-from misaka.core.auth_guidance import format_no_models_available_message
-from misaka.core.auth_storage import AuthStorage
-from misaka.core.cache_warmer import CacheWarmer, CacheWarmingRequest
+from misaka.core.auth_guidance import formatNoModelsAvailableMessage
+from misaka.core.cache_warmer import CacheWarmer, CacheWarmRequest
 from misaka.core.defaults import DEFAULT_THINKING_LEVEL
 from misaka.core.extensions import (
     ExtensionAPI,
@@ -34,33 +36,44 @@ from misaka.core.extensions import (
     SlashCommandSource,
     ToolDefinition,
 )
-from misaka.core.http_dispatcher import applyHttpProxySettings
+from misaka.core.mcp_servers import createToolNameMatcher
 from misaka.core.messages import convertToLlm
-from misaka.core.model_registry import ModelRegistry
 from misaka.core.model_resolver import findInitialModel
+from misaka.core.model_runtime import ModelRuntime
 from misaka.core.prompt_templates import PromptTemplate
-from misaka.core.provider_attribution import merge_provider_attribution_headers
+from misaka.core.provider_attribution import mergeProviderAttributionHeaders
 from misaka.core.resource_loader import DefaultResourceLoader, ResourceLoader
-from misaka.core.session_manager import SessionManager, get_default_session_dir
-from misaka.core.settings_manager import SettingsManager
+from misaka.core.session_manager import SessionManager, getDefaultSessionDir
+from misaka.core.settings_manager import (
+    DEFAULT_TOOL_NAMES,
+    SettingsManager,
+    applyToolModifiers,
+    getToolListError,
+    isToolModifier,
+)
 from misaka.core.timings import time
 from misaka.core.tools import (
     Tool,
-    ToolName,
-    create_bash_tool,
-    create_coding_tools,
-    create_edit_tool,
-    create_find_tool,
-    create_grep_tool,
-    create_ls_tool,
-    create_powershell_tool,
-    create_read_only_tools,
-    create_read_tool,
-    create_write_tool,
-    with_file_mutation_queue,
+    createBashTool,
+    createCodingTools,
+    createEditTool,
+    createFindTool,
+    createGrepTool,
+    createLsTool,
+    createPowerShellTool,
+    createReadOnlyTools,
+    createReadTool,
+    createWriteTool,
+    withFileMutationQueue,
 )
-from misaka.utils.paths import resolve_path
+from misaka.core.virtual_models import getBranchSelection
+from misaka.utils.paths import resolvePath
 from misaka.utils.values import read_field
+
+# Preserve the pre-0.81 fallback for extensions that construct Agent instances
+# or invoke low-level agent loops without supplying streamFn. Agent core remains
+# provider-agnostic and does not import pi-ai/compat itself.
+setDefaultStreamFn(streamSimple)
 
 if TYPE_CHECKING:
     from misaka.core.agent_session_runtime import (
@@ -101,13 +114,25 @@ class ScopedModel(TypedDict):
 class CreateAgentSessionOptions(TypedDict, total=False):
     cwd: str
     agentDir: str
-    authStorage: AuthStorage
-    modelRegistry: ModelRegistry
+    modelRuntime: ModelRuntime
     model: Model[Any]
     thinkingLevel: ThinkingLevel
     scopedModels: list[ScopedModel]
     noTools: Literal["all", "builtin"]
+    # Optional allowlist of tool names or patterns, where `*` matches any characters.
+    #
+    # When omitted, the resolved `defaultTools` setting gives the initial selection when configured.
+    # Otherwise the default built-in tools are enabled. Extension/custom tools remain enabled unless
+    # `noTools` changes that default. When provided, only matching tools are enabled. MCP tools stay
+    # registered for codemode and tool search unless an entry starts with `mcp__`; then only matching
+    # MCP tools are kept. An empty list, like `noTools: "all"`, disables MCP tools too.
+    #
+    # A list of only `+name` and `-name` entries is not an allowlist: it adds tools to or removes them
+    # from the default selection, like the `defaultTools` setting. These entries take exact names.
+    # Mixing them with plain entries throws.
     tools: list[str]
+    # Optional denylist of tool names or patterns to disable. Applies after `tools` when both are
+    # provided, MCP tools included.
     excludeTools: list[str]
     customTools: list[ToolDefinition[Any, Any]]
     parts: list[Any]
@@ -127,401 +152,394 @@ class CreateAgentSessionResult(_CreateAgentSessionResultRequired, total=False):
     modelFallbackMessage: str
 
 
-def _get_default_agent_dir() -> str:
+# Helper Functions
+
+
+def getDefaultAgentDir() -> str:
+    """Get the default agent directory."""
     return get_agent_dir()
 
 
-async def create_agent_session(options: CreateAgentSessionOptions | None = None) -> CreateAgentSessionResult:
-    resolved_options = dict(options or {})
-    explicit_session_manager = resolved_options.get("sessionManager")
-    cwd_option = resolved_options.get("cwd", None)
-    cwd = resolve_path(cwd_option if cwd_option is not None else (
-        explicit_session_manager.getCwd() if explicit_session_manager else os.getcwd()
-    ))
-    agent_dir = (
-        resolve_path(resolved_options["agentDir"])
-        if resolved_options.get("agentDir")
-        else _get_default_agent_dir()
-    )
-    resource_loader = resolved_options.get("resourceLoader")
+async def createAgentSession(options: CreateAgentSessionOptions | None = None) -> CreateAgentSessionResult:
+    """Create an AgentSession with the specified options.
 
-    # The home lays credentials out under credentials/; a custom agent directory keeps the same
-    # shape (config.home.path: a directory laying out what it keeps the way the home does).
+    ```python
+    # Minimal - uses defaults
+    session = (await createAgentSession())["session"]
+
+    # With explicit model
+    result = await createAgentSession({"model": getModel("anthropic", "claude-opus-4-5"), "thinkingLevel": "high"})
+
+    # Full control
+    loader = DefaultResourceLoader({"cwd": os.getcwd(), "agentDir": getAgentDir(), "settingsManager": SettingsManager.create()})
+    await loader.reload()
+    result = await createAgentSession({
+        "model": myModel,
+        "tools": ["read", "bash"],
+        "resourceLoader": loader,
+        "sessionManager": SessionManager.inMemory(),
+    })
+    ```
+    """
+    options = options or {}
+    explicitSessionManager = options.get("sessionManager")
+    cwd = resolvePath(
+        options["cwd"] if options.get("cwd") is not None
+        else explicitSessionManager.getCwd() if explicitSessionManager else os.getcwd()
+    )
+    agentDir = resolvePath(options["agentDir"]) if options.get("agentDir") else getDefaultAgentDir()
+    resourceLoader = options.get("resourceLoader")
+
+    # MISAKA fork: a directory keeps credentials and models the way the home lays them out (config.home.path).
     from misaka.config import home
 
-    custom_dir = resolved_options.get("agentDir")
-    auth_path = str(home.path("auth", agent_dir)) if custom_dir else None
-    models_path = str(home.path("models", agent_dir)) if custom_dir else None
-    auth_storage = resolved_options.get("authStorage") or AuthStorage.create(auth_path)
-    settings_manager = resolved_options.get("settingsManager") or SettingsManager.create(cwd, agent_dir)
-    applyHttpProxySettings(settings_manager.getGlobalSettings().get("httpProxy"))
-    model_registry = resolved_options.get("modelRegistry") or ModelRegistry.create(auth_storage, models_path)
-    if resolved_options.get("modelProfile"):
-        settings_manager.bindModelProfile(resolved_options["modelProfile"], model_registry)
-    # The engine home only decides the session store when the caller named one; otherwise
-    # sessions go to the product tree (config.sessions), where /resume and the panel look.
-    session_manager = explicit_session_manager or SessionManager.create(
-        cwd, get_default_session_dir(cwd, resolved_options.get("agentDir") and agent_dir))
+    authPath = str(home.path("auth", agentDir)) if options.get("agentDir") else None
+    modelsPath = str(home.path("models", agentDir if options.get("agentDir") else None))
+    modelRuntime = options.get("modelRuntime") or await ModelRuntime.create({"authPath": authPath, "modelsPath": modelsPath})
 
-    if resource_loader is None:
-        resource_loader = DefaultResourceLoader(
-            {"cwd": cwd, "agentDir": agent_dir, "settingsManager": settings_manager}
-        )
-        await resource_loader.reload()
+    settingsManager = options.get("settingsManager") or SettingsManager.create(cwd, agentDir)
+    # MISAKA fork: a session that runs as a role reads that role's settings.
+    if options.get("modelProfile"):
+        settingsManager.bindModelProfile(options["modelProfile"], modelRuntime)
+    # MISAKA fork: the agent directory decides the session store only when the caller named one; otherwise
+    # sessions go to the product tree (config.sessions), where /resume and the panel look.
+    sessionManager = explicitSessionManager or SessionManager.create(
+        cwd, getDefaultSessionDir(cwd, options.get("agentDir") and agentDir)
+    )
+
+    if resourceLoader is None:
+        resourceLoader = DefaultResourceLoader({"cwd": cwd, "agentDir": agentDir, "settingsManager": settingsManager})
+        await resourceLoader.reload()
         time("resourceLoader.reload")
 
-    existing_session = session_manager.buildSessionContext()
-    has_existing_session = len(existing_session.messages) > 0
-    has_thinking_entry = any(entry.get("type") == "thinking_level_change" for entry in session_manager.getBranch())
+    # Check if session has existing data to restore
+    existingSession = sessionManager.buildSessionContext()
+    hasExistingSession = len(existingSession.messages) > 0
+    hasThinkingEntry = any(entry.get("type") == "thinking_level_change" for entry in sessionManager.getBranch())
 
-    model = resolved_options.get("model")
-    model_fallback_message: str | None = None
-    if model is None and has_existing_session and existing_session.model:
-        restored_model = model_registry.find(existing_session.model["provider"], existing_session.model["modelId"])
-        if restored_model is not None and model_registry.hasConfiguredAuth(restored_model):
-            model = restored_model
+    model = options.get("model")
+    modelFallbackMessage: str | None = None
+
+    # Assistant messages name the physical model that answered, so a virtual selection is only in
+    # model_change entries.
+    sessionModel = getBranchSelection(sessionManager.getBranch(), modelRuntime.getModel)
+
+    # If session has data, try to restore model from it
+    if model is None and hasExistingSession and sessionModel:
+        restoredModel = modelRuntime.getModel(sessionModel["provider"], sessionModel["modelId"])
+        if restoredModel is not None and modelRuntime.hasConfiguredAuth(restoredModel.provider):
+            model = restoredModel
         if model is None:
-            model_fallback_message = (
-                f'Could not restore model {existing_session.model["provider"]}/{existing_session.model["modelId"]}'
-            )
+            modelFallbackMessage = f"Could not restore model {sessionModel['provider']}/{sessionModel['modelId']}"
 
-    if model is None and getattr(settings_manager, "getModelProfile", lambda: None)():
+    # MISAKA fork: a role that pins its model starts on it, and says so when that provider has no credentials.
+    if model is None and getattr(settingsManager, "getModelProfile", lambda: None)():
         from misaka.config import profiles
 
-        pin = profiles.pinned_model(settings_manager.getModelProfile(), strict=True)
+        pin = profiles.pinned_model(settingsManager.getModelProfile(), strict=True)
         if pin and pin != "inherit":
-            provider, model_id = settings_manager.getDefaultModelPair()
-            model = model_registry.find(provider, model_id)
+            provider, modelId = settingsManager.getDefaultProvider(), settingsManager.getDefaultModel()
+            model = modelRuntime.getModel(provider, modelId)
             if model is None:
-                raise RuntimeError(f"Role default model is not available: {provider}/{model_id}")
-            if not model_registry.hasConfiguredAuth(model):
-                model_fallback_message = (
-                    f"No configured authentication for role default {provider}/{model_id}. "
+                from misaka.core.model_runtime import personalizedCatalogHint
+
+                hint = personalizedCatalogHint(provider)
+                raise RuntimeError(f"Role default model is not available: {provider}/{modelId}" + (f".{hint}" if hint else ""))
+            if not modelRuntime.hasConfiguredAuth(model.provider):
+                modelFallbackMessage = (
+                    f"No configured authentication for role default {provider}/{modelId}. "
                     "Use /login or misaka setup; the selected provider has not been changed."
                 )
 
+    # If still no model, use findInitialModel (checks settings default, then provider defaults)
     if model is None:
-        default_provider, default_model = settings_manager.getDefaultModelPair()
         result = await findInitialModel(
             {
                 "scopedModels": [],
-                "isContinuing": has_existing_session,
-                "defaultProvider": default_provider,
-                "defaultModelId": default_model,
-                "defaultThinkingLevel": settings_manager.getDefaultThinkingLevel(),
-                "modelThinkingLevels": settings_manager.getAllModelThinkingLevels(),
-                "modelRegistry": model_registry,
+                "isContinuing": hasExistingSession,
+                "defaultProvider": settingsManager.getDefaultProvider(),
+                "defaultModelId": settingsManager.getDefaultModel(),
+                "defaultThinkingLevel": settingsManager.getDefaultThinkingLevel(),
+                "modelThinkingLevels": settingsManager.getAllModelThinkingLevels(),
+                "modelRuntime": modelRuntime,
             }
         )
         model = result.model
         if model is None:
-            model_fallback_message = format_no_models_available_message()
-        elif model_fallback_message:
-            model_fallback_message += f". Using {model.provider}/{model.id}"
+            modelFallbackMessage = formatNoModelsAvailableMessage()
+        elif modelFallbackMessage:
+            modelFallbackMessage += f". Using {model.provider}/{model.id}"
 
-    thinking_level = resolved_options.get("thinkingLevel")
-    if thinking_level is None and has_existing_session:
-        thinking_level = (
-            existing_session.thinkingLevel
-            if has_thinking_entry
-            else settings_manager.getDefaultThinkingLevel() or DEFAULT_THINKING_LEVEL
+    thinkingLevel = options.get("thinkingLevel")
+
+    # If session has data, restore thinking level from it
+    if thinkingLevel is None and hasExistingSession:
+        thinkingLevel = (
+            existingSession.thinkingLevel
+            if hasThinkingEntry
+            else settingsManager.getDefaultThinkingLevel() or DEFAULT_THINKING_LEVEL
         )
-    if thinking_level is None:
-        # MISAKA fork: the agent's own default (her role's defaultThinkingLevel) comes before the
-        # shared per-model table.
-        thinking_level = settings_manager.getRoleThinkingLevel()
-    if thinking_level is None and model is not None:
-        thinking_level = settings_manager.getModelThinkingLevel(model.provider, model.id)
-    if thinking_level is None:
-        thinking_level = settings_manager.getDefaultThinkingLevel() or DEFAULT_THINKING_LEVEL
-    thinking_level = "off" if model is None else clamp_thinking_level(model, thinking_level)
 
-    default_active_tool_names: list[ToolName] = ["read", "bash", "edit", "write", "office", "grep", "find", "ls"]
-    # defaultTools selects initial built-ins; it does not populate the registry allowlist (pi 541045ae0).
-    configured_default_tools = settings_manager.getDefaultTools()
-    allowed_tool_names = resolved_options.get("tools")
-    if allowed_tool_names is None and resolved_options.get("noTools") == "all":
-        allowed_tool_names = []
-    excluded_tool_names = (
-        list(resolved_options["excludeTools"])
-        if resolved_options.get("excludeTools") is not None
-        else []
+    # MISAKA fork: the agent's own default (her role's defaultThinkingLevel) comes before the shared per-model table.
+    if thinkingLevel is None:
+        thinkingLevel = settingsManager.getRoleThinkingLevel()
+
+    # Fall back to per-model override, then global default
+    if thinkingLevel is None and model is not None:
+        perModel = settingsManager.getModelThinkingLevel(model.provider, model.id)
+        if perModel:
+            thinkingLevel = perModel
+    if thinkingLevel is None:
+        thinkingLevel = settingsManager.getDefaultThinkingLevel() or DEFAULT_THINKING_LEVEL
+
+    # Clamp to model capabilities
+    thinkingLevel = "off" if model is None else clampThinkingLevel(model, thinkingLevel)
+
+    tools = options.get("tools")
+    toolListError = getToolListError(tools) if tools is not None else None
+    if toolListError:
+        raise ValueError(f"Invalid tools option: {toolListError}")
+    configuredDefaultTools = settingsManager.getDefaultTools()
+    defaultToolNames = (
+        [] if options.get("noTools") else list(DEFAULT_TOOL_NAMES if configuredDefaultTools is None else configuredDefaultTools)
     )
-    excluded_tool_name_set = set(excluded_tool_names)
-    initial_active_tool_names = (
-        list(resolved_options["tools"])
-        if resolved_options.get("tools") is not None
-        else ([] if resolved_options.get("noTools")
-              else (list(configured_default_tools) if configured_default_tools is not None
-                    else default_active_tool_names))
-    )
-    initial_active_tool_names = [
-        name for name in initial_active_tool_names if name not in excluded_tool_name_set
+    # A `tools` list of only `+name`/`-name` entries changes the default selection instead of
+    # replacing it, like the `defaultTools` setting.
+    toolModifiers = list(tools) if tools is not None and any(map(isToolModifier, tools)) else None
+    selectedToolNames = applyToolModifiers(defaultToolNames, toolModifiers) if toolModifiers else tools
+    if toolModifiers:
+        allowedToolNames = selectedToolNames if options.get("noTools") == "all" else None
+    else:
+        allowedToolNames = list(tools) if tools is not None else ([] if options.get("noTools") == "all" else None)
+    excludedToolNames = options.get("excludeTools")
+    isExcludedTool = createToolNameMatcher(excludedToolNames) if excludedToolNames is not None else None
+    initialActiveToolNames = [
+        name
+        for name in (selectedToolNames if selectedToolNames is not None else defaultToolNames)
+        if not (isExcludedTool is not None and isExcludedTool(name))
     ]
 
-    extension_runner_ref: dict[str, Any] = {}
-
-    def convert_to_llm_with_block_images(messages: list[AgentMessage]) -> list[Any]:
+    # Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
+    def convertToLlmWithBlockImages(messages: list[AgentMessage]) -> list[Any]:
         converted = convertToLlm(messages)
-        if not settings_manager.getBlockImages():
+        # Check setting dynamically so mid-session changes take effect
+        if not settingsManager.getBlockImages():
             return converted
+        # Filter out ImageContent from all messages, replacing with text placeholder
+        filtered: list[Any] = []
+        for msg in converted:
+            content = read_field(msg, "content")
+            if read_field(msg, "role") in ("user", "toolResult") and isinstance(content, list):
+                hasImages = any(_contentType(c) == "image" for c in content)
+                if hasImages:
 
-        filtered_messages: list[Any] = []
-        for message in converted:
-            role = read_field(message, "role")
-            content = read_field(message, "content")
-            if role not in {"user", "toolResult"} or not isinstance(content, list):
-                filtered_messages.append(message)
-                continue
-            if not any(_content_type(item) == "image" for item in content):
-                filtered_messages.append(message)
-                continue
+                    def isDisabledText(c: Any) -> bool:
+                        return _contentType(c) == "text" and _contentText(c) == "Image reading is disabled."
 
-            filtered_content: list[Any] = []
-            previous_disabled = False
-            for item in content:
-                if _content_type(item) == "image":
-                    if not previous_disabled:
-                        filtered_content.append(TextContent(text="Image reading is disabled."))
-                    previous_disabled = True
+                    mapped = [TextContent(text="Image reading is disabled.") if _contentType(c) == "image" else c for c in content]
+                    # Dedupe consecutive "Image reading is disabled." texts
+                    filteredContent = [
+                        c for i, c in enumerate(mapped) if not (isDisabledText(c) and i > 0 and isDisabledText(mapped[i - 1]))
+                    ]
+                    payload = _messageDump(msg)
+                    payload["content"] = [_messageDump(c) for c in filteredContent]
+                    filtered.append(validate_message(payload))
                     continue
-                previous_disabled = (
-                    _content_type(item) == "text"
-                    and _content_text(item) == "Image reading is disabled."
-                )
-                filtered_content.append(item)
+            filtered.append(msg)
+        return filtered
 
-            payload = _message_dump(message)
-            payload["content"] = [_message_dump(item) for item in filtered_content]
-            filtered_messages.append(validate_message(payload))
+    extensionRunnerRef: dict[str, Any] = {}
 
-        return filtered_messages
+    async def decideCacheWarming(event: dict[str, Any]) -> Any:
+        runner = extensionRunnerRef.get("current")
+        decision = await runner.emitCacheWarmingDecision(event) if runner is not None else None
+        return decision if decision is not None else event["action"]
 
-    async def stream_fn(model_value: Model[Any], context: Any, stream_options: Any = None) -> Any:
-        resolved_stream_options = _to_dict(stream_options)
-        resolution = await model_registry.getAuth(
-            model_value,
-            AuthResolutionOverrides(signal=resolved_stream_options.get("signal")),
-        )
-        if resolution is None:
-            raise RuntimeError(f"Provider is not configured: {model_value.provider}")
-        request_model = (
-            model_value.model_copy(update={"baseUrl": resolution.auth.baseUrl})
-            if resolution.auth.baseUrl
-            else model_value
-        )
+    cacheWarmer = CacheWarmer(modelRuntime, sessionManager, lambda: settingsManager.getCacheWarmingMode(), decideCacheWarming)
 
-        provider_retry_settings = settings_manager.getProviderRetrySettings()
-        http_idle_timeout_ms = settings_manager.getHttpIdleTimeoutMs()
-        effective_timeout_ms = 2_147_483_647 if http_idle_timeout_ms == 0 else http_idle_timeout_ms
-        # pi sdk.ts:337 merges attribution over the auth headers before the caller's own,
-        # so an explicit header always wins over one of ours.
-        headers = merge_provider_attribution_headers(
-            model_value,
-            settings_manager,
-            session_manager.getSessionId(),
-            _merge_headers(
-                provider_headers_to_record(resolution.auth.headers),
-                resolved_stream_options.get("headers"),
+    def buildRequestOptions(requestModel: Model[Any], options: Any = None) -> dict[str, Any]:
+        options = _toDict(options)
+        providerRetrySettings = settingsManager.getProviderRetrySettings()
+        httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs()
+        effectiveTimeoutMs = 2147483647 if httpIdleTimeoutMs == 0 else httpIdleTimeoutMs
+        headerRunner = extensionRunnerRef.get("current")
+
+        def nullish(*values: Any) -> Any:
+            return next((value for value in values if value is not None), None)
+
+        async def transformHeaders(requestHeaders: dict[str, Any]) -> dict[str, Any]:
+            headers = mergeProviderAttributionHeaders(requestModel, settingsManager, options.get("sessionId"), requestHeaders)
+            if headerRunner is not None and headerRunner.hasHandlers("before_provider_headers"):
+                return await headerRunner.emitBeforeProviderHeaders(dict(headers or {}))
+            return headers or {}
+
+        return {
+            **options,
+            "timeoutMs": nullish(options.get("timeoutMs"), providerRetrySettings.get("timeoutMs"), effectiveTimeoutMs),
+            "websocketConnectTimeoutMs": nullish(
+                options.get("websocketConnectTimeoutMs"), settingsManager.getWebSocketConnectTimeoutMs()
             ),
-        )
-        # pi sdk.ts:330-339 hands the merged headers to `before_provider_headers` handlers right
-        # here (models.ts:657, after mergeHeaders and before the provider call). Handlers mutate
-        # the mapping in place; a None value deletes that header (pi utils/headers.ts).
-        header_runner = extension_runner_ref.get("current")
-        if header_runner is not None and header_runner.has_handlers("before_provider_headers"):
-            transformed = await header_runner.emit_before_provider_headers(dict(headers or {}))
-            headers = {key: str(value) for key, value in transformed.items() if value is not None} or None
-        final_options = dict(resolved_stream_options)
-        final_options["apiKey"] = resolution.auth.apiKey
-        request_env = {
-            **(resolution.env or {}),
-            **(resolved_stream_options.get("env") or {}),
+            "maxRetries": nullish(options.get("maxRetries"), providerRetrySettings.get("maxRetries")),
+            "maxRetryDelayMs": nullish(options.get("maxRetryDelayMs"), providerRetrySettings.get("maxRetryDelayMs")),
+            "transformHeaders": transformHeaders,
         }
-        if request_env:
-            final_options["env"] = request_env
-        if final_options.get("timeoutMs") is None:
-            provider_timeout_ms = provider_retry_settings.get("timeoutMs")
-            final_options["timeoutMs"] = (
-                provider_timeout_ms
-                if provider_timeout_ms is not None
-                else effective_timeout_ms
+
+    # Warm only requests for the selected model. Requests a virtual selection routed, or that an
+    # extension redirected, may not be repeated by the next request, so warming them could be wasted.
+    def cacheContextIsCurrent(requestModel: Model[Any]) -> Callable[[], bool]:
+        messages = agent.state.messages
+
+        def isCurrent() -> bool:
+            currentModel = agent.state.model
+            currentMessages = agent.state.messages
+            return (
+                currentModel is not None
+                and currentModel.provider == requestModel.provider
+                and currentModel.id == requestModel.id
+                and len(messages) <= len(currentMessages)
+                and all(message is currentMessages[index] for index, message in enumerate(messages))
             )
-        if final_options.get("maxRetries") is None:
-            final_options["maxRetries"] = provider_retry_settings.get("maxRetries")
-        if final_options.get("maxRetryDelayMs") is None:
-            final_options["maxRetryDelayMs"] = provider_retry_settings.get("maxRetryDelayMs")
-        if headers is not None:
-            final_options["headers"] = headers
-        request_options = ProviderStreamOptions.model_validate(final_options)
+
+        return isCurrent
+
+    async def transformProviderPayload(payload: Any, _model: Model[Any]) -> Any:
+        runner = extensionRunnerRef.get("current")
+        if runner is None or not runner.hasHandlers("before_provider_request"):
+            return payload
+        return await runner.emitBeforeProviderRequest(payload)
+
+    async def handleProviderResponse(response: Any, _model: Model[Any]) -> None:
+        runner = extensionRunnerRef.get("current")
+        if runner is None or not runner.hasHandlers("after_provider_response"):
+            return
+        await runner.emit(
+            {"type": "after_provider_response", "status": read_field(response, "status"), "headers": read_field(response, "headers")}
+        )
+
+    async def handleProviderStreamEvent(data: Any, model: Model[Any]) -> None:
+        runner = extensionRunnerRef.get("current")
+        if runner is None or not runner.hasHandlers("provider_stream_event"):
+            return
+        await runner.emit(
+            {"data": data, "type": "provider_stream_event", "provider": model.provider, "api": model.api, "model": model.id}
+        )
+
+    async def streamFn(model: Model[Any], context: Any, options: Any = None) -> Any:
+        requestOptions = buildRequestOptions(model, options)
         # Compaction and summaries use their own routing ids; only session requests
         # replace the cache entry, so warming restarts from them. Keep warming while
         # the current transcript still extends the request's prefix. Agent state may
         # shallow-copy the messages array or refresh the model object without changing
         # the provider request, so top-level object identity is not a valid cache key.
-        if resolved_stream_options.get("sessionId") == session_manager.getSessionId():
-            cache_warmer.start(
-                CacheWarmingRequest(model=request_model, context=context, options=request_options),
-                cache_context_is_current(request_model),
+        if requestOptions.get("sessionId") == sessionManager.getSessionId():
+            cacheWarmer.start(
+                CacheWarmRequest(model=model, context=context, options=requestOptions), cacheContextIsCurrent(model)
             )
-        return model_registry.streamSimple(
-            request_model,
-            context,
-            request_options,
-        )
+        return modelRuntime.streamSimple(model, context, requestOptions)
 
-    def cache_context_is_current(request_model: Model[Any]) -> Callable[[], bool]:
-        messages = agent.state.messages
-
-        def is_current() -> bool:
-            current_model = agent.state.model
-            current_messages = agent.state.messages
-            return (
-                current_model is not None
-                and current_model.provider == request_model.provider
-                and current_model.id == request_model.id
-                and len(messages) <= len(current_messages)
-                and all(message is current_messages[index] for index, message in enumerate(messages))
-            )
-
-        return is_current
-
-    async def decide_cache_warming(event: dict[str, Any]) -> Any:
-        runner = extension_runner_ref.get("current")
-        if runner is None:
-            return event["action"]
-        return await runner.emit_cache_warming_decision(event)
-
-    cache_warmer = CacheWarmer(
-        model_registry, session_manager, settings_manager.getCacheWarmingMode, decide_cache_warming
-    )
-
-    async def on_payload(payload: dict[str, Any], _model: Model[Any]) -> Any:
-        runner = extension_runner_ref.get("current")
-        if runner is None or not runner.has_handlers("before_provider_request"):
-            return payload
-        return await runner.emit_before_provider_request(payload)
-
-    async def on_response(response: Any, _model: Model[Any]) -> None:
-        runner = extension_runner_ref.get("current")
-        if runner is None or not runner.has_handlers("after_provider_response"):
-            return
-        await runner.emit(
-            {
-                "type": "after_provider_response",
-                "status": read_field(response, "status"),
-                "headers": read_field(response, "headers"),
-            }
-        )
-
-    async def transform_context(messages: list[AgentMessage], _signal: Any | None = None) -> list[AgentMessage]:
-        session = extension_runner_ref.get("session")
+    async def transformContext(messages: list[AgentMessage], signal: Any | None = None) -> list[AgentMessage]:
+        # MISAKA fork: the context engine prepares the messages, and the session's parts see its durable view.
+        session = extensionRunnerRef.get("session")
         if session is not None:
-            messages = await session.prepareContextMessages(messages, _signal)
-            # MISAKA fork: transient parts/extensions see the engine's durable view.
+            messages = await session.prepareContextMessages(messages, signal)
             messages = await session.moments.context(messages)
-        runner = extension_runner_ref.get("current")
+        runner = extensionRunnerRef.get("current")
         if runner is None:
             return messages
-        return await runner.emit_context(messages)
+        return await runner.emitContext(messages)
 
-    initial_model = model or _unknown_model()
     agent = Agent(
         {
             "initialState": {
                 "systemPrompt": "",
-                "model": initial_model,
-                "thinkingLevel": thinking_level,
+                # MISAKA fork: Agent's state needs a model; a session without one starts on a placeholder that is
+                # cleared right after.
+                "model": model or _unknownModel(),
+                "thinkingLevel": thinkingLevel,
                 "tools": [],
-                "messages": existing_session.messages,
+                "messages": existingSession.messages,
             },
-            "convertToLlm": convert_to_llm_with_block_images,
-            "streamFn": stream_fn,
-            "onPayload": on_payload,
-            "onResponse": on_response,
-            "sessionId": session_manager.getSessionId(),
-            "transformContext": transform_context,
-            "steeringMode": settings_manager.getSteeringMode(),
-            "followUpMode": settings_manager.getFollowUpMode(),
-            "transport": settings_manager.getTransport(),
-            "thinkingBudgets": settings_manager.getThinkingBudgets(),
-            "maxRetryDelayMs": settings_manager.getProviderRetrySettings().get("maxRetryDelayMs"),
+            "convertToLlm": convertToLlmWithBlockImages,
+            "streamFn": streamFn,
+            "onPayload": transformProviderPayload,
+            "onResponse": handleProviderResponse,
+            "onProviderStreamEvent": handleProviderStreamEvent,
+            "sessionId": sessionManager.getSessionId(),
+            "transformContext": transformContext,
+            "steeringMode": settingsManager.getSteeringMode(),
+            "followUpMode": settingsManager.getFollowUpMode(),
+            "transport": settingsManager.getTransport(),
+            "thinkingBudgets": settingsManager.getThinkingBudgets(),
+            "maxRetryDelayMs": settingsManager.getProviderRetrySettings().get("maxRetryDelayMs"),
         }
     )
     if model is None:
         agent.state.model = None
 
     # Restore missing settings metadata for older sessions.
-    if has_existing_session:
-        if not has_thinking_entry:
-            session_manager.appendThinkingLevelChange(thinking_level)
+    if hasExistingSession:
+        if not hasThinkingEntry:
+            sessionManager.appendThinkingLevelChange(thinkingLevel)
     else:
+        # Save initial model and thinking level for new sessions so they can be restored on resume
         if model is not None:
-            session_manager.appendModelChange(model.provider, model.id)
-        session_manager.appendThinkingLevelChange(thinking_level)
+            sessionManager.appendModelChange(model.provider, model.id)
+        sessionManager.appendThinkingLevelChange(thinkingLevel)
 
+    # MISAKA fork: core parts; a raw SDK or helper session has no product assembly, so it gets the session catalog.
     from misaka.core.session_catalog import CatalogPart
-    parts = list(resolved_options.get("parts") or [])
+
+    parts = list(options.get("parts") or [])
     if not any(isinstance(part, CatalogPart) for part in parts):
-        parts.insert(0, CatalogPart())  # raw SDK/helper sessions have no product assembly
+        parts.insert(0, CatalogPart())
     session = AgentSession(
         {
             "agent": agent,
-            "sessionManager": session_manager,
-            "settingsManager": settings_manager,
+            "sessionManager": sessionManager,
+            "settingsManager": settingsManager,
             "cwd": cwd,
-            "scopedModels": resolved_options.get("scopedModels") or [],
-            "resourceLoader": resource_loader,
-            "customTools": resolved_options.get("customTools") or [],
+            "scopedModels": options.get("scopedModels") or [],
+            "resourceLoader": resourceLoader,
+            "customTools": options.get("customTools") or [],
             "parts": parts,
-            "modelRegistry": model_registry,
-            "cacheWarmer": cache_warmer,
-            "initialActiveToolNames": initial_active_tool_names,
-            "allowedToolNames": allowed_tool_names,
-            "excludedToolNames": excluded_tool_names,
-            "extensionRunnerRef": extension_runner_ref,
-            "sessionStartEvent": resolved_options.get("sessionStartEvent"),
+            "modelRuntime": modelRuntime,
+            "cacheWarmer": cacheWarmer,
+            "initialActiveToolNames": initialActiveToolNames,
+            "usesDefaultTools": (tools is None or toolModifiers is not None) and not options.get("noTools"),
+            "defaultToolModifiers": toolModifiers,
+            "allowedToolNames": allowedToolNames,
+            "excludedToolNames": excludedToolNames,
+            "extensionRunnerRef": extensionRunnerRef,
+            "sessionStartEvent": options.get("sessionStartEvent"),
         }
     )
-    extensions_result = resource_loader.getExtensions()
+
+    extensionsResult = resourceLoader.getExtensions()
 
     return {
         "session": session,
-        "extensionsResult": extensions_result,
-        "modelFallbackMessage": model_fallback_message,
+        "extensionsResult": extensionsResult,
+        "modelFallbackMessage": modelFallbackMessage,
     }
 
 
-def _to_dict(value: Any) -> dict[str, Any]:
-    """Convert an options-like value to a plain dict.
+# Helper Functions
 
-    Handles dicts, Pydantic models, SimpleNamespace subclasses (e.g.
-    ``StreamOptionsNamespace``), and other objects with ``__dict__``.
-    Falls back to an empty dict for ``None``.
-    """
+
+def _toDict(value: Any) -> dict[str, Any]:
+    """An options value as a plain dict: a dict, a Pydantic model, or a namespace (``StreamOptionsNamespace``)."""
     if value is None:
         return {}
     if isinstance(value, dict):
         return dict(value)
     if hasattr(value, "model_dump"):
         return value.model_dump()
-    # SimpleNamespace and its subclasses (e.g. StreamOptionsNamespace) store
-    # their attributes in __dict__ but are not iterable, so dict() on them
-    # raises TypeError.  We read __dict__ directly instead.
     if hasattr(value, "__dict__"):
         return dict(vars(value))
     return dict(value)
 
 
-def _merge_headers(*header_groups: dict[str, str] | None) -> dict[str, str] | None:
-    merged: dict[str, str] = {}
-    for group in header_groups:
-        if group:
-            merged.update(group)
-    return merged or None
-
-
-def _unknown_model() -> Model[Any]:
+def _unknownModel() -> Model[Any]:
     return Model(
         id="unknown",
         name="unknown",
@@ -536,37 +554,24 @@ def _unknown_model() -> Model[Any]:
     )
 
 
-def _message_dump(value: Any) -> Any:
+def _messageDump(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         return value.model_dump()
     if isinstance(value, dict):
-        return {key: _message_dump(item) for key, item in value.items()}
+        return {key: _messageDump(item) for key, item in value.items()}
     if isinstance(value, list):
-        return [_message_dump(item) for item in value]
+        return [_messageDump(item) for item in value]
     return value
 
 
-def _content_type(block: Any) -> str | None:
+def _contentType(block: Any) -> str | None:
     value = read_field(block, "type")
     return value if isinstance(value, str) else None
 
 
-def _content_text(block: Any) -> str | None:
+def _contentText(block: Any) -> str | None:
     value = read_field(block, "text")
     return value if isinstance(value, str) else None
-
-
-createBashTool = create_bash_tool
-createCodingTools = create_coding_tools
-createEditTool = create_edit_tool
-createFindTool = create_find_tool
-createGrepTool = create_grep_tool
-createLsTool = create_ls_tool
-createPowerShellTool = create_powershell_tool
-createReadOnlyTools = create_read_only_tools
-createReadTool = create_read_tool
-createWriteTool = create_write_tool
-withFileMutationQueue = with_file_mutation_queue
 
 
 def __getattr__(name: str) -> Any:

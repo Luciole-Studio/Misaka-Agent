@@ -1,4 +1,7 @@
-"""Process ``@file`` CLI arguments into text content and image attachments."""
+"""Translated from pi's ``packages/coding-agent/src/cli/file-processor.ts`` (v1.1.0).
+
+Process @file CLI arguments into text content and image attachments
+"""
 
 from __future__ import annotations
 
@@ -8,9 +11,12 @@ import sys
 from dataclasses import dataclass
 
 from misaka.ai.types import ImageContent
-from misaka.core.tools.path_utils import resolve_read_path
-from misaka.utils.image_process import ProcessImageOptions, process_image
-from misaka.utils.mime import detect_supported_image_mime_type_from_file
+from misaka.core.tools.path_utils import resolveReadPath
+from misaka.utils.chalk import chalk
+from misaka.utils.image_process import ProcessImageOptions, processImage
+from misaka.utils.mime import detectSupportedImageMimeTypeFromFile
+from misaka.utils.node_errors import withSyscall
+from misaka.utils.text import stripBom
 
 
 @dataclass(slots=True)
@@ -21,81 +27,68 @@ class ProcessedFiles:
 
 @dataclass(slots=True)
 class ProcessFileOptions:
+    # Whether to auto-resize images. Default: true
     autoResizeImages: bool | None = None
 
 
-async def process_file_arguments(
-    file_args: list[str],
-    options: ProcessFileOptions | None = None,
-) -> ProcessedFiles:
-    return await _process_file_arguments(file_args, options=options)
+def _readFile(path: str) -> bytes:
+    with open(path, "rb") as file:
+        return file.read()
 
 
-async def _process_file_arguments(
-    file_args: list[str],
-    options: ProcessFileOptions | None = None,
-    *,
-    cwd: str | None = None,
-) -> ProcessedFiles:
-    auto_resize_images = True if options is None or options.autoResizeImages is None else options.autoResizeImages
-    resolved_cwd = cwd or os.getcwd()
+async def processFileArguments(fileArgs: list[str], options: ProcessFileOptions | None = None) -> ProcessedFiles:
+    """Process @file arguments into text content and image attachments"""
+    autoResizeImages = options.autoResizeImages if options is not None and options.autoResizeImages is not None else True
     text = ""
     images: list[ImageContent] = []
 
-    for file_arg in file_args:
-        absolute_path = os.path.abspath(resolve_read_path(file_arg, resolved_cwd))
-        if not os.path.exists(absolute_path):
-            sys.stderr.write(f"Error: File not found: {absolute_path}\n")
+    for fileArg in fileArgs:
+        # Expand and resolve path (handles ~ expansion and macOS screenshot Unicode spaces)
+        absolutePath = os.path.abspath(resolveReadPath(fileArg, os.getcwd()))
+
+        # Check if file exists
+        if not os.path.exists(absolutePath):
+            print(chalk.red(f"Error: File not found: {absolutePath}"), file=sys.stderr)
             raise SystemExit(1)
 
-        stats = await asyncio.to_thread(os.stat, absolute_path)
+        # Check if file is empty
+        stats = await asyncio.to_thread(os.stat, absolutePath)
         if stats.st_size == 0:
+            # Skip empty files
             continue
 
-        mime_type = await detect_supported_image_mime_type_from_file(absolute_path)
-        if mime_type:
-            content = await asyncio.to_thread(_read_bytes, absolute_path)
-            processed = await process_image(
-                content,
-                mime_type,
-                ProcessImageOptions(autoResizeImages=auto_resize_images),
-            )
+        mimeType = await detectSupportedImageMimeTypeFromFile(absolutePath)
+
+        if mimeType:
+            # Handle image file
+            content = await asyncio.to_thread(_readFile, absolutePath)
+            processed = await processImage(content, mimeType, ProcessImageOptions(autoResizeImages=autoResizeImages))
+
             if not processed.ok:
-                text += f'<file name="{absolute_path}">{processed.message}</file>\n'
+                text += f'<file name="{absolutePath}">{processed.message}</file>\n'
                 continue
 
-            attachment = ImageContent(
-                type="image", mimeType=processed.mimeType, data=processed.data
-            )
+            attachment = ImageContent(type="image", mimeType=processed.mimeType, data=processed.data)
             images.append(attachment)
-            note = "\n".join(processed.hints)
-            text += f'<file name="{absolute_path}">{note}</file>\n'
-            continue
 
-        try:
-            file_text = await asyncio.to_thread(_read_text, absolute_path)
-        except OSError as error:
-            sys.stderr.write(f"Error: Could not read file {absolute_path}: {error}\n")
-            raise SystemExit(1) from error
-
-        text += f'<file name="{absolute_path}">\n{file_text}\n</file>\n'
+            # Add text reference to image with optional processing hints
+            if len(processed.hints) > 0:
+                text += f'<file name="{absolutePath}">{chr(10).join(processed.hints)}</file>\n'
+            else:
+                text += f'<file name="{absolutePath}"></file>\n'
+        else:
+            # Handle text file
+            try:
+                raw = await asyncio.to_thread(withSyscall, "open", _readFile, absolutePath, path=absolutePath)
+                # readFile(..., "utf-8"): bytes that are not UTF-8 become U+FFFD.
+                content = stripBom(raw.decode("utf-8", errors="replace"))
+                text += f'<file name="{absolutePath}">\n{content}\n</file>\n'
+            except OSError as error:
+                message = getattr(error, "uvMessage", None) or str(error)
+                print(chalk.red(f"Error: Could not read file {absolutePath}: {message}"), file=sys.stderr)
+                raise SystemExit(1) from error
 
     return ProcessedFiles(text=text, images=images)
 
 
-def _read_bytes(path: str) -> bytes:
-    with open(path, "rb") as handle:
-        return handle.read()
-
-
-def _read_text(path: str) -> str:
-    # errors="replace" is what every other reader in the repo does (core/tools/read.py:287,
-    # workspace.py:27) and what pi cli/file-processor.ts:77 gets for free from Node's decoder.
-    # Strict decoding would raise UnicodeDecodeError -- a ValueError, which the caller's
-    # ``except OSError`` does not catch -- and end the process on a traceback instead of
-    # putting the (mostly readable) file into the <file> block.
-    with open(path, encoding="utf-8-sig", errors="replace") as handle:
-        return handle.read()
-
-
-__all__ = ["ProcessFileOptions", "ProcessedFiles", "process_file_arguments"]
+__all__ = ["ProcessFileOptions", "ProcessedFiles", "processFileArguments"]

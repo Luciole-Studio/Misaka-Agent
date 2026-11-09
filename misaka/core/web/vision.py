@@ -41,9 +41,9 @@ async def describe(image, question, ctx, selected, *, setting, purpose, max_toke
     """The text the vision model ``selected`` answers ``question`` with about ``image`` (a content
     block). ``setting`` names the knob that chose the model, for the errors; ``purpose`` is the
     accounting label. Raises ValueError when the model cannot be used or the call fails."""
-    from misaka.ai.stream import complete_simple
+    from misaka.ai.compat import completeSimple
     from misaka.ai.types import SimpleStreamOptions
-    from misaka.ai.utils.headers import provider_headers_to_record
+    from misaka.ai.utils.headers import providerHeadersToRecord
     from misaka.core.web.accounting import account_call
 
     provider, separator, model_id = selected.partition('/')
@@ -51,15 +51,17 @@ async def describe(image, question, ctx, selected, *, setting, purpose, max_toke
     model = registry.find(provider, model_id) if registry is not None and separator else None
     if model is None or 'image' not in model.input:
         raise ValueError(f'{setting} must identify an available vision model as provider/model')
-    auth = await registry.getAuth(model)
-    if auth is None:
+    if not registry.hasConfiguredAuth(model):
         raise ValueError(f'The vision model {setting} names has no authentication')
-    if auth.auth.baseUrl:
-        model = model.model_copy(update={'baseUrl': auth.auth.baseUrl})
-    options = SimpleStreamOptions(apiKey=auth.auth.apiKey, headers=provider_headers_to_record(auth.auth.headers),
-                                  env=auth.env, signal=getattr(ctx, 'signal', None), maxTokens=max_tokens)
+    auth = await registry.getApiKeyAndHeaders(model)
+    if not auth['ok']:
+        raise ValueError(auth['error'])
+    if auth.get('baseUrl'):
+        model = model.model_copy(update={'baseUrl': auth['baseUrl']})
+    options = SimpleStreamOptions(apiKey=auth.get('apiKey'), headers=providerHeadersToRecord(auth.get('headers')),
+                                  env=auth.get('env'), signal=getattr(ctx, 'signal', None), maxTokens=max_tokens)
     async with account_call(purpose, provider, question, unit='provider_operation') as facts:
-        result = await complete_simple(model, {'messages': [{'role': 'user', 'content': [
+        result = await completeSimple(model, {'messages': [{'role': 'user', 'content': [
             {'type': 'text', 'text': question}, image], 'timestamp': int(time.time() * 1000)}]}, options)
         usage = getattr(result, 'usage', None)
         if usage is not None:

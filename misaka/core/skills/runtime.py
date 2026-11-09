@@ -44,9 +44,9 @@ def using_runtime(runtime):
 
 
 def blocked_env(name):
-    from misaka.ai.env_api_keys import _ENV_MAP
+    from misaka.ai.env_api_keys import _envMap
     return (name in _STATIC_PROVIDER_ENV_BLOCKLIST or name in _AWS_SDK_CREDENTIAL_ENV_VARS
-            or name in _ENV_MAP.values() or _is_hermes_internal_secret(name)
+            or name in _envMap.values() or _is_hermes_internal_secret(name)
             or name.startswith(("MISAKA_", "_HERMES_FORCE_")))
 
 

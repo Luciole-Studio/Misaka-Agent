@@ -8,7 +8,7 @@ the same. Without a terminal (a pipe, a container) every menu falls back to a nu
 prompt, so the wizard is never stuck waiting for a key nobody can press.
 
 Colour comes from the theme files the chat and the panel draw from
-(``ui/tui/interactive/theme/{dark,light}.json``), the variant picked from the terminal's
+(``modes/interactive/theme/{dark,light}.json``), the variant picked from the terminal's
 background the way the panel picks it, so the wizard is the same rose as the rest of the
 program rather than a generic cyan-and-green shell script. Truecolor when the terminal
 reports it, the nearest xterm-256 index otherwise; plain text, with the emblem in block
@@ -21,6 +21,7 @@ import json
 import math
 import os
 import queue
+import re
 import select
 import shutil
 import sys
@@ -321,12 +322,27 @@ def prompt(question: str, default: str | None = None, *, password: bool = False)
     suffix = color(f" [{default}]", DIM) if default else ""
     text = f"  {question}{suffix}: "
     try:
-        value = getpass.getpass(text) if password else input(text)
+        value = getpass.getpass(text) if password else input(_line_editing(text))
     except (KeyboardInterrupt, EOFError):
         print()
         raise SetupCancelled from None
     value = value.strip()
     return value or (default or "")
+
+
+def _line_editing(text: str) -> str:
+    """Hand ``input()`` to readline, and the prompt with its colour codes marked for it.
+
+    Without readline the tty driver edits the line, and it erases a byte at a time: Backspace
+    over a Chinese character (three bytes) leaves a broken one behind, which ``input()`` then
+    fails to decode. readline counts unmarked colour codes as columns and misplaces the cursor,
+    so each one is wrapped in the ``\\001``/``\\002`` markers it skips.
+    """
+    try:
+        import readline  # noqa: F401 - importing it is what makes input() use it
+    except ImportError:  # Windows: the console edits the line itself
+        return text
+    return re.sub(r"\x1b\[[0-9;]*m", lambda m: f"\x01{m.group()}\x02", text)
 
 
 def prompt_cancellable(question: str, cancel: threading.Event) -> str:

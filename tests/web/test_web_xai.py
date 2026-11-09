@@ -19,8 +19,8 @@ import httpx
 import pytest
 from webconf import write_web
 
-from misaka.ai.utils.oauth import OAuthCredentials
-from misaka.ai.utils.oauth import xai as xai_oauth
+from misaka.ai.auth.oauth import xai as xai_oauth
+from misaka.ai.auth.types import OAuthCredential
 from misaka.core.web.backends import xai
 
 
@@ -506,11 +506,11 @@ async def test_a_401_on_an_oauth_token_refreshes_once_and_retries(monkeypatch, x
     write_oauth_login(xai_home, access="stale-token", refresh="r1")
     refreshed_from: list[str] = []
 
-    async def fake_refresh(refresh_token, signal=None, *, post_form=None):
+    async def fake_refresh(refresh_token, signal):
         refreshed_from.append(refresh_token)
-        return OAuthCredentials(access="fresh-token", refresh="r2", expires=far_future_ms())
+        return OAuthCredential(type="oauth", access="fresh-token", refresh="r2", expires=far_future_ms())
 
-    monkeypatch.setattr(xai_oauth, "refresh_xai_token", fake_refresh)
+    monkeypatch.setattr(xai_oauth, "_refreshXaiToken", fake_refresh)
 
     def handler(request):
         if len(sent) == 1:
@@ -535,10 +535,10 @@ async def test_a_401_on_an_oauth_token_refreshes_once_and_retries(monkeypatch, x
 async def test_a_refresh_that_returns_the_same_token_does_not_retry(monkeypatch, xai_home):
     write_oauth_login(xai_home, access="stale-token", refresh="r1")
 
-    async def fake_refresh(refresh_token, signal=None, *, post_form=None):
-        return OAuthCredentials(access="stale-token", refresh="r1", expires=far_future_ms())
+    async def fake_refresh(refresh_token, signal):
+        return OAuthCredential(type="oauth", access="stale-token", refresh="r1", expires=far_future_ms())
 
-    monkeypatch.setattr(xai_oauth, "refresh_xai_token", fake_refresh)
+    monkeypatch.setattr(xai_oauth, "_refreshXaiToken", fake_refresh)
     sent = stub_net(monkeypatch, lambda request: httpx.Response(401, text="Unauthorized", request=request))
 
     result = await xai.XAIWebSearchProvider().search("q", limit=5)
@@ -551,10 +551,10 @@ async def test_a_refresh_that_returns_the_same_token_does_not_retry(monkeypatch,
 async def test_a_failed_refresh_reports_the_401_rather_than_itself(monkeypatch, xai_home):
     write_oauth_login(xai_home)
 
-    async def fake_refresh(refresh_token, signal=None, *, post_form=None):
+    async def fake_refresh(refresh_token, signal):
         raise RuntimeError("refresh token rejected")
 
-    monkeypatch.setattr(xai_oauth, "refresh_xai_token", fake_refresh)
+    monkeypatch.setattr(xai_oauth, "_refreshXaiToken", fake_refresh)
     sent = stub_net(monkeypatch, lambda request: httpx.Response(401, text="Unauthorized", request=request))
 
     result = await xai.XAIWebSearchProvider().search("q", limit=5)
@@ -569,11 +569,11 @@ async def test_a_401_on_an_api_key_never_retries(monkeypatch):
     monkeypatch.setenv("XAI_API_KEY", "sk-dead")
     refreshed: list[str] = []
 
-    async def fake_refresh(refresh_token, signal=None, *, post_form=None):
+    async def fake_refresh(refresh_token, signal):
         refreshed.append(refresh_token)
         raise AssertionError("an API-key credential must never be refreshed")
 
-    monkeypatch.setattr(xai_oauth, "refresh_xai_token", fake_refresh)
+    monkeypatch.setattr(xai_oauth, "_refreshXaiToken", fake_refresh)
     sent = stub_net(monkeypatch, lambda request: httpx.Response(401, text="Unauthorized", request=request))
 
     result = await xai.XAIWebSearchProvider().search("q", limit=5)

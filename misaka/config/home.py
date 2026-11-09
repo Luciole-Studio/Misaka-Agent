@@ -52,12 +52,15 @@ LAYOUT: dict[str, Entry] = {
     # What you edit sits shallow at the root. It is also what pi calls the agent directory:
     # its own joins (settings, models, keybindings, themes, prompts, extensions) land here.
     # Every other setting is a section of settings.json (allies, skills, moa, web), read through
-    # SettingsManager; a role's settings.json holds what ROLE_KEYS lists. An extension reads its own
+    # SettingsManager; a role's settings.json holds what ROLE_SETTING_KEYS lists. An extension reads its own
     # section the same way and keeps its files under plugins/<name>/: nothing here names one.
     "agent": Entry("", "edit", 0o700),
     "settings": Entry("settings.json", "edit"),
     "models": Entry("models.json", "edit"),
     "keybindings": Entry("keybindings.json", "edit"),
+    # MCP servers (`mcpServers`): the home's are global, read by every role; a role directory's
+    # (`profiles.mcp_dir`) overlays them for her. A trusted project may add its own.
+    "mcp_config": Entry("mcp.json", "edit"),
     # The shared layer: what every role sees. A role directory overlays it, first match winning.
     "shared_soul": Entry("MISAKA.md", "edit"),
     "shared_skills": Entry("skills", "edit"),
@@ -75,7 +78,9 @@ LAYOUT: dict[str, Entry] = {
     "credentials": Entry("credentials", "secret", 0o700),
     "auth": Entry("credentials/auth.json", "secret", 0o600),
     "vault": Entry("credentials/vault", "secret", 0o700),
-    "mcp_auth": Entry("credentials/mcp-auth", "secret", 0o700),
+    # MCP sign-ins, beside the `mcp.json` that defines the server: the home's for global servers, a
+    # role directory's for hers.
+    "mcp_auth": Entry("credentials/mcp-auth.json", "secret", 0o600),
     "db": Entry("state/board.db", "state"),
     "messages_db": Entry("state/messages.db", "state"),
     # The panel's spaces by durable id -> folder and name, for every space a session belongs to.
@@ -103,7 +108,6 @@ LAYOUT: dict[str, Entry] = {
     "vision_cache": Entry("cache/vision", "cache"),
     "skill_blobs": Entry("cache/skill-blobs", "cache"),
     "skills_index": Entry("cache/skills", "cache"),
-    "mcp_schema_cache": Entry("cache/mcp-schema.json", "cache"),
     "dm_protocol": Entry("cache/dm-protocol.md", "cache"),
     "log": Entry("logs/misaka.log", "logs"),
     "debug_log": Entry("logs/misaka-debug.log", "logs"),
@@ -111,7 +115,8 @@ LAYOUT: dict[str, Entry] = {
     "warnings_log": Entry("logs/misaka-warnings.log", "logs"),
     "panel_crash_log": Entry("logs/panel-crash.log", "logs"),
     "stall_logs": Entry("logs/stalls", "logs"),
-    "mcp_logs": Entry("logs/mcp", "logs"),
+    # Messages MCP servers send with `notifications/message`, one file for every process (the MCP extension).
+    "mcp_log": Entry("logs/mcp/mcp.log", "logs"),
     "web_logs": Entry("logs/web", "logs"),
     "moa_traces": Entry("logs/moa-traces", "logs"),
     "net_sock": Entry("run/net.sock", "run"),

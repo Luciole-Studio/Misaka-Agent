@@ -158,7 +158,7 @@ def test_a_proposal_an_option_waiting_to_be_opened_takes_up_is_covered_by_it(nod
     """2026-09-29: 48 of 69 divergence proposals were declined, many as falling under an option the
     root had decided and the reconciliation had not opened yet -- `covered` could name only a node.
     Covered by that option, the proposal goes with it: the node opened for it is told it takes it up."""
-    from misaka.core.research import graph, workflow
+    from misaka.core.research import views, workflow
 
     con, run, root = node_run.con, node_run.run, node_run.root
     did = runs.add_decision(con, run["id"], node=root, round=1, origin="plan", index=0, question="Which frame?",
@@ -178,12 +178,12 @@ def test_a_proposal_an_option_waiting_to_be_opened_takes_up_is_covered_by_it(nod
     with pytest.raises(ValueError, match="option waiting to be opened"):
         covered_by(declined)
     payload = covered_by(waiting)
-    assert runs.prepare_runner(con, "research_branches", node["id"])
+    assert runs.prepare_runner(con, "research_execution", node["id"])
     node = runs.node(con, node["id"])
     workflow._apply_decisions(con, run, node, node, payload)
     issue = runs.issue(con, proposal)
     assert (issue["disposition"], issue["option_id"], issue["covered_by"]) == ("covered", waiting, None)
-    assert f"takes up `{proposal}`" in graph.render_paths(graph.snapshot(con, runs.get(con, run["id"])))
+    assert f"takes up `{proposal}`" in views.render_paths(views.snapshot(con, runs.get(con, run["id"])))
     opened = runs.create_node(con, run["id"], question="Structural limits", parents=[root["id"]])
     runs.set_option(con, waiting, node_id=opened["id"])
     assert f"takes up `{proposal}` (raised at node {node['id']}): World-systems theory" in planner.position(con, run, opened)
@@ -245,7 +245,7 @@ def test_a_re_review_s_deliberation_is_only_what_the_red_team_does_not_hold(tmp_
         manager = SessionManager.create(str(tmp_path), str(tmp_path / "s"))
         manager.appendMessage({"role": "user", "content": "go", "timestamp": 1})
         con.execute("UPDATE research_runs SET root_session=? WHERE id=?", (manager.getSessionFile(), run["id"]))
-        con.execute("UPDATE research_branches SET fork_entry=? WHERE id=?", (manager.getLeafId(), root["id"]))
+        con.execute("UPDATE research_execution SET fork_entry=? WHERE id=?", (manager.getLeafId(), root["id"]))
         run, root = runs.get(con, run["id"]), runs.node(con, root["id"])
         _say(manager, "ROUND ONE reasoning")
         _write_reply(manager, "# Conclusion v1\nFiscal limits decided it.")
@@ -318,13 +318,12 @@ async def test_review_records_survive_acceptance_and_reach_their_node(tmp_path, 
             row = tasks.get(con, tid)
             prepared = dispatch.prepare_submission(row, worker.build_submission(con, row, "done"))
             assert dispatch.accept_state(con, row, prepared, generation=1, claim_lock="lock1")
-            link = con.execute("SELECT run_id, branch_id FROM research_run_tasks WHERE task_id=?", (tid,)).fetchone()
+            link = con.execute("SELECT run_id, branch_id FROM research_cards WHERE task_id=?", (tid,)).fetchone()
             run, node = runs.get(con, link["run_id"]), runs.node(con, link["branch_id"])
             receive = (workflow._receive_divergence(con, run, node, tasks.get(con, tid), 1) if kind == "divergence"
                        else workflow._receive_critique(con, run, node, tasks.get(con, tid), 1))
             assert receive is None
-            assert [r["question"] for r in con.execute("SELECT question FROM research_issues WHERE task_id=?", (tid,))] \
-                == [received]
+            assert [r["question"] for r in runs.issues(con, run["id"]) if r["task_id"] == tid] == [received]
 
 
 async def test_a_red_team_card_cannot_record_alternatives(tmp_path, monkeypatch):

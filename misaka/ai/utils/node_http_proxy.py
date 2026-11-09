@@ -1,15 +1,20 @@
-"""Environment-driven HTTP proxy resolution helpers."""
+"""Translated from pi's ``packages/ai/src/utils/node-http-proxy.ts`` (v1.1.0).
+
+MISAKA fork: ``urllib.parse`` stands in for the WHATWG ``URL``; a URL whose port is not a number in range parses here
+but has no port, which ``_parseProxyTargetUrl`` treats as the ``new URL`` failure it is upstream.
+"""
 
 from __future__ import annotations
 
-import json
-import os
 import re
-from dataclasses import dataclass
 from typing import Any
 from urllib.parse import ParseResult, urlparse
 
-DEFAULT_PROXY_PORTS: dict[str, int] = {
+from misaka.ai.types import ProviderEnv
+from misaka.ai.utils.provider_env import getProviderEnvValue
+from misaka.utils.js import jsonStringify
+
+_DEFAULT_PROXY_PORTS: dict[str, int] = {
     "ftp": 21,
     "gopher": 70,
     "http": 80,
@@ -18,126 +23,145 @@ DEFAULT_PROXY_PORTS: dict[str, int] = {
     "wss": 443,
 }
 
-UNSUPPORTED_PROXY_PROTOCOL_MESSAGE = (
-    "Unsupported proxy protocol. SOCKS and PAC proxy URLs are not supported; "
-    "use an HTTP or HTTPS proxy URL."
-)
+
+def _getProxyEnv(key: str, env: ProviderEnv | None = None) -> str:
+    lowercaseKey = key.lower()
+    uppercaseKey = key.upper()
+    return (
+        (env.get(lowercaseKey) if env else None)
+        or (env.get(uppercaseKey) if env else None)
+        or getProviderEnvValue(lowercaseKey)
+        or getProviderEnvValue(uppercaseKey)
+        or ""
+    )
 
 
-@dataclass(frozen=True, slots=True)
-class NodeHttpProxyAgents:
-    httpAgent: str
-    httpsAgent: str
+def _parseProxyTargetUrl(targetUrl: str | ParseResult) -> ParseResult | None:
+    if isinstance(targetUrl, ParseResult):
+        return targetUrl
 
-
-def _get_proxy_env(key: str, env: Any = None) -> str:
-    """The request-scoped ``env`` wins over the process environment, either case.
-
-    ``ProviderRequestOptions.env`` is documented upstream as carrying proxy variables, so a
-    proxy configured per provider (auth.json ``env`` / ``AuthResult.env``) has to be looked
-    at before ``os.environ``.
-    """
-    lower, upper = key.lower(), key.upper()
-    if env:
-        scoped = _read_env_value(env, lower) or _read_env_value(env, upper)
-        if scoped:
-            return scoped
-    return os.environ.get(lower, "") or os.environ.get(upper, "")
-
-
-def _read_env_value(env: Any, key: str) -> str:
-    getter = getattr(env, "get", None)
-    value = getter(key) if callable(getter) else getattr(env, key, None)
-    return value if isinstance(value, str) else ""
-
-
-def _parse_proxy_target_url(target_url: str | ParseResult) -> ParseResult | None:
-    parsed = target_url if isinstance(target_url, ParseResult) else urlparse(target_url)
+    parsed = urlparse(targetUrl)
     try:
         _ = parsed.port
     except ValueError:
-        # `new URL("https://host:abc/v1")` throws in Node, and pi's parseProxyTargetUrl
-        # turns that into `undefined` -> no proxy. `urlparse` accepts the string and defers
-        # the error to `.port`, so a hand-typed bad port in models.json used to raise out of
-        # every request instead. Same verdict as an unparseable URL: this target is not proxied.
         return None
     return parsed if parsed.scheme and parsed.netloc else None
 
 
-def _should_proxy_hostname(hostname: str, port: int, env: Any = None) -> bool:
-    no_proxy = _get_proxy_env("no_proxy", env).lower()
-    if not no_proxy:
+def _stripBrackets(host: str) -> str:
+    return host[1:-1] if host.startswith("[") and host.endswith("]") else host
+
+
+def _parseInt(text: str) -> int | None:
+    """MISAKA fork: ``Number.parseInt(text, 10)``: the leading integer, or ``None`` for NaN."""
+    match = re.match(r"\s*([+-]?\d+)", text)
+    return int(match.group(1)) if match else None
+
+
+def _parseNoProxyEntry(entry: str) -> dict[str, Any] | None:
+    trimmed = entry.strip().lower()
+    if not trimmed:
+        return None
+
+    if trimmed.startswith("["):
+        closingBracket = trimmed.find("]")
+        if closingBracket != -1:
+            host = trimmed[1:closingBracket]
+            rest = trimmed[closingBracket + 1 :]
+            if rest.startswith(":"):
+                port = _parseInt(rest[1:])
+                return {"host": host, "port": 0 if port is None else port}
+            return {"host": host, "port": 0}
+
+    if ":" in trimmed and len(trimmed.split(":")) > 2:
+        return {"host": trimmed, "port": 0}
+
+    colonIndex = trimmed.rfind(":")
+    if colonIndex != -1 and colonIndex == trimmed.find(":"):
+        host = trimmed[:colonIndex]
+        port = _parseInt(trimmed[colonIndex + 1 :])
+        if port is not None:
+            return {"host": host, "port": port}
+
+    return {"host": trimmed, "port": 0}
+
+
+def _shouldProxyHostname(hostname: str, port: int, env: ProviderEnv | None = None) -> bool:
+    noProxy = _getProxyEnv("no_proxy", env).lower()
+    if not noProxy:
         return True
-    if no_proxy == "*":
+    if noProxy == "*":
         return False
 
-    for proxy in re.split(r"[,\s]", no_proxy):
-        if not proxy:
-            continue
-        proxy_hostname = proxy
-        proxy_port = 0
-        parsed_proxy = re.match(r"^(.+):(\d+)$", proxy)
-        if parsed_proxy is not None:
-            proxy_hostname = parsed_proxy.group(1)
-            proxy_port = int(parsed_proxy.group(2))
-        if proxy_port and proxy_port != port:
-            continue
+    normalizedTargetHost = _stripBrackets(hostname.lower())
 
-        if not proxy_hostname.startswith(("*", ".")):
-            if hostname == proxy_hostname:
-                return False
-            continue
+    def keeps(entry: str) -> bool:
+        parsed = _parseNoProxyEntry(entry)
+        if not parsed:
+            return True
 
-        normalized = proxy_hostname.removeprefix("*")
-        if hostname.endswith(normalized):
+        if parsed["port"] and parsed["port"] != port:
+            return True
+
+        domain = _stripBrackets(parsed["host"])
+        if domain.startswith("*."):
+            domain = domain[2:]
+        elif domain.startswith(".") or domain.startswith("*"):  # noqa: PIE810
+            domain = domain[1:]
+
+        if not domain:
+            return True
+
+        if normalizedTargetHost == domain:
             return False
 
-    return True
+        if normalizedTargetHost.endswith(f".{domain}"):  # noqa: SIM103
+            return False
+
+        return True
+
+    return all(keeps(entry) for entry in re.split(r"[,\s]", noProxy))
 
 
-def _get_proxy_for_url(target_url: str | ParseResult, env: Any = None) -> str:
-    parsed_url = _parse_proxy_target_url(target_url)
-    if parsed_url is None or not parsed_url.scheme or not parsed_url.netloc:
+def _getProxyForUrl(targetUrl: str | ParseResult, env: ProviderEnv | None = None) -> str:
+    parsedUrl = _parseProxyTargetUrl(targetUrl)
+    if parsedUrl is None or not parsedUrl.scheme or not parsedUrl.netloc:
         return ""
 
-    protocol = parsed_url.scheme
-    hostname = parsed_url.hostname or ""
-    port = parsed_url.port or DEFAULT_PROXY_PORTS.get(protocol, 0)
-    if not _should_proxy_hostname(hostname, port, env):
+    protocol = parsedUrl.scheme
+    hostname = _stripBrackets(parsedUrl.hostname or re.sub(r":\d*$", "", parsedUrl.netloc))
+    port = parsedUrl.port or _DEFAULT_PROXY_PORTS.get(protocol) or 0
+    if not _shouldProxyHostname(hostname, port, env):
         return ""
 
-    proxy = _get_proxy_env(f"{protocol}_proxy", env) or _get_proxy_env("all_proxy", env)
+    proxy = _getProxyEnv(f"{protocol}_proxy", env) or _getProxyEnv("all_proxy", env)
     if proxy and "://" not in proxy:
         proxy = f"{protocol}://{proxy}"
     return proxy
 
 
-def resolve_http_proxy_url_for_target(
-    target_url: str | ParseResult, env: Any = None
-) -> ParseResult | None:
-    proxy = _get_proxy_for_url(target_url, env)
+UNSUPPORTED_PROXY_PROTOCOL_MESSAGE = (
+    "Unsupported proxy protocol. SOCKS and PAC proxy URLs are not supported; use an HTTP or HTTPS proxy URL."
+)
+
+
+def resolveHttpProxyUrlForTarget(targetUrl: str | ParseResult, env: ProviderEnv | None = None) -> ParseResult | None:
+    proxy = _getProxyForUrl(targetUrl, env)
     if not proxy:
         return None
 
-    proxy_url = urlparse(proxy)
-    if not proxy_url.scheme or not proxy_url.netloc:
-        raise RuntimeError(f"Invalid proxy URL {json.dumps(proxy)}: Invalid URL")
-    if proxy_url.scheme not in {"http", "https"}:
-        raise RuntimeError(f"{UNSUPPORTED_PROXY_PROTOCOL_MESSAGE} Got {proxy_url.scheme}:")
-    return proxy_url
+    proxyUrl = urlparse(proxy)
+    try:
+        _ = proxyUrl.port
+        if not proxyUrl.scheme or not proxyUrl.netloc:
+            raise ValueError("Invalid URL")
+    except ValueError:
+        raise RuntimeError(f"Invalid proxy URL {jsonStringify(proxy)}: Invalid URL") from None
+
+    if proxyUrl.scheme not in ("http", "https"):
+        raise RuntimeError(f"{UNSUPPORTED_PROXY_PROTOCOL_MESSAGE} Got {proxyUrl.scheme}:")
+
+    return proxyUrl
 
 
-def create_http_proxy_agents_for_target(
-    target_url: str | ParseResult, env: Any = None
-) -> NodeHttpProxyAgents | None:
-    proxy_url = resolve_http_proxy_url_for_target(target_url, env)
-    if proxy_url is None:
-        return None
-    proxy = proxy_url.geturl()
-    return NodeHttpProxyAgents(httpAgent=proxy, httpsAgent=proxy)
-
-
-__all__ = [
-    "UNSUPPORTED_PROXY_PROTOCOL_MESSAGE",
-    "NodeHttpProxyAgents",
-    ]
+__all__ = ["UNSUPPORTED_PROXY_PROTOCOL_MESSAGE", "resolveHttpProxyUrlForTarget"]

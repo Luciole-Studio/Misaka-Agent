@@ -26,8 +26,10 @@ from xml.sax.saxutils import escape
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from misaka.ai.utils.typebox_helpers import typeboxSchema
 from misaka.config import CFG, sisters
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.moments import SENDERS
 from misaka.utils.async_lifecycle import run_in_thread, settle, settle_thread_call
 
 logger = logging.getLogger(__name__)
@@ -188,15 +190,75 @@ def return_reply(con, role, text, rows, *, since):
         send(con, record["inbox"], text, summary=text[:80], sender=role, to_session=session_id)
 
 
+def report_failure(con, role, error, reason, rows):
+    """Hermes' Bot Mode reports a failed delivery to the sender (the delivery process's completion
+    notification, ``bot_mode_dm._wait_reply_main``), in its words: the live windows that wrote
+    ``rows`` are told, as ``return_reply`` would have answered them. Returns their session ids."""
+    from misaka.core import session_catalog
+
+    text = f"Delivery to {role} failed [reason: {reason}]: {error}"
+    told = set()
+    for session_id in dict.fromkeys(row["sender_session"] for row in rows if row["sender_session"]):
+        record = session_catalog.live_session(session_id)
+        if record is None or not record.get("inbox") or record.get("kind") == "dm":
+            continue
+        send(con, record["inbox"], text, summary=text[:80], sender=role, to_session=session_id)
+        told.add(session_id)
+    return told
+
+
+def settle_consultation(board, run_id, lock, status, *, reason=None, exit_code=None):
+    """End a consultation (``tasks.end_consultation``). One that ends unanswered is reported to
+    whoever asked, as Hermes' Bot Mode reports a failed delivery (``report_failure``): the card
+    itself stays as it was, so nothing else would tell them. Returns the ended run or None."""
+    from misaka.core.platform import tasks
+
+    run = tasks.end_consultation(board, run_id, lock, status, reason=reason, exit_code=exit_code)
+    if run is not None and status != "done":
+        try:
+            tell_asker(board, run, reason or status)
+        except Exception:  # the consultation is settled; a lost notice is only logged
+            logger.warning("Could not tell the sender that consultation %s ended", run_id, exc_info=True)
+    return run
+
+
+def tell_asker(board, run, reason):
+    """Tell whoever sent the message a consultation answered that it ended unanswered."""
+    from misaka.core import session_catalog
+    from misaka.core.platform import tasks
+
+    started = board.execute("SELECT payload FROM events WHERE task_id=? AND kind='consultation_started' "
+                            "AND run_id=? ORDER BY id DESC LIMIT 1", (run["task_id"], run["id"])).fetchone()
+    asker = (json.loads(started["payload"] or "{}") if started else {}).get("asker") or {}
+    if not asker:
+        return                                   # typed in her window: the person saw it end
+    text = (f"Card {run['task_id']} ({run['assignee']}) did not answer your message: {reason}. "
+            "Her delivered work stands; send it again, or have the card reworked.")
+    con = connect()
+    try:
+        session_id = asker.get("sender_session")
+        record = session_catalog.live_session(session_id) if session_id else None
+        if record is not None and record.get("inbox"):
+            send(con, record["inbox"], text, summary=text[:80], sender=run["assignee"], to_session=session_id)
+            return
+        card = tasks.get(board, asker["sender_task"]) if asker.get("sender_task") else None
+        if card is not None:
+            send(con, card["assignee"], text, summary=text[:80], sender=run["assignee"],
+                 to_task=card["id"], generation=int(card["generation"]))
+    finally:
+        con.close()
+
+
 def _idle_card_target(card):
     """A card nobody is running. Not started yet, the row is pinned to its attempt and handed over
-    at its first tool boundary (B16, how the daemon mails a first attempt). Finished, she is woken
+    at its first tool boundary (B16, how the daemon mails a first attempt). Otherwise she is woken
     in her own session: CCB's SendMessage resumes a stopped agent from its transcript with the
-    message (resumeAgentBackground), Hermes' Bot Mode runs the turn in the recipient's own session,
-    and here that is the card's ``pane.continue_card``, what misaka_sister_message makes. Her window
-    may still be open; the wake takes it over all the same, because her answer is then a new
-    attempt the sender can wait for (misaka_sister_output, block) -- a message put into that open
-    session left Last Order nothing to wait on, and she decided without the answer (B121)."""
+    message (resumeAgentBackground), Hermes' Bot Mode runs the turn in the recipient's own session.
+    A finished card (``consult``) answers it as a consultation, which leaves the card as it is --
+    her open window takes it through her inbox, a closed one is reopened -- and the sender waits
+    on that consultation (misaka_sister_output, block): a message once put into an open window
+    left Last Order nothing to wait on, and she decided without the answer (B121). A card parked
+    with its window closed is continued, as misaka_sister_message would."""
     from misaka.core.network.sister_runtime import TERMINAL_BOARD_STATUSES
 
     if card["status"] == "review":
@@ -205,34 +267,22 @@ def _idle_card_target(card):
         return {**_card_target(card, None), "not_started": True}
     return {"to_addr": card["assignee"], "to_task": card["id"], "to_session": None,
             "generation": int(card["generation"]), "after_turn": False, "wake_card": True,
+            "consult": card["status"] in FINISHED,
             "workspace": card["workspace"],
             "label": f"card {card['id']} ({card['assignee']}: {card['title']})"}
 
 
 def _sender_node(board, *, sender_task, sender_session):
-    """``(run_id, node_id)`` of the research node the sender works on: her card's node, or the node
-    whose Last Order conversation she is; a run's window outside its nodes has no node, and a
-    sender outside any run has neither."""
-    if sender_task:
-        row = board.execute("SELECT run_id, branch_id FROM research_run_tasks WHERE task_id=?",
-                            (sender_task,)).fetchone()
-        if row:
-            return row["run_id"], row["branch_id"]
-    if sender_session:
-        tail = f"%{sender_session}.jsonl"   # stored session files end in their session id
-        row = board.execute("SELECT run_id, id FROM research_branches WHERE session_file LIKE ?",
-                            (tail,)).fetchone()
-        if row:
-            return row["run_id"], row["id"]
-        row = board.execute("SELECT id FROM research_runs WHERE origin_session=? OR root_session LIKE ?",
-                            (sender_session, tail)).fetchone()
-        if row:
-            return row["id"], None
-    return None, None
+    """``(owner, scope, unit)`` the sender works in -- a workflow's run and the node inside it: her
+    card's node, or the node whose Last Order conversation she is; a run's window outside its nodes
+    has no node, and a sender outside any workflow has neither (``platform.owners``)."""
+    from misaka.core.platform import owners
+
+    return owners.sender_scope(board, sender_task, sender_session)
 
 
 def _node_last_order(*, sender_task, sender_session):
-    """The Last Order of the sender's own research node, live and reading mail, else None. Every
+    """The Last Order of the sender's own workflow node, live and reading mail, else None. Every
     node's Last Order is a `last-order` window in the one panel space, so inside a run the name
     means hers: the root's window for a root card, a node's own window for that node's (B123)."""
     from misaka.core import session_catalog
@@ -242,14 +292,13 @@ def _node_last_order(*, sender_task, sender_session):
         return None
     board = tasks.connect(_board_path())
     try:
-        _run, node = _sender_node(board, sender_task=sender_task, sender_session=sender_session)
-        row = (board.execute("SELECT session_file FROM research_branches WHERE id=?", (node,)).fetchone()
-               if node else None)
-    except sqlite3.OperationalError:     # a board research has never touched has no such tables
+        owner, _run, node = _sender_node(board, sender_task=sender_task, sender_session=sender_session)
+        session_file = owner.unit_session_file(board, node) if node else None
+    except sqlite3.OperationalError:     # a board its workflows have never touched has no such tables
         return None
     finally:
         board.close()
-    name = os.path.basename((row["session_file"] if row else None) or "")
+    name = os.path.basename(session_file or "")
     session_id = name[-len("00000000-0000-0000-0000-000000000000.jsonl"):-len(".jsonl")]
     if not SESSION_ID.match(session_id) or session_id == sender_session:
         return None
@@ -258,42 +307,49 @@ def _node_last_order(*, sender_task, sender_session):
 
 
 def _run_cards(role, *, sender_task, sender_session):
-    """The cards ``role`` holds where the sender works, the sender's own aside: her node's when it
-    has any, else the whole run's -- a research graph puts the same Sister on several nodes, joins
-    included. A name sent from inside a run means one of them: that role's contact session is
-    outside the run, cannot see it, and once did a card's whole job beside the card (2026-10-01)."""
+    """``(owner, cards)``: the cards ``role`` holds where the sender works, the sender's own aside --
+    her node's when it has any, else the whole run's (a workflow's graph may put the same Sister on
+    several nodes, joins included). A name sent from inside a run means one of them: that role's
+    contact session is outside the run, cannot see it, and once did a card's whole job beside the
+    card (2026-10-01)."""
     from misaka.core.platform import tasks
 
     if not (sender_task or sender_session):
-        return []
+        return None, []
     board = tasks.connect(_board_path())
     try:
-        run, branch = _sender_node(board, sender_task=sender_task, sender_session=sender_session)
+        owner, run, branch = _sender_node(board, sender_task=sender_task, sender_session=sender_session)
         if run is None:
-            return []
-        query = ("SELECT t.id, t.status, t.title FROM research_run_tasks l JOIN tasks t ON t.id=l.task_id "
-                 "WHERE l.run_id=? AND t.assignee=? AND t.id IS NOT ?")
-        rows = board.execute(query + " AND l.branch_id=? ORDER BY t.created_at",
-                             (run, role, sender_task, branch)).fetchall() if branch else []
-        return rows or board.execute(query + " ORDER BY t.created_at", (run, role, sender_task)).fetchall()
-    except sqlite3.OperationalError:     # a board research has never touched has no such tables
-        return []
+            return None, []
+        units = dict(owner.scope_cards(board, run))
+        ids = [task_id for task_id in units if task_id != sender_task]
+        if not ids:
+            return owner, []
+        rows = board.execute(f"SELECT id, status, title FROM tasks WHERE assignee=? AND id IN ({','.join('?' * len(ids))}) "
+                             "ORDER BY created_at", (role, *ids)).fetchall()
+        mine = [row for row in rows if branch and units[row["id"]] == branch]
+        return owner, mine or rows
+    except sqlite3.OperationalError:     # a board its workflows have never touched has no such tables
+        return None, []
     finally:
         board.close()
 
 
-def wake_card(target, message):
-    """Continue a closed card with ``message`` as her next turn, in her own session. Blocking."""
+def wake_card(target, message, *, asker=None):
+    """Put ``message`` to a card nobody is running, as her next turn in her own session. A
+    finished card answers it as a consultation (``pane.consult_card``: the card stays as it is,
+    the reply carries the run the sender can wait on); a parked one is continued. Blocking."""
     from misaka.ui.panel import client as net
 
     pane = os.environ.get("MISAKA_NET_PANE")
     if not pane:
         net.ensure()
-    # Consulted, not reworked: the cards built on her answer are not sent back to todo.
     request = {"task_id": target["to_task"], "say": message,
-               "expected_generation": target["generation"], "consult": True}
+               "expected_generation": target["generation"]}
     if pane:
         request["place"] = {"grid": pane}
+    if target.get("consult"):
+        return net.request("pane.consult_card", {**request, "asker": asker})
     return net.request("pane.continue_card", request)
 
 
@@ -399,13 +455,13 @@ def resolve_address(addr, *, sender, space=None, sender_task=None, sender_sessio
             + "; ".join(target["label"] for target in targets)
             + ". Send to one of them by its card id or session id."
         )
-    run_cards = _run_cards(addr, sender_task=sender_task, sender_session=sender_session)
+    run_owner, run_cards = _run_cards(addr, sender_task=sender_task, sender_session=sender_session)
     if len(run_cards) == 1:
         return resolve_address(run_cards[0]["id"], sender=sender, space=space, sender_task=sender_task,
                                sender_session=sender_session, contact=contact)
     if run_cards:
         raise ValueError(
-            f"'{addr}' has {len(run_cards)} cards in this research run: "
+            f"'{addr}' has {len(run_cards)} cards in this {run_owner.scope_label}: "
             + "; ".join(f"{card['id']} ({card['status']}: {card['title']})" for card in run_cards)
             + ". Send to one of them by its card id."
         )
@@ -441,20 +497,25 @@ def wake_contact(role, message_id, *, sender):
     """Start a detached ``misaka dm`` that delivers ``message_id`` to ``role``'s contact session.
 
     The row is durable before this runs: the wake-up leaves it to a contact turn already live,
-    retries a failed one, and a wake-up that never starts leaves it queued for the next one.
+    retries a transient failure once and reports a final one to the sender (Hermes' policy, see
+    ``misaka.cli.dm``), and a wake-up that never starts leaves it queued for the next one.
     """
     argv = [sys.executable, "-m", "misaka", "dm", "--wait-message", str(message_id),
             "--from", sender, "--", role]
-    # The detached recipient owns neither the sender's task, pane, space nor skill snapshot.
+    # The detached recipient owns neither the sender's task, pane nor space.
     child_env = {
         k: v
         for k, v in os.environ.items()
         if not k.startswith(("MISAKA_USAGE_", "MISAKA_SISTER_OWNER_"))
-        and k not in {"MISAKA_DM_CARD_ALLOWLIST", "MISAKA_NET_PANE", "MISAKA_NET_SPACE", "MISAKA_SKILL_SANDBOX"}
+        and k not in {"MISAKA_DM_CARD_ALLOWLIST", "MISAKA_NET_PANE", "MISAKA_NET_SPACE"}
     }
     try:
+        # Hermes runs the turn with stdin=DEVNULL too. Inherited, it is the sender's terminal: once
+        # that window closed, every process the wake-up started died on a bad descriptor at birth
+        # ("init_sys_streams", 2026-10-24).
         subprocess.Popen(
             argv,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -498,23 +559,33 @@ def send_as(sender, addr, message, summary, *, request_input=False, card_task=No
                        f" · session {sender_session}" if sender_session else ""))
         # A note that asks nothing gets no reply: a reply to a finished card wakes her in turn,
         # and two finished cards thanking each other would wake each other for ever.
-        out = wake_card(target, f"[Message from {who}. If it asks you something, answer with SendMessage; "
-                                f"a note that asks nothing needs no reply. Then complete the card again "
-                                f"with misaka_card_complete -- your deliverable stands unless you change "
-                                f"it.]\n{message}")
+        consult = bool(target.get("consult"))
+        if consult:
+            header = (f"[Message from {who}. If it asks you something, answer with SendMessage; a note that "
+                      f"asks nothing needs no reply. Your card stays finished: files you change and findings "
+                      f"you note are declared again when this turn ends.]")
+        else:
+            header = (f"[Message from {who}. If it asks you something, answer with SendMessage; then carry "
+                      f"on with your card.]")
+        out = wake_card(target, f"{header}\n{message}", asker={
+            "sender": sender, "sender_task": card_task, "sender_session": sender_session})
         from misaka.core.platform import cards
         try:
-            cards.append_log(target["workspace"], target["to_task"], sender, f"[message] {message}")
+            # [consult] and [message] (a continuation) read alike otherwise in her log.
+            cards.append_log(target["workspace"], target["to_task"], sender,
+                             f"[{'consult' if consult else 'message'}] {message}")
         except OSError:
             pass
+        what = ("had finished, so she is answering your message in her own session; the card stays "
+                "as it was" if consult else "was woken in her own session with your message as her next turn")
         return {"content": [{"type": "text", "text": (
-            f"{target['label']} had finished, so she was woken in her own session with your "
-            f"message as her next turn (pane {out['pane_id']}). A reply comes back as a message"
+            f"{target['label']} {what} (pane {out['pane_id']}). A reply comes back as a message"
             + ("; to hear it before you go on, wait for her with misaka_sister_output "
                f"(task_id={target['to_task']}, block=true)." if sender == "last-order"
                else "; continue working without waiting for it."))}],
             "details": {"to": target["to_addr"], "to_task": target["to_task"], "to_session": None,
-                        "pane_id": out["pane_id"], "woken": True}}
+                        "pane_id": out["pane_id"], "woken": True,
+                        **({"consultation": out.get("run_id")} if consult else {})}}
     if request_input:
         mid = request_help(target, body, message, summary, sender=sender, card_task=card_task,
                            sender_session=sender_session)
@@ -545,8 +616,13 @@ def request_help(target, body, message, summary, *, sender, card_task, sender_se
     """The card help protocol: the row is held out of every inbox until this attempt is parked
     for it. If the mailbox write fails the live card is untouched; if parking loses its
     ownership race the held row is deleted."""
+    from misaka.core.network import worker
     from misaka.core.platform import tasks
 
+    if card_task and worker.claim_env(card_task)[0] is None and worker.attempt_env(card_task)[0] is not None:
+        # A finished card answering a consultation has no attempt to park.
+        raise ValueError("This card is finished and is answering a message; it cannot wait for input. "
+                         "Ask with SendMessage (request_input=false) and answer with what you have.")
     raw_generation = (os.environ.get("MISAKA_SISTER_OWNER_GENERATION")
                       or os.environ.get("MISAKA_USAGE_GENERATION", ""))
     generation = int(raw_generation) if raw_generation.isdigit() else None
@@ -762,8 +838,8 @@ class SendMessageParams(BaseModel):
 
     to: str = Field(description=(
         "A card id (t_xxxxxx) reaches the session running that card; a session id reaches that one "
-        "conversation. A finished card, or its closed session, is woken in her own session with this "
-        "message as her next turn; a card that has not started gets it when it does. Inside a research "
+        "conversation. A finished card answers it in her own session (her window, open or reopened) and "
+        "stays finished; a card that has not started gets it when it does. Inside a workflow's "
         "run a name means that role's card in the run; otherwise a name (last-order, or a Sister id such "
         "as 10032) reaches "
         "the one session of that role in your space, or her contact session when none is there; "
@@ -801,6 +877,9 @@ class MessagesPart:
         self.card_task = card_task
         self.contact = contact
         self._stop = asyncio.Event()
+        self._opened = asyncio.Event()  # a card's first run has started (_pump waits for it)
+        if not card_task:
+            self._opened.set()
         self._job = None
         self._handovers = set()     # sendCustomMessage calls still running (a turn mail started)
         self.commands = []
@@ -814,7 +893,7 @@ class MessagesPart:
                 + (" Only request_input=true to a Last Order parks this card for input before "
                    "queuing a help request." if self.card_task else "")
             ),
-            parameters=SendMessageParams.model_json_schema(),
+            parameters=typeboxSchema(SendMessageParams),
             execute=self._send,
             promptSnippet="Send a message to another agent",
             promptGuidelines=(
@@ -870,7 +949,25 @@ class MessagesPart:
         raw = os.environ.get("MISAKA_SISTER_OWNER_GENERATION") or os.environ.get("MISAKA_USAGE_GENERATION", "")
         return int(raw) if raw.isdigit() else None
 
+    async def _until_opened(self):
+        """Whether the session's first run started before it stopped.
+
+        A card session opens with its contract (or a wake's note), and mail pinned to her goes in
+        at that run's first tool boundary (B16), as CCB drains a sub-agent's pending messages only
+        after its tool results. Polling from session start instead, mail already waiting started
+        a run of its own before the contract was sent; the contract then queued behind that whole
+        run and reached the card after she had submitted (2026-10-24, R14: 14 cards)."""
+        waits = [asyncio.ensure_future(self._opened.wait()), asyncio.ensure_future(self._stop.wait())]
+        try:
+            await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for wait in waits:
+                wait.cancel()
+        return not self._stop.is_set()
+
     async def _pump(self):
+        if not await self._until_opened():
+            return
         # `connect` opens the file, runs the schema script and sweeps delivered rows: all
         # blocking, all on this session's loop unless it is handed to a thread.
         con, cancelled = await settle_thread_call(connect)
@@ -1002,7 +1099,8 @@ class MessagesPart:
             # notices and nudges stay followUp elsewhere: they are for when the work stops.
             sending = self._hand_over(
                 {"customType": "agent-messages", "content": text,
-                 "display": True, "details": {"count": len(rows), "mail_ids": mail_ids}},
+                 "display": True, "details": {"count": len(rows), "mail_ids": mail_ids,
+                                              SENDERS: sorted({str(row["sender"]) for row in rows})}},
                 {"deliverAs": "steer", "triggerTurn": True,
                  "_deliveryId": delivery_id or "mail:" + ",".join(mail_ids),
                  "_onPersist": on_persist, "_onError": on_error})
@@ -1048,6 +1146,9 @@ class MessagesPart:
         self._stop = asyncio.Event()
         self._job = asyncio.ensure_future(self._pump())
         self._job.add_done_callback(self._report)
+
+    async def agent_start(self, event, ctx):
+        self._opened.set()
 
     async def session_shutdown(self, event, ctx):
         if not self.receive:

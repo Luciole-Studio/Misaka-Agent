@@ -1,143 +1,204 @@
-"""Async event stream primitives used by provider streaming adapters."""
+"""Translated from pi's ``packages/ai/src/utils/event-stream.ts`` (v1.1.0).
+
+MISAKA fork: a waiting consumer is an ``asyncio.Future``; a consumer cancelled while it waits leaves a cancelled future
+behind, which ``push`` skips. The final-result future is made on first use, because a future needs an event loop. The
+live error cause, the producer task and ``spawn_stream_task`` at the end are MISAKA additions.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator, Callable
-from typing import Any, TypeVar, cast
+from typing import Any
 
 from misaka.ai.types import AssistantMessage, AssistantMessageEvent
+from misaka.utils.js import UNDEFINED, jsRound
 
-TEvent = TypeVar("TEvent")
-TResult = TypeVar("TResult")
 
-_END_OF_STREAM = object()
-_UNSET = object()
+class _FifoQueue[T]:
+    def __init__(self) -> None:
+        self._incoming: list[T] = []
+        self._outgoing: list[T] = []
+
+    @property
+    def length(self) -> int:
+        return len(self._incoming) + len(self._outgoing)
+
+    def enqueue(self, value: T) -> None:
+        self._incoming.append(value)
+
+    def dequeue(self) -> T | None:
+        if len(self._outgoing) == 0:
+            while len(self._incoming) > 0:
+                self._outgoing.append(self._incoming.pop())
+        return self._outgoing.pop() if self._outgoing else None
 
 
 _detached_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _detached_future_loop() -> asyncio.AbstractEventLoop:
-    """The one loop backing futures built outside any running loop."""
+    """MISAKA fork: the one loop backing futures built outside any running loop. A few synchronous call paths construct
+    already-complete streams; their futures are resolved and read in place, so they share one detached loop instead of
+    leaking a new one each time."""
     global _detached_loop
     if _detached_loop is None or _detached_loop.is_closed():
         _detached_loop = asyncio.new_event_loop()
     return _detached_loop
 
 
-class EventStream[TEvent, TResult]:
-    def __init__(
-        self,
-        is_complete: Callable[[TEvent], bool],
-        extract_result: Callable[[TEvent], TResult],
-    ) -> None:
-        self._queue: asyncio.Queue[object] = asyncio.Queue()
-        self._done = False
-        self._is_complete = is_complete
-        self._extract_result = extract_result
-        self._result_future: asyncio.Future[TResult] | None = None
-        self._waiting_consumers = 0
+class EventStream[T, R]:
+    """Generic event stream class for async iteration"""
 
-    def push(self, event: TEvent) -> None:
+    def __init__(self, isComplete: Callable[[T], bool], extractResult: Callable[[T], R]) -> None:
+        self._queue: _FifoQueue[T] = _FifoQueue()
+        self._waiting: _FifoQueue[asyncio.Future[tuple[Any, bool]]] = _FifoQueue()
+        self._done = False
+        self._finalResultPromise: asyncio.Future[R] | None = None
+        self._isComplete = isComplete
+        self._extractResult = extractResult
+
+    def _resolveFinalResult(self, result: R) -> None:
+        promise = self._finalResult()
+        if not promise.done():
+            promise.set_result(result)
+
+    def push(self, event: T) -> None:
         if self._done:
             return
 
-        if self._is_complete(event):
+        if self._isComplete(event):
             self._done = True
-            result_future = self._ensure_result_future()
-            if not result_future.done():
-                result_future.set_result(self._extract_result(event))
+            self._resolveFinalResult(self._extractResult(event))
 
-        self._queue.put_nowait(event)
+        # Deliver to waiting consumer or queue it
+        waiter = self._dequeueWaiter()
+        if waiter is not None:
+            waiter.set_result((event, False))
+        else:
+            self._queue.enqueue(event)
 
-    def end(self, result: TResult | object = _UNSET) -> None:
+    def end(self, result: Any = UNDEFINED) -> None:
         self._done = True
-        result_future = self._ensure_result_future()
-        if result is not _UNSET and not result_future.done():
-            result_future.set_result(cast(TResult, result))
-        for _ in range(max(1, self._waiting_consumers)):
-            self._queue.put_nowait(_END_OF_STREAM)
+        if result is not UNDEFINED:
+            self._resolveFinalResult(result)
+        # Notify all waiting consumers that we're done
+        while self._waiting.length > 0:
+            waiter = self._waiting.dequeue()
+            if waiter is not None and not waiter.done():
+                waiter.set_result((None, True))
 
-    def result(self) -> asyncio.Future[TResult]:
-        return self._ensure_result_future()
-
-    def __aiter__(self) -> AsyncIterator[TEvent]:
+    def __aiter__(self) -> AsyncIterator[T]:
         return self._iterate()
 
-    async def _iterate(self) -> AsyncIterator[TEvent]:
+    async def _iterate(self) -> AsyncIterator[T]:
         while True:
-            if self._queue.empty() and self._done:
+            if self._queue.length > 0:
+                yield self._queue.dequeue()  # type: ignore[misc]
+            elif self._done:
                 return
+            else:
+                waiter: asyncio.Future[tuple[Any, bool]] = asyncio.get_running_loop().create_future()
+                self._waiting.enqueue(waiter)
+                value, done = await waiter
+                if done:
+                    return
+                yield value
 
-            self._waiting_consumers += 1
-            try:
-                item = await self._queue.get()
-            finally:
-                self._waiting_consumers -= 1
+    def result(self) -> asyncio.Future[R]:
+        return self._finalResult()
 
-            if item is _END_OF_STREAM:
-                return
-            yield cast(TEvent, item)
-
-    def _ensure_result_future(self) -> asyncio.Future[TResult]:
-        if self._result_future is None:
+    def _finalResult(self) -> asyncio.Future[R]:
+        """MISAKA fork: ``finalResultPromise``, made on first use."""
+        if self._finalResultPromise is None:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                # Streams are normally created inside an active event loop, but a few
-                # synchronous call paths construct already-complete streams for tests
-                # and lightweight wrappers. Those futures are resolved and read in place,
-                # so they share one detached loop instead of leaking a new one each time.
                 loop = _detached_future_loop()
-            self._result_future = loop.create_future()
-        return self._result_future
+            self._finalResultPromise = loop.create_future()
+        return self._finalResultPromise
+
+    def _dequeueWaiter(self) -> asyncio.Future[tuple[Any, bool]] | None:
+        """MISAKA fork: the next waiter still waiting; a consumer cancelled while it waited left a cancelled one."""
+        while self._waiting.length > 0:
+            waiter = self._waiting.dequeue()
+            if waiter is not None and not waiter.done():
+                return waiter
+        return None
 
 
 class AssistantMessageEventStream(EventStream[AssistantMessageEvent, AssistantMessage]):
-    def __init__(self) -> None:
-        # Live control data only: never serialized into the message or session.
-        self.error_cause: BaseException | None = None
-        self._producer: asyncio.Task | None = None
-        super().__init__(
-            lambda event: event.type in {"done", "error"},
-            lambda event: event.message if event.type == "done" else event.error,
-        )
+    """Event stream of one assistant response. It also times the response: the final message (`done` or `error` event,
+    or the result passed to `end()`) gets `durationMs`, measured with a monotonic clock from the stream's creation,
+    unless the message already has one or its `timestamp` predates the stream. A stream that forwards a response which
+    started elsewhere, such as a deferred result fetched later, therefore leaves it untimed."""
 
+    def __init__(self) -> None:
+        self._startedAt = time.time_ns() // 1_000_000
+        self._startedAtMonotonic = time.perf_counter()
+        # MISAKA fork: live control data only, never serialized into the message or session: the exception behind an
+        # `error` event, and the producer task `settled()` joins.
+        self.error_cause: BaseException | None = None
+        self._producer: asyncio.Task[Any] | None = None
+
+        def extractResult(event: AssistantMessageEvent) -> AssistantMessage:
+            if event.type == "done":
+                return event.message
+            if event.type == "error":
+                return event.error
+            raise RuntimeError("Unexpected event type for final result")
+
+        super().__init__(lambda event: event.type in ("done", "error"), extractResult)
+
+    def push(self, event: AssistantMessageEvent, *, cause: BaseException | None = None) -> None:
+        if event.type == "done":
+            self._time(event.message)
+        elif event.type == "error":
+            self._time(event.error)
+            # MISAKA fork: keep the live exception behind the error.
+            if not self._done:
+                self.error_cause = cause
+        super().push(event)
+
+    def end(self, result: Any = UNDEFINED) -> None:
+        if result is not UNDEFINED and result is not None:
+            self._time(result)
+        super().end(result)
+
+    def _time(self, message: AssistantMessage) -> None:
+        if self._done or message.durationMs is not None or message.timestamp < self._startedAt:
+            return
+        message.durationMs = max(0, jsRound((time.perf_counter() - self._startedAtMonotonic) * 1000))
 
     async def settled(self) -> None:
-        """Join this stream's producer, including its transport finalizers.
+        """MISAKA fork: join this stream's producer, including its transport finalizers.
 
-        A done/error event resolves result() before the provider's finally block.
-        Short-lived auxiliary event loops must drain that owner before closing.
+        A done/error event resolves result() before the provider's finally block. Short-lived auxiliary event loops
+        must drain that owner before closing.
         """
         if self._producer is not None and self._producer is not asyncio.current_task():
             from misaka.utils.async_lifecycle import settle
+
             _, cancelled = await settle(self._producer)
             if cancelled is not None:
                 raise cancelled
 
-    def push(self, event: AssistantMessageEvent, *, cause: BaseException | None = None) -> None:
-        if not self._done and event.type == "error":
-            self.error_cause = cause
-        super().push(event)
+
+def createAssistantMessageEventStream() -> AssistantMessageEventStream:
+    """Factory function for AssistantMessageEventStream (for use in extensions)"""
+    return AssistantMessageEventStream()
 
 
-__all__ = [
-    "AssistantMessageEventStream",
-    "EventStream",
-]
-
-
+# MISAKA fork: provider tasks need a strong reference while they run.
 _live_stream_tasks: set[asyncio.Task[Any]] = set()
 
 
 def spawn_stream_task(coro: Any, *, stream: AssistantMessageEventStream | None = None) -> asyncio.Task[Any]:
-    """Run a provider's streaming body, holding the task until it finishes.
+    """MISAKA fork: run a provider's streaming body, holding the task until it finishes.
 
-    The event loop keeps only a weak reference to a task, so a bare
-    ``asyncio.create_task(run())`` -- which is how every provider used to start its stream --
-    can be collected mid-response. The reference lives here until the task completes.
+    The event loop keeps only a weak reference to a task, so a bare ``asyncio.create_task(run())`` can be collected
+    mid-response. The reference lives here until the task completes.
     """
     task = asyncio.create_task(coro)
     if stream is not None:
@@ -145,3 +206,6 @@ def spawn_stream_task(coro: Any, *, stream: AssistantMessageEventStream | None =
     _live_stream_tasks.add(task)
     task.add_done_callback(_live_stream_tasks.discard)
     return task
+
+
+__all__ = ["AssistantMessageEventStream", "EventStream", "createAssistantMessageEventStream"]

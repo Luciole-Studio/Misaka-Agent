@@ -13,6 +13,7 @@ import copy
 import logging
 import os
 import re
+import sqlite3
 import threading
 import time
 from contextlib import contextmanager
@@ -21,16 +22,29 @@ from types import SimpleNamespace
 from weakref import WeakValueDictionary
 
 from misaka.core.platform.prompt_guard import MARKER, untrusted
+from misaka.core.virtual_models import isVirtualModel
 from misaka.utils.values import read_field, signal_aborted
 
 from ..vendor import aux_session
 from ..vendor.reconcile import _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
-from . import config_bridge, execution, fence, ingest, llm, rollups, storage
+from . import (
+    calls,
+    config_bridge,
+    entry_rows,
+    execution,
+    fence,
+    images,
+    ingest,
+    llm,
+    rollups,
+    storage,
+)
 
 logger = logging.getLogger(__name__)
 
 # Upstream's summary labels, used for lineage fencing, not as proof of compaction.
 _SUMMARY_BLOCK = re.compile(r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]")
+_SHOWN_HINT = re.compile(r"\[Expand for details: ([^\n]*)\]\s*$")
 
 # Per-session locks serialize engine work; the registry serializes admission and
 # retirement. Weak locks disappear after their last owner/waiter releases them.
@@ -68,8 +82,24 @@ def engine(ctx=None):
             from ..vendor.engine import LCMEngine
 
             llm.install()
+            images.install()
+            ingest.install()
+            calls.install()
             execution.install_worker_ownership()
             class NativeLCMEngine(LCMEngine):
+                def _bind_storage(self, *args, **kwargs):
+                    super()._bind_storage(*args, **kwargs)
+                    # Upstream discards the ids of the rows it writes; keep each one's entry
+                    # (entry_rows). On the class, so a private import runtime (carry) records too.
+                    store, write = self._store, self._store._append_protected_batch
+
+                    def append_protected_batch(session_id, messages, *args, **kwargs):
+                        ids = write(session_id, messages, *args, **kwargs)
+                        entry_rows.record(store, ids, messages)
+                        return ids
+
+                    store._append_protected_batch = append_protected_batch
+
                 def handle_tool_call(self, *args, **kwargs):
                     with execution.worker_owner(self):
                         return super().handle_tool_call(*args, **kwargs)
@@ -90,6 +120,12 @@ def engine(ctx=None):
                     from .native import session_is_branch_of
                     return session_is_branch_of(session_id, parent_session_id)
 
+                def _message_replay_identity(self, msg, *, stored_row=False):
+                    return super()._message_replay_identity(images.without(msg), stored_row=stored_row)
+
+                def _session_end_prefix_compare_content(self, message, *, session_id):
+                    return super()._session_end_prefix_compare_content(images.without(message), session_id=session_id)
+
                 def _ingest_messages(self, messages):
                     # Cached sanitized rows retain current input provenance, not the
                     # source ordinals from an earlier view or a different branch.
@@ -104,19 +140,27 @@ def engine(ctx=None):
                 def get_runtime_identity(self):
                     identity = super().get_runtime_identity()
                     identity.update(plugin_name="misaka-lcm", project=str(storage.project(ctx)),
-                                    storage_lifetime="project-runtime", history_scope="loaded-project-cache",
+                                    storage_lifetime="project", history_scope="loaded-project-cache",
                                     native_session_catalog_contains="session-identifiers-not-conversation-content")
                     return identity
 
             storage.acquire(project)
+            database = config_bridge.database_path(ctx)
+            if not _readable(database):
+                entry_rows.forget(SimpleNamespace(db_path=database))
+                if storage.reset_unreadable(project):
+                    logger.warning("MISAKA LCM database of %s could not be read; started a fresh cache.", project)
             built = NativeLCMEngine(config=config_bridge.load_config(ctx=ctx), hermes_home="")
             try:
                 built._misaka_project = str(project)
+                built._misaka_source = storage.source(ctx)
                 built._misaka_cache = storage.current(project)
                 storage.namespace_ids(built._store._conn)
                 from .native import session_ids
                 built._dag.before_publish = execution.check_cancelled
                 built._lifecycle._host_sessions = session_ids
+                if storage.take_first_owner(project):
+                    _forget_deleted_sessions(built)
             except BaseException as error:
                 try:
                     _shutdown(built)
@@ -125,6 +169,55 @@ def engine(ctx=None):
                 raise
             _ENGINES[key] = built
         return _ENGINES[key]
+
+
+def _clear_session_rows(built, session_id, why) -> None:
+    """Drop one session's rows and summaries. The session file holds everything they came from."""
+    logger.warning("MISAKA LCM clearing the rows of session %s: %s.", session_id, why)
+    built._dag.delete_session_nodes(session_id, on_deleted_batch=built._purge_embeddings_for_nodes)
+    built._store.delete_session_messages(session_id)
+
+
+def _forget_deleted_sessions(built) -> None:
+    """A deleted session's words leave the cache too, now that the cache outlives the session."""
+    for session_id, path in entry_rows.session_files(built._store):
+        if not os.path.exists(path):
+            _clear_session_rows(built, session_id, "its session file is gone")
+            entry_rows.forget_session(built._store, session_id)
+
+
+def _readable(database) -> bool:
+    """Whether a kept database opens at all. Asked first: a failed engine start leaves state behind."""
+    if not os.path.exists(database):
+        return True
+    connection = None
+    try:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+        connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        return True
+    except sqlite3.DatabaseError:
+        return False
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _rows_held(built, originals) -> int | None:
+    """How many of the archive's leading rows the store holds, or None when it holds anything else.
+
+    The bindings answer this exactly, so upstream's reconciliation, which has to infer it, is not
+    needed: it compares every prefix with the store, took tens of minutes on a large session that
+    did not match (2026-10-27, R38) or failed the turn, and cannot prove the cursor of a one-message
+    session at all, adding its row again at every reopen. A healthy session's rows are all bound,
+    one per position, and are the archive's first rows. A branch left by /tree breaks the last of
+    these, which costs one rebuild and never recurs, since the rebuilt rows are the whole archive."""
+    rows = [row[0] for row in built._store._conn.execute(
+        "SELECT store_id FROM messages WHERE session_id = ?", (built._session_id,))]
+    keys = entry_rows.keys(built._store, rows)
+    stored = set(keys.values())
+    if len(keys) != len(rows) or len(stored) != len(rows):
+        return None
+    return len(rows) if stored == {message[entry_rows.KEY] for message in originals[:len(rows)]} else None
 
 
 def _retire(key) -> None:
@@ -182,6 +275,7 @@ def _shutdown(built, timeout=25):
         if thread.is_alive():
             raise TimeoutError("MISAKA LCM FTS workers are still active; retaining the cache")
     built.shutdown()
+    entry_rows.forget(built._store)               # reopened on next use; the cache directory may go now
 
 
 def release_project(ctx=None):
@@ -212,7 +306,9 @@ atexit.register(close_all)
 
 def update_model(ctx) -> None:
     model = read_field(ctx, "model")
-    if model is None:
+    # A virtual selection has no window of its own: the model each request goes to is bound when the request is
+    # prepared (session_context_prepare), and stays bound between hooks.
+    if model is None or isVirtualModel(model):
         return
     built = engine(ctx)
     api = str(read_field(model, 'api', '') or '')
@@ -247,6 +343,54 @@ def _node_text(node) -> str:
             f"{node.summary}\n[Expand for details: {node.expand_hint}]")
 
 
+def local_nodes(built, args: dict) -> dict:
+    """`args` with each number a frame shows given as the node it stands for now.
+
+    A frame keeps the number it was drawn with, while upstream's tools open only this session's
+    current numbers: a fork imports its parent's frontier as nodes of its own, and a rebuilt cache
+    numbers everything anew. Rewriting the frames to those numbers wrote the whole context into
+    the session file each time, broke the prompt cache, put our hint where the summarizer's had
+    been, and worked once: a replay update names no scaffolds, so after the next rebuild the frames
+    opened nothing (2026-11-07: 0 of 65 on the real `test` sessions). The checkpoint says which
+    node each frame is, so the number is translated here instead and the text is left alone.
+    """
+    kept = getattr(built, '_misaka_kept_frames', None)
+    if not kept:
+        return args
+
+    def local(value):
+        try:
+            return kept[int(value)][0]
+        except (KeyError, TypeError, ValueError):
+            return value
+
+    args = dict(args)
+    if 'node_id' in args:
+        args['node_id'] = local(args['node_id'])
+    if isinstance(args.get('node_ids'), list):
+        args['node_ids'] = [local(value) for value in args['node_ids']]
+    return args
+
+
+def _frame_shown(built, node, messages) -> str:
+    """The frame `messages` show for `node`: the one kept, unless the engine has drawn its own.
+
+    Asked of what the engine drew, not of the kept text: a replay update draws nothing, and the
+    kept frame it carries forward comes with a source like every other row of it.
+    """
+    kept = next((frame for local, frame in getattr(built, '_misaka_kept_frames', {}).values()
+                 if local == node.node_id), None)
+    own = _node_text(node)
+    if kept is None:
+        return own
+    for message in messages:
+        content = message.get('content')
+        if ingest.SOURCE not in message and own in (
+                content if isinstance(content, str) else ingest._text_of(content)):
+            return own
+    return kept
+
+
 @dataclass(frozen=True)
 class Transcript:
     """One owner-loop snapshot; a queued worker must not mix transcript generations."""
@@ -269,7 +413,7 @@ def freeze_context(ctx, transcript):
     """Only the owner loop reads mutable session/model identity before queuing work."""
     session_id = ingest.session_id(ctx)
     return SimpleNamespace(
-        cwd=read_field(ctx, 'cwd'), lcm_project=str(storage.project(ctx)),
+        cwd=read_field(ctx, 'cwd'), lcm_project=str(storage.project(ctx)), lcm_source=storage.source(ctx),
         sessionManager=SimpleNamespace(getSessionId=lambda: session_id,
                                        getSessionFile=lambda: transcript.session_file,
                                        getEntries=lambda: transcript.entries,
@@ -277,10 +421,45 @@ def freeze_context(ctx, transcript):
         model=copy.deepcopy(read_field(ctx, "model")), modelRegistry=read_field(ctx, "modelRegistry"))
 
 
-def _session_originals(transcript):
-    from misaka.core.session_manager import session_entry_to_context_messages
+# Entries that open no ingest: a tool result, an edit, a usage receipt or a non-message custom
+# entry is appended with no model request, run start or compaction in between.
+_NO_INGEST = frozenset({'context_edit', 'usage', 'custom', 'label', 'session_info'})
 
-    return {item["id"]: ingest.upstream_messages(session_entry_to_context_messages(item))
+
+def _edits_before_ingest(entries):
+    """The context edits each entry already carried when live ingest first stored it.
+
+    Ingest stores what ``buildSessionContext`` showed at a model request, a run's start or end, or
+    a compaction, and upstream never re-reads a row it has passed. An edit appended before any of
+    those (a retry dropping the attempt it failed, ``_omitRecoveryAttempt``) means the entry never
+    reached the store; one appended later (a boundary draft) left its original there. Applying
+    every edit, or none, gives the archive a different multiset of identical rows than the store,
+    and upstream's surplus-skip matcher then re-deals them: a retried 503's empty assistant row
+    left a checkpoint's frontier with a source no entry owned (2026-10-26, Last Order's
+    cards_failed turn). Only an edit on the target's own branch counts, as in
+    ``buildSessionProjection``; the last one wins, as there."""
+    by_id = {entry['id']: entry for entry in entries}
+    edits = {}
+    for entry in entries:
+        if entry['type'] != 'context_edit':
+            continue
+        target, parent = str(entry.get('targetId')), entry.get('parentId')
+        while parent is not None and parent != target:
+            between = by_id.get(parent)
+            if between is None or not (between['type'] in _NO_INGEST or (
+                    between['type'] == 'message' and read_field(between.get('message'), 'role') == 'toolResult')):
+                break
+            parent = between.get('parentId')
+        if parent == target:
+            edits[target] = entry
+    return edits
+
+
+def _session_originals(transcript):
+    from misaka.core.session_manager import projectContextEntry
+
+    edits = _edits_before_ingest(transcript.entries)
+    return {item["id"]: entry_rows.tag(item["id"], ingest.upstream_messages(projectContextEntry(item, edits.get(item["id"]))))
             for item in transcript.entries if item["type"] != "compaction"}
 
 
@@ -290,15 +469,43 @@ def _archive_map(built, transcript, *, through=None):
         transcript = Transcript(transcript.entries[:end], transcript.branch, transcript.session_id,
                                 transcript.session_file, transcript.project)
     projected = _session_originals(transcript)
-    originals = [message for group in projected.values() for message in group]
-    watermark, scope = built._last_compacted_store_id, built.active_store_ids
-    try:
-        built._last_compacted_store_id, built.active_store_ids = 0, None
-        stored = built._get_store_id_map_for_messages(originals)
-    finally:
-        built._last_compacted_store_id, built.active_store_ids = watermark, scope
-    return projected, {entry: [stored[id(message)] for message in group if id(message) in stored]
-                       for entry, group in projected.items()}
+    # Each entry's rows by the binding recorded when they were written (entry_rows), not by
+    # content; only entries no row is bound to are matched by content, among unbound rows.
+    rows = [row[0] for row in built._store._conn.execute(
+        "SELECT store_id FROM messages WHERE session_id = ?", (built._session_id,))]
+    bound, taken = entry_rows.bound(built._store, rows)
+    # Only the positions the archive still projects: a reply a retry dropped after agent_end
+    # stored it stays as unowned as content matching left it.
+    result = {entry: [positions[index] for index in range(len(projected[entry])) if index in positions]
+              for entry, positions in bound.items() if projected.get(entry)}
+    unbound = [entry for entry in projected if entry not in result]
+    if unbound:
+        originals = [message for entry in unbound for message in projected[entry]]
+        watermark, scope = built._last_compacted_store_id, built.active_store_ids
+        try:
+            built._last_compacted_store_id = 0
+            built.active_store_ids = {row for row in rows if row not in taken} if taken else None
+            stored = built._get_store_id_map_for_messages(originals)
+        finally:
+            built._last_compacted_store_id, built.active_store_ids = watermark, scope
+        result.update({entry: [stored[id(message)] for message in projected[entry] if id(message) in stored]
+                       for entry in unbound})
+    return projected, {entry: result[entry] for entry in projected}
+
+
+def _archive_sources(built, transcript):
+    """Each stored row's owning entry, and each carried row's receipt key."""
+    from . import carry
+    _, stored = _archive_map(built, transcript)
+    return ({source: entry for entry, sources in stored.items() for source in sources},
+            {row: key for key, row in carry.sources(built, transcript).items()})
+
+
+def _hint(entry, record):
+    """The hint a restored node shows: the one its frame was drawn with, which the summarizer wrote.
+    A native compaction's record has no frame; its text also says the compaction was imported."""
+    shown = _SHOWN_HINT.search(record.get('frame') or '')
+    return shown.group(1) if shown else f"MISAKA session compaction {entry['id']} node {record['id']}"
 
 
 def _checkpoint_nodes(built, entry, transcript):
@@ -308,8 +515,9 @@ def _checkpoint_nodes(built, entry, transcript):
     checkpoint carries the frontier plus its original entry references, allowing a
     new DAG to reconstruct that same provenance without importing another branch.
     """
+    built._misaka_kept_frames = {}
     if entry is None or built._bypasses_lcm_context_management():
-        return [], {}
+        return []
     from . import carry
     full = entry.get("contextMessages") is not None
     capsules = (entry.get("details") or {}).get("lcm", {}) if full else {}
@@ -322,6 +530,10 @@ def _checkpoint_nodes(built, entry, transcript):
     # matcher reassign a published checkpoint's older source to the new occurrence.
     projected, stored = _archive_map(built, transcript, through=entry['id'])
     branch_ids = {item['id'] for item in transcript.branch}
+    # Checkpoints written before 2026-10-26 name attempts a retry had already dropped: the empty
+    # reply of a 503. Such an entry has no row and no content, so the summary loses nothing by it.
+    dropped = {item.get('targetId') for item in transcript.branch
+               if item['type'] == 'context_edit' and item.get('replacement') is None}
     foreign = carry.sources(built, transcript)
     if full:
         records = capsules['nodes']
@@ -329,9 +541,9 @@ def _checkpoint_nodes(built, entry, transcript):
         cut = next(i for i, item in enumerate(transcript.branch) if item['id'] == entry['firstKeptEntryId'])
         records = [{'id': 0, 'summary': entry['summary'], 'depth': 0,
                     'sourceEntries': [item['id'] for item in transcript.branch[:cut] if projected.get(item['id'])]}]
-    nodes, replacements = [], {}
+    nodes = []
     for record in records:
-        references = record['sourceEntries']
+        references = [ref for ref in record['sourceEntries'] if ref not in dropped]
         if not set(references) <= branch_ids or any(not stored.get(ref) for ref in references):
             raise ValueError('LCM checkpoint source entries are absent from this branch/store')
         carried = record.get('foreignSources', [])
@@ -345,7 +557,7 @@ def _checkpoint_nodes(built, entry, transcript):
                                  or set(carry.source_ids(built, node)) != set(sources)):
             node = None
         if node is None:
-            hint = f"MISAKA session compaction {entry['id']} node {record['id']}"
+            hint = _hint(entry, record)
             node = next((node for node in built._dag.get_session_nodes(built.current_session_id, limit=-1)
                          if node.expand_hint == hint and node.summary == record['summary']
                          and node.depth == record['depth']
@@ -359,9 +571,10 @@ def _checkpoint_nodes(built, entry, transcript):
                 built._dag.add_node(node)
                 built._invalidate_rollups_for_published_node(node)
         nodes.append(node)
-        if full and record['frame'] != _node_text(node):
-            replacements[record['frame']] = _node_text(node)
-    return nodes, replacements
+        shown = _SUMMARY_BLOCK.match(record['frame']) if full else None
+        if shown and record['frame'] != _node_text(node):
+            built._misaka_kept_frames[int(shown.group(2))] = (node.node_id, record['frame'])
+    return nodes
 
 
 def _checkpoint(transcript):
@@ -373,7 +586,7 @@ def _summary_scope(built, *, transcript):
     """The selected checkpoint frontier and its raw branch, plus new publications."""
     saved = built._dag.active_node_ids, built.active_store_ids
     try:
-        nodes, _ = _checkpoint_nodes(built, _checkpoint(transcript), transcript)
+        nodes = _checkpoint_nodes(built, _checkpoint(transcript), transcript)
         _, stored = _archive_map(built, transcript)
         from . import carry
         built.active_store_ids = {source for entry in transcript.branch for source in stored.get(entry['id'], [])} | set(carry.sources(built, transcript).values())
@@ -398,10 +611,14 @@ def turn_key(transcript):
                                            else entry.get('message'))), None)
 
 def _messages(transcript, built):
-    from misaka.core.session_manager import build_session_context
+    from misaka.core.session_manager import buildSessionProjection
 
-    native = build_session_context(transcript.branch).messages
-    messages = ingest.upstream_messages(native)
+    # buildSessionContext's messages, entry by entry, each row carrying the entry it came from
+    # (entry_rows). A compaction's own rows -- its summary scaffold and the copies it retains --
+    # are no entry's source and carry none.
+    messages = [row for item in buildSessionProjection(transcript.branch).entries
+                for row in (ingest.upstream_messages(item.messages) if item.sourceEntry["type"] == "compaction"
+                            else entry_rows.tag(item.sourceEntry["id"], ingest.upstream_messages(item.messages)))]
     if built._bypasses_lcm_context_management():
         return messages
     entry = _checkpoint(transcript)
@@ -412,28 +629,29 @@ def _messages(transcript, built):
     # shaped subsequence that the linear upstream cursor would count twice.
     if built._ingest_cursor_needs_reconcile or native_import:
         originals = [message for group in _session_originals(transcript).values() for message in group]
-        built._ingest_cursor = 0
-        built._schedule_ingest_cursor_reconciliation()
-        built._last_compacted_store_id = 0
-        try:
-            built.ingest(originals)
-        finally:
-            built._ingest_cursor_needs_reconcile = True
-        if built._consecutive_ingest_failures:
-            raise RuntimeError('LCM checkpoint originals were not persisted')
+        held = _rows_held(built, originals)
+        if held is None:
+            _clear_session_rows(built, built._session_id, "its rows no longer match its session file")
+            held = 0
+        for rebuilt in (False, True):
+            built._ingest_cursor = held
+            built._ingest_cursor_needs_reconcile = False
+            built._last_compacted_store_id = 0
+            try:
+                built.ingest(originals)
+            finally:
+                built._ingest_cursor_needs_reconcile = True
+            if not built._consecutive_ingest_failures:
+                break
+            if rebuilt:
+                raise RuntimeError('LCM checkpoint originals were not persisted')
+            _clear_session_rows(built, built._session_id, "its archive could not be stored")
+            built._record_ingest_success()
+            held = 0
         built._ingest_cursor = len(messages)
-    nodes, replacements = _checkpoint_nodes(built, entry, transcript)
+    nodes = _checkpoint_nodes(built, entry, transcript)
     if entry and entry['type'] == 'compaction' and entry.get('contextMessages') is None and nodes:
         messages[0] = {'role': 'user', 'content': _node_text(nodes[0])} if len(nodes) == 1 else messages[0]
-    elif replacements:
-        # Only rewrite generated scaffold positions recorded in the checkpoint;
-        # identical quoted node frames in a raw message are still just raw text.
-        for index in (entry.get('details') or {})['lcm']['scaffolds']:
-            text = messages[index]['content']
-            text = text if isinstance(text, str) else ingest._text_of(text)
-            for old, new in replacements.items():
-                text = text.replace(old, new)
-            messages[index] = {**messages[index], 'content': text}
     if built._ingest_cursor_needs_reconcile:
         from . import carry
         built._last_compacted_store_id = max(
@@ -470,8 +688,8 @@ def _guarded_summary(built, summary: str) -> str:
       through here on every round, and wrapping a wrapper defangs the inner fence and
       grows the row each time.
     """
-    node_ids = [int(node) for _, node in _SUMMARY_BLOCK.findall(summary)]
-    if not fence.is_tainted(built, node_ids=node_ids):
+    shown = [int(node) for _, node in _SUMMARY_BLOCK.findall(summary)]
+    if not fence.is_tainted(built, node_ids=local_nodes(built, {'node_ids': shown})['node_ids']):
         return summary
     label = f"lcm:compaction:{built.current_session_id}"
     opener = f'<<<{MARKER} name="{label}">>>'
@@ -513,29 +731,34 @@ def start(ctx) -> str:
     built = engine(ctx)
     if session_id:
         update_model(ctx)
+        session_file = ctx.sessionManager.getSessionFile()
+        if session_file:
+            entry_rows.note_session(built._store, session_id, session_file)
         lineage = _lineage(session_id)
         if lineage is not None:
             aux_session.record_subagent_start(lineage)
         from . import carry
         carried = carry.receipt(snapshot(ctx)) if read_field(ctx.sessionManager, 'getEntries') else None
         continuity = ({'conversation_id': carried['details']['lcm']['carry']['conversation']} if carried else {})
-        built.on_session_start(session_id, platform="misaka", **continuity)
+        # Upstream's "which platform" is, for one project cache shared by Last Order and her
+        # Sisters, "which agent": it is what every row of this session stores as its `source`.
+        built.on_session_start(session_id, platform=storage.source(ctx), **continuity)
         built._ingest_cursor_needs_reconcile = True  # a fresh DB may still open an existing tree
         built._misaka_preflight_turn = None
         built._misaka_preanswer = None
         branch = read_field(ctx.sessionManager, 'getBranch')
         if branch:
-            from misaka.core.session_manager import build_session_context
+            from misaka.core.session_manager import buildSessionContext
 
             from ..native.usage_anchor import capture_usage_anchor
             entries = list(branch())
-            messages = build_session_context(entries).messages
+            messages = buildSessionContext(entries).messages
             # Retained tail usage priced the pre-compaction request, not this
             # checkpoint's shorter prefix. Only a subsequent real response can
             # anchor the replacement view; otherwise use the original estimator.
             cut = next((i + 1 for i in range(len(entries) - 1, -1, -1)
                         if entries[i]['type'] == 'compaction'), 0)
-            first_priced = len(messages) - len(build_session_context(entries[cut:]).messages) if cut else 0
+            first_priced = len(messages) - len(buildSessionContext(entries[cut:]).messages) if cut else 0
             built._usage_anchor = None
             for index in range(len(messages) - 1, first_priced - 1, -1):
                 message = messages[index]
@@ -575,7 +798,7 @@ def end(ctx, *, transcript=None, reset=False) -> None:
 def usage(message, ctx) -> None:
     reported = read_field(message, "usage")
     if reported is not None:
-        from misaka.core.session_manager import build_session_context
+        from misaka.core.session_manager import buildSessionContext
 
         from ..native.image_token_cost import calibrate_from_usage
         from ..native.usage_anchor import capture_usage_anchor
@@ -583,7 +806,7 @@ def usage(message, ctx) -> None:
         data = llm.usage_dict(reported)
         branch = read_field(ctx.sessionManager, 'getBranch')
         if branch:
-            messages = ingest.upstream_messages(build_session_context(list(branch())).messages)
+            messages = ingest.upstream_messages(buildSessionContext(list(branch())).messages)
             if messages and messages[-1].get('role') == 'assistant':
                 messages = messages[:-1]
             calibrate_from_usage(built, messages, data['prompt_tokens'])
@@ -613,6 +836,7 @@ class Prepared:
     focus: str | None
     compress: bool
     replay_changed: bool
+    scaffolds: frozenset = frozenset()      # the replay rows the checkpoint named as its own summaries
 
 
 def _aligned(native, original_native):
@@ -641,12 +865,16 @@ def _aligned(native, original_native):
     return original_native, list(range(len(original_native)))
 
 
+def _custom(message):
+    return read_field(message, 'role') == 'custom'
+
+
 def prepare(event, ctx, *, transcript=None):
     """Original engine policy, without consulting Pi thresholds or cut points."""
-    from misaka.core.session_manager import build_session_context
+    from misaka.core.session_manager import buildSessionContext
 
     transcript = transcript or snapshot(ctx)
-    original_native = build_session_context(transcript.branch).messages
+    original_native = buildSessionContext(transcript.branch).messages
     native = read_field(event, 'messages')
     if native is None:
         native = original_native
@@ -659,6 +887,7 @@ def prepare(event, ctx, *, transcript=None):
     replay_changed = len(positions) != len(messages)
     replay = ingest.Replay(native)
     checkpoint = _checkpoint(transcript)
+    scaffolds = frozenset()
     if checkpoint is not None:
         metadata = ((checkpoint.get('details') or {}).get('lcm') or {}).get('nativeMetadata', {})
         if not isinstance(metadata, dict):
@@ -674,15 +903,24 @@ def prepare(event, ctx, *, transcript=None):
                 raise ValueError('Invalid native compression checkpoint metadata')
             if index in active_positions:
                 replay.messages[active_positions[index]].update(values)
+        scaffolds = frozenset(active_positions[index] for index in checkpoint.get('contextSummaries') or ()
+                              if index in active_positions)
     # Checkpoint rebinding changes generated content only. Keep the live source's
-    # timestamp/tool metadata (custom persistence assigns a separate receipt time).
+    # timestamp/tool metadata -- except a custom message's timestamp, which takes the
+    # transcript's: persistence stamps a custom entry with its own receipt time, and a
+    # message that opened a turn or was steered in keeps its creation time live. The
+    # engine compares this list with the replay it cached from the transcript rows, and
+    # a difference there is a "replay changed" that compacts a leaf at every turn start,
+    # whatever the threshold (2026-10-29, R64).
     if replay_changed:
         if built._consecutive_ingest_failures:
             raise RuntimeError('LCM retry checkpoint originals were not persisted')
         cleaned = built._cached_active_replay_messages(messages)
         if cleaned is None and not built._bypasses_lcm_context_management():
             raise RuntimeError('LCM retry checkpoint has no matching ingest replay')
-    messages = [{**original, 'content': messages[source]['content']}
+    messages = [{**original, 'content': messages[source]['content'],
+                 **({'timestamp': messages[source]['timestamp']}
+                    if _custom(replay.originals[original[ingest.SOURCE]]) and 'timestamp' in messages[source] else {})}
                 for original, source in zip(replay.messages, positions)]
     if replay_changed and cleaned is not None:
         # Hermes' cursor belongs to the current list, not the longer native archive.
@@ -720,7 +958,7 @@ def prepare(event, ctx, *, transcript=None):
     if not wants and replay.unchanged(messages) and not replay_changed:
         return None
     return Prepared(built, transcript, replay, messages, read_field(ctx, 'model'), int(tokens),
-                    reason, read_field(event, 'customInstructions'), wants, replay_changed)
+                    reason, read_field(event, 'customInstructions'), wants, replay_changed, scaffolds)
 
 
 def compact(prepared):
@@ -730,6 +968,19 @@ def compact(prepared):
     built = prepared.built
     with _summary_scope(built, transcript=prepared.transcript):
         from ..native.support import AuxiliaryExplicitCancellation
+        from . import carry
+        if not prepared.replay_changed:
+            # The check below, before the engine commits anything: a frontier the archive cannot
+            # account for skips this round and the context goes out uncompacted. Raising instead
+            # failed the turn, and its session_compact_failed rebind re-ingests the whole archive
+            # as duplicate rows. After compress() the engine has published nodes and moved its
+            # cursor, so a refusal there still raises.
+            source_entries, foreign = _archive_sources(built, prepared.transcript)
+            if any(source not in source_entries and source not in foreign
+                   for node in built._summary_frontier_nodes() for source in carry.source_ids(built, node)):
+                logger.warning('LCM frontier of %s has sources outside the transcript archive; '
+                               'skipping this compaction.', built.current_session_id)
+                return None
         try:
             compressed = (built.compress(prepared.messages, current_tokens=prepared.tokens,
                                          focus_topic=prepared.focus, force=prepared.reason == 'manual')
@@ -739,17 +990,14 @@ def compact(prepared):
         if prepared.replay.unchanged(compressed) and not prepared.replay_changed:
             return None
         frontier = built._summary_frontier_nodes()
-        _, stored = _archive_map(built, prepared.transcript)
-        source_entries = {source: entry for entry, sources in stored.items() for source in sources}
+        source_entries, foreign = _archive_sources(built, prepared.transcript)
         records = []
-        from . import carry
-        foreign = {row: key for key, row in carry.sources(built, prepared.transcript).items()}
         for node in frontier:
             sources = carry.source_ids(built, node)
             if any(source not in source_entries and source not in foreign for source in sources):
                 raise ValueError('LCM frontier contains sources outside the transcript archive')
             records.append({'id': node.node_id, 'depth': node.depth, 'summary': node.summary,
-                            'frame': _node_text(node),
+                            'frame': _frame_shown(built, node, compressed),
                             'sourceEntries': list(dict.fromkeys(source_entries[source] for source in sources if source in source_entries)),
                             **({'foreignSources': [foreign[source] for source in sources if source in foreign]} if any(source in foreign for source in sources) else {})})
         scaffolds = []
@@ -759,7 +1007,9 @@ def compact(prepared):
             metadata = {key: message[key] for key in ingest.NATIVE_METADATA if key in message}
             if metadata:
                 native_metadata[str(index)] = metadata
-            if ingest.SOURCE not in message:
+            # A summary the engine wrote this round has no source; one a checkpoint only carries
+            # over has, and was named by the checkpoint before it.
+            if ingest.SOURCE not in message or message[ingest.SOURCE] in prepared.scaffolds:
                 scaffolds.append(index)
             if message.get('_compressed_summary'):
                 from .native import fence_summary_content

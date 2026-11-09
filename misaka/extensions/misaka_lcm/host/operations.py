@@ -14,11 +14,15 @@ def command(raw: str, ctx=None) -> str:
             if raw.strip() == "status":
                 result = result.replace("LCM status\n", "MISAKA LCM status\n"
                                         f"project: {storage.project(ctx)}\n"
-                                        "storage_lifetime: project-runtime\n", 1)
+                                        "storage_lifetime: project\n", 1)
                 result = result.replace("no active Hermes session", "no active MISAKA session")
             return result
         finally:
             if ctx is None:
-                # The empty-key engine is CLI-owned, never a conversation's runtime.
+                # The empty-key engine is CLI-owned, never a conversation's runtime. A cache this
+                # command only opened goes with it: looking must not leave anything in the folder.
+                empty = built._store._conn.execute("SELECT 1 FROM messages LIMIT 1").fetchone() is None
                 context_engine.close()
                 context_engine.release_project()
+                if empty:
+                    storage.clear(storage.project())

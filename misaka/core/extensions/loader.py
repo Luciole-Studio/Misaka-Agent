@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import inspect
 import json
@@ -9,14 +10,14 @@ import os
 import sys
 import tomllib
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from misaka.config import get_agent_dir
 from misaka.core.event_bus import EventBusController, createEventBus
-from misaka.core.exec import exec_command
+from misaka.core.exec import execCommand
 from misaka.core.extensions.types import (
     EntryRenderer,
     ExecOptions,
@@ -26,21 +27,39 @@ from misaka.core.extensions.types import (
     ExtensionFlag,
     ExtensionRuntime,
     ExtensionShortcut,
+    ExtensionVirtualModel,
     LoadExtensionsResult,
     MarkdownTransformer,
     PendingNativeProviderRegistration,
     PendingProviderRegistration,
+    PendingVirtualModelRegistration,
     ProviderConfig,
     RegisteredCommand,
     RegisteredTool,
     ToolDefinition,
     ToolInfo,
+    ToolRendererResolver,
     _LoadedExtension,
 )
-from misaka.core.pi_manifest import read_pi_manifest
-from misaka.core.source_info import create_synthetic_source_info
+from misaka.core.mcp_servers import (
+    McpServerConfig,
+    McpServerRegistry,
+    RegisteredMcpServer,
+    mcpNamespace,
+    validateMcpServerConfig,
+)
+from misaka.core.pi_manifest import readPiManifest
+from misaka.core.settings_manager import Settings
+from misaka.core.source_info import (
+    createSyntheticSourceInfo,
+    getSyntheticPathSource,
+    isSyntheticPath,
+)
 from misaka.core.timings import time
-from misaka.utils.paths import resolve_path
+from misaka.core.virtual_models import VirtualModelDefinition
+from misaka.utils.node_fs import readdirEntries
+from misaka.utils.paths import resolvePath
+from misaka.utils.values import read_field
 
 _ENTRY_DATA_UNSET = object()
 
@@ -60,14 +79,14 @@ class _FactoryLoad:
     pendingRuntimeChanges: list[Callable[[], None]] = field(default_factory=list)
     loadingUnsubscribers: list[Callable[[], None]] = field(default_factory=list)
 
-    def assert_active(self) -> None:
+    def assertActive(self) -> None:
         if self.state == "failed":
             raise RuntimeError(
                 f'Extension "{self.extension.path}" failed to load and its API is no longer active.'
             )
         self.runtime.assertActive()
 
-    def apply_runtime_change(self, change: Callable[[], None]) -> None:
+    def applyRuntimeChange(self, change: Callable[[], None]) -> None:
         if self.state == "loading":
             self.pendingRuntimeChanges.append(change)
         else:
@@ -82,7 +101,7 @@ class _FactoryLoad:
         for apply in self.pendingRuntimeChanges:
             apply()
         self.state = "active"
-        self._clear_pending()
+        self.clearPending()
 
     def discard(self) -> None:
         if self.state != "loading":
@@ -90,9 +109,9 @@ class _FactoryLoad:
         self.state = "failed"
         for unsubscribe in self.loadingUnsubscribers:
             unsubscribe()
-        self._clear_pending()
+        self.clearPending()
 
-    def _clear_pending(self) -> None:
+    def clearPending(self) -> None:
         self.pendingFlagValues.clear()
         self.pendingRuntimeChanges.clear()
         self.loadingUnsubscribers.clear()
@@ -106,11 +125,11 @@ class _TrackedEventBus:
     bus: Any
 
     def emit(self, channel: str, data: Any) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         self.bus.emit(channel, data)
 
     def on(self, channel: str, handler: Any) -> Callable[[], None]:
-        self.load.assert_active()
+        self.load.assertActive()
         unsubscribe = self.load.runtime.trackEventBusSubscription(
             self.bus.on(channel, handler)
         )
@@ -130,7 +149,7 @@ class _ExtensionAPI:
     def on(self, event: str, handler: Any) -> Callable[[], None]:
         """Register a handler; the returned function drops it again. Handlers added or removed
         during a dispatch apply to later dispatches, not the current one (pi #8967)."""
-        self.load.assert_active()
+        self.load.assertActive()
 
         def registered_handler(*args: Any) -> Any:
             return handler(*args)
@@ -151,15 +170,20 @@ class _ExtensionAPI:
         return unsubscribe
 
     def registerTool(self, definition: ToolDefinition[Any, Any]) -> None:
-        self.load.assert_active()
-        parameters = getattr(definition, "parameters", None)
-        if parameters is None or isinstance(parameters, list):
-            # A tool without a parameter schema would break the provider request; refuse it
-            # at registration instead (pi #9300).
+        self.load.assertActive()
+        parameters = read_field(definition, "parameters")
+        # MISAKA fork: an object schema is a JSON-schema mapping or a pydantic model class (pi: any non-array object).
+        if not (
+            isinstance(parameters, Mapping)
+            or (isinstance(parameters, type) and hasattr(parameters, "model_json_schema"))
+        ):
             raise ValueError(
-                f'Tool "{definition.name}" registered by extension "{self.extension.path}" '
+                f'Tool "{read_field(definition, "name")}" registered by extension "{self.extension.path}" '
                 "must define an object parameter schema."
             )
+        # MISAKA fork: a definition may also be a mapping, as pi's are plain objects.
+        if isinstance(definition, Mapping):
+            definition = ToolDefinition(**definition)
         self.extension.tools[definition.name] = RegisteredTool(
             definition=definition,
             sourceInfo=self.extension.sourceInfo,
@@ -169,30 +193,37 @@ class _ExtensionAPI:
     def registerWebSearchProvider(self, provider: Any) -> None:
         from misaka.core.web.registry import validate_provider
 
-        self.load.assert_active()
+        self.load.assertActive()
         name = validate_provider(provider)
         self.extension.webProviders[name] = provider
         self.runtime.refreshTools()
 
     def unregisterWebSearchProvider(self, name: str) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         self.extension.webProviders.pop(name.strip(), None)
         self.runtime.refreshTools()
 
     def registerBrowserProvider(self, provider: Any) -> None:
         from misaka.core.web.browser.providers import validate_provider
 
-        self.load.assert_active()
+        self.load.assertActive()
         self.extension.browserProviders[validate_provider(provider)] = provider
         self.runtime.refreshTools()
 
     def unregisterBrowserProvider(self, name: str) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         self.extension.browserProviders.pop(name.strip(), None)
         self.runtime.refreshTools()
 
     def registerCommand(self, name: str, options: dict[str, Any]) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
+        if not isinstance(name, str) or len(name) == 0:
+            raise ValueError(
+                f'Command registered by extension "{self.extension.path}" must have a non-empty string name. '
+                'Use pi.registerCommand("name", { description, handler }).'
+            )
+        if not callable((options or {}).get("handler")):
+            raise ValueError(f'Command "/{name}" registered by extension "{self.extension.path}" must define handler().')  # noqa: TRY004 - upstream raises a plain Error
         self.extension.commands[name] = RegisteredCommand(
             name=name,
             sourceInfo=self.extension.sourceInfo,
@@ -202,7 +233,7 @@ class _ExtensionAPI:
         )
 
     def registerShortcut(self, shortcut: str, options: dict[str, Any]) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         self.extension.shortcuts[shortcut] = ExtensionShortcut(
             shortcut=shortcut,
             extensionPath=self.extension.path,
@@ -211,10 +242,10 @@ class _ExtensionAPI:
         )
 
     def registerFlag(self, name: str, options: dict[str, Any]) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         if "default" in options:
             default = options["default"]
-            expected_type = {"boolean": bool, "string": str}.get(options["type"])
+            expected_type = {"boolean": bool, "string": str}.get(options.get("type"))
             if expected_type is None or not isinstance(default, expected_type):
                 actual_type = (
                     "boolean"
@@ -224,12 +255,12 @@ class _ExtensionAPI:
                     else type(default).__name__
                 )
                 raise TypeError(
-                    f'Invalid default for flag "{name}": expected {options["type"]}, got {actual_type}'
+                    f'Invalid default for flag "{name}": expected {options.get("type")}, got {actual_type}'
                 )
         self.extension.flags[name] = ExtensionFlag(
             name=name,
             extensionPath=self.extension.path,
-            type=options["type"],
+            type=options.get("type"),
             description=options.get("description"),
             default=options.get("default"),
         )
@@ -240,19 +271,25 @@ class _ExtensionAPI:
                 self.runtime.flagValues[name] = options["default"]
 
     def registerMessageRenderer(self, customType: str, renderer: Any) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         self.extension.messageRenderers[customType] = renderer
 
     def registerMarkdownTransformer(self, transformer: MarkdownTransformer) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         self.extension.markdownTransformer = transformer
 
     def registerEntryRenderer(self, customType: str, renderer: EntryRenderer[Any]) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         self.extension.entryRenderers[customType] = renderer
 
+    def registerToolRenderer(self, resolver: ToolRendererResolver) -> None:
+        self.load.assertActive()
+        if self.extension.toolRenderers is None:
+            self.extension.toolRenderers = []
+        self.extension.toolRenderers.append(resolver)
+
     def getFlag(self, name: str) -> bool | str | None:
-        self.load.assert_active()
+        self.load.assertActive()
         if name not in self.extension.flags:
             return None
         if name in self.runtime.flagValues:
@@ -260,7 +297,7 @@ class _ExtensionAPI:
         return self.load.pendingFlagValues.get(name)
 
     def sendMessage(self, message: Any, options: dict[str, Any] | None = None) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         self.runtime.sendMessage(message, options)
 
     def sendUserMessage(
@@ -268,90 +305,174 @@ class _ExtensionAPI:
         content: str | list[Any],
         options: dict[str, Any] | None = None,
     ) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         self.runtime.sendUserMessage(content, options)
 
     def appendEntry(self, customType: str, data: Any = _ENTRY_DATA_UNSET) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         if data is _ENTRY_DATA_UNSET:
             self.runtime.appendEntry(customType)
         else:
             self.runtime.appendEntry(customType, data)
 
     def setSessionName(self, name: str) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         self.runtime.setSessionName(name)
 
     def getSessionName(self) -> str | None:
-        self.load.assert_active()
+        self.load.assertActive()
         return self.runtime.getSessionName()
 
     def setLabel(self, entryId: str, label: str | None) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         self.runtime.setLabel(entryId, label)
 
     async def exec(self, command: str, args: list[str], options: ExecOptions | None = None) -> ExecResult:
-        self.load.assert_active()
+        self.load.assertActive()
         resolved_options: ExecOptions = dict(options or {})
         cwd_override = resolved_options.get("cwd")
         resolved_cwd = self.cwd if cwd_override is None else str(cwd_override)
-        return await exec_command(command, args, resolved_cwd, resolved_options)
+        return await execCommand(command, args, resolved_cwd, resolved_options)
 
     def getActiveTools(self) -> list[str]:
-        self.load.assert_active()
+        self.load.assertActive()
         return self.runtime.getActiveTools()
 
     def getAllTools(self) -> list[ToolInfo]:
-        self.load.assert_active()
+        self.load.assertActive()
         return self.runtime.getAllTools()
 
+    def getSettings(self) -> Settings:
+        self.load.assertActive()
+        return self.runtime.getSettings()
+
     def setActiveTools(self, toolNames: list[str]) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         self.runtime.setActiveTools(toolNames)
 
     def getCommands(self) -> list[dict[str, Any]]:
-        self.load.assert_active()
+        self.load.assertActive()
         return self.runtime.getCommands()
 
     async def setModel(self, model: Any) -> bool:
-        self.load.assert_active()
+        self.load.assertActive()
         return await self.runtime.setModel(model)
 
     def getThinkingLevel(self) -> str:
-        self.load.assert_active()
+        self.load.assertActive()
         return self.runtime.getThinkingLevel()
 
     def setThinkingLevel(self, level: str) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         self.runtime.setThinkingLevel(level)
 
     def registerProvider(
         self, providerOrName: Any, config: ProviderConfig | None = None
     ) -> None:
-        self.load.assert_active()
+        self.load.assertActive()
         _validate_provider_registration(providerOrName, config)
         if isinstance(providerOrName, str):
             assert config is not None
-            self.load.apply_runtime_change(
+            self.load.applyRuntimeChange(
                 lambda: self.runtime.registerProvider(
                     providerOrName, config, self.extension.path
                 )
             )
             return
-        self.load.apply_runtime_change(
+        self.load.applyRuntimeChange(
             lambda: self.runtime.registerNativeProvider(
                 providerOrName, self.extension.path
             )
         )
 
     def unregisterProvider(self, name: str) -> None:
-        self.load.assert_active()
-        self.load.apply_runtime_change(
+        self.load.assertActive()
+        self.load.applyRuntimeChange(
             lambda: self.runtime.unregisterProvider(name, self.extension.path)
         )
 
+    def registerMcpServer(self, name: str, config: McpServerConfig) -> None:
+        self.load.assertActive()
+        validated = validateMcpServerConfig(name, config)
+        if isinstance(validated, str):
+            raise ValueError(f'Invalid MCP server registered by extension "{self.extension.path}": {validated}')  # noqa: TRY004 - an invalid config, reported as upstream's Error
+        registered = self.runtime.mcpServers.get(name)
+        owner = registered.extensionPath if registered is not None else None
+        if owner is not None and owner != self.extension.path:
+            raise ValueError(f'MCP server "{name}" is already registered by extension "{owner}"')
+        # Names that differ only in `-` and `_` would share a namespace.
+        clash = next(
+            (
+                server
+                for server in self.runtime.mcpServers.list()
+                if server.name != name and mcpNamespace(server.name) == mcpNamespace(name)
+            ),
+            None,
+        )
+        if clash is not None:
+            raise ValueError(f'MCP server "{name}" conflicts with registered server "{clash.name}"')
+        server = RegisteredMcpServer(name=name, config=copy.deepcopy(validated), extensionPath=self.extension.path)
+        self.load.applyRuntimeChange(lambda: self.runtime.mcpServers.register(server))
 
-def _not_initialized(*_args: Any, **_kwargs: Any) -> Any:
+    def unregisterMcpServer(self, name: str) -> None:
+        self.load.assertActive()
+        self.load.applyRuntimeChange(lambda: self.runtime.mcpServers.unregister(name, self.extension.path))
+
+    def getMcpServers(self) -> list[RegisteredMcpServer]:
+        self.load.assertActive()
+        return self.runtime.mcpServers.list()
+
+    def registerVirtualModel(self, model: ExtensionVirtualModel) -> None:
+        self.load.assertActive()
+        runtime = self.runtime
+        route = read_field(model, "route")
+        # Routing runs after the runner binds, so the context is created per request. The state
+        # comes from the session branch that this router wrote.
+        definition = VirtualModelDefinition(
+            provider=read_field(model, "provider"),
+            id=read_field(model, "id"),
+            name=read_field(model, "name"),
+            route=lambda request: route(request, runtime.createContext()),
+            thinkingLevels=read_field(model, "thinkingLevels"),
+            contextWindow=read_field(model, "contextWindow"),
+            maxTokens=read_field(model, "maxTokens"),
+            input=read_field(model, "input"),
+        )
+        self.load.applyRuntimeChange(lambda: runtime.registerVirtualModel(definition, self.extension.path))
+
+    def unregisterVirtualModel(self, provider: str, id: str) -> None:
+        self.load.assertActive()
+        self.load.applyRuntimeChange(lambda: self.runtime.unregisterVirtualModel(provider, id))
+
+
+extensionCacheCwd: str | None = None
+extensionCacheGeneration = 0
+extensionCache: dict[str, ExtensionFactory] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class ExtensionCacheToken:
+    cwd: str
+    generation: int
+
+
+def clearExtensionCache() -> None:
+    global extensionCacheCwd, extensionCacheGeneration
+    extensionCache.clear()
+    extensionCacheCwd = None
+    extensionCacheGeneration += 1
+
+
+def useExtensionCacheCwd(cwd: str) -> ExtensionCacheToken:
+    global extensionCacheCwd
+    resolvedCwd = resolvePath(cwd)
+    if extensionCacheCwd is not None and extensionCacheCwd != resolvedCwd:
+        clearExtensionCache()
+    extensionCacheCwd = resolvedCwd
+    return ExtensionCacheToken(cwd=resolvedCwd, generation=extensionCacheGeneration)
+
+
+def notInitialized(*_args: Any, **_kwargs: Any) -> Any:
     raise RuntimeError("Extension runtime not initialized. Action methods cannot be called during extension loading.")
 
 
@@ -369,10 +490,10 @@ def _validate_provider_registration(
         raise TypeError("native provider registration takes one provider object")
 
 
-def create_extension_runtime() -> ExtensionRuntime:
+def createExtensionRuntime() -> ExtensionRuntime:
     state = _RuntimeState()
 
-    def assert_active() -> None:
+    def assertActive() -> None:
         if state.staleMessage:
             raise RuntimeError(state.staleMessage)
 
@@ -383,7 +504,7 @@ def create_extension_runtime() -> ExtensionRuntime:
             message
             or (
                 "This extension ctx is stale after session replacement or reload. "
-                "Do not use a captured harn or command ctx after ctx.newSession(), ctx.fork(), "
+                "Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), "
                 "ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, "
                 "move post-replacement work into withSession and use the ctx passed to withSession. "
                 "For reload, do not use the old ctx after await ctx.reload()."
@@ -443,30 +564,51 @@ def create_extension_runtime() -> ExtensionRuntime:
             if getattr(entry.provider, "id", None) != name
         ]
 
+    def queue_virtual_model(definition: VirtualModelDefinition, extension_path: str | None = None) -> None:
+        source = "<unknown>" if extension_path is None else extension_path
+        runtime.pendingVirtualModelRegistrations.append(
+            PendingVirtualModelRegistration(definition=definition, extensionPath=source)
+        )
+
+    def unqueue_virtual_model(provider: str, id: str) -> None:
+        runtime.pendingVirtualModelRegistrations[:] = [
+            entry
+            for entry in runtime.pendingVirtualModelRegistrations
+            if entry.definition.provider != provider or entry.definition.id != id
+        ]
+
     runtime = ExtensionRuntime(
-        sendMessage=_not_initialized,
-        sendUserMessage=_not_initialized,
-        appendEntry=_not_initialized,
-        setSessionName=_not_initialized,
-        getSessionName=_not_initialized,
-        setLabel=_not_initialized,
-        getActiveTools=_not_initialized,
-        getAllTools=_not_initialized,
-        setActiveTools=_not_initialized,
+        sendMessage=notInitialized,
+        sendUserMessage=notInitialized,
+        appendEntry=notInitialized,
+        setSessionName=notInitialized,
+        getSessionName=notInitialized,
+        setLabel=notInitialized,
+        getActiveTools=notInitialized,
+        getAllTools=notInitialized,
+        getSettings=notInitialized,
+        setActiveTools=notInitialized,
         refreshTools=lambda: None,
-        getCommands=_not_initialized,
+        getCommands=notInitialized,
         setModel=_set_model_not_initialized,
-        getThinkingLevel=_not_initialized,
-        setThinkingLevel=_not_initialized,
+        getThinkingLevel=notInitialized,
+        setThinkingLevel=notInitialized,
         flagValues={},
         pendingProviderRegistrations=[],
         pendingNativeProviderRegistrations=[],
-        assertActive=assert_active,
+        pendingVirtualModelRegistrations=[],
+        createContext=notInitialized,
+        assertActive=assertActive,
         invalidate=invalidate,
         trackEventBusSubscription=track_event_bus_subscription,
         registerProvider=queue_provider,
         registerNativeProvider=queue_native_provider,
         unregisterProvider=unqueue_provider,
+        mcpServers=McpServerRegistry(),
+        # Pre-bind: queue registrations so bindCore() can flush them once the model registry is
+        # available. bindCore() replaces both with direct calls.
+        registerVirtualModel=queue_virtual_model,
+        unregisterVirtualModel=unqueue_virtual_model,
     )
     return runtime
 
@@ -475,58 +617,78 @@ def _default_event_bus() -> EventBusController:
     return createEventBus()
 
 
-async def load_extension_from_factory(
+async def loadExtensionFromFactory(
     factory: ExtensionFactory,
     cwd: str,
     event_bus: Any,
     runtime: ExtensionRuntime,
     extension_path: str = "<inline>",
 ) -> Extension:
-    return await _initialize_extension(
+    return await initializeExtension(
         factory,
         extension_path,
         extension_path,
-        resolve_path(cwd),
+        resolvePath(cwd),
         event_bus,
         runtime,
     )
 
 
-async def load_extensions(
+async def loadExtensionsInternal(
     paths: list[str],
     cwd: str,
     event_bus: Any | None = None,
     runtime: ExtensionRuntime | None = None,
+    useCache: bool = False,
 ) -> LoadExtensionsResult:
     extensions: list[Extension] = []
     errors: list[dict[str, str]] = []
-    resolved_cwd = resolve_path(cwd)
+    cacheToken = useExtensionCacheCwd(cwd) if useCache else None
+    resolved_cwd = cacheToken.cwd if cacheToken is not None else resolvePath(cwd)
     resolved_event_bus = event_bus if event_bus is not None else _default_event_bus()
-    runtime = runtime or create_extension_runtime()
+    runtime = runtime or createExtensionRuntime()
 
     for ext_path in paths:
-        extension, error = await _load_extension(ext_path, resolved_cwd, resolved_event_bus, runtime)
+        extension, error = await loadExtension(ext_path, resolved_cwd, resolved_event_bus, runtime, cacheToken)
         if error is not None:
             errors.append({"path": ext_path, "error": error})
             continue
         if extension is not None:
             extensions.append(extension)
 
-    return LoadExtensionsResult(extensions=extensions, errors=errors, runtime=runtime)
+    return LoadExtensionsResult(extensions=extensions, errors=errors, warnings=[], runtime=runtime)
 
 
-def discover_extensions_in_dir(dir_path: str) -> list[str]:
+async def loadExtensions(
+    paths: list[str],
+    cwd: str,
+    event_bus: Any | None = None,
+    runtime: ExtensionRuntime | None = None,
+) -> LoadExtensionsResult:
+    return await loadExtensionsInternal(paths, cwd, event_bus, runtime)
+
+
+async def loadExtensionsCached(
+    paths: list[str],
+    cwd: str,
+    event_bus: Any | None = None,
+    runtime: ExtensionRuntime | None = None,
+) -> LoadExtensionsResult:
+    return await loadExtensionsInternal(paths, cwd, event_bus, runtime, True)
+
+
+def discoverExtensionsInDir(dir_path: str) -> list[str]:
     if not os.path.isdir(dir_path):
         return []
     discovered: list[str] = []
     try:
-        for entry in os.scandir(dir_path):
+        for entry in readdirEntries(dir_path):
             entry_path = entry.path
-            if (entry.is_file() or entry.is_symlink()) and is_extension_file(entry.name):
+            if (entry.is_file() or entry.is_symlink()) and isExtensionFile(entry.name):
                 discovered.append(entry_path)
                 continue
             if entry.is_dir() or entry.is_symlink():
-                entries = resolve_extension_entries(entry_path)
+                entries = resolveExtensionEntries(entry_path)
                 if entries:
                     discovered.extend(entries)
     except OSError:
@@ -534,14 +696,14 @@ def discover_extensions_in_dir(dir_path: str) -> list[str]:
     return discovered
 
 
-async def discover_and_load_extensions(
+async def discoverAndLoadExtensions(
     configured_paths: list[str],
     cwd: str,
     agent_dir: str | None = None,
     event_bus: Any | None = None,
 ) -> LoadExtensionsResult:
-    resolved_cwd = resolve_path(cwd)
-    resolved_agent_dir = resolve_path(get_agent_dir() if agent_dir is None else agent_dir)
+    resolved_cwd = resolvePath(cwd)
+    resolved_agent_dir = resolvePath(get_agent_dir() if agent_dir is None else agent_dir)
     all_paths: list[str] = []
     seen: set[str] = set()
 
@@ -553,27 +715,27 @@ async def discover_and_load_extensions(
             seen.add(resolved)
             all_paths.append(candidate)
 
-    add_paths(discover_extensions_in_dir(os.path.join(resolved_agent_dir, "extensions")))
+    add_paths(discoverExtensionsInDir(os.path.join(resolved_agent_dir, "extensions")))
 
     for raw_path in configured_paths:
-        resolved = resolve_path(raw_path, resolved_cwd, normalize_unicode_spaces=True)
+        resolved = resolvePath(raw_path, resolved_cwd, {"normalizeUnicodeSpaces": True})
         if os.path.isdir(resolved):
-            entries = resolve_extension_entries(resolved)
+            entries = resolveExtensionEntries(resolved)
             if entries:
                 add_paths(entries)
             else:
-                add_paths(discover_extensions_in_dir(resolved))
+                add_paths(discoverExtensionsInDir(resolved))
             continue
         add_paths([resolved])
 
-    return await load_extensions(all_paths, resolved_cwd, event_bus)
+    return await loadExtensions(all_paths, resolved_cwd, event_bus)
 
 
-def resolve_extension_entries(dir_path: str) -> list[str] | None:
+def resolveExtensionEntries(dir_path: str) -> list[str] | None:
     manifest = _read_harn_manifest(dir_path)
     package_json_path = os.path.join(dir_path, "package.json")
     if manifest is None and os.path.exists(package_json_path):
-        manifest = read_pi_manifest(package_json_path)
+        manifest = readPiManifest(package_json_path)
     if manifest and manifest.get("extensions"):
         entries = [
             os.path.abspath(os.path.join(dir_path, candidate))
@@ -588,7 +750,7 @@ def resolve_extension_entries(dir_path: str) -> list[str] | None:
     return None
 
 
-def is_extension_file(name: str) -> bool:
+def isExtensionFile(name: str) -> bool:
     return name.endswith(".py")
 
 
@@ -636,19 +798,20 @@ def _validate_harn_manifest(value: Any) -> dict[str, list[str]] | None:
     return {}
 
 
-async def _load_extension(
+async def loadExtension(
     path: str,
     cwd: str,
     event_bus: Any,
     runtime: ExtensionRuntime,
+    cacheToken: ExtensionCacheToken | None = None,
 ) -> tuple[Extension | None, str | None]:
-    resolved_path = resolve_path(path, cwd, normalize_unicode_spaces=True)
+    resolved_path = resolvePath(path, cwd, {"normalizeUnicodeSpaces": True})
     try:
-        factory = _load_extension_module(resolved_path)
+        factory = loadExtensionModule(resolved_path, cacheToken)
         time(f"{path} module import", "extensions")
         if factory is None:
             return None, f"Extension does not export a valid factory function: {path}"
-        extension = await _initialize_extension(
+        extension = await initializeExtension(
             factory,
             path,
             resolved_path,
@@ -661,7 +824,20 @@ async def _load_extension(
         return None, f"Failed to load extension: {error}"
 
 
-def _load_extension_module(resolved_path: str) -> ExtensionFactory | None:
+def isCurrentCacheToken(cacheToken: ExtensionCacheToken | None) -> bool:
+    return (
+        cacheToken is not None
+        and extensionCacheCwd == cacheToken.cwd
+        and extensionCacheGeneration == cacheToken.generation
+    )
+
+
+def loadExtensionModule(resolved_path: str, cacheToken: ExtensionCacheToken | None = None) -> ExtensionFactory | None:
+    if isCurrentCacheToken(cacheToken):
+        cachedFactory = extensionCache.get(resolved_path)
+        if cachedFactory is not None:
+            return cachedFactory
+
     if not os.path.exists(resolved_path):
         raise FileNotFoundError(f"Extension path does not exist: {resolved_path}")
     spec = importlib.util.spec_from_file_location(f"harn_extension_{uuid.uuid4().hex}", resolved_path)
@@ -679,7 +855,11 @@ def _load_extension_module(resolved_path: str) -> ExtensionFactory | None:
             sys.modules[spec.name] = previous_module
         raise
     candidate = getattr(module, "default", None)
-    return candidate if callable(candidate) else None
+    if not callable(candidate):
+        return None
+    if isCurrentCacheToken(cacheToken):
+        extensionCache[resolved_path] = candidate
+    return candidate
 
 
 async def _invoke_factory(factory: ExtensionFactory, api: _ExtensionAPI) -> None:
@@ -688,7 +868,7 @@ async def _invoke_factory(factory: ExtensionFactory, api: _ExtensionAPI) -> None
         await result
 
 
-async def _initialize_extension(
+async def initializeExtension(
     factory: ExtensionFactory,
     extension_path: str,
     resolved_path: str,
@@ -696,7 +876,7 @@ async def _initialize_extension(
     event_bus: Any,
     runtime: ExtensionRuntime,
 ) -> Extension:
-    extension = _create_extension(extension_path, resolved_path)
+    extension = createExtension(extension_path, resolved_path)
     load = _FactoryLoad(extension=extension, runtime=runtime)
     api = _ExtensionAPI(
         extension=extension,
@@ -715,21 +895,20 @@ async def _initialize_extension(
     return extension
 
 
-def _create_extension(path: str, resolved_path: str) -> Extension:
-    source = path[1:-1].split(":")[0] if path.startswith("<") and path.endswith(">") else "local"
-    base_dir = None if path.startswith("<") else os.path.dirname(resolved_path)
-    source_info = create_synthetic_source_info(path, {"source": source or "temporary", "baseDir": base_dir})
+def createExtension(path: str, resolved_path: str) -> Extension:
+    synthetic_source = getSyntheticPathSource(path)
+    source = synthetic_source if synthetic_source is not None else "local"
+    base_dir = None if isSyntheticPath(path) else os.path.dirname(resolved_path)
+    source_info = createSyntheticSourceInfo(path, {"source": source, "baseDir": base_dir})
     return _LoadedExtension(path=path, resolvedPath=resolved_path, sourceInfo=source_info)
 
 
-createExtensionRuntime = create_extension_runtime
-discoverAndLoadExtensions = discover_and_load_extensions
-loadExtensionFromFactory = load_extension_from_factory
-loadExtensions = load_extensions
 
 __all__ = [
+    "clearExtensionCache",
     "createExtensionRuntime",
     "discoverAndLoadExtensions",
     "loadExtensionFromFactory",
     "loadExtensions",
+    "loadExtensionsCached",
 ]

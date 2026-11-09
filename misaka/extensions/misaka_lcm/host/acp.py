@@ -40,7 +40,7 @@ class OwnedACPClient(CopilotACPClient):
 
 
 async def complete(*, messages, model, timeout, cwd, signal=None, **kwargs):
-    from misaka.ai.utils.abort import wait_for_abort
+    from misaka.utils._abort_signal import wait_for_abort
     if signal_aborted(signal):
         raise asyncio.CancelledError('ACP request cancelled')
     client = OwnedACPClient(acp_cwd=cwd)

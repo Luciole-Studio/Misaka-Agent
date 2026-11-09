@@ -2,9 +2,11 @@
 
 import psutil
 
+from misaka.core.platform import owners
+
 # A card is one model CLI process: a few hundred MiB resident while it streams. The host
-# cap follows the memory that is actually free, but never below this floor -- a research
-# node fans out eight cards at once, and a cap of two turned that into four serial rounds.
+# cap follows the memory that is actually free, but never below this floor -- a workflow's
+# step may fan out eight cards at once, and a cap of two turned that into four serial rounds.
 HOST_FLOOR = 4
 HOST_CEILING = 12
 PER_CARD_BYTES = 256 * 1024**2
@@ -33,13 +35,18 @@ def occupied(con):
     """Cards consuming a host slot, including accepted headless workers still settling.
 
     The current attempt already records its process identity. Inspect only that
-    attempt, not historical runs; permanent interactive card panes are not tails.
+    attempt, not historical runs; permanent interactive card panes are not tails. A
+    running consultation of a finished card holds a slot for its turn.
     """
     from misaka.core.platform import processes
     from misaka.core.subagent.child import PROCESS_GROUP_IDENTITY
 
     taken = dict(con.execute(
         "SELECT id,assignee FROM tasks WHERE status='running' AND claim_lock IS NOT NULL"))
+    # A finished card answering a message runs a model turn too (tasks.start_consultation); it
+    # is running only for that turn, so it never holds a slot past it.
+    taken.update(con.execute(
+        "SELECT task_id,assignee FROM task_runs WHERE phase='consult' AND status='running'"))
     rows = con.execute(
         "SELECT t.id,t.assignee,r.pid,r.process_identity FROM tasks t "
         "JOIN task_runs r ON r.id=t.current_run_id AND r.generation=t.generation "
@@ -59,11 +66,9 @@ def occupied(con):
             argv = psutil.Process(row["pid"]).cmdline()
         except psutil.Error:
             continue
-        # Both the research worker wrapper and its durable Sister child may
-        # own the attempt. A card-shell TUI deliberately lives beyond its turn.
+        # A workflow's card process (its owner knows its command line) and a durable Sister
+        # child may own the attempt. A card-shell TUI deliberately lives beyond its turn.
         module = next((argv[i + 1] for i in range(len(argv) - 1) if argv[i] == "-m"), None)
-        if module == "misaka.cli.subagent_child" or (
-            module == "misaka.cli.research_node" and "--run-card" in argv
-        ):
+        if module == "misaka.cli.subagent_child" or owners.owns_card_process(argv):
             taken[row["id"]] = row["assignee"]
     return taken

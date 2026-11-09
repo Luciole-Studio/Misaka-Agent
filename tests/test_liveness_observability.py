@@ -56,8 +56,19 @@ def test_self_drift_is_reported_once(caplog, monkeypatch):
     processes._REPORTED.clear()
 
 
+_boards: list = []
+
+
+@pytest.fixture(autouse=True)
+def _closeBoards():
+    yield
+    while _boards:
+        _boards.pop().close()
+
+
 def _branch(tmp_path):
     con = tasks.connect(str(tmp_path / "board.db"))
+    _boards.append(con)
     runs.init(con)
     run = runs.create(con, workspace=str(tmp_path), question="why does it drift?",
                       limits={"max_depth": 1, "parallel": 1}, token_start=0, origin_session=None)
@@ -67,33 +78,33 @@ def _branch(tmp_path):
 
 def test_a_refused_claim_explains_the_key_mismatch_and_leaves_it_on_the_row(tmp_path):
     con, node_id = _branch(tmp_path)
-    key = runs.prepare_runner(con, "research_branches", node_id)
-    assert not runs.claim_runner(con, "research_branches", node_id, "0" * 32)
-    text = runs.note_claim_failure(con, "research_branches", node_id, "0" * 32)
+    key = runs.prepare_runner(con, "research_execution", node_id)
+    assert not runs.claim_runner(con, "research_execution", node_id, "0" * 32)
+    text = runs.note_claim_failure(con, "research_execution", node_id, "0" * 32)
     assert text.startswith("claim refused: runner key mismatch")
     assert key[:8] in text and "00000000" in text
     assert runs.node(con, node_id)["last_error"] == text
     # A later, different explanation does not overwrite the first cause.
-    runs.note_claim_failure(con, "research_branches", node_id, key)
+    runs.note_claim_failure(con, "research_execution", node_id, key)
     assert runs.node(con, node_id)["last_error"] == text
 
 
 def test_a_refused_claim_explains_the_identity_mismatch(tmp_path):
     con, node_id = _branch(tmp_path)
-    key = runs.prepare_runner(con, "research_branches", node_id)
-    con.execute("UPDATE research_branches SET runner_pid=?, runner_identity=? WHERE id=?",
+    key = runs.prepare_runner(con, "research_execution", node_id)
+    con.execute("UPDATE research_execution SET runner_pid=?, runner_identity=? WHERE id=?",
                 (os.getpid(), "host:0:0.000000", node_id))
-    assert not runs.claim_runner(con, "research_branches", node_id, key)
-    text = runs.note_claim_failure(con, "research_branches", node_id, key)
+    assert not runs.claim_runner(con, "research_execution", node_id, key)
+    text = runs.note_claim_failure(con, "research_execution", node_id, key)
     assert "runner identity mismatch" in text
     assert "host:0:0.000000" in text and str(os.getpid()) in text
 
 
 def test_a_successful_claim_has_nothing_to_explain_but_still_answers(tmp_path):
     con, node_id = _branch(tmp_path)
-    key = runs.prepare_runner(con, "research_branches", node_id)
-    assert runs.claim_runner(con, "research_branches", node_id, key)
-    assert "no visible reason" in runs.note_claim_failure(con, "research_branches", node_id, key)
+    key = runs.prepare_runner(con, "research_execution", node_id)
+    assert runs.claim_runner(con, "research_execution", node_id, key)
+    assert "no visible reason" in runs.note_claim_failure(con, "research_execution", node_id, key)
 
 
 def test_runner_failure_carries_the_pane_tail():

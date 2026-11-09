@@ -6,8 +6,9 @@ from types import SimpleNamespace
 import pytest
 from webconf import read_web
 
-from misaka.cli import app, setup, web
+from misaka.cli import app, web
 from misaka.cli import setup_ui as ui
+from misaka.cli import setup_wizard as setup
 from misaka.cli import web_setup as menu
 from misaka.config import home
 from misaka.core.web import config, registry

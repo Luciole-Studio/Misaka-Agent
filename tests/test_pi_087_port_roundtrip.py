@@ -36,12 +36,13 @@ def _reply_stream(replies: list[str], seen: list):
 
 @asynccontextmanager
 async def _opened(home, session_manager):
-    from misaka.ai.models import get_models
-    from misaka.cli.args import parse_args
+    from misaka.ai.compat import getModels
+    from misaka.cli.args import parseArgs
     from misaka.core.auth_storage import AuthStorage
-    from misaka.core.extensions.runner import emit_session_shutdown_event
+    from misaka.core.extensions.runner import emitSessionShutdownEvent
+    from misaka.core.model_runtime import ModelRuntime
     from misaka.core.resource_loader import DefaultResourceLoader
-    from misaka.core.sdk import create_agent_session
+    from misaka.core.sdk import createAgentSession
     from misaka.core.settings_manager import SettingsManager
     from misaka.core.wiring import SessionSpec, assemble, role_session_setup
 
@@ -52,21 +53,21 @@ async def _opened(home, session_manager):
     agent_dir = home / "agent" / "last_order-foreground"
     agent_dir.mkdir(parents=True, exist_ok=True)
     spec = SessionSpec(profile_dir=str(profile), role=role, workspace=str(workspace), kind="foreground",
-                       sender=role, mcp_role=role, task_id=None, research_context=False)
+                       sender=role, mcp_role=role, task_id=None, workflow_context=False)
     assembly = assemble(spec)
-    role_flags, assembly, _env = role_session_setup(str(profile), str(workspace), research_context=False,
+    role_flags, assembly, _env = role_session_setup(str(profile), str(workspace), workflow_context=False,
                                                     receive_messages=True)
-    sections = parse_args(role_flags).appendSystemPrompt or []
+    sections = parseArgs(role_flags).appendSystemPrompt or []
     options = {"cwd": str(workspace), "agentDir": str(agent_dir)}
     loader = DefaultResourceLoader({**options, "extensionFactories": assembly.extension_factories,
                                     "appendSystemPrompt": sections})
     await loader.reload()
-    model = next(m for m in get_models("anthropic") if m.id == "claude-opus-5")
-    auth = AuthStorage.inMemory()
-    auth.setRuntimeApiKey(model.provider, "fixture")
-    result = await create_agent_session({**options, "resourceLoader": loader,
+    model = next(m for m in getModels("anthropic") if m.id == "claude-opus-5")
+    runtime = await ModelRuntime.create({"authStorage": AuthStorage.inMemory(), "modelsPath": None})
+    await runtime.setRuntimeApiKey(model.provider, "fixture")
+    result = await createAgentSession({**options, "resourceLoader": loader,
                                          "customTools": assembly.custom_tools, "parts": assembly.parts,
-                                         "model": model, "authStorage": auth,
+                                         "model": model, "modelRuntime": runtime,
                                          "settingsManager": SettingsManager.inMemory(
                                              {"compaction": {"enabled": False}, "retry": {"enabled": False}}),
                                          "sessionManager": session_manager})
@@ -77,7 +78,7 @@ async def _opened(home, session_manager):
         event = {"type": "session_shutdown", "reason": "test"}
         try:
             await session.moments.session_shutdown(event)
-            await emit_session_shutdown_event(session.extensionRunner, event)
+            await emitSessionShutdownEvent(session.extensionRunner, event)
         finally:
             session.dispose()
 
@@ -99,7 +100,7 @@ async def test_a_restarted_session_neither_redeclares_tools_nor_repatches_the_pr
     session_dir = prompt_home / "sessions"
     seen: list = []
     async with _opened(prompt_home, SessionManager.create(str(prompt_home / "workspace"), str(session_dir))) as first:
-        first.agent.streamFn = _reply_stream(["one"], seen)
+        first.agent.streamFunction = _reply_stream(["one"], seen)
         await first.prompt("first run")
         await first.waitForIdle()
         path = first.sessionManager.getSessionFile()
@@ -110,7 +111,7 @@ async def test_a_restarted_session_neither_redeclares_tools_nor_repatches_the_pr
         assert set(declared) == set(first.getActiveToolNames())
 
     async with _opened(prompt_home, SessionManager.open(path, str(session_dir))) as second:
-        second.agent.streamFn = _reply_stream(["two"], seen)
+        second.agent.streamFunction = _reply_stream(["two"], seen)
         await second.prompt("second run")
         await second.waitForIdle()
         heads = _system_entries(second.sessionManager)
@@ -128,7 +129,7 @@ async def test_a_pre_port_session_file_gains_one_head_on_its_next_run(prompt_hom
     """A session written before the port has no leading system message. Its next run must
     declare the prompt sections and the tools once, ahead of the new user message, and the
     replayed prompt must equal the session's effective prompt."""
-    from misaka.ai.utils.transcript import get_current_system_prompt, get_current_tools
+    from misaka.ai.utils.transcript import getCurrentSystemPrompt, getCurrentTools
     from misaka.core.session_manager import SessionManager
 
     session_dir = prompt_home / "sessions"
@@ -150,11 +151,11 @@ async def test_a_pre_port_session_file_gains_one_head_on_its_next_run(prompt_hom
         reply = _reply_stream(["new answer"], seen)
 
         def stream(model, context, options=None):
-            # The run's effective prompt: parts may force extra text for the run's duration.
+            # The run's effective prompt: the parts' sections are the run's own.
             effective.append(session.systemPrompt)
             return reply(model, context, options)
 
-        session.agent.streamFn = stream
+        session.agent.streamFunction = stream
         await session.prompt("new question")
         await session.waitForIdle()
         roles = [read_field(m, "role") for m in session.agent.state.messages]
@@ -162,11 +163,11 @@ async def test_a_pre_port_session_file_gains_one_head_on_its_next_run(prompt_hom
         heads = _system_entries(session.sessionManager)
         assert len(heads) == 1 and heads[0].get("sections") and heads[0].get("toolsAdded")
         sent = seen[0].messages
-        assert get_current_system_prompt(sent) == effective[0]
-        # The persisted head carries the structured sections; the forced run-time text is
-        # projected onto the request only.
-        assert get_current_system_prompt(session.sessionManager.buildSessionContext().messages) == session.systemPrompt
-        assert {tool.name for tool in get_current_tools(sent)} == set(session.getActiveToolNames())
+        assert getCurrentSystemPrompt(sent) == effective[0]
+        # The persisted head carries the structured sections the request had, the parts' included:
+        # nothing is forced, so the transcript replays the prompt that was sent.
+        assert getCurrentSystemPrompt(session.sessionManager.buildSessionContext().messages) == effective[0]
+        assert {tool.name for tool in getCurrentTools(sent)} == set(session.getActiveToolNames())
 
 
 # --- seams that hand a transcript to a second model ------------------------------------
@@ -184,24 +185,24 @@ def _model(api: str, provider: str = "fixture"):
 
 def _capturing_provider(api: str, seen: list):
     """An API provider that records the transcript it is handed and answers with one word."""
-    from misaka.ai.api_registry import ApiProvider, register_api_provider
+    from misaka.ai.compat import ApiProvider, registerApiProvider
 
     def stream_simple(model, context, options=None):
         seen.append(context)
         return _reply_stream(["ok"], [])(model, context, options)
 
-    register_api_provider(ApiProvider(api=api, stream=stream_simple, streamSimple=stream_simple), source_id="test")
+    registerApiProvider(ApiProvider(api=api, stream=stream_simple, streamSimple=stream_simple), sourceId="test")
 
 
 async def test_moa_aggregator_receives_the_normalized_transcript_with_one_head(monkeypatch):
     """The MoA provider is handed a `TranscriptContext`; the aggregator must be called with
     the same prompt and tool declarations, not a rebuilt `Context`."""
-    from misaka.ai.api_registry import unregister_api_providers
+    from misaka.ai.compat import unregisterApiProviders
     from misaka.ai.types import Context, Tool, UserMessage
     from misaka.ai.utils.transcript import (
-        get_current_system_prompt,
-        get_current_tools,
-        normalize_context,
+        getCurrentSystemPrompt,
+        getCurrentTools,
+        normalizeContext,
     )
     from misaka.core.moa import provider as moa
 
@@ -215,18 +216,18 @@ async def test_moa_aggregator_receives_the_normalized_transcript_with_one_head(m
     monkeypatch.setattr(moa, "_MODEL_RESOLVER", lambda _provider, _id: aggregator)
     monkeypatch.setattr(moa, "_AUTH_RESOLVER", None)
     tool = Tool(name="read", description="read a file", parameters={"type": "object", "properties": {}})
-    context = normalize_context(Context(
+    context = normalizeContext(Context(
         systemPrompt="mixture prompt", messages=[UserMessage(content="question", timestamp=1)], tools=[tool]))
     try:
         result = await moa.stream_simple_moa(_model("moa", "moa"), context).result()
     finally:
-        unregister_api_providers("test")
+        unregisterApiProviders("test")
     assert result.content[-1].text == "ok"
     assert len(seen) == 1
     sent = seen[0].messages
     assert [read_field(m, "role") for m in sent] == ["system", "user"]
-    assert get_current_system_prompt(sent) == "mixture prompt"
-    assert [t.name for t in get_current_tools(sent)] == ["read"]
+    assert getCurrentSystemPrompt(sent) == "mixture prompt"
+    assert [t.name for t in getCurrentTools(sent)] == ["read"]
 
 
 async def test_exact_fork_replaces_every_system_message_with_the_parent_head():
@@ -236,9 +237,9 @@ async def test_exact_fork_replaces_every_system_message_with_the_parent_head():
 
     from misaka.ai.types import Context, SystemMessage, Tool, UserMessage
     from misaka.ai.utils.transcript import (
-        get_current_system_prompt,
-        get_current_tools,
-        normalize_context,
+        getCurrentSystemPrompt,
+        getCurrentTools,
+        normalizeContext,
     )
     from misaka.core.subagent.fork import install
 
@@ -254,23 +255,23 @@ async def test_exact_fork_replaces_every_system_message_with_the_parent_head():
         seen.append(context)
         return "stream"
 
-    session.agent.streamFn = previous
+    session.agent.streamFunction = previous
     install(session, {"systemPrompt": "PARENT PROMPT", "tools": [
         {"name": "read", "description": "parent wording", "parameters": read.parameters_json_schema(),
          "constrainedSampling": None}]})
     assert active_names == ["read"]
-    transcript = normalize_context(Context(
+    transcript = normalizeContext(Context(
         systemPrompt="worker prompt", messages=[
             UserMessage(content="copied question", timestamp=5),
             SystemMessage(content="", sections={"rules": "<rules>\nworker rules\n</rules>"}, timestamp=6),
             UserMessage(content="directive", timestamp=7),
         ], tools=[read]))
-    assert session.agent.streamFn(_model("fixture-api"), transcript, None) == "stream"
+    assert session.agent.streamFunction(_model("fixture-api"), transcript, None) == "stream"
     sent = seen[0].messages
     assert [read_field(m, "role") for m in sent] == ["system", "user", "user"]
     assert sent[0].timestamp == transcript.messages[0].timestamp
-    assert get_current_system_prompt(sent) == "PARENT PROMPT"
-    assert [(t.name, t.description) for t in get_current_tools(sent)] == [("read", "parent wording")]
+    assert getCurrentSystemPrompt(sent) == "PARENT PROMPT"
+    assert [(t.name, t.description) for t in getCurrentTools(sent)] == [("read", "parent wording")]
 
 
 def test_an_agent_seeded_with_a_parents_transcript_keeps_its_own_prompt_only_without_the_parents_head():

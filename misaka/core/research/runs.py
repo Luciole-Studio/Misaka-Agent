@@ -1,6 +1,8 @@
 """Persistent research-run state and file artifacts.
 
-A run is a directed acyclic graph of nodes (``research_branches`` joined by ``research_edges``).
+A run is a directed acyclic graph of nodes, kept as the run's graph (``misaka.core.graph``, its id
+the run's): ``inquiry`` nodes joined by ``fork`` edges, with the decisions, options, review issues
+and relations around them, and the journal of Last Order's commands.
 The root (depth 0) is the question as asked; every other node pursues an option of a decision
 some node made -- a possibility (another hypothesis, method, reading, perspective, decomposition,
 or a critique of the question itself), never a correction: corrections stay in their node as
@@ -8,8 +10,9 @@ revision rounds. A node reached by options of several nodes, or opened to carry 
 nodes forward together, has several parents. Research prose lives directly in the project from
 its first write: ``<workspace>/nodes/<node>/`` per node (its cards under ``cards/``) and
 ``<workspace>/final/`` for run-level products. Session transcripts share the existing
-``~/.misaka/sessions`` store. SQLite is the only authority on the graph; the graph files in the
-project are views written from it and never read back.
+``~/.misaka/sessions`` store. The graph is the only authority on the run's structure; the graph
+files in the project are views written from it and never read back. How each node is being run
+(its status, session and runner) is execution, kept here in ``research_execution``.
 """
 from __future__ import annotations
 
@@ -25,6 +28,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from misaka.config import home
+from misaka.core import graph
 from misaka.core.platform import tasks as task_store
 from misaka.utils import atomic
 
@@ -33,17 +37,11 @@ from misaka.utils import atomic
 CRITIQUE_KINDS = frozenset({"red_team", "final_review"})
 REVIEW_KINDS = CRITIQUE_KINDS | {"divergence"}
 
+# The run's graph (``misaka.core.graph``) holds its structure: the nodes and what forked them, the
+# decisions, options, review issues and relations, and the journal of Last Order's commands. These
+# tables hold the rest: the run itself, how each node is being executed, the cards, and the files and
+# findings the run registered.
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS research_actions (
-  run_id TEXT NOT NULL,
-  branch_id TEXT NOT NULL,
-  action_key TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  session_file TEXT NOT NULL,
-  tool_call_id TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  PRIMARY KEY(run_id,branch_id,action_key)
-);
 CREATE TABLE IF NOT EXISTS research_runs (
   id              TEXT PRIMARY KEY,
   workspace       TEXT NOT NULL,
@@ -58,16 +56,12 @@ CREATE TABLE IF NOT EXISTS research_runs (
   stop_requested  INTEGER NOT NULL DEFAULT 0,
   final_artifact  TEXT,
   last_error      TEXT,
-  driver_lock     TEXT,
-  driver_expires  INTEGER,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS research_branches (
+CREATE TABLE IF NOT EXISTS research_execution (
   id              TEXT PRIMARY KEY,
   run_id          TEXT NOT NULL,
-  question        TEXT NOT NULL,
-  depth           INTEGER NOT NULL,
   status          TEXT NOT NULL DEFAULT 'queued',
   session_file    TEXT,
   fork_entry      TEXT,
@@ -79,58 +73,7 @@ CREATE TABLE IF NOT EXISTS research_branches (
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS research_edges (
-  run_id          TEXT NOT NULL,
-  child_id        TEXT NOT NULL,
-  parent_id       TEXT NOT NULL,
-  PRIMARY KEY(child_id,parent_id)
-);
-CREATE TABLE IF NOT EXISTS research_decisions (
-  id              TEXT PRIMARY KEY,
-  run_id          TEXT NOT NULL,
-  node_id         TEXT NOT NULL,
-  round           INTEGER NOT NULL,
-  origin          TEXT NOT NULL,
-  question        TEXT NOT NULL,
-  stakes          TEXT NOT NULL,
-  created_at      INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS research_options (
-  id              TEXT PRIMARY KEY,
-  run_id          TEXT NOT NULL,
-  decision_id     TEXT NOT NULL,
-  label           TEXT NOT NULL,
-  premise         TEXT NOT NULL,
-  node_id         TEXT,
-  reason          TEXT,
-  created_at      INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS research_relations (
-  id              TEXT PRIMARY KEY,
-  run_id          TEXT NOT NULL,
-  kind            TEXT NOT NULL,
-  note            TEXT NOT NULL,
-  created_at      INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS research_relation_nodes (
-  relation_id     TEXT NOT NULL,
-  node_id         TEXT NOT NULL,
-  position        INTEGER NOT NULL,
-  PRIMARY KEY(relation_id,node_id)
-);
-CREATE TABLE IF NOT EXISTS research_reconciles (
-  run_id          TEXT NOT NULL,
-  round           INTEGER NOT NULL,
-  payload_json    TEXT NOT NULL,
-  session_file    TEXT NOT NULL,
-  tool_call_id    TEXT NOT NULL,
-  approved_call_id TEXT,
-  receipt_json    TEXT,
-  applied_at      INTEGER,
-  created_at      INTEGER NOT NULL,
-  PRIMARY KEY(run_id,round)
-);
-CREATE TABLE IF NOT EXISTS research_run_tasks (
+CREATE TABLE IF NOT EXISTS research_cards (
   task_id         TEXT PRIMARY KEY,
   run_id          TEXT NOT NULL,
   branch_id       TEXT NOT NULL,
@@ -138,23 +81,6 @@ CREATE TABLE IF NOT EXISTS research_run_tasks (
   round           INTEGER NOT NULL DEFAULT 1,
   local_id        TEXT,
   depends_json    TEXT NOT NULL DEFAULT '[]',
-  created_at      INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS research_issues (
-  id              TEXT PRIMARY KEY,
-  run_id          TEXT NOT NULL,
-  branch_id       TEXT NOT NULL,
-  task_id         TEXT NOT NULL,
-  round           INTEGER NOT NULL,
-  origin          TEXT NOT NULL,
-  kind            TEXT NOT NULL,
-  question        TEXT NOT NULL,
-  rationale       TEXT NOT NULL,
-  priority        INTEGER NOT NULL DEFAULT 0,
-  disposition     TEXT,
-  option_id       TEXT,
-  covered_by      TEXT,
-  reason          TEXT,
   created_at      INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS research_artifacts (
@@ -191,22 +117,14 @@ CREATE TABLE IF NOT EXISTS research_claims (
 """
 
 INDEXES = """
-CREATE INDEX IF NOT EXISTS research_branches_run ON research_branches(run_id,depth);
-CREATE INDEX IF NOT EXISTS research_edges_parent ON research_edges(parent_id);
-CREATE INDEX IF NOT EXISTS research_edges_run ON research_edges(run_id);
-CREATE INDEX IF NOT EXISTS research_decisions_run ON research_decisions(run_id,node_id);
-CREATE INDEX IF NOT EXISTS research_options_run ON research_options(run_id,decision_id);
-CREATE INDEX IF NOT EXISTS research_relations_run ON research_relations(run_id);
-CREATE INDEX IF NOT EXISTS research_relation_nodes_node ON research_relation_nodes(node_id);
-CREATE INDEX IF NOT EXISTS research_tasks_run ON research_run_tasks(run_id,branch_id,kind);
-CREATE INDEX IF NOT EXISTS research_issues_run ON research_issues(run_id,branch_id,round);
-CREATE INDEX IF NOT EXISTS research_issues_option ON research_issues(option_id);
+CREATE INDEX IF NOT EXISTS research_execution_run ON research_execution(run_id);
+CREATE INDEX IF NOT EXISTS research_cards_run ON research_cards(run_id,branch_id,kind);
+CREATE UNIQUE INDEX IF NOT EXISTS research_cards_local ON research_cards(run_id,branch_id,local_id) WHERE local_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS research_artifacts_run ON research_artifacts(run_id,branch_id,kind);
 CREATE UNIQUE INDEX IF NOT EXISTS research_artifacts_generated ON research_artifacts(run_id,path) WHERE task_id IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS research_artifacts_task ON research_artifacts(run_id,task_id,path) WHERE task_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS research_findings_run ON research_findings(run_id,branch_id,task_id);
 CREATE INDEX IF NOT EXISTS research_claims_finding ON research_claims(finding_id);
-CREATE UNIQUE INDEX IF NOT EXISTS research_tasks_local ON research_run_tasks(run_id,branch_id,local_id) WHERE local_id IS NOT NULL;
 """
 
 ACTIVE = ("active", "waiting_input", "stopping")
@@ -219,13 +137,13 @@ MAX_NODES_CEILING = 500
 # A run's own compaction threshold, as a share of the context window: below a tenth a session would
 # compact on nearly every turn, above 0.95 there is no room left to compact into.
 MIN_CONTEXT_THRESHOLD, MAX_CONTEXT_THRESHOLD = 0.1, 0.95
-RESEARCH_SCHEMA_VERSION = 18   # typed issue destinations (option_id, covered_by); relation members as rows
+# v19: the structure moved into the run's graph (v18 is migrated, _migrate_from_18). v20: an option left unopened
+# points at what answers it, and an option can answer a path declined before (_migrate_from_19).
+RESEARCH_SCHEMA_VERSION = 20
 DRIVER_TTL_SECONDS = 300
 RESEARCH_TABLES = (
-    "research_actions", "research_reconciles",
-    "research_claims", "research_findings", "research_artifacts",
-    "research_issues", "research_relation_nodes", "research_relations", "research_options", "research_decisions",
-    "research_run_tasks", "research_edges", "research_branches", "research_runs",
+    "research_claims", "research_findings", "research_artifacts", "research_cards", "research_execution",
+    "research_runs",
 )
 # What Last Order may answer a red-team issue with; one she took to her decision ends as ``branch``
 # (``option_id`` = the option that takes it up) or, not opened, as ``covered`` (``covered_by``, or the
@@ -311,6 +229,7 @@ def _validate_current_schema(con):
 
 
 def init(con):
+    graph.init(con)
     has_runs, current = _schema_state(con)
     if has_runs and current:
         _validate_current_schema(con)
@@ -323,9 +242,172 @@ def init(con):
         if has_runs and current:
             _validate_current_schema(con)
             return
+        recorded = con.execute("SELECT MAX(version) FROM schema_migrations WHERE component='research'").fetchone()[0]
+        if recorded in (18, 19):
+            # A v18 board's graphs are made with the current schema; a v19 board's are given it.
+            if recorded == 18:
+                _migrate_from_18(con)
+            else:
+                _migrate_from_19(con)
+            con.execute("INSERT INTO schema_migrations(component,version,applied_at) VALUES('research',?,?)",
+                        (RESEARCH_SCHEMA_VERSION, int(time.time())))
+            return
         if task_store.require_schema(con, "research", RESEARCH_SCHEMA_VERSION, populated=has_runs):
             _execute_script(con, SCHEMA)
             _execute_script(con, INDEXES)
+
+
+# --- the run's graph ---------------------------------------------------------------------
+
+def graph_schema(chosen):
+    """What a run's graph may hold, under the run's limits ``chosen``: its node count and depth are
+    the graph's own bounds, so no writer can pass them."""
+    return {
+        "nodes": {"inquiry": {"max": chosen["max_nodes"], "frozen": ["depth"]},
+                  "decision": {}, "option": {}, "issue": {}, "relation": {}},
+        "edges": {
+            # parent -> child: the node a decision of the parent opened, or a join of several
+            "fork": {"from": ["inquiry"], "to": ["inquiry"], "acyclic": True, "frozen": True,
+                     "max_depth": chosen["max_depth"]},
+            "decides": {"from": ["inquiry"], "to": ["decision"], "max_in": 1},
+            "offers": {"from": ["decision"], "to": ["option"], "max_in": 1},
+            "opens": {"from": ["option"], "to": ["inquiry"], "max_out": 1},
+            "raised_on": {"from": ["issue"], "to": ["inquiry"], "max_out": 1},
+            "becomes": {"from": ["issue"], "to": ["option"], "max_out": 1},
+            # What answers a possibility that was not opened as a node of its own: an issue's covering node,
+            # or, for an option left unopened, the node that pursues it or the option opened for it. Each
+            # possibility has one such pointer, set by whoever judged it; following them -- with
+            # ``becomes`` and ``opens`` -- ends at a node or at a record left unopened (views.where).
+            "covered_by": {"from": ["issue", "option"], "to": ["inquiry", "option"], "max_out": 1, "acyclic": True},
+            # A cross-reference, not a pointer: an option that brings back a path declined or left unopened,
+            # and answers the reason recorded for it. The path stays where it was.
+            "answers": {"from": ["option"], "to": ["issue", "option"], "unique": True},
+            "member": {"from": ["relation"], "to": ["inquiry"], "unique": True},
+        },
+    }
+
+
+@contextmanager
+def _holding(con, run_id):
+    """The token a write to the run's graph goes under, inside one write transaction: the driver
+    lease's holder, or -- while nobody drives the run (it is being made, or a command edits it between
+    drivers) -- one taken for this write and given back. Research fences its own writers with
+    ``check_owner``; this only satisfies the graph's lease."""
+    with task_store.write_txn(con):
+        holder = graph.get(con, run_id).lease_token
+        if holder is not None:
+            yield holder
+            return
+        transient = "research:" + secrets.token_hex(6)
+        graph.acquire(con, run_id, transient, ttl=DRIVER_TTL_SECONDS)
+        try:
+            yield transient
+        finally:
+            graph.release(con, run_id, transient)
+
+
+def _commit(con, run_id, op, payload, apply):
+    """One change to the run's graph, journaled as ``op`` with ``payload``; ``apply(change)`` makes it."""
+    with _holding(con, run_id) as token:
+        return graph.commit(con, run_id, op, payload, token=token, handlers={op: lambda change, _entry: apply(change)})
+
+
+def _migrate_from_18(con):
+    """Carry a v18 board forward: each run's structure into its graph, its commands and
+    reconciliations into the graph's journal, its driver lease onto the graph, and node execution and
+    card links into their tables. Ids are kept, so a migrated run resumes where it was."""
+    for index in ("research_tasks_run", "research_tasks_local"):
+        con.execute(f"DROP INDEX IF EXISTS {index}")
+    con.execute("ALTER TABLE research_run_tasks RENAME TO research_cards")
+    _execute_script(con, SCHEMA)                 # research_execution; the other tables are there already
+    now = int(time.time())
+    for run in con.execute("SELECT * FROM research_runs ORDER BY created_at,rowid").fetchall():
+        rid = run["id"]
+        graph.create(con, "research", graph_schema(limits(run)), id=rid)
+        token = "migration:" + rid
+        graph.acquire(con, rid, token, ttl=DRIVER_TTL_SECONDS)
+        rows = {
+            "branches": con.execute("SELECT * FROM research_branches WHERE run_id=? ORDER BY depth,created_at,rowid",
+                                    (rid,)).fetchall(),
+            "edges": con.execute("SELECT * FROM research_edges WHERE run_id=? ORDER BY rowid", (rid,)).fetchall(),
+            "decisions": con.execute("SELECT * FROM research_decisions WHERE run_id=? ORDER BY created_at,rowid",
+                                     (rid,)).fetchall(),
+            "options": con.execute("SELECT * FROM research_options WHERE run_id=? ORDER BY rowid", (rid,)).fetchall(),
+            "issues": con.execute("SELECT * FROM research_issues WHERE run_id=? ORDER BY created_at,rowid",
+                                  (rid,)).fetchall(),
+            "relations": con.execute("SELECT * FROM research_relations WHERE run_id=? ORDER BY created_at,rowid",
+                                     (rid,)).fetchall(),
+        }
+
+        def build(change, _entry, rows=rows):
+            for row in rows["branches"]:
+                change.add_node("inquiry", {"question": row["question"], "depth": row["depth"]}, id=row["id"])
+            for row in rows["edges"]:
+                change.add_edge("fork", row["parent_id"], row["child_id"])
+            for row in rows["decisions"]:
+                change.add_node("decision", {"round": row["round"], "origin": row["origin"], "question": row["question"],
+                                             "stakes": row["stakes"], "created_at": row["created_at"]}, id=row["id"])
+                change.add_edge("decides", row["node_id"], row["id"])
+            for row in rows["options"]:
+                change.add_node("option", {"label": row["label"], "premise": row["premise"], "reason": row["reason"],
+                                           "created_at": row["created_at"]}, id=row["id"])
+                change.add_edge("offers", row["decision_id"], row["id"])
+                if row["node_id"]:
+                    change.add_edge("opens", row["id"], row["node_id"])
+            for row in rows["issues"]:
+                change.add_node("issue", {key: row[key] for key in (
+                    "task_id", "round", "origin", "kind", "question", "rationale", "priority", "disposition", "reason",
+                    "created_at")}, id=row["id"])
+                change.add_edge("raised_on", row["id"], row["branch_id"])
+                if row["option_id"]:
+                    change.add_edge("becomes", row["id"], row["option_id"])
+                if row["covered_by"]:
+                    change.add_edge("covered_by", row["id"], row["covered_by"])
+            for row in rows["relations"]:
+                change.add_node("relation", {"kind": row["kind"], "note": row["note"], "created_at": row["created_at"]},
+                                id=row["id"])
+                for member in con.execute("SELECT node_id,position FROM research_relation_nodes WHERE relation_id=? "
+                                          "ORDER BY position", (row["id"],)):
+                    change.add_edge("member", row["id"], member["node_id"], {"position": member["position"]})
+
+        graph.commit(con, rid, "migrate", {"from_version": 18}, token=token, handlers={"migrate": build})
+        for row in con.execute("SELECT * FROM research_actions WHERE run_id=? ORDER BY created_at,rowid", (rid,)):
+            graph.propose(con, rid, "action", json.loads(row["payload_json"]), key=row["action_key"],
+                          scope=row["branch_id"], proposer=_proposer(row["session_file"], row["tool_call_id"],
+                                                                     row["created_at"], stored=True))
+        for row in con.execute("SELECT * FROM research_reconciles WHERE run_id=? ORDER BY round", (rid,)):
+            entry = graph.propose(con, rid, "reconcile", json.loads(row["payload_json"]), key=_reconcile_key(row["round"]),
+                                  proposer=_proposer(row["session_file"], row["tool_call_id"], row["created_at"],
+                                                     stored=True))
+            if row["approved_call_id"] and row["approved_call_id"] == row["tool_call_id"]:
+                graph.approve(con, entry.id, approver=_APPROVER)
+            if row["applied_at"] is not None:
+                receipt = json.loads(row["receipt_json"]) if row["receipt_json"] else None
+                graph.apply(con, entry.id, token=token, handlers={"reconcile": lambda _change, _entry, r=receipt: r})
+        graph.release(con, rid, token)
+        if run["driver_lock"] and run["driver_expires"] and run["driver_expires"] > now:
+            graph.acquire(con, rid, run["driver_lock"], ttl=run["driver_expires"] - now)
+    con.execute(
+        "INSERT INTO research_execution (id,run_id,status,session_file,fork_entry,context_artifact,runner_pid,"
+        "runner_identity,runner_key,last_error,created_at,updated_at) SELECT id,run_id,status,session_file,fork_entry,"
+        "context_artifact,runner_pid,runner_identity,runner_key,last_error,created_at,updated_at FROM research_branches")
+    for column in ("driver_lock", "driver_expires"):
+        con.execute(f"ALTER TABLE research_runs DROP COLUMN {column}")
+    for table in ("research_actions", "research_reconciles", "research_issues", "research_relation_nodes",
+                  "research_relations", "research_options", "research_decisions", "research_edges",
+                  "research_branches"):
+        con.execute(f"DROP TABLE {table}")
+    _execute_script(con, INDEXES)
+
+
+def _migrate_from_19(con):
+    """Give every run's graph the v20 schema: the same kinds, with ``covered_by`` widened to options and
+    ``answers`` added. Nothing in a graph changes; the schema op is journaled like any other."""
+    for run in con.execute("SELECT * FROM research_runs ORDER BY created_at,rowid").fetchall():
+        if graph.get(con, run["id"]) is None:
+            continue
+        with _holding(con, run["id"]) as token:
+            graph.commit(con, run["id"], "schema", graph_schema(limits(run)), token=token)
 
 
 def _lease_holder_is_dead(lock):
@@ -344,42 +426,38 @@ def _lease_holder_is_dead(lock):
 
 
 def acquire_driver(con, run_id, lock, ttl_seconds=DRIVER_TTL_SECONDS):
-    """Take the run's driver lease: one process advances a run at a time. False when another
-    live lease holds it."""
-    now = int(time.time())
+    """Take the run's driver lease -- its graph's lease: one process advances a run at a time. False
+    when another live lease holds it. A driver that died hard (a crashed pane, SIGKILL) neither renews
+    nor releases; waiting its TTL out only held the run (2026-09-23: three refusals, cleared by hand),
+    so a holder whose process is gone is taken over at once."""
     with task_store.write_txn(con):
-        previous = get(con, run_id)
-        if previous["driver_lock"] and previous["driver_lock"] != lock and _lease_holder_is_dead(previous["driver_lock"]):
-            # A driver that died hard (a crashed pane, SIGKILL) neither renews nor releases;
-            # waiting its TTL out only holds the run (2026-09-23: three refusals, cleared by
-            # hand). Its lease expires here, inside the takeover transaction.
-            con.execute("UPDATE research_runs SET driver_expires=0 WHERE id=? AND driver_lock=?",
-                        (run_id, previous["driver_lock"]))
-        cur = con.execute(
-            "UPDATE research_runs SET driver_lock=?, driver_expires=? WHERE id=? "
-            "AND (driver_lock IS NULL OR driver_expires IS NULL OR driver_expires < ? OR driver_lock=?)",
-            (lock, now + int(ttl_seconds), run_id, now, lock),
-        )
-        if cur.rowcount != 1:
-            return False
-        if previous["driver_lock"] != lock:
+        lease = graph.acquire(con, run_id, lock, ttl=int(ttl_seconds), stale=_lease_holder_is_dead)
+        if lease.acquired and lease.previous != lock:
             # Invalidate delayed child spawns in the same transaction as takeover.
             # Keep PID/identity for the successor's existing orphan-reaping path.
-            con.execute("UPDATE research_branches SET runner_key=NULL WHERE run_id=?", (run_id,))
-    return True
+            con.execute("UPDATE research_execution SET runner_key=NULL WHERE run_id=?", (run_id,))
+    return lease.acquired
+
+
+def driverless(run):
+    """Whether no live driver holds ``run`` (as ``get`` reads it): nobody took its lease, the lease
+    ran out, or its holder's process is gone -- the lease ``acquire_driver`` would take over now."""
+    lock, expires = run["driver_lock"], run["driver_expires"]
+    return not lock or expires is None or expires < int(time.time()) or _lease_holder_is_dead(lock)
 
 
 def heartbeat_driver(con, run_id, lock, ttl_seconds=DRIVER_TTL_SECONDS):
-    cur = con.execute(
-        "UPDATE research_runs SET driver_expires=? WHERE id=? AND driver_lock=?",
-        (int(time.time()) + int(ttl_seconds), run_id, lock),
-    )
-    return cur.rowcount == 1
+    return graph.renew(con, run_id, lock, ttl=int(ttl_seconds))
 
 
 def release_driver(con, run_id, lock):
-    con.execute("UPDATE research_runs SET driver_lock=NULL, driver_expires=NULL WHERE id=? AND driver_lock=?",
-                (run_id, lock))
+    graph.release(con, run_id, lock)
+
+
+def holds_driver(con, run_id, lock):
+    """Whether ``lock`` (None: nobody) is the run's driver lease as it stands."""
+    found = graph.get(con, run_id)
+    return found is not None and found.lease_token == lock
 
 
 # Cards past these statuses keep their dependency history as it is: the DAG must not be rewritten
@@ -572,11 +650,30 @@ def task_contexts(con):
     if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_runs'").fetchone():
         return {}
     init(con)
-    return {row["task_id"]: dict(row) for row in con.execute(
-        "SELECT t.task_id,t.run_id,t.branch_id AS node_id,b.depth,t.kind,t.round,"
-        "r.workspace,r.origin_session,b.question AS node_question "
-        "FROM research_run_tasks t JOIN research_runs r ON r.id=t.run_id "
-        "JOIN research_branches b ON b.id=t.branch_id")}
+    contexts, snapshots = {}, {}
+    for row in con.execute(
+            "SELECT c.task_id,c.run_id,c.branch_id AS node_id,c.kind,c.round,r.workspace,r.origin_session "
+            "FROM research_cards c JOIN research_runs r ON r.id=c.run_id").fetchall():
+        if row["run_id"] not in snapshots:
+            snapshots[row["run_id"]] = graph.snapshot(con, row["run_id"])
+        found = snapshots[row["run_id"]].node(row["node_id"])
+        if found is not None:
+            contexts[row["task_id"]] = {**dict(row), "depth": found.attrs["depth"], "node_question": found.attrs["question"]}
+    return contexts
+
+
+def task_context(con, task_id):
+    """One card's entry of ``task_contexts``, or None for a card outside every run."""
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_runs'").fetchone():
+        return None
+    init(con)
+    row = con.execute(
+        "SELECT c.task_id,c.run_id,c.branch_id AS node_id,c.kind,c.round,r.workspace,r.origin_session "
+        "FROM research_cards c JOIN research_runs r ON r.id=c.run_id WHERE c.task_id=?", (task_id,)).fetchone()
+    found = graph.snapshot(con, row["run_id"]).node(row["node_id"]) if row else None
+    if found is None:
+        return None
+    return {**dict(row), "depth": found.attrs["depth"], "node_question": found.attrs["question"]}
 
 
 def project_name(run):
@@ -671,6 +768,7 @@ def create(con, *, workspace, question, limits=None, token_start=0, origin_sessi
             (run_id, workspace, question, "created", "active",
              json.dumps(spec, ensure_ascii=False), int(token_start), origin_session, now, now),
         )
+        graph.create(con, "research", graph_schema(spec), id=run_id)
         row = get(con, run_id)
         ensure_layout(row)
         write_text(con, run_id, "question", 'Original research question', run_path(row, "question.md"),
@@ -684,7 +782,15 @@ def create(con, *, workspace, question, limits=None, token_start=0, origin_sessi
 
 def get(con, run_id):
     init(con)
-    return con.execute("SELECT * FROM research_runs WHERE id=?", (run_id,)).fetchone()
+    row = con.execute("SELECT * FROM research_runs WHERE id=?", (run_id,)).fetchone()
+    return _run(con, row) if row else None
+
+
+def _run(con, row):
+    """A run as callers read it. Its driver lease is its graph's."""
+    found = graph.get(con, row["id"])
+    return {**dict(row), "driver_lock": found.lease_token if found else None,
+            "driver_expires": found.lease_expires if found else None}
 
 
 def latest(con, workspace=None, active_only=False):
@@ -695,16 +801,19 @@ def latest(con, workspace=None, active_only=False):
         args.append(workspace)
     if active_only:
         q += " AND status IN ('active','waiting_input','stopping')"
-    return con.execute(q + " ORDER BY created_at DESC LIMIT 1", args).fetchone()
+    row = con.execute(q + " ORDER BY created_at DESC LIMIT 1", args).fetchone()
+    return _run(con, row) if row else None
 
 
 def listing(con, *, workspace=None):
     init(con)
     if workspace:
-        return con.execute(
+        rows = con.execute(
             "SELECT * FROM research_runs WHERE workspace=? ORDER BY created_at DESC", (workspace,)
         ).fetchall()
-    return con.execute("SELECT * FROM research_runs ORDER BY created_at DESC").fetchall()
+    else:
+        rows = con.execute("SELECT * FROM research_runs ORDER BY created_at DESC").fetchall()
+    return [_run(con, row) for row in rows]
 
 
 def limits(run):
@@ -743,7 +852,8 @@ def current_limits(con, run):
 def update_limits(con, run_id, changes):
     """Change a run's limits while it runs: ``(before, after)``. The same bounds as a new run's, and
     never below what the run already holds -- a graph of 12 nodes cannot be limited to 10. Raises
-    ValueError saying what to change."""
+    ValueError saying what to change. The node count and depth are the graph's own bounds, so they
+    change in its schema as well."""
     unknown = sorted(set(changes) - set(ADJUSTABLE_LIMITS))
     if unknown:
         raise ValueError(f"not adjustable: {', '.join(unknown)} (adjustable: {', '.join(ADJUSTABLE_LIMITS)})")
@@ -755,13 +865,16 @@ def update_limits(con, run_id, changes):
             raise ValueError(f"Research run {run_id} is done; its limits no longer matter.")
         before = limits(run)
         after = normalize_limits({**json.loads(run["limits_json"] or "{}"), **changes})
-        held, deepest = con.execute(
-            "SELECT COUNT(*), COALESCE(MAX(depth), 0) FROM research_branches WHERE run_id=?", (run_id,)).fetchone()
+        inquiries = graph.snapshot(con, run_id).nodes("inquiry")
+        held, deepest = len(inquiries), max((int(found.attrs["depth"]) for found in inquiries), default=0)
         if after["max_nodes"] < held:
             raise ValueError(f"max_nodes {after['max_nodes']} is below the {held} nodes the graph already holds")
         if after["max_depth"] < deepest:
             raise ValueError(f"max_depth {after['max_depth']} is below the depth {deepest} a node already has")
         con.execute("UPDATE research_runs SET limits_json=? WHERE id=?", (json.dumps(after, sort_keys=True), run_id))
+        if (after["max_nodes"], after["max_depth"]) != (before["max_nodes"], before["max_depth"]):
+            with _holding(con, run_id) as token:
+                graph.commit(con, run_id, "schema", graph_schema(after), token=token)
     return before, after
 
 
@@ -781,13 +894,10 @@ def set_state(con, run_id, *, phase=None, status=None, error=None,
         values.append(int(wave))
     fields.append("updated_at=?")
     values.extend([int(time.time()), run_id])
-    where = "id=?"
-    if driver_lock is not None:
-        where += " AND driver_lock=?"
-        values.append(driver_lock)
-    cur = con.execute(f"UPDATE research_runs SET {','.join(fields)} WHERE {where}", values)
-    if driver_lock is not None and cur.rowcount != 1:
-        raise RuntimeError(f"Research run {run_id}: driver lease lost.")
+    with task_store.write_txn(con):
+        if driver_lock is not None and not holds_driver(con, run_id, driver_lock):
+            raise RuntimeError(f"Research run {run_id}: driver lease lost.")
+        con.execute(f"UPDATE research_runs SET {','.join(fields)} WHERE id=?", values)
     return get(con, run_id)
 
 
@@ -797,6 +907,18 @@ def request_stop(con, run_id):
         "WHERE id=? AND status IN ('active','waiting_input','stopping')",
         (int(time.time()), run_id),
     )
+
+
+def close(con, run_id, session_id):
+    """Take a stopped or failed run out of the conversation that started it: ``for_session`` no
+    longer returns it, so its notice stops standing there, and its cards' notices stop going there.
+    A resume binds the resuming window again (``workflow.run``). False when it was not that
+    conversation's paused run."""
+    return con.execute(
+        "UPDATE research_runs SET origin_session=NULL,updated_at=? "
+        "WHERE id=? AND origin_session=? AND status IN ('stopped','failed')",
+        (int(time.time()), run_id, session_id),
+    ).rowcount == 1
 
 
 def resume(con, run_id, *, driver_lock=None, clarification=""):
@@ -829,7 +951,7 @@ def _resume(con, run_id, *, driver_lock, clarification):
     # A failed node replans: every phase of ``_expand`` is idempotent over what it already
     # produced (saved plans, cards and project-local artifacts), so it picks up its own work.
     con.execute(
-        "UPDATE research_branches SET status='planning',updated_at=? "
+        "UPDATE research_execution SET status='planning',updated_at=? "
         "WHERE run_id=? AND status IN ('waiting_input','awaiting_approval','failed')", (int(time.time()), run_id),
     )
     con.execute(
@@ -863,7 +985,16 @@ def reopen_cards(con, run_id, node_id=None):
     """Send the run's (or one node's) stopped, failed and unusable cards back to their Sisters.
     A failed card is retried like a stopped one: without this the node it killed replays the
     identical failure on every resume, and the only way out is editing this database by hand.
-    A card its node went on without stays as it is."""
+    A card its node went on without stays as it is.
+
+    The cards' files are read first. A stop lands in the file before the index commits, so a
+    process that died between the two (2026-10-25, R31) left a card stopped in its file and
+    todo here: deciding on the index alone skipped it, and the next dispatch tick put the
+    file's stop back after this resume had passed it."""
+    from misaka.core.platform import cards as card_files
+    for row in tasks(con, run_id, node_id=node_id):
+        if row["workspace"]:
+            card_files.reconcile_one(con, row["workspace"], row["id"])
     given_up = given_up_cards(con, run_id, node_id)
     for row in tasks(con, run_id, node_id=node_id):
         if row["id"] in given_up:
@@ -898,17 +1029,15 @@ def retry_node(con, run, node_id, *, session_file, tool_call_id):
         raise ValueError(f"No node {node_id} in run {run['id']}.")
     if current["status"] != "failed":
         raise ValueError(f"Node {node_id} is {current['status']}, not failed; only a failed node is retried.")
-    tried = con.execute("SELECT COUNT(*) FROM research_actions WHERE branch_id=? AND action_key LIKE 'retry:%'",
-                        (node_id,)).fetchone()[0]
+    tried = len(graph.entries(con, run["id"], scope=node_id, key_prefix="retry:", status=_LIVE))
     if tried >= RETRY_LIMIT:
         raise ValueError(f"Node {node_id} was already retried {tried} times; its failure needs the user.")
     with task_store.write_txn(con):
         reopen_cards(con, run["id"], node_id)
-        con.execute("UPDATE research_branches SET status='planning',last_error=NULL,updated_at=? WHERE id=?",
+        con.execute("UPDATE research_execution SET status='planning',last_error=NULL,updated_at=? WHERE id=?",
                     (int(time.time()), node_id))
-        con.execute("INSERT INTO research_actions VALUES (?,?,?,?,?,?,?)",
-                    (run["id"], node_id, f"retry:{tool_call_id}", json.dumps({"attempt": tried + 1}),
-                     home.stored(session_file), tool_call_id, int(time.time())))
+        graph.propose(con, run["id"], "action", {"attempt": tried + 1}, key=f"retry:{tool_call_id}", scope=node_id,
+                      proposer=_proposer(session_file, tool_call_id))
     return tried + 1
 
 
@@ -929,7 +1058,7 @@ def stop_requested(con, run_id):
 
 def task_count(con, run_id):
     return con.execute(
-        "SELECT COUNT(*) FROM research_run_tasks WHERE run_id=?", (run_id,)
+        "SELECT COUNT(*) FROM research_cards WHERE run_id=?", (run_id,)
     ).fetchone()[0]
 
 
@@ -948,7 +1077,7 @@ def link_task(con, run_id, task_id, *, kind, node, local_id=None, dependencies=(
     output_dir.resolve().relative_to(Path(run["workspace"]).resolve())
     dependencies = list(dependencies)
     con.execute(
-        "INSERT INTO research_run_tasks "
+        "INSERT INTO research_cards "
         "(task_id,run_id,branch_id,kind,round,local_id,depends_json,created_at) "
         "VALUES (?,?,?,?,?,?,?,?)",
         (task_id, run_id, node["id"], kind, int(round), local_id,
@@ -969,7 +1098,7 @@ def link_task(con, run_id, task_id, *, kind, node, local_id=None, dependencies=(
         parents = []
         for dependency in dependencies:
             parent = con.execute(
-                "SELECT task_id FROM research_run_tasks WHERE run_id=? AND branch_id=? AND local_id=?",
+                "SELECT task_id FROM research_cards WHERE run_id=? AND branch_id=? AND local_id=?",
                 (run_id, node["id"], dependency),
             ).fetchone()
             if parent:
@@ -985,7 +1114,7 @@ def link_task(con, run_id, task_id, *, kind, node, local_id=None, dependencies=(
 def tasks(con, run_id, *, kind=None, node_id=None, round=None):
     q, args = (
         ("SELECT t.*,rt.branch_id,rt.kind AS research_kind,rt.round,rt.local_id,rt.depends_json "
-         "FROM research_run_tasks rt JOIN tasks t ON t.id=rt.task_id WHERE rt.run_id=?"),
+         "FROM research_cards rt JOIN tasks t ON t.id=rt.task_id WHERE rt.run_id=?"),
         [run_id],
     )
     if kind:
@@ -1003,44 +1132,63 @@ def tasks(con, run_id, *, kind=None, node_id=None, round=None):
 # --- nodes: the research graph --------------------------------------------------------
 
 def create_node(con, run_id, *, question, parents):
-    """A node and its edges, in the caller's transaction. Its depth is one more than its deepest
-    parent's (0 for the root, the only node without parents). Every parent already exists when
-    its child is written and edges never change, so the graph stays acyclic without a cycle check."""
+    """A node and its fork edges, in the caller's transaction. Its depth is one more than its deepest
+    parent's (0 for the root, the only node without parents); the graph keeps the forks acyclic."""
     run = get(con, run_id)
     if not run:
         raise ValueError(f"Research run not found: {run_id}")
-    parent_ids = list(dict.fromkeys(parents))
-    rows = [node(con, parent_id) for parent_id in parent_ids]
-    if any(row is None or row["run_id"] != run_id for row in rows):
+    parents = list(dict.fromkeys(parents))
+    node_id = _commit(con, run_id, "open_node", {"question": " ".join(str(question).split()), "parents": parents},
+                      lambda change: _open_node(con, change, run, question, parents))
+    return node(con, node_id)
+
+
+def _open_node(con, change, run, question, parents):
+    """Add an inquiry under ``parents`` to ``change``, with its execution row; returns its id."""
+    view = change.view
+    parents = list(dict.fromkeys(parents))
+    rows = [view.node(parent_id) for parent_id in parents]
+    if any(row is None or row.kind != "inquiry" for row in rows):
         raise ValueError("A node's parents must be nodes of the same run.")
-    existing = con.execute("SELECT COUNT(*) FROM research_branches WHERE run_id=?", (run_id,)).fetchone()[0]
+    existing = len(view.nodes("inquiry"))
     if not rows and existing:
         raise ValueError("A run has one root; every later node has parents.")
-    depth = max(int(row["depth"]) for row in rows) + 1 if rows else 0
-    chosen = limits(run)
+    depth = max(int(row.attrs["depth"]) for row in rows) + 1 if rows else 0
+    chosen = current_limits(con, run)
     if depth > chosen["max_depth"]:
         raise RuntimeError("The research run has reached its depth limit.")
     if existing >= chosen["max_nodes"]:
         raise RuntimeError("The research run has reached its node limit.")
-    bid = "b_" + secrets.token_hex(5)
+    node_id = change.add_node("inquiry", {"question": " ".join(str(question).split()), "depth": depth},
+                              id="b_" + secrets.token_hex(5))
+    for parent_id in parents:
+        change.add_edge("fork", parent_id, node_id)
     now = int(time.time())
-    con.execute(
-        "INSERT INTO research_branches (id,run_id,question,depth,status,created_at,updated_at) "
-        "VALUES (?,?,?,?,'queued',?,?)",
-        (bid, run_id, " ".join(str(question).split()), depth, now, now),
-    )
-    con.executemany("INSERT INTO research_edges (run_id,child_id,parent_id) VALUES (?,?,?)",
-                    [(run_id, bid, parent_id) for parent_id in parent_ids])
-    return node(con, bid)
+    con.execute("INSERT INTO research_execution (id,run_id,status,created_at,updated_at) VALUES (?,?,'queued',?,?)",
+                (node_id, run["id"], now, now))
+    return node_id
+
+
+def _node_row(row, found):
+    return {**dict(row), "question": found.attrs["question"], "depth": int(found.attrs["depth"])}
 
 
 def node(con, node_id):
-    return con.execute("SELECT * FROM research_branches WHERE id=?", (node_id,)).fetchone()
+    row = con.execute("SELECT * FROM research_execution WHERE id=?", (node_id,)).fetchone()
+    if row is None:
+        return None
+    found = graph.snapshot(con, row["run_id"]).node(node_id)
+    return _node_row(row, found) if found is not None else None
 
 
 def nodes(con, run_id):
-    return con.execute("SELECT * FROM research_branches WHERE run_id=? ORDER BY depth,created_at,rowid",
-                       (run_id,)).fetchall()
+    """The run's nodes, shallowest first, each level in the order its nodes were opened."""
+    rows = {row["id"]: row for row in con.execute("SELECT * FROM research_execution WHERE run_id=?", (run_id,))}
+    if not rows:
+        return []
+    found = [item for item in graph.snapshot(con, run_id).nodes("inquiry") if item.id in rows]
+    found.sort(key=lambda item: (int(item.attrs["depth"]), item.ordinal))
+    return [_node_row(rows[item.id], item) for item in found]
 
 
 def is_root(node):
@@ -1048,24 +1196,33 @@ def is_root(node):
 
 
 def root(con, run_id):
-    return con.execute("SELECT * FROM research_branches WHERE run_id=? AND depth=0", (run_id,)).fetchone()
+    return next((row for row in nodes(con, run_id) if row["depth"] == 0), None)
+
+
+def _forks(con, node_id, *, outward):
+    row = con.execute("SELECT run_id FROM research_execution WHERE id=?", (node_id,)).fetchone()
+    if row is None:
+        return []
+    snap = graph.snapshot(con, row["run_id"])
+    if outward:
+        wanted = {edge.target for edge in snap.out_edges(node_id, "fork")}
+    else:
+        wanted = {edge.source for edge in snap.in_edges(node_id, "fork")}
+    return [found for found in nodes(con, row["run_id"]) if found["id"] in wanted]
 
 
 def parents(con, node_id):
-    return con.execute(
-        "SELECT b.* FROM research_edges e JOIN research_branches b ON b.id=e.parent_id "
-        "WHERE e.child_id=? ORDER BY b.depth,b.created_at,b.rowid", (node_id,)).fetchall()
+    return _forks(con, node_id, outward=False)
 
 
 def children(con, node_id):
-    return con.execute(
-        "SELECT b.* FROM research_edges e JOIN research_branches b ON b.id=e.child_id "
-        "WHERE e.parent_id=? ORDER BY b.depth,b.created_at,b.rowid", (node_id,)).fetchall()
+    return _forks(con, node_id, outward=True)
 
 
 def edges(con, run_id):
-    return con.execute("SELECT child_id,parent_id FROM research_edges WHERE run_id=? ORDER BY rowid",
-                       (run_id,)).fetchall()
+    if graph.get(con, run_id) is None:
+        return []
+    return [{"child_id": edge.target, "parent_id": edge.source} for edge in graph.snapshot(con, run_id).edges("fork")]
 
 
 def next_level(con, run_id):
@@ -1087,14 +1244,14 @@ def set_node(con, node_id, *, status=None, session_file=None, context_artifact=N
     with task_store.write_txn(con):
         if owner is not None:
             check_owner(con, *owner)
-        con.execute(f"UPDATE research_branches SET {','.join(fields)} WHERE id=?", values)
+        con.execute(f"UPDATE research_execution SET {','.join(fields)} WHERE id=?", values)
     return node(con, node_id)
 
 
 def set_fork_entry(con, node_id, entry):
     """Where the node's own conversation begins in its session: the last entry it inherited (a
     fork's parent turns, or the root window's turns before the run). None = the whole session."""
-    con.execute("UPDATE research_branches SET fork_entry=?,updated_at=? WHERE id=?",
+    con.execute("UPDATE research_execution SET fork_entry=?,updated_at=? WHERE id=?",
                 (entry, int(time.time()), node_id))
 
 
@@ -1112,32 +1269,59 @@ def add_issue(con, run_id, *, node, task_id, round, origin, kind, question, rati
     if not question:
         return None
     normalized = " ".join(question.casefold().split())
-    for row in con.execute("SELECT id,question FROM research_issues WHERE task_id=? AND round=?",
-                           (task_id, int(round))):
-        if " ".join(row["question"].casefold().split()) == normalized:
-            return row["id"]
-    iid = "i_" + secrets.token_hex(5)
-    con.execute(
-        "INSERT INTO research_issues "
-        "(id,run_id,branch_id,task_id,round,origin,kind,question,rationale,priority,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (iid, run_id, node["id"], task_id, int(round), origin, str(kind or "unclassified"), question,
-         str(rationale or ""), int(priority or 0), int(time.time())),
-    )
-    return iid
+    for found in graph.snapshot(con, run_id).nodes("issue"):
+        if (found.attrs["task_id"] == task_id and found.attrs["round"] == int(round)
+                and " ".join(found.attrs["question"].casefold().split()) == normalized):
+            return found.id
+    attrs = {"task_id": task_id, "round": int(round), "origin": origin, "kind": str(kind or "unclassified"),
+             "question": question, "rationale": str(rationale or ""), "priority": int(priority or 0),
+             "disposition": None, "reason": None, "created_at": int(time.time())}
+
+    def add(change):
+        issue_id = change.add_node("issue", attrs, id="i_" + secrets.token_hex(5))
+        change.add_edge("raised_on", issue_id, node["id"])
+        return issue_id
+
+    return _commit(con, run_id, "add_issue", {"node": node["id"], **attrs}, add)
+
+
+def _end(snap, element_id, kind):
+    """Where ``element_id``'s single ``kind`` edge leads, or None."""
+    found = snap.out_edges(element_id, kind)
+    return found[0].target if found else None
+
+
+def _issue_row(snap, run_id, found):
+    return {"id": found.id, "run_id": run_id, "branch_id": _end(snap, found.id, "raised_on"),
+            **graph.thaw(found.attrs), "option_id": _end(snap, found.id, "becomes"),
+            "covered_by": _end(snap, found.id, "covered_by")}
+
+
+def drop_issues(con, run_id, issue_ids):
+    """Take issues off the graph: a review card's latest submission replaces the ones it raised before."""
+    issue_ids = list(issue_ids)
+    if issue_ids:
+        _commit(con, run_id, "drop_issues", {"issues": issue_ids},
+                lambda change: [change.retire(issue_id) for issue_id in issue_ids] and None)
 
 
 def issues(con, run_id, *, node_id=None, round=None, origin=None, option_id=None):
-    q, args = "SELECT * FROM research_issues WHERE run_id=?", [run_id]
-    for column, value in (("branch_id", node_id), ("round", round), ("origin", origin), ("option_id", option_id)):
-        if value is not None:
-            q += f" AND {column}=?"
-            args.append(value)
-    return con.execute(q + " ORDER BY round,priority DESC,created_at,rowid", args).fetchall()
+    if graph.get(con, run_id) is None:
+        return []
+    snap = graph.snapshot(con, run_id)
+    wanted = {"branch_id": node_id, "round": round, "origin": origin, "option_id": option_id}
+    rows = [row for row in (_issue_row(snap, run_id, found) for found in snap.nodes("issue"))
+            if all(value is None or row[key] == value for key, value in wanted.items())]
+    return sorted(rows, key=lambda row: (row["round"], -row["priority"], row["created_at"]))
 
 
 def issue(con, issue_id):
-    return con.execute("SELECT * FROM research_issues WHERE id=?", (issue_id,)).fetchone()
+    run_id = graph.locate(con, issue_id)
+    if run_id is None:
+        return None
+    snap = graph.snapshot(con, run_id)
+    found = snap.node(issue_id)
+    return _issue_row(snap, run_id, found) if found is not None and found.kind == "issue" else None
 
 
 def dispose(con, issue_id, disposition, *, option=None, covered_by=None, reason=None):
@@ -1145,8 +1329,20 @@ def dispose(con, issue_id, disposition, *, option=None, covered_by=None, reason=
     ``option`` is the option that takes the issue up -- a ``branch`` issue's own, or the option
     waiting to be opened that a ``covered`` one falls under -- ``covered_by`` the node that already
     pursues a ``covered`` one."""
-    con.execute("UPDATE research_issues SET disposition=?,option_id=?,covered_by=?,reason=? WHERE id=?",
-                (disposition, option, covered_by, reason, issue_id))
+    run_id = graph.locate(con, issue_id)
+    if run_id is None:
+        return
+
+    def record(change):
+        change.update(issue_id, {"disposition": disposition, "reason": reason})
+        for kind, target in (("becomes", option), ("covered_by", covered_by)):
+            for edge in change.view.out_edges(issue_id, kind):
+                change.retire(edge.id)
+            if target:
+                change.add_edge(kind, issue_id, target)
+
+    _commit(con, run_id, "dispose", {"issue": issue_id, "disposition": disposition, "option": option,
+                                     "covered_by": covered_by, "reason": reason}, record)
 
 
 def destination(issue):
@@ -1161,9 +1357,8 @@ def destination(issue):
 def errata(con, run_id):
     """Corrections recorded against conclusions of this run, oldest first. Each is a node's command
     (``erratum:<call>``): ``raised_by`` is that node, ``node`` the one corrected."""
-    return [{"raised_by": row["branch_id"], **json.loads(row["payload_json"])} for row in con.execute(
-        "SELECT branch_id,payload_json FROM research_actions WHERE run_id=? AND action_key LIKE 'erratum:%' "
-        "ORDER BY created_at,rowid", (run_id,))]
+    return [{"raised_by": entry.scope, **graph.thaw(entry.payload)}
+            for entry in graph.entries(con, run_id, key_prefix="erratum:", status=_LIVE)]
 
 
 # --- decisions and options -------------------------------------------------------------
@@ -1178,79 +1373,145 @@ def add_decision(con, run_id, *, node, round, origin, index, question, stakes, o
     review (``origin='decide'``) -- with its options. An option marked ``own`` is the node's own
     line and is pursued by the node itself; every other option waits for the level's
     reconciliation, which opens it as a node or records why not. Replays are idempotent."""
-    did = _derived_id("d_", node["id"], origin, round, index)
+    decision_id = _derived_id("d_", node["id"], origin, round, index)
+    if graph.snapshot(con, run_id).node(decision_id) is not None:
+        return decision_id
     now = int(time.time())
-    con.execute(
-        "INSERT OR IGNORE INTO research_decisions (id,run_id,node_id,round,origin,question,stakes,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?)", (did, run_id, node["id"], int(round), origin, question, stakes, now))
-    for position, option in enumerate(options):
-        con.execute(
-            "INSERT OR IGNORE INTO research_options (id,run_id,decision_id,label,premise,node_id,created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (_derived_id("o_", did, position), run_id, did, option["label"], option["premise"],
-             node["id"] if option.get("own") else None, now))
-    return did
+
+    def add(change):
+        change.add_node("decision", {"round": int(round), "origin": origin, "question": question, "stakes": stakes,
+                                     "created_at": now}, id=decision_id)
+        change.add_edge("decides", node["id"], decision_id)
+        for position, choice in enumerate(options):
+            option_id = change.add_node("option", {"label": choice["label"], "premise": choice["premise"],
+                                                   "reason": None, "created_at": now},
+                                        id=_derived_id("o_", decision_id, position))
+            change.add_edge("offers", decision_id, option_id)
+            if choice.get("own"):
+                change.add_edge("opens", option_id, node["id"])
+            for record in dict.fromkeys(choice.get("answers") or ()):
+                change.add_edge("answers", option_id, record)
+        return decision_id
+
+    return _commit(con, run_id, "add_decision", {"node": node["id"], "origin": origin, "round": int(round),
+                                                 "index": index, "question": question, "stakes": stakes,
+                                                 "options": list(options)}, add)
 
 
 def decisions(con, run_id, *, node_id=None):
-    q, args = "SELECT * FROM research_decisions WHERE run_id=?", [run_id]
-    if node_id is not None:
-        q += " AND node_id=?"
-        args.append(node_id)
-    return con.execute(q + " ORDER BY created_at,rowid", args).fetchall()
+    if graph.get(con, run_id) is None:
+        return []
+    snap, rows = graph.snapshot(con, run_id), []
+    for found in snap.nodes("decision"):
+        made = snap.in_edges(found.id, "decides")
+        owner = made[0].source if made else None
+        if node_id is None or owner == node_id:
+            rows.append({"id": found.id, "run_id": run_id, "node_id": owner, **graph.thaw(found.attrs)})
+    return rows
+
+
+def _option_row(snap, run_id, found):
+    offered = snap.in_edges(found.id, "offers")
+    return {"id": found.id, "run_id": run_id, "decision_id": offered[0].source if offered else None,
+            **graph.thaw(found.attrs), "node_id": _end(snap, found.id, "opens"),
+            "covered_by": _end(snap, found.id, "covered_by"),
+            "answers": [edge.target for edge in snap.out_edges(found.id, "answers")]}
 
 
 def options(con, run_id, *, decision_id=None):
-    q, args = "SELECT * FROM research_options WHERE run_id=?", [run_id]
-    if decision_id is not None:
-        q += " AND decision_id=?"
-        args.append(decision_id)
-    return con.execute(q + " ORDER BY rowid", args).fetchall()
+    if graph.get(con, run_id) is None:
+        return []
+    snap = graph.snapshot(con, run_id)
+    return [row for row in (_option_row(snap, run_id, found) for found in snap.nodes("option"))
+            if decision_id is None or row["decision_id"] == decision_id]
 
 
 def option(con, option_id):
-    return con.execute("SELECT * FROM research_options WHERE id=?", (option_id,)).fetchone()
+    run_id = graph.locate(con, option_id)
+    if run_id is None:
+        return None
+    snap = graph.snapshot(con, run_id)
+    found = snap.node(option_id)
+    return _option_row(snap, run_id, found) if found is not None and found.kind == "option" else None
 
 
-_OPTION_WITH_DECISION = (
-    "SELECT o.*,d.node_id AS decided_at,d.question AS decision_question,d.stakes AS decision_stakes,"
-    "d.origin AS decision_origin FROM research_options o JOIN research_decisions d ON d.id=o.decision_id ")
+def _with_decision(snap, row):
+    """An option with the decision that offered it: where it was decided, and what was asked."""
+    decision = snap.node(row["decision_id"])
+    made = snap.in_edges(decision.id, "decides")
+    return {**row, "decided_at": made[0].source if made else None, "decision_question": decision.attrs["question"],
+            "decision_stakes": decision.attrs["stakes"], "decision_origin": decision.attrs["origin"]}
+
+
+def _options_with_decisions(con, run_id, keep):
+    snap = graph.snapshot(con, run_id)
+    found = [(snap.node(row["decision_id"]).ordinal, item.ordinal, _with_decision(snap, row))
+             for item in snap.nodes("option") for row in [_option_row(snap, run_id, item)] if keep(row)]
+    return [row for *_order, row in sorted(found, key=lambda each: each[:2])]
 
 
 def pending_options(con, run_id):
     """Options no reconciliation has given an outcome yet: neither a node nor a reason."""
-    return con.execute(_OPTION_WITH_DECISION + "WHERE o.run_id=? AND o.node_id IS NULL AND o.reason IS NULL "
-                       "ORDER BY d.created_at,d.rowid,o.rowid", (run_id,)).fetchall()
+    if graph.get(con, run_id) is None:
+        return []
+    return _options_with_decisions(con, run_id, lambda row: row["node_id"] is None and row["reason"] is None)
 
 
 def origin_options(con, node_id):
     """The options that led to this node: decided at another node and pursued here."""
-    return con.execute(_OPTION_WITH_DECISION + "WHERE o.node_id=? AND d.node_id!=? ORDER BY d.created_at,o.rowid",
-                       (node_id, node_id)).fetchall()
+    row = con.execute("SELECT run_id FROM research_execution WHERE id=?", (node_id,)).fetchone()
+    if row is None:
+        return []
+    snap = graph.snapshot(con, row["run_id"])
+
+    def led_here(option_row):
+        made = snap.in_edges(option_row["decision_id"], "decides")
+        return option_row["node_id"] == node_id and (made[0].source if made else None) != node_id
+
+    return _options_with_decisions(con, row["run_id"], led_here)
 
 
-def set_option(con, option_id, *, node_id=None, reason=None):
-    con.execute("UPDATE research_options SET node_id=?,reason=? WHERE id=?", (node_id, reason, option_id))
+def set_option(con, option_id, *, node_id=None, reason=None, covered_by=None):
+    run_id = graph.locate(con, option_id)
+    if run_id is not None:
+        _commit(con, run_id, "set_option", {"option": option_id, "node": node_id, "reason": reason,
+                                            "covered_by": covered_by},
+                lambda change: _set_option(change, option_id, node_id, reason, covered_by))
+
+
+def _set_option(change, option_id, node_id, reason, covered_by=None):
+    """The outcome of an option: the node that pursues it, or the reason it was not opened -- with,
+    when something answers it, that node or the option opened for it (``covered_by``)."""
+    change.update(option_id, {"reason": reason})
+    for kind in ("opens", "covered_by"):
+        for edge in change.view.out_edges(option_id, kind):
+            change.retire(edge.id)
+    if node_id:
+        change.add_edge("opens", option_id, node_id)
+    elif covered_by:
+        change.add_edge("covered_by", option_id, covered_by)
 
 
 # --- relations: what links nodes without scheduling anything ------------------------------
 
 def relations(con, run_id):
-    members = {}
-    for row in con.execute(
-            "SELECT m.relation_id,m.node_id FROM research_relation_nodes m JOIN research_relations r "
-            "ON r.id=m.relation_id WHERE r.run_id=? ORDER BY m.relation_id,m.position", (run_id,)):
-        members.setdefault(row["relation_id"], []).append(row["node_id"])
-    return [{**dict(row), "nodes": members.get(row["id"], [])} for row in con.execute(
-        "SELECT * FROM research_relations WHERE run_id=? ORDER BY created_at,rowid", (run_id,))]
+    if graph.get(con, run_id) is None:
+        return []
+    snap, rows = graph.snapshot(con, run_id), []
+    for found in snap.nodes("relation"):
+        members = sorted(snap.out_edges(found.id, "member"), key=lambda edge: edge.attrs.get("position", 0))
+        rows.append({"id": found.id, "run_id": run_id, **graph.thaw(found.attrs),
+                     "nodes": [edge.target for edge in members]})
+    return rows
 
 
-def _add_relation(con, relation_id, run_id, kind, note, members, now):
+def _add_relation(change, relation_id, kind, note, members, now):
     """One relation and its member nodes, in order; recording the same id again changes nothing."""
-    con.execute("INSERT OR IGNORE INTO research_relations (id,run_id,kind,note,created_at) VALUES (?,?,?,?,?)",
-                (relation_id, run_id, kind, note, now))
-    con.executemany("INSERT OR IGNORE INTO research_relation_nodes (relation_id,node_id,position) VALUES (?,?,?)",
-                    [(relation_id, node_id, position) for position, node_id in enumerate(members)])
+    if change.view.node(relation_id) is not None:
+        return
+    change.add_node("relation", {"kind": kind, "note": note, "created_at": now}, id=relation_id)
+    for position, member in enumerate(dict.fromkeys(members)):
+        change.add_edge("member", relation_id, member, {"position": position})
 
 
 def add_relations(con, run, items):
@@ -1259,30 +1520,52 @@ def add_relations(con, run, items):
     with task_store.write_txn(con):
         _owned_run(con, run)
         known = {row["id"] for row in relations(con, run["id"])}
-        added = 0
+        fresh = []
         for item in items:
             members = list(dict.fromkeys(item["nodes"]))
             relation_id = _derived_id("rel_", run["id"], item["kind"], *sorted(members), item["note"])
-            added += relation_id not in known
-            known.add(relation_id)
-            _add_relation(con, relation_id, run["id"], item["kind"], item["note"], members, int(time.time()))
-        return added
+            if relation_id not in known:
+                known.add(relation_id)
+                fresh.append((relation_id, item["kind"], item["note"], members))
+        if fresh:
+            now = int(time.time())
+            _commit(con, run["id"], "relate", {"relations": [list(item) for item in fresh]},
+                    lambda change: [_add_relation(change, *item, now) for item in fresh] and None)
+        return len(fresh)
 
 
 # --- reconciliation: the level barrier's run-level command -------------------------------
 
+def _reconcile_key(round):
+    return f"reconcile:{int(round)}"
+
+
+def _reconcile_row(run_id, entry):
+    who = entry.proposer or {}
+    return {"run_id": run_id, "round": int(entry.key.split(":", 1)[1]), "payload": graph.thaw(entry.payload),
+            "session_file": _pointer(who.get("session_file")), "tool_call_id": who.get("tool_call_id"),
+            "approved_call_id": who.get("tool_call_id") if entry.approver is not None else None,
+            "receipt": graph.thaw(entry.receipt) if entry.status == graph.APPLIED else None,
+            "applied_at": entry.applied_at, "created_at": who.get("created_at", entry.created_at)}
+
+
 def reconcile(con, run_id, round):
-    row = con.execute("SELECT * FROM research_reconciles WHERE run_id=? AND round=?", (run_id, int(round))).fetchone()
-    if row is None:
-        return None
-    return {**dict(row), "payload": json.loads(row["payload_json"]),
-            "receipt": json.loads(row["receipt_json"]) if row["receipt_json"] else None}
+    entry = graph.current(con, run_id, _reconcile_key(round))
+    return _reconcile_row(run_id, entry) if entry else None
 
 
 def reconcile_rounds(con, run_id):
     """Every reconciliation of the run, oldest first."""
-    return [reconcile(con, run_id, row[0]) for row in con.execute(
-        "SELECT round FROM research_reconciles WHERE run_id=? ORDER BY round", (run_id,))]
+    return sorted((_reconcile_row(run_id, entry) for entry in
+                   graph.entries(con, run_id, scope="", key_prefix="reconcile:", status=_LIVE)),
+                  key=lambda row: row["round"])
+
+
+def withdraw_reconcile(con, run_id, round):
+    """Drop a reconciliation that was not applied: its round is reconciled again from the start."""
+    entry = graph.current(con, run_id, _reconcile_key(round))
+    if entry is not None and entry.status != graph.APPLIED:
+        graph.withdraw(con, entry.id)
 
 
 def _owned_run(con, run):
@@ -1300,12 +1583,8 @@ def record_reconcile(con, run, round, payload, *, session_file, tool_call_id):
         prior = reconcile(con, run["id"], round)
         if prior is not None and prior["applied_at"] is not None:
             raise ValueError(f"Reconciliation {round} is already applied; the graph has moved on.")
-        con.execute(
-            "INSERT OR REPLACE INTO research_reconciles "
-            "(run_id,round,payload_json,session_file,tool_call_id,approved_call_id,receipt_json,applied_at,created_at) "
-            "VALUES (?,?,?,?,?,NULL,NULL,NULL,?)",
-            (run["id"], int(round), json.dumps(payload, ensure_ascii=False), home.stored(session_file),
-             tool_call_id, int(time.time())))
+        graph.propose(con, run["id"], "reconcile", payload, key=_reconcile_key(round),
+                      proposer=_proposer(session_file, tool_call_id), supersede=True)
     return reconcile(con, run["id"], round)
 
 
@@ -1313,11 +1592,10 @@ def approve_reconcile(con, run, round):
     """The user's go-ahead, recorded by the root Last Order, for the reconciliation as it stands."""
     with task_store.write_txn(con):
         _owned_run(con, run)
-        current = reconcile(con, run["id"], round)
-        if current is None:
+        entry = graph.current(con, run["id"], _reconcile_key(round))
+        if entry is None:
             raise ValueError("There is no recorded reconciliation to start; record one with misaka_research_reconcile first.")
-        con.execute("UPDATE research_reconciles SET approved_call_id=tool_call_id WHERE run_id=? AND round=?",
-                    (run["id"], int(round)))
+        graph.approve(con, entry.id, approver=_APPROVER)
     return reconcile(con, run["id"], round)
 
 
@@ -1327,42 +1605,122 @@ def reconcile_approved(con, run_id, round):
 
 
 def apply_reconcile(con, run, round, resolved, *, considered):
-    """Open what a reconciliation decided, in one transaction: its nodes and their edges, the
-    outcome of every option it answered, its relations, and the receipt. Returns the receipt; a
-    reconciliation already applied is returned as it was, never applied twice."""
+    """Open what a reconciliation decided, in one application to the graph: its nodes and their
+    edges, the outcome of every option it answered, its relations, and the receipt. Returns the
+    receipt; a reconciliation already applied is returned as it was, never applied twice."""
     with task_store.write_txn(con):
         _owned_run(con, run)
-        current = reconcile(con, run["id"], round)
-        if current is None:
+        entry = graph.current(con, run["id"], _reconcile_key(round))
+        if entry is None:
             raise ValueError(f"Reconciliation {round} was never recorded.")
-        if current["applied_at"] is not None:
-            return current["receipt"]
-        opened = {"nodes": [], "joins": []}
-        for item in resolved["nodes"]:
-            child = create_node(con, run["id"], question=item["question"], parents=item["parents"])
-            for option_id in item["options"]:
-                set_option(con, option_id, node_id=child["id"])
-            opened["nodes"].append(child["id"])
-        for item in resolved["joins"]:
-            opened["joins"].append(create_node(con, run["id"], question=item["question"], parents=item["parents"])["id"])
-        for item in resolved["not_pursued"]:
-            set_option(con, item["option"], reason=item["reason"])
-        now = int(time.time())
-        for position, item in enumerate(resolved["relations"]):
-            _add_relation(con, _derived_id("rel_", run["id"], round, position), run["id"], item["kind"], item["note"],
-                          item["nodes"], now)
-        receipt = {"considered": list(considered), **opened}
-        con.execute("UPDATE research_reconciles SET receipt_json=?,applied_at=? WHERE run_id=? AND round=?",
-                    (json.dumps(receipt), now, run["id"], int(round)))
-    return receipt
+        if entry.status == graph.APPLIED:
+            return graph.thaw(entry.receipt)
+
+        def open_level(change, _entry):
+            now = int(time.time())
+            opened = {"nodes": [], "joins": []}
+            # Coverage claims first: a reopened proposal becomes an option here, which the outcomes below name.
+            as_option = _review_coverage(change, round, resolved.get("coverage") or (), now)
+            for item in resolved["nodes"]:
+                child = _open_node(con, change, run, item["question"], item["parents"])
+                for option_id in item["options"]:
+                    _set_option(change, as_option.get(option_id, option_id), child, None)
+                opened["nodes"].append(child)
+            for item in resolved["joins"]:
+                opened["joins"].append(_open_node(con, change, run, item["question"], item["parents"]))
+            for item in resolved["not_pursued"]:
+                cover = item.get("covered_by")
+                _set_option(change, as_option.get(item["option"], item["option"]), None, item["reason"],
+                            as_option.get(cover, cover))
+            for position, item in enumerate(resolved["relations"]):
+                _add_relation(change, _derived_id("rel_", run["id"], round, position), item["kind"], item["note"],
+                              item["nodes"], now)
+            return {"considered": list(considered), **opened, **({"reopened": as_option} if as_option else {})}
+
+        with _holding(con, run["id"]) as token:
+            receipt = graph.apply(con, entry.id, token=token, handlers={"reconcile": open_level})
+    return graph.thaw(receipt)
+
+
+REOPENED_QUESTION = ("Reconciliation {round}: possibilities raised here that the node named as covering them "
+                     "does not pursue")
+REOPENED_STAKES = ("Each was closed as covered by a node or an option of another line; reading both lines, the "
+                   "reconciliation found that line does not answer it, so it is a possibility of its own.")
+
+
+def _review_coverage(change, round, verdicts, now):
+    """The reconciliation's verdict on each coverage claim (``views.coverage_claims``), on the claim's
+    issue. A claim that holds keeps its pointer. A reopened one becomes an option of a decision the
+    reconciliation records at the node that raised it -- the proposal's question and premise, the verdict's
+    note recorded as why it was reopened -- which the reconciliation then opens or leaves unopened like any
+    pending option. Returns issue id -> option id."""
+    as_option, by_node = {}, {}
+    for verdict in verdicts:
+        review = {"round": int(round), "verdict": verdict["verdict"], "note": verdict["note"],
+                  "claimed": verdict["covered_by"]}
+        change.update(verdict["proposal"], {"coverage_review": review})
+        if verdict["verdict"] == "reopen":
+            by_node.setdefault(verdict["node"], []).append(verdict)
+    for node_id, items in by_node.items():
+        decision_id = _derived_id("d_", node_id, "reconcile", round, 0)
+        change.add_node("decision", {"round": int(round), "origin": "reconcile", "question": REOPENED_QUESTION.format(
+            round=int(round)), "stakes": REOPENED_STAKES, "created_at": now}, id=decision_id)
+        change.add_edge("decides", node_id, decision_id)
+        for position, verdict in enumerate(items):
+            issue_id = verdict["proposal"]
+            question = change.view.node(issue_id).attrs["question"]
+            option_id = change.add_node("option", {"label": question, "premise": verdict["premise"] or question,
+                                                   "reason": None, "created_at": now},
+                                        id=_derived_id("o_", decision_id, position))
+            change.add_edge("offers", decision_id, option_id)
+            for kind in ("covered_by", "becomes"):
+                for edge in change.view.out_edges(issue_id, kind):
+                    change.retire(edge.id)
+            change.add_edge("becomes", issue_id, option_id)
+            change.update(issue_id, {"disposition": "branch", "reason": (
+                f"reconciliation {int(round)}: not covered by {verdict['covered_by']} -- {verdict['note']}")})
+            as_option[issue_id] = option_id
+    return as_option
+
+
+_LIVE = (graph.PROPOSED, graph.APPROVED, graph.APPLIED)
+# Who approves a reconciliation: the user, through the root Last Order's command.
+_APPROVER = {"by": "user"}
+
+
+def _proposer(session_file, tool_call_id, created_at=None, *, stored=False):
+    """Who recorded a command: the session (kept home-relative, as board rows keep it) and the call."""
+    return {"session_file": (session_file if stored else session_file and home.stored(session_file)) or None,
+            "tool_call_id": tool_call_id, "created_at": int(created_at if created_at is not None else time.time())}
+
+
+def _pointer(value):
+    return str(home.from_stored(value)) if isinstance(value, str) and value else value
+
+
+def _action(run_id, entry):
+    who = entry.proposer or {}
+    return {"run_id": run_id, "branch_id": entry.scope, "action_key": entry.key, "payload": graph.thaw(entry.payload),
+            "session_file": _pointer(who.get("session_file")), "tool_call_id": who.get("tool_call_id"),
+            "created_at": who.get("created_at", entry.created_at)}
 
 
 def action(con, run_id, node_id, key):
-    row = con.execute(
-        "SELECT * FROM research_actions WHERE run_id=? AND branch_id=? AND action_key=?",
-        (run_id, node_id, key),
-    ).fetchone()
-    return {**dict(row), "payload": json.loads(row["payload_json"])} if row else None
+    entry = graph.current(con, run_id, key, scope=node_id)
+    return _action(run_id, entry) if entry else None
+
+
+def actions(con, run_id, node_id, prefix):
+    """A node's standing commands whose keys begin with ``prefix``, oldest first."""
+    return [_action(run_id, entry) for entry in graph.entries(con, run_id, scope=node_id, key_prefix=prefix,
+                                                              status=_LIVE)]
+
+
+def withdraw_actions(con, run_id, node_id, prefix):
+    """Withdraw a node's standing commands whose keys begin with ``prefix``."""
+    with task_store.write_txn(con):
+        for entry in graph.entries(con, run_id, scope=node_id, key_prefix=prefix, status=_LIVE):
+            graph.withdraw(con, entry.id)
 
 
 def check_owner(con, run, branch=None, *, allow_stop=False):
@@ -1401,26 +1759,19 @@ def record_action(con, run, branch, key, payload, *, session_file, tool_call_id)
             if prior["payload"] != payload:
                 raise ValueError("This research command was already accepted with different arguments.")
             return prior
-        con.execute(
-            "INSERT INTO research_actions VALUES (?,?,?,?,?,?,?)",
-            (run["id"], branch["id"], key, json.dumps(payload, ensure_ascii=False),
-             session_file and home.stored(session_file), tool_call_id, int(time.time())),
-        )
+        graph.propose(con, run["id"], "action", payload, key=key, scope=branch["id"],
+                      proposer=_proposer(session_file, tool_call_id))
     return action(con, run["id"], branch["id"], key)
 
 
 def replace_action(con, run, branch, key, payload, *, session_file, tool_call_id):
     """Accept a command that supersedes the earlier one of its key: a plan revised while it waits
-    for the user, or a fresh start after such a revision. Same ownership rule as record_action."""
+    for the user, or a fresh start after such a revision. Same ownership rule as record_action. The
+    earlier one stays on the journal, voided."""
     with task_store.write_txn(con):
         _owned(con, run, branch)
-        con.execute("DELETE FROM research_actions WHERE run_id=? AND branch_id=? AND action_key=?",
-                    (run["id"], branch["id"], key))
-        con.execute(
-            "INSERT INTO research_actions VALUES (?,?,?,?,?,?,?)",
-            (run["id"], branch["id"], key, json.dumps(payload, ensure_ascii=False),
-             session_file and home.stored(session_file), tool_call_id, int(time.time())),
-        )
+        graph.propose(con, run["id"], "action", payload, key=key, scope=branch["id"],
+                      proposer=_proposer(session_file, tool_call_id), supersede=True)
     return action(con, run["id"], branch["id"], key)
 
 
@@ -1443,17 +1794,14 @@ def plan_change_key(round):
 
 def plan_changes(con, run_id, node_id, round):
     """The changes Last Order made to a round's cards while they ran, oldest first."""
-    return [json.loads(row["payload_json"]) for row in con.execute(
-        "SELECT payload_json FROM research_actions WHERE run_id=? AND branch_id=? AND action_key LIKE ? "
-        "ORDER BY created_at,rowid", (run_id, node_id, plan_change_key(round) + ":%"))]
+    return [row["payload"] for row in actions(con, run_id, node_id, plan_change_key(round) + ":")]
 
 
 def failed_card_decisions(con, run_id, node_id=None):
     """What node Last Orders decided about cards that failed for good, oldest first: each names
     its ``decision`` and the ``cards`` it covers."""
-    return [json.loads(row["payload_json"]) for row in con.execute(
-        "SELECT payload_json FROM research_actions WHERE run_id=? AND (? IS NULL OR branch_id=?) "
-        "AND action_key LIKE 'cards_failed:%' ORDER BY created_at,rowid", (run_id, node_id, node_id))]
+    return [graph.thaw(entry.payload) for entry in
+            graph.entries(con, run_id, scope=node_id, key_prefix="cards_failed:", status=_LIVE)]
 
 
 def given_up_cards(con, run_id, node_id=None):
@@ -1468,8 +1816,9 @@ def skipped(con, run_id, node_id):
 
 
 def delete_action(con, run_id, node_id, key):
-    con.execute("DELETE FROM research_actions WHERE run_id=? AND branch_id=? AND action_key=?",
-                (run_id, node_id, key))
+    entry = graph.current(con, run_id, key, scope=node_id)
+    if entry is not None:
+        graph.withdraw(con, entry.id)
 
 
 def plan_key(round):
@@ -1503,20 +1852,16 @@ def record_run_action(con, run, key, payload, *, session_file, tool_call_id):
     with task_store.write_txn(con):
         _owned_run(con, run)
         node = root(con, run["id"])
-        con.execute("DELETE FROM research_actions WHERE run_id=? AND branch_id=? AND action_key=?",
-                    (run["id"], node["id"], key))
-        con.execute("INSERT INTO research_actions VALUES (?,?,?,?,?,?,?)",
-                    (run["id"], node["id"], key, json.dumps(payload, ensure_ascii=False),
-                     home.stored(session_file), tool_call_id, int(time.time())))
+        graph.propose(con, run["id"], "action", payload, key=key, scope=node["id"],
+                      proposer=_proposer(session_file, tool_call_id), supersede=True)
     return action(con, run["id"], node["id"], key)
 
 
 def plan_round(con, run_id, node_id):
     """The highest planning round this node has recorded a plan for; 0 before the first."""
-    keys = [row[0] for row in con.execute(
-        "SELECT action_key FROM research_actions WHERE run_id=? AND branch_id=? "
-        "AND (action_key='plan' OR action_key LIKE 'plan:%')", (run_id, node_id))]
-    rounds = [1 if key == "plan" else int(key.split(":", 1)[1]) for key in keys]
+    keys = [entry.key for entry in graph.entries(con, run_id, scope=node_id, key_prefix="plan", status=_LIVE)]
+    rounds = [1 if key == "plan" else int(key.split(":", 1)[1]) for key in keys
+              if key == "plan" or re.fullmatch(r"plan:\d+", key)]
     return max(rounds) if rounds else 0
 
 
@@ -1548,8 +1893,8 @@ def reframe(con, run_id, node, question):
     if not question:
         return
     with task_store.write_txn(con):
-        con.execute("UPDATE research_branches SET question=?,updated_at=? WHERE id=?",
-                    (question, int(time.time()), node["id"]))
+        _commit(con, run_id, "reframe", {"node": node["id"], "question": question},
+                lambda change: change.update(node["id"], {"question": question}))
         if is_root(node):
             con.execute("UPDATE research_runs SET question=?,updated_at=? WHERE id=?",
                         (question, int(time.time()), run_id))
@@ -1745,8 +2090,7 @@ def summary(con, run_id):
         "id": run["id"], "workspace": run["workspace"], "phase": run["phase"],
         "status": run["status"], "wave": run["wave"], "limits": limits(run),
         "tasks": task_count(con, run_id), "nodes": len(nodes(con, run_id)),
-        "undisposed_issues": con.execute("SELECT COUNT(*) FROM research_issues WHERE run_id=? "
-                                         "AND disposition IS NULL", (run_id,)).fetchone()[0],
+        "undisposed_issues": sum(1 for row in issues(con, run_id) if row["disposition"] is None),
         "pending_options": len(pending_options(con, run_id)),
         "stop_requested": bool(run["stop_requested"]),
         "final_artifact": run["final_artifact"], "last_error": run["last_error"],

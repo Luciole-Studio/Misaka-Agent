@@ -963,6 +963,7 @@ def build(target_name: str) -> Path:
         )
     for name in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"):
         shutil.copy2(ROOT / name, stage / name)
+    shutil.copytree(ROOT / "LICENSES", stage / "LICENSES", dirs_exist_ok=True)
     _write_bundled(stage, version, target, versions, git_version, poppler_version, poppler_origin)
     _install_project(tools / _exe("uv"), python_executable(stage))
     _smoke(stage, version)

@@ -1,10 +1,10 @@
 """``misaka update``: is this install behind the repository, and what would bring it level.
 
 Shaped after how Hermes updates itself, in intent rather than detail. Follow the branch head
-rather than release tags, fast-forward only, and never guess: refuse on a dirty tree, a diverged
-branch, or an install shape it cannot vouch for, and say what to run by hand. Checking and applying
-are separate (``hermes update --check``); nothing here runs on its own. Applying keeps Hermes's
-promises too:
+rather than release tags -- main, or the branch the install was made from -- fast-forward only,
+and never guess: refuse on a dirty tree, a diverged branch, or an install shape it cannot vouch
+for, and say what to run by hand. Checking and applying are separate (``hermes update --check``);
+nothing here runs on its own. Applying keeps Hermes's promises too:
 
 - the install method decides the command, and what the install holds survives it: uv and pipx
   upgrade from their own records, extras included; pip is handed the extras found installed;
@@ -52,6 +52,18 @@ class Install:
     path: Path | None         # the checkout, when there is one
     commit: str | None        # the commit a git install pinned
     version: str
+    revision: str | None = None   # what a git install was asked for (PEP 610 ``requested_revision``): a branch, a tag
+
+    @property
+    def follows(self) -> str:
+        """What this install tracks: the revision it was installed from, else the main branch. A git
+        install made from another branch is that branch's, not behind or beside main."""
+        return self.revision or BRANCH
+
+    @property
+    def source(self) -> str:
+        """The git requirement that makes this install again, at the revision it follows."""
+        return f"git+{REPO_URL}" + (f"@{self.revision}" if self.revision else "")
 
 
 def _manager(installer: str) -> str:
@@ -97,7 +109,8 @@ def describe() -> Install:
     url = str(direct.get("url") or "")
     vcs = direct.get("vcs_info") or {}
     if vcs.get("vcs") == "git":
-        return Install("git", False, installer, None, vcs.get("commit_id"), dist.version)
+        return Install("git", False, installer, None, vcs.get("commit_id"), dist.version,
+                       vcs.get("requested_revision") or None)
     if url.startswith("file://"):
         parsed = urlsplit(url)
         editable = bool((direct.get("dir_info") or {}).get("editable"))
@@ -152,15 +165,29 @@ def active_runs() -> list[str]:
     from contextlib import closing
 
     from misaka.config import home
+    from misaka.core import graph
     from misaka.core.research.runs import ACTIVE
     board = home.path("db")
     if not board.is_file():
         return []
     try:
         with closing(sqlite3.connect(board.resolve().as_uri() + "?mode=ro", uri=True)) as con:
-            rows = con.execute(f"SELECT id, workspace FROM research_runs WHERE status IN ({','.join('?' * len(ACTIVE))}) "
-                               "AND driver_lock IS NOT NULL AND (driver_expires IS NULL OR driver_expires>=?)",
-                               (*ACTIVE, int(time.time()))).fetchall()
+            con.row_factory = sqlite3.Row
+            active = con.execute(f"SELECT id, workspace FROM research_runs WHERE status IN ({','.join('?' * len(ACTIVE))})",
+                                 ACTIVE).fetchall()
+            now, rows = int(time.time()), []
+            # A run is driven while its graph's lease is held; a board research has not opened since
+            # an upgrade keeps the lease on the run row still (schema v18, migrated on that open).
+            before_migration = "driver_lock" in {row[1] for row in con.execute('PRAGMA table_info("research_runs")')}
+            for run_id, workspace in active:
+                if before_migration:
+                    token, expires = con.execute("SELECT driver_lock, driver_expires FROM research_runs WHERE id=?",
+                                                 (run_id,)).fetchone()
+                else:
+                    lease = graph.get(con, run_id)
+                    token, expires = (lease.lease_token, lease.lease_expires) if lease else (None, None)
+                if token is not None and (expires is None or expires >= now):
+                    rows.append((run_id, workspace))
     except sqlite3.Error:
         return []
     return [f"{run_id}  {home.display(workspace)}" for run_id, workspace in rows]
@@ -199,16 +226,17 @@ def stop_daemon() -> None:
 
 def _git(path: Path, *args: str, check: bool = True) -> str:
     result = subprocess.run(["git", "-C", str(path), *args],
-                            capture_output=True, text=True, encoding="utf-8", check=False, timeout=60)
+                            capture_output=True, text=True, encoding="utf-8", errors="replace",
+                            check=False, timeout=60)
     if check and result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout).strip() or f"git {' '.join(args)} failed")
     return result.stdout.strip()
 
 
-def _remote_head_via_git(path: Path) -> str | None:
+def _remote_head_via_git(path: Path, branch: str = BRANCH) -> str | None:
     """The branch head straight from the remote. No API, no token, no rate limit."""
     try:
-        line = _git(path, "ls-remote", "origin", f"refs/heads/{BRANCH}")
+        line = _git(path, "ls-remote", "origin", f"refs/heads/{branch}")
     except (RuntimeError, OSError, subprocess.SubprocessError):
         return None
     return line.split()[0] if line else None
@@ -231,7 +259,7 @@ def github_token() -> tuple[str | None, str]:
             return value, name
     try:
         found = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, encoding="utf-8",
-                               timeout=5, check=False)
+                               errors="replace", timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):
         return None, ""
     token = found.stdout.strip()
@@ -244,9 +272,9 @@ def _api(path: str) -> tuple[dict | None, str | None]:
     import urllib.error
     import urllib.request
 
-    from misaka.ai.utils.user_agent import get_misaka_user_agent
+    from misaka.ai.utils.pi_user_agent import getPiUserAgent
     token, _source = github_token()
-    headers = {"User-Agent": get_misaka_user_agent(), "Accept": "application/vnd.github+json"}
+    headers = {"User-Agent": getPiUserAgent(), "Accept": "application/vnd.github+json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(f"{API}{path}", headers=headers)
@@ -305,22 +333,33 @@ def _bundle_update(install: Install) -> int:
     return 0
 
 
-def _behind(base: str) -> tuple[int | None, str | None]:
-    """``(commits ahead of base, why not)``, via one compare call."""
-    data, failure = _api(f"/compare/{base}...{BRANCH}")
+def _behind(base: str, head: str = BRANCH) -> tuple[int | None, str | None]:
+    """``(commits ``head`` is ahead of base, why not)``, via one compare call."""
+    data, failure = _api(f"/compare/{base}...{head}")
     if data is None:
         return None, failure
     if data.get("status") not in {"ahead", "identical"}:
-        return None, f"this install's commit is not an ancestor of {BRANCH}"
+        return None, f"this install's commit is not an ancestor of {head}"
     ahead = data.get("ahead_by")
     return (ahead, None) if isinstance(ahead, int) else (None, "GitHub did not report a distance")
 
 
+def _upstream(path: Path) -> str | None:
+    """The branch of ``origin`` the checkout's branch tracks, or None (no upstream, or another remote's)."""
+    try:
+        upstream = _git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        return None
+    remote, _, branch = upstream.partition("/")
+    return branch if remote == "origin" and branch else None
+
+
 def _checkout_state(install: Install) -> dict:
-    """What a checkout can say about itself, and whether it is safe to fast-forward."""
+    """What a checkout can say about itself, and whether it is safe to fast-forward -- along the
+    branch of origin it tracks, else main."""
     path = install.path
     assert path is not None
-    state: dict = {"head": None, "remote": None, "behind": None, "dirty": None, "reason": None}
+    state: dict = {"head": None, "remote": None, "behind": None, "dirty": None, "reason": None, "follows": BRANCH}
     try:
         state["head"] = _git(path, "rev-parse", "HEAD")
         state["dirty"] = bool(_git(path, "status", "--porcelain"))
@@ -328,7 +367,8 @@ def _checkout_state(install: Install) -> dict:
     except (RuntimeError, OSError, subprocess.SubprocessError) as error:
         state["reason"] = str(error)
         return state
-    remote = _remote_head_via_git(path)
+    follows = state["follows"] = _upstream(path) or BRANCH
+    remote = _remote_head_via_git(path, follows)
     state["remote"] = remote
     if remote is None:
         state["reason"] = "the remote could not be reached"
@@ -338,7 +378,7 @@ def _checkout_state(install: Install) -> dict:
         return state
     # `--ff-only` is the whole safety model: it is a fast-forward or it is nothing.
     try:
-        _git(path, "fetch", "origin", BRANCH, "--quiet")
+        _git(path, "fetch", "origin", follows, "--quiet")
         can_ff = subprocess.run(["git", "-C", str(path), "merge-base", "--is-ancestor", "HEAD", remote],
                                 capture_output=True, check=False).returncode == 0
         state["behind"] = int(_git(path, "rev-list", "--count", f"HEAD..{remote}") or 0)
@@ -346,7 +386,7 @@ def _checkout_state(install: Install) -> dict:
         state["reason"] = str(error)
         return state
     if not can_ff:
-        state["reason"] = f"this checkout has commits {BRANCH} does not; a fast-forward is not possible"
+        state["reason"] = f"this checkout has commits {follows} does not; a fast-forward is not possible"
     elif state["dirty"]:
         state["reason"] = "the working tree has uncommitted changes"
     elif branch == "HEAD":
@@ -370,10 +410,10 @@ def _install_commands(install: Install) -> list[list[str]] | None:
     extras = installed_extras()
     wanted = f"[{','.join(extras)}]" if extras else ""
     if install.kind == "git":
-        source = f"misaka{wanted} @ git+{REPO_URL}"
+        source = f"misaka{wanted} @ {install.source}"
         if install.installer == "uv":
             return [["uv", "pip", "install", "--python", sys.executable, "--reinstall-package", "misaka", source]]
-        return [[sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-deps", f"misaka @ git+{REPO_URL}"],
+        return [[sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-deps", f"misaka @ {install.source}"],
                 [sys.executable, "-m", "pip", "install", source]]
     if install.kind == "checkout" and install.path is not None:
         # Dependencies move with the code; the pull alone leaves the environment behind.
@@ -392,7 +432,7 @@ def adding_extras(install: Install, adding: list[str]) -> list[str] | None:
     if install.kind == "checkout" and install.path is not None:
         target = ["-e", f"{install.path}[{extras}]"]
     elif install.kind == "git":
-        target = [f"misaka[{extras}] @ git+{REPO_URL}"]
+        target = [f"misaka[{extras}] @ {install.source}"]      # the revision it follows, not main
     else:
         return None
     return {"uv tool": ["uv", "tool", "install", "--force", *target],
@@ -497,7 +537,7 @@ def _restore_command(install: Install) -> str:
             }.get(install.installer, f"{sys.executable} -m pip install --force-reinstall {source}")
 
 
-def _report(install: Install, state: dict | None, behind: int | None) -> None:
+def _report(install: Install, state: dict | None, behind: int | None, follows: str = BRANCH) -> None:
     shape = {"checkout": "a git checkout" + (" (editable)" if install.editable else ""),
              "git": f"installed from {REPO_URL}",
              "wheel": "installed from a built package",
@@ -518,11 +558,11 @@ def _report(install: Install, state: dict | None, behind: int | None) -> None:
     if install.kind == "bundle":
         return                              # a release, compared with releases (_bundle_update)
     if behind is None:
-        ui.print_check(None, BRANCH, "could not be compared" + (f": {state['reason']}" if state and state.get("reason") else ""))
+        ui.print_check(None, follows, "could not be compared" + (f": {state['reason']}" if state and state.get("reason") else ""))
     elif behind == 0:
-        ui.print_success(f"Up to date with {BRANCH}.")
+        ui.print_success(f"Up to date with {follows}.")
     else:
-        ui.print_warning(f"{behind} commit(s) behind {BRANCH}.")
+        ui.print_warning(f"{behind} commit(s) behind {follows}.")
 
 
 def run(*, apply: bool = False) -> int:
@@ -530,19 +570,23 @@ def run(*, apply: bool = False) -> int:
     install = describe()
     if install.kind == "bundle":
         return _bundle_update(install)
-    ui.print_info(f"Tracking the {BRANCH} branch of {REPO}, the way Hermes tracks its own:",
-                  "a fast-forward or nothing. Releases are cut rarely; the branch is the product.", "")
-
     state = _checkout_state(install) if install.kind == "checkout" else None
+    follows = (state or {}).get("follows") or install.follows
+    if follows == BRANCH:
+        ui.print_info(f"Tracking the {BRANCH} branch of {REPO}, the way Hermes tracks its own:",
+                      "a fast-forward or nothing. Releases are cut rarely; the branch is the product.", "")
+    else:
+        ui.print_info(f"Tracking {follows} of {REPO}, which this install was made from:",
+                      "a fast-forward or nothing.", "")
     if state is not None:
         behind = state.get("behind")
     elif install.commit:
-        behind, failure = _behind(install.commit)
+        behind, failure = _behind(install.commit, follows)
         if failure:
             state = {"reason": failure}
     else:
         behind = None
-    _report(install, state, behind)
+    _report(install, state, behind, follows)
 
     commands = _install_commands(install)
     if behind == 0 and not apply:
@@ -555,10 +599,11 @@ def run(*, apply: bool = False) -> int:
     blocked = state.get("reason") if state else None
     if blocked:
         ui.print_error(f"Cannot update in place: {blocked}.")
-        ui.print_info("Resolve it in the checkout and run this again; nothing here will do it for you.")
+        ui.print_info("Resolve it in the checkout and run this again; nothing here will do it for you."
+                      if install.kind == "checkout" else "Nothing was changed; run this again once it can be compared.")
         return 1
 
-    steps = ([f"git -C {ui.tilde(str(install.path))} pull --ff-only origin {BRANCH}"] if install.kind == "checkout" else []) \
+    steps = ([f"git -C {ui.tilde(str(install.path))} pull --ff-only origin {follows}"] if install.kind == "checkout" else []) \
         + [shlex.join(command) for command in commands]
     ui.print_info("", "Updating would run:", *[f"  {step}" for step in steps])
     if not apply:
@@ -595,11 +640,11 @@ def run(*, apply: bool = False) -> int:
     before = state.get("head") if state else None
     if install.kind == "checkout" and install.path is not None:
         try:
-            _git(install.path, "pull", "--ff-only", "origin", BRANCH)
+            _git(install.path, "pull", "--ff-only", "origin", follows)
         except (RuntimeError, OSError, subprocess.SubprocessError) as error:
             ui.print_error(f"git pull failed: {error}")
             return 1
-        ui.print_success(f"Fast-forwarded to {BRANCH}.")
+        ui.print_success(f"Fast-forwarded to {follows}.")
     failure = _run_all(commands, install.path) or _starts()
     if failure:
         ui.print_error(f"The update did not finish: {failure}.")

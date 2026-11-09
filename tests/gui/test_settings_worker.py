@@ -406,7 +406,7 @@ class CustomModelSettingsTests(unittest.TestCase):
             captured["max_tokens"] = options.maxTokens
             return SimpleNamespace(stopReason="stop", content=[SimpleNamespace(text="OK")])
 
-        with mock.patch("misaka.ai.stream.complete_simple", ok):
+        with mock.patch("misaka.ai.compat.completeSimple", ok):
             result = op_ping_custom({"api": "openai-completions", "base_url": self.origin + "/v1",
                                      "api_key": secret, "model": "llama3"})
         self.assertEqual(result["message"], "模型已回复：OK")
@@ -419,7 +419,7 @@ class CustomModelSettingsTests(unittest.TestCase):
         async def boom(model, context, options=None):
             raise RuntimeError(f"upstream said {options.apiKey}")
 
-        with mock.patch("misaka.ai.stream.complete_simple", boom):
+        with mock.patch("misaka.ai.compat.completeSimple", boom):
             with self.assertRaises(ValueError) as caught:
                 op_ping_custom({"api": "openai-completions", "base_url": self.origin + "/v1",
                                 "api_key": secret, "model": "llama3"})

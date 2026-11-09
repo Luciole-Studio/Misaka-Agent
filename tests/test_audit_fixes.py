@@ -18,7 +18,7 @@ def test_office_cache_does_not_bypass_private_material_guard(tmp_path):
     import asyncio
 
     from misaka.core.documents.office import cache
-    from misaka.core.tools.read import create_read_tool_definition
+    from misaka.core.tools.read import createReadToolDefinition
     from misaka.core.web.evidence import check_material_read
 
     project = tmp_path / 'project'
@@ -32,7 +32,7 @@ def test_office_cache_does_not_bypass_private_material_guard(tmp_path):
         check_material_read(str(private))
     entry = cache._directory(str(project)) / (cache._key(str(source)) + '.md')
     entry.symlink_to(private)
-    result = asyncio.run(create_read_tool_definition(str(project)).execute('audit', {'path': 'table.csv'}))
+    result = asyncio.run(createReadToolDefinition(str(project)).execute('audit', {'path': 'table.csv'}))
     content = '\n'.join(item.text for item in result.content if hasattr(item, 'text'))
     assert 'PRIVATE_FIXTURE_MARKER' not in content, content
 
@@ -91,6 +91,7 @@ def test_uninstall_project_inspection_closes_database(tmp_path):
 @pytest.mark.asyncio
 async def test_streaming_mail_is_not_acknowledged_before_persistence(tmp_path):
     from misaka.agent.agent import Agent
+    from misaka.ai.compat import streamSimple
     from misaka.core.agent_session import AgentSession
     from misaka.core.network import messages
     from misaka.core.session_manager import SessionManager
@@ -100,7 +101,7 @@ async def test_streaming_mail_is_not_acknowledged_before_persistence(tmp_path):
     try:
         mid = messages.send(con, 'last-order', 'DURABLE_FIXTURE_MESSAGE', sender='10032')
         session = object.__new__(AgentSession)
-        session.agent = Agent()
+        session.agent = Agent(streamFn=streamSimple)
         session._isAgentRunActive = True
         session._customMessageReceipts = {}
         session.sessionManager = SessionManager.create(str(tmp_path), str(tmp_path / 'sessions'))
@@ -118,9 +119,9 @@ async def test_streaming_mail_is_not_acknowledged_before_persistence(tmp_path):
         row = con.execute('SELECT delivered_at FROM messages WHERE id=?', (mid,)).fetchone()
         assert row['delivered_at'] is None, 'mail ACKed with only an in-memory follow-up; a crash loses it'
         # The real transcript append fires the receipt, then the inbox may ACK.
-        queued = session.agent._steering_queue.drain()
+        queued = session.agent._steeringQueue.drain()
         for message in queued:
-            session._append_custom_message(message)
+            session._appendCustomMessage(message)
         await asyncio.wait_for(delivery, 5)
         assert con.execute('SELECT delivered_at FROM messages WHERE id=?', (mid,)).fetchone()[0] is not None
         assert 'DURABLE_FIXTURE_MESSAGE' in Path(session.sessionManager.sessionFile).read_text(encoding='utf-8')
@@ -206,7 +207,7 @@ async def test_extension_exec_timeout_reaps_owned_descendants(tmp_path):
 
     import psutil
 
-    from misaka.core.exec import exec_command
+    from misaka.core.exec import execCommand
 
     pidfile = tmp_path / 'fixture-child.pid'
     program = (
@@ -217,7 +218,7 @@ async def test_extension_exec_timeout_reaps_owned_descendants(tmp_path):
         'time.sleep(30)\n'
     )
     try:
-        result = await exec_command(sys.executable, ['-c', program], str(tmp_path), {'timeout': 500})
+        result = await execCommand(sys.executable, ['-c', program], str(tmp_path), {'timeout': 500})
         assert result.killed and pidfile.exists()
         pid = int(pidfile.read_text(encoding='utf-8'))
         alive = psutil.pid_exists(pid) and psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
@@ -235,16 +236,17 @@ async def test_extension_exec_timeout_reaps_owned_descendants(tmp_path):
 @posix.modes
 async def test_interactive_bash_spill_is_private(tmp_path, monkeypatch):
     from misaka.core import bash_executor
+    from misaka.utils import output_files
 
     class Operations:
         async def exec(self, command, cwd, options):
             options['onData'](b'PRIVATE_FIXTURE_OUTPUT\n' * 6000)
             return {'exitCode': 0}
 
-    monkeypatch.setattr(bash_executor.tempfile, 'gettempdir', lambda: str(tmp_path))
+    monkeypatch.setattr(output_files.tempfile, 'gettempdir', lambda: str(tmp_path))
     old = os.umask(0o022)
     try:
-        result = await bash_executor.execute_bash_with_operations('fixture', str(tmp_path), Operations())
+        result = await bash_executor.executeBashWithOperations('fixture', str(tmp_path), Operations())
         assert result.fullOutputPath
         assert stat.S_IMODE(Path(result.fullOutputPath).stat().st_mode) == 0o600
     finally:
@@ -303,11 +305,12 @@ def test_update_decodes_local_install_file_uri(tmp_path, monkeypatch):
 
 def _busy_mail_session(tmp_path):
     from misaka.agent.agent import Agent
+    from misaka.ai.compat import streamSimple
     from misaka.core.agent_session import AgentSession
     from misaka.core.session_manager import SessionManager
 
     session = object.__new__(AgentSession)
-    session.agent = Agent()
+    session.agent = Agent(streamFn=streamSimple)
     session._isAgentRunActive = True
     session._customMessageReceipts = {}
     session.sessionManager = SessionManager.create(str(tmp_path), str(tmp_path / 'sessions'))
@@ -317,7 +320,7 @@ def _busy_mail_session(tmp_path):
 
 async def _wait_for_queue(session, count=1):
     async with asyncio.timeout(5):
-        while len(session.agent._steering_queue._messages) < count:
+        while len(session.agent._steeringQueue._messages) < count:
             await asyncio.sleep(0.01)
 
 
@@ -346,8 +349,8 @@ async def test_mail_shutdown_or_cancel_keeps_unpersisted_rows_retryable(tmp_path
         assert tuple(row) == (None, None)
         # A late persistence callback does not use the already-closed connection.
         con.close()
-        for message in session.agent._steering_queue.drain():
-            session._append_custom_message(message)
+        for message in session.agent._steeringQueue.drain():
+            session._appendCustomMessage(message)
     finally:
         if job is not None:
             job.cancel()
@@ -373,8 +376,8 @@ async def test_mail_retry_after_ack_failure_deduplicates_each_row(tmp_path, monk
         monkeypatch.setattr(messages, 'ack', fail_ack)
         job = asyncio.create_task(inbox._deliver_once(con))
         await _wait_for_queue(session)
-        for message in session.agent._steering_queue.drain():
-            session._append_custom_message(message)
+        for message in session.agent._steeringQueue.drain():
+            session._appendCustomMessage(message)
         with pytest.raises(sqlite3.OperationalError, match='ACK failure'):
             await asyncio.wait_for(job, 5)
         assert con.execute('SELECT delivered_at FROM messages WHERE id=?', (first,)).fetchone()[0] is None
@@ -383,10 +386,10 @@ async def test_mail_retry_after_ack_failure_deduplicates_each_row(tmp_path, monk
         monkeypatch.setattr(messages, 'ack', original_ack)
         job = asyncio.create_task(inbox._deliver_once(con))
         await _wait_for_queue(session)
-        queued = session.agent._steering_queue.drain()
+        queued = session.agent._steeringQueue.drain()
         assert len(queued) == 1
         assert 'second fixture' in queued[0]['content']
-        session._append_custom_message(queued[0])
+        session._appendCustomMessage(queued[0])
         await asyncio.wait_for(job, 5)
         assert con.execute('SELECT COUNT(*) FROM messages WHERE delivered_at IS NOT NULL').fetchone()[0] == 2
         entries = session.sessionManager.getEntries()
@@ -413,7 +416,7 @@ async def test_mail_persist_error_does_not_ack_batch(tmp_path):
         job = asyncio.create_task(inbox._deliver_once(con))
         await _wait_for_queue(session)
         delivery_id = next(iter(session._customMessageReceipts))
-        session._fail_custom_receipt(delivery_id, OSError('fixture transcript write failed'))
+        session._failCustomReceipt(delivery_id, OSError('fixture transcript write failed'))
         with pytest.raises(OSError, match='transcript write failed'):
             await asyncio.wait_for(job, 5)
         assert all(tuple(r) == (None, None) for r in con.execute('SELECT delivered_at,lease_token FROM messages'))
@@ -449,8 +452,8 @@ async def test_mail_renews_lease_while_waiting_for_persistence(tmp_path, monkeyp
             while not renewals:
                 await asyncio.sleep(0.01)
         assert con.execute('SELECT delivered_at FROM messages').fetchone()[0] is None
-        for message in session.agent._steering_queue.drain():
-            session._append_custom_message(message)
+        for message in session.agent._steeringQueue.drain():
+            session._appendCustomMessage(message)
         await asyncio.wait_for(job, 5)
     finally:
         if job is not None:
@@ -516,7 +519,7 @@ async def test_extension_exec_cleans_detached_sigterm_resistant_child(tmp_path, 
 
     import psutil
 
-    from misaka.core.exec import exec_command
+    from misaka.core.exec import execCommand
 
     pidfile = tmp_path / 'child.pid'
     child_script = 'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(30)'
@@ -527,7 +530,7 @@ async def test_extension_exec_cleans_detached_sigterm_resistant_child(tmp_path, 
         f'pathlib.Path({str(pidfile)!r}).write_text(str(p.pid))\n'
         'time.sleep(30)\n')
     abort = asyncio.Event()
-    job = asyncio.create_task(exec_command(sys.executable, ['-c', parent_script], str(tmp_path),
+    job = asyncio.create_task(execCommand(sys.executable, ['-c', parent_script], str(tmp_path),
                                            {'signal': abort, 'timeout': 700 if trigger == 'timeout' else 0}))
     try:
         async with asyncio.timeout(5):
@@ -560,9 +563,9 @@ async def test_extension_exec_cleans_detached_sigterm_resistant_child(tmp_path, 
 async def test_extension_exec_keeps_output_and_normal_exit_status(tmp_path):
     import sys
 
-    from misaka.core.exec import exec_command
+    from misaka.core.exec import execCommand
 
-    result = await exec_command(sys.executable, ['-c', 'import sys;print("out");print("err",file=sys.stderr);sys.exit(7)'], str(tmp_path))
+    result = await execCommand(sys.executable, ['-c', 'import sys;print("out");print("err",file=sys.stderr);sys.exit(7)'], str(tmp_path))
     # A Windows child writes its text-mode newlines as CRLF, and the output is kept as written.
     stdout, stderr = (text.replace('\r\n', '\n') for text in (result.stdout, result.stderr))
     assert (stdout, stderr, result.code, result.killed) == ('out\n', 'err\n', 7, False)
@@ -676,18 +679,18 @@ async def test_mail_cancelled_batch_reattaches_receipts_without_duplicating_queu
             messages.send(con, 'last-order', body, sender='10032')
         job = asyncio.create_task(inbox._deliver_once(con))
         await _wait_for_queue(session)
-        assert len(session.agent._steering_queue._messages) == 1  # one batch, one wake-up
-        assert session.agent._steering_queue._messages[0]['details']['count'] == 2
+        assert len(session.agent._steeringQueue._messages) == 1  # one batch, one wake-up
+        assert session.agent._steeringQueue._messages[0]['details']['count'] == 2
         job.cancel()
         with pytest.raises(asyncio.CancelledError):
             await job
         messages.send(con, 'last-order', 'third', sender='10032')
         job = asyncio.create_task(inbox._deliver_once(con))
         await _wait_for_queue(session, 2)
-        assert len(session.agent._steering_queue._messages) == 2
+        assert len(session.agent._steeringQueue._messages) == 2
         while session.agent.hasQueuedMessages():
-            for message in session.agent._steering_queue.drain():
-                session._append_custom_message(message)
+            for message in session.agent._steeringQueue.drain():
+                session._appendCustomMessage(message)
         await asyncio.wait_for(job, 5)
         assert con.execute('SELECT COUNT(*) FROM messages WHERE delivered_at IS NOT NULL').fetchone()[0] == 3
         assert len(session.sessionManager.getEntries()) == 2

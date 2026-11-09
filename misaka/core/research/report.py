@@ -11,6 +11,7 @@ it never judges or rewrites research prose.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -19,10 +20,11 @@ import time
 from pathlib import Path
 
 from misaka.core.documents import index as corpus
+from misaka.core.documents import workspace as ws_index
 from misaka.core.platform import prompt_guard
 from misaka.core.platform import tasks as task_store
-from misaka.core.research import bundle, commands, graph, planner, runs
-from misaka.core.session_manager import find_most_recent_session
+from misaka.core.research import bundle, commands, planner, runs, views
+from misaka.core.session_manager import findMostRecentSession
 from misaka.utils import atomic
 
 _LOG = logging.getLogger(__name__)
@@ -160,9 +162,28 @@ def doc_id(run, path):
 
 def index_run(con, run, node=None):
     """Every registered text product of the run, or of one ``node``, in the workspace corpus:
-    ``{path: doc_id}``."""
+    ``{path: doc_id}``. A file saved by hand under a card's ``sources/`` was offered to the corpus
+    when the card finished: it keeps the id it got, and a scan refused then is not read again. A
+    card's working files stay out here as they did then, unless the card indexed one itself."""
     rows = runs.artifacts(con, run["id"], branch_id=node["id"] if node is not None else None)
-    return {row["path"]: found for row in rows if (found := doc_id(run, row["path"])) is not None}
+
+    @functools.cache
+    def card(task_id):
+        return task_store.get(con, task_id)
+
+    def offered(row):
+        if json.loads(row["metadata_json"] or "{}").get("saved_by_hand"):
+            return False
+        task = card(row["task_id"]) if row["task_id"] else None
+        return task is None or ws_index.belongs_in_corpus(task, row["path"])
+
+    def indexed(row):
+        if offered(row):
+            return doc_id(run, row["path"])
+        known = row["sha256"][:12]
+        return known if corpus.resolve_doc(known, workspace=run["workspace"]) else None
+
+    return {row["path"]: found for row in rows if (found := indexed(row)) is not None}
 
 
 def _catalog(con, run, docs, focus=None):
@@ -178,7 +199,7 @@ def _catalog(con, run, docs, focus=None):
         by_kind = {}
         for row in rows:
             by_kind.setdefault(row["kind"], []).append(doc(row["path"]))
-        entry = {"node": node["id"], "kind": graph.kind(con, node), "depth": node["depth"], "status": node["status"],
+        entry = {"node": node["id"], "kind": views.kind(con, node), "depth": node["depth"], "status": node["status"],
                  "parents": [p["id"] for p in runs.parents(con, node["id"])],
                  "children": [c["id"] for c in runs.children(con, node["id"])],
                  "question": node["question"],
@@ -190,7 +211,7 @@ def _catalog(con, run, docs, focus=None):
                  # Counts only: every issue's text made the catalog 280 KB (2026-09-29, 293 issues); the
                  # issues view lists a node's.
                  "issues": _issue_counts(runs.issues(con, run["id"], node_id=node["id"])),
-                 "dissolves": graph.dissolution(con, run, node)}
+                 "dissolves": views.dissolution(con, run, node)}
         if node["id"] == focus:
             entry.update({"reached_by": [{"decided_at": o["decided_at"], "decision": o["decision_question"],
                                           "option": o["label"], "premise": o["premise"]}
@@ -228,7 +249,8 @@ def _record(con, run):
         decisions.append({"node": decision["node_id"], "origin": decision["origin"], "question": decision["question"],
                           "stakes": decision["stakes"],
                           "options": [{"label": o["label"], "premise": o["premise"], "node": o["node_id"],
-                                       "not_pursued": o["reason"]}
+                                       "not_pursued": o["reason"], "answered_by": o["covered_by"],
+                                       "brings_back": o["answers"]}
                                       for o in runs.options(con, run["id"], decision_id=decision["id"])]})
     issues = runs.issues(con, run["id"])
     return {
@@ -238,18 +260,19 @@ def _record(con, run):
                         for i in issues if i["disposition"] == "correct"],
         "errata": runs.errata(con, run["id"]),
         "not_taken": [{"issue": i["id"], "node": i["branch_id"], "origin": i["origin"], "question": i["question"],
-                       "disposition": i["disposition"], "to": runs.destination(i), "reason": i["reason"]}
+                       "disposition": i["disposition"], "to": runs.destination(i), "reason": i["reason"],
+                       **({"coverage_review": i["coverage_review"]} if i.get("coverage_review") else {})}
                       for i in issues if i["disposition"] in {"decline", "covered"}],
         "skipped_nodes": [{"node": n["id"], "question": n["question"]}
                           for n in runs.nodes(con, run["id"]) if n["status"] == "parked"],
         "decisions": decisions,
         "relations": runs.relations(con, run["id"]),
-        "dissolutions": [{"node": n["id"], **graph.dissolution(con, run, n)} for n in runs.nodes(con, run["id"])
-                         if graph.dissolution(con, run, n)],
+        "dissolutions": [{"node": n["id"], **views.dissolution(con, run, n)} for n in runs.nodes(con, run["id"])
+                         if views.dissolution(con, run, n)],
         "dissolution_consent": (runs.action(con, run["id"], runs.root(con, run["id"])["id"], runs.CONSENT_KEY)
                                 or {}).get("payload"),
-        "graph": os.path.join(run["workspace"], graph.graph_path(run)),
-        "paths": os.path.join(run["workspace"], graph.paths_path(run)),
+        "graph": os.path.join(run["workspace"], views.graph_path(run)),
+        "paths": os.path.join(run["workspace"], views.paths_path(run)),
     }
 
 
@@ -264,9 +287,8 @@ def _stage(con, run, cfg, worker, prompt, *, key, model, reply, extra_tools=(), 
     action, _text = planner.commanded(
         worker, cfg, prompt, command=tool, name=REPORT_TOOL, what=f"{REPORT_TOOL} for {key}",
         recorded=lambda: runs.action(con, run["id"], root["id"], key),
-        cwd=run["workspace"], session_dir=session_dir, tools=FINAL_TOOLS,
-        raw=True, task_id=run["id"], con=con, session_file=run["root_session"],
-        continue_session=bool(find_most_recent_session(session_dir)), extra_tools=tuple(extra_tools))
+        cwd=run["workspace"], session_dir=session_dir, raw=True, task_id=run["id"], con=con, session_file=run["root_session"],
+        continue_session=bool(findMostRecentSession(session_dir)), extra_tools=tuple(extra_tools))
     if check_active:
         check_active()
     return action["payload"]
@@ -336,8 +358,8 @@ def _common(con, run, docs, focus=None):
             "(root first, then by depth)\n"
             + prompt_guard.untrusted("research-catalog", json.dumps(_catalog(con, run, docs, focus), ensure_ascii=False,
                                                                     indent=2))
-            + f"\nThe graph: `{os.path.join(run['workspace'], graph.graph_path(run))}`; every possibility raised and where "
-            f"it went: `{os.path.join(run['workspace'], graph.paths_path(run))}`; the complete list of materials the run "
+            + f"\nThe graph: `{os.path.join(run['workspace'], views.graph_path(run))}`; every possibility raised and where "
+            f"it went: `{os.path.join(run['workspace'], views.paths_path(run))}`; the complete list of materials the run "
             f"opened and downloaded, which misaka writes when the report is delivered (Appendix III): "
             f"`{os.path.join(run['workspace'], runs.run_path(run, bundle.MANIFEST))}`.\n")
 
@@ -349,7 +371,7 @@ def prepare(con, run, cfg, worker, *, check_active=None):
     root = runs.root(con, run["id"])
     if _checkpoint(con, run, "survey") is None:
         relate = commands.relate_tool(con, run, session_file=run["root_session"],
-                                      validate=lambda value: graph.resolve_relations(con, run, value))
+                                      validate=lambda value: views.resolve_relations(con, run, value))
         sections = []
         for node in runs.nodes(con, run["id"]):
             key = f"survey:{node['id']}"

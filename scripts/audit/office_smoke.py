@@ -19,8 +19,8 @@ from pptx import Presentation
 from pptx.dml.color import RGBColor
 
 from misaka.core.documents.office import soffice
-from misaka.core.tools.office import create_office_tool_definition
-from misaka.core.tools.read import create_read_tool_definition
+from misaka.core.tools.office import createOfficeToolDefinition
+from misaka.core.tools.read import createReadToolDefinition
 
 
 def digest(path):
@@ -40,8 +40,8 @@ async def smoke(out, render):
     if render and renderer is None:
         raise RuntimeError('--render requires pdftoppm')
     out.mkdir(parents=True, exist_ok=False)
-    tool = create_office_tool_definition(str(out))
-    read = create_read_tool_definition(str(out))
+    tool = createOfficeToolDefinition(str(out))
+    read = createReadToolDefinition(str(out))
     records = {'libreoffice': version, 'formats': []}
 
     async def write(name, ops):

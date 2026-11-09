@@ -1,34 +1,36 @@
-"""Session-scoped cleanup hooks used by provider integrations."""
+"""Translated from pi's ``packages/ai/src/session-resources.ts`` (v1.1.0).
+
+MISAKA fork: the set is an insertion-ordered dict (a Python set has hash order), iterated as a snapshot (a JS Set
+tolerates removal while it is iterated); ``AggregateError`` is ``ExceptionGroup``.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
-SessionResourceCleanup = Callable[[str | None], None]
+type SessionResourceCleanup = Callable[[str | None], None]
 
-_session_resource_cleanups: dict[SessionResourceCleanup, None] = {}
+_sessionResourceCleanups: dict[SessionResourceCleanup, None] = {}
 
 
-def register_session_resource_cleanup(cleanup: SessionResourceCleanup) -> Callable[[], None]:
-    _session_resource_cleanups[cleanup] = None
+def registerSessionResourceCleanup(cleanup: SessionResourceCleanup) -> Callable[[], None]:
+    _sessionResourceCleanups[cleanup] = None
 
     def unregister() -> None:
-        _session_resource_cleanups.pop(cleanup, None)
+        _sessionResourceCleanups.pop(cleanup, None)
 
     return unregister
 
 
-def cleanup_session_resources(session_id: str | None = None) -> None:
+def cleanupSessionResources(sessionId: str | None = None) -> None:
     errors: list[Exception] = []
-    for cleanup in tuple(_session_resource_cleanups.keys()):
+    for cleanup in tuple(_sessionResourceCleanups):
         try:
-            cleanup(session_id)
-        except Exception as error:  # noqa: BLE001 - every cleanup runs; the errors are re-raised together below
+            cleanup(sessionId)
+        except Exception as error:  # noqa: BLE001 - every cleanup runs; the errors are raised together below
             errors.append(error)
-    if errors:
+    if len(errors) > 0:
         raise ExceptionGroup("Failed to cleanup session resources", errors)
 
 
-__all__ = [
-    "SessionResourceCleanup",
-    ]
+__all__ = ["SessionResourceCleanup", "cleanupSessionResources", "registerSessionResourceCleanup"]

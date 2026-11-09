@@ -1,46 +1,42 @@
-"""The default ``AuthContext``, translated from pi's ``packages/ai/src/auth/context.ts``.
+"""Translated from pi's ``packages/ai/src/auth/context.ts`` (v1.1.0).
 
-Upstream reaches for ``node:fs``/``node:os`` through a variable specifier so browser
-bundlers leave the import alone, and answers ``fileExists`` with ``false`` when there is
-no filesystem. Python has no such split, so the indirection is dropped and the behaviour
-it protected -- a missing or unreadable path is simply "no" -- is what stays.
+MISAKA fork: Python has no browser build, so the bundler-opaque ``node:fs``/``node:os`` imports are plain ``os`` calls,
+and the returned object literal is an instance of ``_DefaultAuthContext``.
 """
 
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from collections.abc import Mapping
 
 from misaka.ai.auth.types import AuthContext
+from misaka.utils.js import jsTrim
+
+
+def _getProcessEnv() -> Mapping[str, str]:
+    return os.environ
 
 
 class _DefaultAuthContext:
     async def env(self, name: str) -> str | None:
-        """The variable's value, or ``None`` when it is unset or blank.
-
-        A variable set to whitespace reads as unset on purpose: an empty
-        ``ANTHROPIC_API_KEY`` left over in a shell profile should not count as configured.
-        """
-        value = os.environ.get(name)
-        return value if value is not None and value.strip() else None
+        value = _getProcessEnv().get(name)
+        return value if isinstance(value, str) and len(jsTrim(value)) > 0 else None
 
     async def fileExists(self, path: str) -> bool:
-        """Whether the path exists, expanding a leading ``~``.
-
-        Any failure to answer -- permissions, a malformed path -- is "no", because the
-        caller's next move is to try another source, not to report an error.
-        """
         try:
-            resolved = Path(path).expanduser() if path.startswith("~") else Path(path)
-            return resolved.exists()
-        except (OSError, ValueError, RuntimeError):
-            # RuntimeError: expanduser() with no resolvable home. Anything here means we
-            # could not answer, and "not configured" is the answer that keeps the caller moving.
+            resolved = path
+            if resolved.startswith("~"):
+                resolved = os.path.expanduser("~") + resolved[1:]
+            # `fs.access(resolved)`: F_OK.
+            return os.access(resolved, os.F_OK)
+        except Exception:  # noqa: BLE001 - `catch { return false; }`
             return False
 
 
 def defaultProviderAuthContext() -> AuthContext:
-    """Env vars from the process environment, file existence from the filesystem."""
+    """Default auth context: env vars from `process.env` (undefined in browsers),
+    file existence via node:fs (always false in browsers).
+    """
     return _DefaultAuthContext()
 
 

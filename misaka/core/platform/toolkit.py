@@ -4,7 +4,7 @@ A tool reaches the model down two channels. The ``tools`` array carries
 ``description`` and the parameter schema, and both are required by the dataclass,
 so a tool that reaches the request is always fully documented there. The system
 prompt's ``Available tools:`` inventory carries ``promptSnippet``, and that field
-is optional: ``build_system_prompt`` filters out every tool without one, and it
+is optional: ``buildSystemPrompt`` filters out every tool without one, and it
 does so silently. A tool can therefore be completely callable and completely
 absent from the inventory the model reads before it decides what to reach for.
 
@@ -26,6 +26,7 @@ import re
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
+from misaka.ai.utils.typebox_helpers import typeboxSchema
 from misaka.core.extensions.types import ToolDefinition
 
 # Inventory lines sit one per tool in every request; the existing hand-written ones
@@ -116,7 +117,7 @@ def register_tool(
     produced, and ``before(ctx, args)`` runs after parsing and before the handler
     for the callers that gate on session context.
     """
-    to_schema = schema or (lambda model: model.model_json_schema())
+    to_schema = schema or typeboxSchema
 
     def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
         async def execute(tool_call_id, raw, signal, on_update, ctx):

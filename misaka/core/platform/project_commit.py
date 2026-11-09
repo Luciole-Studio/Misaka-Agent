@@ -1,12 +1,12 @@
 """Committing the project to git, only when the user asks and only after the user confirms.
 
-Nothing in MISAKA commits by itself: research, cards and their files leave the working tree as
+Nothing in MISAKA commits by itself: workflows, cards and their files leave the working tree as
 it is, and the history is the user's to write. Two doors lead to a commit, both in a window the
 user is sitting at: the ``/commit`` command, and the ``project_commit`` tool Last Order (or a
 Sister chatting with the user) calls when the user asks in words. Either way the files that would
 be committed are shown and the user presses confirm; a session with no screen cannot commit. The
-tool exists only in foreground sessions that are not research nodes, and a research phase turn
-narrows the tools to the research set, so no phase of a run can reach it. The commit is made
+tool exists only in foreground sessions that are not a workflow's own windows, and a workflow's
+phase turn narrows the tools to its own set, so no phase of a run can reach it. The commit is made
 under the repository's own configured identity.
 """
 from __future__ import annotations
@@ -88,7 +88,7 @@ SESSION_KINDS = {"foreground"}
 
 
 def part(spec):
-    from misaka.core.research.wiring.node import node_identity
-    if spec.research_context or node_identity():   # a research node's window: the run's, not the user's desk
+    from misaka.core.platform import owners
+    if spec.workflow_context or owners.owns_window():   # a workflow's window, not the user's desk
         return None
     return ProjectCommitPart()

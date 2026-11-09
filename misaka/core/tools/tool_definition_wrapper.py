@@ -6,19 +6,22 @@ from collections.abc import Callable
 from typing import Any
 
 from misaka.agent.types import AgentTool
-from misaka.core.extensions.types import ExtensionContext, ToolDefinition
+from misaka.core.extensions.types import ExtensionToolContext, ToolDefinition
+
+# Creates the context for executing the tool call `toolCallId` with the call's signal.
+type ToolContextFactory = Callable[[str, Any], ExtensionToolContext]
 
 
-def wrap_tool_definition[TDetails](
+def wrapToolDefinition[TDetails](
     definition: ToolDefinition[Any, TDetails],
-    ctx_factory: Callable[[], ExtensionContext] | None = None,
+    ctx_factory: ToolContextFactory | None = None,
 ) -> AgentTool:
     async def execute(
         tool_call_id: str,
         params: Any,
-        signal: Any | None,
-        on_update: Any | None,
-        ctx: ExtensionContext | None = None,
+        signal: Any | None = None,
+        on_update: Any | None = None,
+        ctx: ExtensionToolContext | None = None,
     ) -> Any:
         return await definition.execute(
             tool_call_id,
@@ -27,7 +30,7 @@ def wrap_tool_definition[TDetails](
             on_update,
             ctx
             if ctx is not None
-            else (ctx_factory() if ctx_factory is not None else None),
+            else (ctx_factory(tool_call_id, signal) if ctx_factory is not None else None),
         )
 
     return AgentTool(
@@ -38,19 +41,20 @@ def wrap_tool_definition[TDetails](
         parameters=definition.parameters,
         constrainedSampling=definition.constrainedSampling,
         prepareArguments=definition.prepareArguments,
+        outputSchema=definition.outputSchema,
         executionMode=definition.executionMode,
         execute=execute,
     )
 
 
-def wrap_tool_definitions(
+def wrapToolDefinitions(
     definitions: list[ToolDefinition[Any, Any]],
-    ctx_factory: Callable[[], ExtensionContext] | None = None,
+    ctx_factory: ToolContextFactory | None = None,
 ) -> list[AgentTool]:
-    return [wrap_tool_definition(definition, ctx_factory) for definition in definitions]
+    return [wrapToolDefinition(definition, ctx_factory) for definition in definitions]
 
 
-def create_tool_definition_from_agent_tool(tool: Any) -> ToolDefinition[Any, Any]:
+def createToolDefinitionFromAgentTool(tool: Any) -> ToolDefinition[Any, Any]:
     async def execute(
         tool_call_id: str,
         params: Any,
@@ -68,16 +72,15 @@ def create_tool_definition_from_agent_tool(tool: Any) -> ToolDefinition[Any, Any
         parameters=tool.parameters,
         constrainedSampling=tool.constrainedSampling,
         prepareArguments=getattr(tool, "prepareArguments", None),
+        outputSchema=getattr(tool, "outputSchema", None),
         executionMode=getattr(tool, "executionMode", None),
         execute=execute,
     )
 
 
-wrapToolDefinition = wrap_tool_definition
-wrapToolDefinitions = wrap_tool_definitions
-createToolDefinitionFromAgentTool = create_tool_definition_from_agent_tool
 
 __all__ = [
+    "ToolContextFactory",
     "createToolDefinitionFromAgentTool",
     "wrapToolDefinition",
     "wrapToolDefinitions",

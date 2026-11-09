@@ -141,7 +141,7 @@ def test_cleanup_does_not_mask_publish_error(tmp_path, monkeypatch):
 
 
 async def test_committed_cleanup_warning_is_a_successful_tool_call(tmp_path, monkeypatch):
-    from misaka.core.tools.office import create_office_tool_definition
+    from misaka.core.tools.office import createOfficeToolDefinition
 
     path = tmp_path / 'original.txt'
     path.write_text('before\n', encoding='utf-8')
@@ -154,7 +154,7 @@ async def test_committed_cleanup_warning_is_a_successful_tool_call(tmp_path, mon
 
     with monkeypatch.context() as patch:
         patch.setattr(_office.os, 'unlink', deny_backup_delete)
-        result = await create_office_tool_definition(str(tmp_path)).execute(
+        result = await createOfficeToolDefinition(str(tmp_path)).execute(
             'acceptance', {'path': str(path), 'ops': [{'append': {'content': 'after\n'}}]})
     receipt = result.content[0].text
     assert receipt.startswith('✓'), receipt

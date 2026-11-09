@@ -5,7 +5,6 @@ import json
 import os
 import shutil
 import subprocess
-from types import SimpleNamespace
 
 from misaka.config import home
 from misaka.core.web import config, gateway
@@ -26,14 +25,14 @@ def status():
 
 def run(args):
     if args.op.startswith('gateway-'):
-        auth = gateway.storage()
         if args.op == 'gateway-login':
-            def show(info):
-                print(f'Open {info.verificationUri}\nDevice code: {info.userCode}')
-            asyncio.run(auth.login('nous', SimpleNamespace(onDeviceCode=show, signal=None)))
+            from misaka.cli.web import login_and_store
+            from misaka.core.web.backends.xai import _auth_path
+
+            asyncio.run(login_and_store(gateway.nousOAuth, _auth_path(), 'nous'))
             print('Nous OAuth saved in this profile auth.json')
         elif args.op == 'gateway-logout':
-            auth.remove('nous')
+            asyncio.run(gateway.storage().delete('nous'))
             current_scope().gateway_accounts.clear()
             print('Nous profile grant removed; explicit TOOL_GATEWAY_USER_TOKEN still takes precedence if configured')
         else:

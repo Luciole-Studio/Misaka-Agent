@@ -60,7 +60,7 @@ def op_overview(_params: dict) -> dict:
         return skill_catalogue(os.getcwd(), _params.get("role") or None)
     import platform
 
-    from misaka.cli.setup import Wizard, _install_command
+    from misaka.cli.setup_wizard import Wizard, _install_command
     from misaka.config import CFG, VERSION, current_config, profiles
     from misaka.config import env as env_file
     from misaka.config.product import setting
@@ -105,8 +105,10 @@ def op_overview(_params: dict) -> dict:
 # ---- models and credentials -----------------------------------------------------------
 
 def _runtime(read_only=True):
-    from misaka.cli.auth import _create_runtime
-    return _create_runtime(read_only=read_only)
+    from misaka.cli.auth_overview import create_auth_runtime
+    from misaka.core.model_registry import ModelRegistry
+    auth = asyncio.run(create_auth_runtime(read_only=read_only, refresh=True))
+    return SimpleNamespace(registry=ModelRegistry(auth.runtime), storage=auth.credentials)
 
 
 def _profile_for(target):
@@ -123,8 +125,8 @@ def _profile_for(target):
 
 
 def op_models_overview(_params: dict) -> dict:
-    from misaka.cli.auth import _missing_sdk_extras
-    from misaka.cli.setup import FEATURED_PROVIDERS
+    from misaka.cli.auth_overview import missing_sdk_extras
+    from misaka.cli.setup_wizard import FEATURED_PROVIDERS
     from misaka.config import current_config, profiles
     from misaka.core.network import roster
 
@@ -136,12 +138,12 @@ def op_models_overview(_params: dict) -> dict:
         custom = {**custom, "error": load_error[:500]}
     custom_ids = {item["id"] for item in custom["services"]}
     known = sorted({model.provider for model in registry.getAll()})
-    oauth_ids = {p.id for p in registry.getOAuthProviders()}
+    oauth_ids = {p.id for p in registry.modelRuntime.getProviders() if p.auth.oauth is not None}
     providers = []
     for provider in [*[p for p in FEATURED_PROVIDERS if p in known], *[p for p in known if p not in FEATURED_PROVIDERS]]:
         status = registry.getProviderAuthStatus(provider)
         try:
-            extras = _missing_sdk_extras(registry, provider)
+            extras = missing_sdk_extras(registry.modelRuntime, provider)
         except Exception:  # noqa: BLE001
             extras = []
         configured = bool(status.configured or status.source)
@@ -167,7 +169,7 @@ def op_models_overview(_params: dict) -> dict:
 
 
 def op_models(params: dict) -> dict:
-    from misaka.cli.setup import Wizard
+    from misaka.cli.setup_wizard import Wizard
     from misaka.config import current_config
     provider = str(params.get("provider") or "")
     registry = _runtime().registry
@@ -193,14 +195,19 @@ def op_set_key(params: dict) -> dict:
     runtime = _runtime(read_only=False)
     if provider not in {m.provider for m in runtime.registry.getAll()}:
         raise ValueError("未知的服务商")
-    runtime.storage.set(provider, {"type": "api_key", "key": key})
+    from misaka.ai.auth.types import ApiKeyCredential
+
+    async def store(_current):
+        return ApiKeyCredential(key=key)
+
+    asyncio.run(runtime.storage.modify(provider, store))
     return {"message": f"已保存 {provider} 的 API Key"}
 
 
 def op_logout(params: dict) -> dict:
     provider = str(params.get("provider") or "")
     runtime = _runtime(read_only=False)
-    runtime.storage.remove(provider)
+    asyncio.run(runtime.registry.modelRuntime.logout(provider))
     return {"message": f"已移除 {provider} 保存的登录信息（环境变量中的密钥不受影响）"}
 
 
@@ -240,7 +247,6 @@ def _clear_pin(profile: str) -> None:
 
 
 def op_verify(params: dict) -> dict:
-    from misaka.ai.stream import complete_simple
     from misaka.ai.types import Context, SimpleStreamOptions, UserMessage
     provider, model_id = str(params.get("provider") or ""), str(params.get("model") or "")
     registry = _runtime().registry
@@ -249,12 +255,9 @@ def op_verify(params: dict) -> dict:
         model = registry.find(provider, model_id)
         if model is None:
             raise RuntimeError(f"{provider}/{model_id} 不在模型目录中")
-        auth = await registry.getApiKeyAndHeaders(model)
-        if not auth.get("ok"):
-            raise RuntimeError(auth.get("error") or "没有找到可用的凭证")
-        reply = await complete_simple(
+        reply = await registry.completeSimple(
             model, Context(messages=[UserMessage(content="Reply with the single word OK.", timestamp=0)]),
-            SimpleStreamOptions(apiKey=auth.get("apiKey"), headers=auth.get("headers"), maxTokens=16))
+            SimpleStreamOptions(maxTokens=16))
         if reply.stopReason == "error":
             raise RuntimeError(reply.errorMessage or "请求失败")
         return "".join(getattr(part, "text", "") for part in reply.content)
@@ -373,7 +376,10 @@ def op_test_provider(params: dict) -> dict:
     _registry, model, auth = _provider_auth(provider, str(params.get("model") or ""))
     if provider == "openrouter":
         key = auth.get("apiKey") or ""
-        status, payload = _fetch_one(model.baseUrl.rstrip("/") + "/key",
+        base = model.baseUrl.rstrip("/")
+        if not base.endswith("/v1"):
+            base += "/v1"
+        status, payload = _fetch_one(base + "/key",
                                      _catalog_headers("openai-completions", key), key)
         if not 200 <= status < 300 or not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
             raise ValueError(f"OpenRouter 凭证测试失败（HTTP {status}）")
@@ -449,7 +455,7 @@ def _read_models_document() -> dict:
     path = _models_file()
     if not os.path.isfile(path):
         return {"providers": {}}
-    from misaka.core.model_registry import _strip_json_comments
+    from misaka.utils.json import stripJsonComments as _strip_json_comments
     with open(path, encoding="utf-8-sig") as handle:
         text = handle.read()
     try:
@@ -466,8 +472,8 @@ def _read_models_document() -> dict:
 
 
 def _builtin_provider_ids() -> set[str]:
-    from misaka.ai.models import get_providers
-    return set(get_providers())
+    from misaka.ai.compat import getProviders
+    return set(getProviders())
 
 
 def _is_custom_block(provider_id: str, block: object, builtin: set[str]) -> bool:
@@ -558,7 +564,7 @@ def _scrub(message: str, key: str) -> str:
 def _resolved_key(stored: str) -> str:
     if not stored:
         return ""
-    from misaka.core.resolve_config_value import resolve_config_value
+    from misaka.core.resolve_config_value import resolveConfigValue as resolve_config_value
     resolved = resolve_config_value(stored)
     if resolved is None:
         raise ValueError("API Key 没有解析出来。$NAME 需要环境变量已设置，!命令 需要命令有输出")
@@ -601,7 +607,7 @@ def _catalog_urls(api: str, base: str) -> list[str]:
 
 
 def _catalog_headers(api: str, key: str) -> dict[str, str]:
-    from misaka.ai.utils.user_agent import get_misaka_user_agent
+    from misaka.ai.utils.pi_user_agent import getPiUserAgent as get_misaka_user_agent
     headers = {"Accept": "application/json", "User-Agent": get_misaka_user_agent()}
     if not key:
         return headers
@@ -753,7 +759,7 @@ def op_ping_custom(params: dict) -> dict:
     model_id = str(params.get("model") or "").strip()
     if not model_id or len(model_id) > 256 or any(char in model_id for char in "\r\n\0"):
         raise ValueError("请选择一个模型")
-    from misaka.ai.stream import complete_simple
+    from misaka.ai.compat import completeSimple as complete_simple
     from misaka.ai.types import Context, Model, ModelCost, SimpleStreamOptions, UserMessage
     model = Model(
         id=model_id, name=model_id, api=api, provider="custom", baseUrl=base, reasoning=False,
@@ -905,12 +911,14 @@ def op_login(params: dict) -> dict:
     whose callback server wins the race would otherwise leave a worker blocked on stdin
     that ``asyncio.run`` then waits for forever (see the wizard's docstring).
     """
-    from misaka.ai.auth.oauth_bridge import callbacks_for_interaction
-    from misaka.cli.setup import _open_browser
+    from misaka.ai.auth.types import LoginOptions
+    from misaka.core.provider_attribution import CLIENT_NAME
+    from misaka.core.settings_manager import SettingsManager
+    from misaka.utils.open_browser import openBrowser as _open_browser
 
     provider = str(params.get("provider") or "")
     registry = _runtime(read_only=False).registry
-    if provider not in {p.id for p in registry.getOAuthProviders()}:
+    if provider not in {p.id for p in registry.modelRuntime.getProviders() if p.auth.oauth is not None}:
         raise ValueError("这个服务商不支持浏览器登录")
 
     async def run() -> None:
@@ -958,12 +966,11 @@ def op_login(params: dict) -> dict:
                 send({"event": "message", "message": str(getattr(event, "message", ""))})
 
         interaction = SimpleNamespace(signal=None, prompt=ask, notify=notify)
-        owned = (registry.getRegisteredProviderConfig(provider) is not None
-                 or registry.getRegisteredNativeProvider(provider) is not None)
-        if owned:
-            await registry.login(provider, "oauth", interaction)
-        else:
-            await registry.authStorage.login(provider, callbacks_for_interaction(interaction))
+        await registry.modelRuntime.login(
+            provider, "oauth", interaction,
+            LoginOptions(getDeviceId=lambda: SettingsManager.create(os.getcwd()).getOrCreateDeviceId(),
+                         agentName=CLIENT_NAME),
+        )
 
     asyncio.run(run())
     return {"message": f"{provider} 已登录"}
@@ -1203,7 +1210,7 @@ def op_web_overview(_params: dict) -> dict:
 def _web_commit(changes: dict, remove=()) -> dict:
     """``web_setup.save`` without its confirmation prompt: validate the merged layers, then write."""
     from misaka.cli.web_setup import _sensitive, _validate
-    from misaka.core.settings_manager import deep_merge_settings
+    from misaka.core.settings_manager import deepMergeSettings as deep_merge_settings
     from misaka.core.web import config, dispatch, registry
     from misaka.core.web.scope import current_scope
     from dataclasses import replace

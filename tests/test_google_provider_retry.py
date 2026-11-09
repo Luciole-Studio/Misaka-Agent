@@ -1,8 +1,8 @@
 """Gemini and Vertex retry a transient failure the way every other provider does.
 
-Both providers turn the SDK's own retries down to one attempt because the outer
-``retry_google_request`` owns retrying -- but the stream call was never wrapped in it, so a
-503 failed the turn at once and ``retry.provider.maxRetries`` was ignored for Google.
+The SDK makes a single attempt unless told otherwise, so the outer ``retryGoogleRequest``
+owns retrying -- but the stream call was once never wrapped in it, so a 503 failed the turn
+at once and ``retry.provider.maxRetries`` was ignored for Google.
 """
 import asyncio
 from types import SimpleNamespace
@@ -10,13 +10,12 @@ from types import SimpleNamespace
 import pytest
 from google.genai import errors
 
-from misaka.ai.models import get_model
-from misaka.ai.providers.google import stream_google
-from misaka.ai.providers.google_vertex import stream_google_vertex
+from misaka.ai.api import google_generative_ai, google_vertex
+from misaka.ai.compat import getModel
 from misaka.ai.types import Context
-from misaka.ai.utils.abort import AbortController
+from misaka.utils.js import AbortController
 
-PROVIDERS = [(stream_google, "google"), (stream_google_vertex, "google-vertex")]
+PROVIDERS = [(google_generative_ai.stream, "google"), (google_vertex.stream, "google-vertex")]
 
 
 def _chunks():
@@ -40,33 +39,39 @@ class _Models:
         return _chunks()
 
 
-def _client(models):
-    return SimpleNamespace(aio=SimpleNamespace(models=models))
+def _useClient(monkeypatch, models) -> None:
+    """The SDK client the adapters build: both modules' ``GoogleGenAI`` answers one serving ``models``."""
+    client = SimpleNamespace(aio=SimpleNamespace(models=models))
+    monkeypatch.setattr(google_generative_ai, "GoogleGenAI", lambda **_kwargs: client)
+    monkeypatch.setattr(google_vertex, "GoogleGenAI", lambda **_kwargs: client)
 
 
 @pytest.mark.parametrize("stream,provider", PROVIDERS)
-async def test_a_transient_failure_is_retried_up_to_max_retries(stream, provider):
+async def test_a_transient_failure_is_retried_up_to_max_retries(stream, provider, monkeypatch):
     models = _Models(failures=2)
-    options = {"client": _client(models), "maxRetries": 2, "maxRetryDelayMs": 1}
-    result = await stream(get_model(provider, "gemini-2.5-flash"), Context(messages=[]), options).result()
+    _useClient(monkeypatch, models)
+    options = {"apiKey": "test-key", "maxRetries": 2, "maxRetryDelayMs": 1}
+    result = await stream(getModel(provider, "gemini-2.5-flash"), Context(messages=[]), options).result()
     assert result.stopReason == "stop", result.errorMessage
     assert models.calls == 3
 
 
 @pytest.mark.parametrize("stream,provider", PROVIDERS)
-async def test_without_max_retries_the_first_failure_ends_the_turn(stream, provider):
+async def test_without_max_retries_the_first_failure_ends_the_turn(stream, provider, monkeypatch):
     models = _Models(failures=1)
-    result = await stream(get_model(provider, "gemini-2.5-flash"), Context(messages=[]),
-                          {"client": _client(models)}).result()
+    _useClient(monkeypatch, models)
+    result = await stream(getModel(provider, "gemini-2.5-flash"), Context(messages=[]),
+                          {"apiKey": "test-key"}).result()
     assert result.stopReason == "error"
     assert models.calls == 1
 
 
 @pytest.mark.parametrize("stream,provider", PROVIDERS)
-async def test_abort_while_connecting_ends_the_turn_as_aborted(stream, provider):
+async def test_abort_while_connecting_ends_the_turn_as_aborted(stream, provider, monkeypatch):
     controller = AbortController()
-    options = {"client": _client(_Models(failures=0, hang=True)), "signal": controller}
-    pending = stream(get_model(provider, "gemini-2.5-flash"), Context(messages=[]), options).result()
+    _useClient(monkeypatch, _Models(failures=0, hang=True))
+    options = {"apiKey": "test-key", "signal": controller.signal}
+    pending = stream(getModel(provider, "gemini-2.5-flash"), Context(messages=[]), options).result()
     await asyncio.sleep(0.05)
     controller.abort()
     result = await asyncio.wait_for(pending, 5)

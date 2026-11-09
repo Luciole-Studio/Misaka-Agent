@@ -25,6 +25,7 @@ from misaka.config import CFG, home
 from misaka.core import session_catalog
 from misaka.core.network import messages
 from misaka.core.platform import cards, processes, tasks
+from misaka.core.session_manager import SessionManager
 
 BODY = "## deliverable\nnotes.md\n"
 SPACE_T1 = "w1111aaaa"      # the research run's space
@@ -156,7 +157,7 @@ async def test_a_last_order_message_to_a_closed_card_continues_her_session(world
     from misaka.ui.panel import client as net
     calls = []
     monkeypatch.setattr(net, "request", lambda method, params=None, **kw: calls.append((method, params))
-                        or {"pane_id": "p7"})
+                        or {"pane_id": "p7", "run_id": "tr_0000000001"})
     monkeypatch.setattr(net, "ensure", lambda *a, **kw: None)
     monkeypatch.setenv("MISAKA_NET_PANE", "p1")
     done = _finished(world, generation=3)
@@ -164,12 +165,15 @@ async def test_a_last_order_message_to_a_closed_card_continues_her_session(world
     out = await _part(lo, sender="last-order")._send(
         "fixture", {"to": done, "message": "dig into the 1803 budget", "summary": "more"},
         None, None, SimpleNamespace())
-    assert calls == [("pane.continue_card", {"task_id": done,
-                                             "say": "[Message from last-order · session " + lo + ". If it asks you something, answer with SendMessage; a note that asks nothing needs no reply. Then complete the card again with misaka_card_complete -- your deliverable stands unless you change it.]\ndig into the 1803 budget",
-                                             "expected_generation": 3, "consult": True,
-                                             "place": {"grid": "p1"}})]
+    # R40: a finished card answers as a consultation; she is not asked to complete again.
+    assert calls == [("pane.consult_card", {"task_id": done,
+                                            "say": "[Message from last-order · session " + lo + ". If it asks you something, answer with SendMessage; a note that asks nothing needs no reply. Your card stays finished: files you change and findings you note are declared again when this turn ends.]\ndig into the 1803 budget",
+                                            "expected_generation": 3, "place": {"grid": "p1"},
+                                            "asker": {"sender": "last-order", "sender_task": None,
+                                                      "sender_session": lo}})]
     assert out["details"]["woken"] and out["details"]["pane_id"] == "p7"
-    assert "woken in her own session" in out["content"][0]["text"]
+    assert out["details"]["consultation"] == "tr_0000000001"
+    assert "stays as it was" in out["content"][0]["text"]
     # B111: she can hear the answer inside the phase turn that has to end in its command.
     assert f"misaka_sister_output (task_id={done}, block=true)" in out["content"][0]["text"]
     assert messages.pending(world.mail, "10032", task_id=done) == []   # nothing queued for nobody
@@ -624,6 +628,219 @@ def test_the_contact_delivery_hands_her_answer_back(world, monkeypatch):
     assert _replies(world, window) == ["10032 standing by"]
 
 
+def _contact_turns(monkeypatch, *results):
+    """`misaka dm` with its model turns scripted: each call takes the next result, and records the
+    keyword arguments it was given."""
+    from misaka.core.platform import session as platform_session
+
+    calls = []
+
+    async def turn(flags, text, cwd, **kw):
+        calls.append({"flags": flags, **kw})
+        if "--session" in flags:
+            path = flags[flags.index("--session") + 1]
+        else:    # a turn leaves its session behind, failed or not: a new Bot Chat, named
+            manager = SessionManager.create(cwd, flags[flags.index("--session-dir") + 1])
+            manager.appendSessionInfo(flags[flags.index("--name") + 1])
+            manager.appendMessage({"role": "user", "content": text, "timestamp": 0})
+            path = manager.getSessionFile()
+        error = results[len(calls) - 1]
+        return {"text": None if error else "10032 standing by", "error": error, "timed_out": False,
+                "session_file": path}
+
+    monkeypatch.setattr(platform_session, "run_session", turn)
+    return calls
+
+
+def _delivered(world, mid):
+    return world.mail.execute("SELECT delivered_at FROM messages WHERE id=?", (mid,)).fetchone()[0] is not None
+
+
+def test_a_contact_turn_runs_under_hermes_inactivity_timeout_not_a_wall_clock(world, monkeypatch):
+    """2026-10-24: 10032 reviewing a 36-card plan thought for eight minutes and was cut at the
+    600 s wall clock twice, losing the review each time. Hermes runs a Bot Chat turn with no wall
+    clock; its gateway stops a turn only after HERMES_AGENT_TIMEOUT (1800 s) without activity."""
+    from misaka.cli import dm
+
+    calls = _contact_turns(monkeypatch, None)
+    window = _live(world, _sid(), role="last-order", space=SPACE_T1)
+    mid = messages.send(world.mail, "10032", "review the plan", summary="r", sender="last-order",
+                        sender_session=window)
+    assert dm.deliver("10032", sender="last-order", wait_message=mid) == 0
+    assert [(call["timeout"], call["idle_timeout"]) for call in calls] == [(None, 1800)]
+
+
+def test_a_transient_contact_failure_is_retried_once_on_the_same_session(world, monkeypatch):
+    """Hermes `_run_local_turn`: one policy-gated retry, which resumes the session; the old wake-up
+    started up to five whole turns for any failure, a timeout included."""
+    from misaka.cli import dm
+
+    calls = _contact_turns(monkeypatch, "Error code: 529 overloaded_error", None)
+    window = _live(world, _sid(), role="last-order", space=SPACE_T1)
+    mid = messages.send(world.mail, "10032", "hello there", summary="hi", sender="last-order",
+                        sender_session=window)
+    assert dm.deliver("10032", sender="last-order", wait_message=mid) == 0
+    first, retry = (call["flags"] for call in calls)
+    assert first[first.index("--name") + 1] == "Bot Chat"
+    assert retry[retry.index("--session") + 1] == dm.contact_session("10032")
+    assert _replies(world, window) == ["10032 standing by"]
+
+
+def test_a_failure_the_retry_cannot_fix_reaches_the_sender_and_settles(world, monkeypatch):
+    """The old wake-up gave up in silence: the row stayed queued and the window that wrote was told
+    she was "being woken". Hermes answers a failed delivery to its sender, with the reason."""
+    from misaka.cli import dm
+
+    for error, reason, turns in (("Error code: 401 authentication_error", "provider_auth_or_access", 1),
+                                 ("Error code: 529 overloaded_error", "provider_server_error", 2)):
+        calls = _contact_turns(monkeypatch, error, error)
+        window = _live(world, _sid(), role="last-order", space=SPACE_T1)
+        mid = messages.send(world.mail, "10032", "hello there", summary="hi", sender="last-order",
+                            sender_session=window)
+        assert dm.deliver("10032", sender="last-order", wait_message=mid) == 1
+        assert len(calls) == turns
+        assert _replies(world, window) == [f"Delivery to 10032 failed [reason: {reason}]: {error}"]
+        assert _delivered(world, mid)
+
+
+def test_a_failure_nobody_could_be_told_of_stays_queued(world, monkeypatch):
+    """The window closed while the turn ran: a transient failure is not retried for nobody, and the
+    report has nobody to reach."""
+    from misaka.cli import dm
+    from misaka.core.platform import session as platform_session
+
+    window = _live(world, _sid(), role="last-order", space=SPACE_T1)
+    calls = []
+
+    async def turn(flags, text, cwd, **kw):
+        calls.append(flags)
+        _live(world, window, role="last-order", space=SPACE_T1, alive=False)
+        return {"text": None, "error": "Error code: 529 overloaded_error", "timed_out": False}
+
+    monkeypatch.setattr(platform_session, "run_session", turn)
+    mid = messages.send(world.mail, "10032", "hello there", summary="hi", sender="last-order",
+                        sender_session=window)
+    assert dm.deliver("10032", sender="last-order", wait_message=mid) == 1
+    assert len(calls) == 1 and not _delivered(world, mid)
+    assert world.mail.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
+
+
+def test_a_contact_turn_stops_once_everyone_who_wrote_has_gone(world, monkeypatch):
+    """2026-10-24: the panel closed (Last Order gone, the run stopped) and 10032's wake-up went on
+    thinking for nobody. Hermes runs a delivery as a background process of the sender and kills
+    it with her (process_registry.kill_all on agent_close, gateway shutdown, /stop)."""
+    from misaka.cli import dm
+    from misaka.core.platform import session as platform_session
+
+    monkeypatch.setattr(messages, "DELIVERY_RENEW_SECONDS", 0.02)
+    window = _live(world, _sid(), role="last-order", space=SPACE_T1)
+    stopped = []
+
+    async def turn(flags, text, cwd, **kw):
+        _live(world, window, role="last-order", space=SPACE_T1, alive=False)   # the panel closes
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            stopped.append(True)
+            raise
+        return {"text": "too late", "error": None, "timed_out": False}
+
+    monkeypatch.setattr(platform_session, "run_session", turn)
+    mid = messages.send(world.mail, "10032", "review the plan", summary="r", sender="last-order",
+                        sender_session=window)
+    started = time.monotonic()
+    assert dm.deliver("10032", sender="last-order", wait_message=mid) == 1
+    assert stopped and time.monotonic() - started < 10
+    assert not _delivered(world, mid)
+    row = world.mail.execute("SELECT lease_token FROM messages WHERE id=?", (mid,)).fetchone()
+    assert row[0] is None                                   # back in the queue, for a later turn
+
+
+def test_no_contact_turn_starts_for_windows_already_gone(world, monkeypatch):
+    from misaka.cli import dm
+
+    calls = _contact_turns(monkeypatch, None)
+    gone = _live(world, _sid(), role="last-order", space=SPACE_T1, alive=False)
+    mid = messages.send(world.mail, "10032", "hello there", summary="hi", sender="last-order",
+                        sender_session=gone)
+    assert dm.deliver("10032", sender="last-order", wait_message=mid) == 1
+    assert calls == [] and not _delivered(world, mid)
+
+
+@pytest.mark.parametrize("writer", ["command line", "contact session", "a live window too"])
+def test_a_contact_turn_with_someone_left_to_hear_it_runs(world, monkeypatch, writer):
+    """A row from the command line has no session to die with; a contact session lasts one turn by
+    design and is never answered, so its mail is not tied to it; one live window keeps the turn."""
+    from misaka.cli import dm
+
+    calls = _contact_turns(monkeypatch, None)
+    gone = _live(world, _sid(), role="last-order", space=SPACE_T1, alive=False)
+    first = messages.send(world.mail, "10032", "hello there", summary="hi", sender="last-order",
+                          sender_session=gone)
+    other = {"command line": None,
+             "contact session": _live(world, _sid(), role="10036", kind="dm", alive=False),
+             "a live window too": _live(world, _sid(), role="last-order", space=SPACE_T1)}[writer]
+    messages.send(world.mail, "10032", "and this", summary="a", sender="10036" if other else "user",
+                  sender_session=other)
+    assert dm.deliver("10032", sender="last-order", wait_message=first) == 0
+    assert len(calls) == 1 and _delivered(world, first)
+
+
+def test_the_wake_up_does_not_hold_the_senders_terminal(monkeypatch):
+    """2026-10-24: the panel closed while 10032's wake-up was retrying; its stdin was that window's
+    terminal, and every turn after died at birth on a bad descriptor (`init_sys_streams`)."""
+    spawned = []
+    monkeypatch.setattr(messages.subprocess, "Popen", lambda argv, **kw: spawned.append(kw))
+    messages.wake_contact("10032", 7, sender="last-order")
+    assert spawned and spawned[0]["stdin"] is messages.subprocess.DEVNULL
+    assert spawned[0]["start_new_session"] is True
+
+
+def test_the_inactivity_timeout_counts_from_the_last_session_event(monkeypatch):
+    """Hermes `_watch_gateway_turn_inactivity`: a turn that keeps producing events runs past the
+    limit; one that goes quiet is stopped, in Hermes' words."""
+    from misaka.core.platform import session as platform_session
+
+    monkeypatch.setattr(platform_session, "IDLE_POLL_SECONDS", 0.01)
+
+    async def busy(activity):
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            activity[0] = time.monotonic()
+        return "done"
+
+    async def run():
+        activity = [time.monotonic()]
+        assert await platform_session._until_idle(busy(activity), activity, 0.05) == "done"
+        with pytest.raises(TimeoutError, match=r"^Execution timed out \(inactivity\)$"):
+            await platform_session._until_idle(asyncio.sleep(5), [time.monotonic()], 0.05)
+
+    asyncio.run(run())
+
+
+def test_a_long_contact_turn_keeps_its_rows_leased(world, monkeypatch):
+    """With no wall clock a fixed lease would lapse under a long turn and hand its rows to another
+    reader; the turn renews them as the inbox pump renews its own."""
+    from misaka.cli import dm
+
+    monkeypatch.setattr(messages, "DELIVERY_RENEW_SECONDS", 0.02)
+    mid = messages.send(world.mail, "10032", "hello there", summary="hi", sender="last-order")
+    token = messages.new_lease_token()
+    assert messages.claim(world.mail, [mid], ttl_seconds=1, token=token) == {mid}
+
+    def expires():
+        return world.mail.execute("SELECT lease_expires FROM messages WHERE id=?", (mid,)).fetchone()[0]
+
+    claimed = expires()
+
+    async def turn():
+        await asyncio.sleep(0.1)
+        return "answered"
+
+    assert asyncio.run(dm._leased(turn(), world.mail, [mid], token)) == "answered"
+    assert expires() >= claimed + messages.DELIVERY_LEASE_SECONDS - 2
+
+
 def _run(world, *, origin_session=None):
     from misaka.core.research import runs
     runs.init(world.board)
@@ -633,7 +850,7 @@ def _run(world, *, origin_session=None):
 
 def _link(world, run_id, task_id, branch="b_root"):
     world.board.execute(
-        "INSERT INTO research_run_tasks (task_id, run_id, branch_id, kind, created_at) VALUES (?,?,?,?,?)",
+        "INSERT INTO research_cards (task_id, run_id, branch_id, kind, created_at) VALUES (?,?,?,?,?)",
         (task_id, run_id, branch, "research", int(time.time())))
     world.board.commit()
 
@@ -736,9 +953,9 @@ def test_a_parked_card_with_its_window_open_is_still_reached_in_that_session(wor
 def _node(world, run_id, node_id, *, depth, session_id):
     now = int(time.time())
     world.board.execute(
-        "INSERT INTO research_branches (id, run_id, question, depth, status, session_file, created_at, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?)",
-        (node_id, run_id, "q", depth, "executing",
+        "INSERT INTO research_execution (id, run_id, status, session_file, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (node_id, run_id, "executing",
          f"state/sessions/research/{run_id}--node-{node_id}/2026-10-01T15-28-47-603Z_{session_id}.jsonl", now, now))
     world.board.commit()
 
@@ -769,20 +986,24 @@ def test_last_order_inside_a_run_means_the_last_order_of_the_sender_s_own_node(w
 
 def test_a_node_s_window_reads_its_own_mail_and_leaves_the_card_notifications_to_the_root():
     """B123: the node window ran without a mailbox, so its Sisters could not reach her; reading
-    the workspace's card notifications as well would take them from the root's window."""
+    the workspace's card notifications as well would take them from the root's window. A Last
+    Order with no window is the same: without a mailbox, a card's message woke the contact
+    session, which is outside the run, in the home folder (2026-11-07)."""
     import ast
     import inspect
     import textwrap
 
     from misaka.core.network.wiring import network
-    from misaka.core.research import node
+    from misaka.core.research import node, window
     from misaka.core.wiring import SessionSpec
 
-    tree = ast.parse(textwrap.dedent(inspect.getsource(node.run_interactive)))
-    call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call)
-                and isinstance(n.func, ast.Name) and n.func.id == "role_session_setup")
-    flags = {k.arg: k.value.value for k in call.keywords if isinstance(k.value, ast.Constant)}
-    assert flags["receive_messages"] is True and flags["receive_notifications"] is False
+    for adapter in (node.run_interactive, window.node_session.__wrapped__):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(adapter)))
+        call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Name) and n.func.id == "role_session_setup")
+        flags = {k.arg: k.value.value for k in call.keywords if isinstance(k.value, ast.Constant)}
+        assert flags["receive_messages"] is True and flags["receive_notifications"] is False
+        assert any(keyword.arg == "node" for keyword in call.keywords)      # her rows name her node
     spec = SessionSpec(profile_dir="/p", role="last_order", workspace="/w", kind="foreground",
                        sender="last-order", receive_messages=True, receive_notifications=False)
     assert network.part(spec).receive_notifications is False

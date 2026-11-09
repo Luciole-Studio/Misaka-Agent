@@ -9,7 +9,6 @@ import os
 import shutil
 import subprocess
 import sys
-from types import SimpleNamespace
 
 import httpx
 
@@ -19,8 +18,8 @@ from misaka.core.web.scope import WebScope, current_scope
 
 
 async def _discover(extension_paths):
-    from misaka.cli.engine import create_project_trust_context
-    from misaka.core.project_trust import ProjectTrustStore, resolve_project_trusted
+    from misaka.cli.project_trust import createProjectTrustContext
+    from misaka.core.project_trust import ProjectTrustStore, resolveProjectTrusted
     from misaka.core.resource_loader import DefaultResourceLoader
 
     cwd, agent_dir = os.getcwd(), get_agent_dir()
@@ -29,12 +28,11 @@ async def _discover(extension_paths):
                                     "noPromptTemplates": True, "noThemes": True, "noContextFiles": True})
 
     async def trust(payload):
-        return await resolve_project_trusted({
+        return await resolveProjectTrusted({
             "cwd": cwd, "trustStore": ProjectTrustStore(agent_dir),
             "defaultProjectTrust": loader.settingsManager.getDefaultProjectTrust(),
             "extensionsResult": payload["extensionsResult"],
-            "projectTrustContext": create_project_trust_context(
-                cwd=cwd, mode="print", settings_manager=loader.settingsManager, has_ui=False),
+            "projectTrustContext": createProjectTrustContext({"cwd": cwd, "mode": "print", "settingsManager": loader.settingsManager, "hasUI": False}),
             "onExtensionError": lambda message: print(message, file=sys.stderr),
         })
 
@@ -138,14 +136,41 @@ def _post_setup(row, args):
             sys.executable, "-m", "pip", "install", "ddgs"]
         subprocess.run(command, check=True)
     if args.login:
-        from misaka.core.auth_storage import AuthStorage
+        from misaka.ai.auth.oauth.xai import xaiOAuth
         from misaka.core.web.backends.xai import _auth_path
 
-        def show_code(info):
-            print(f"Open {info.verificationUri}\nDevice code: {info.userCode}")
+        asyncio.run(login_and_store(xaiOAuth, _auth_path(), "xai"))
 
-        asyncio.run(AuthStorage.create(_auth_path()).login(
-            "xai", SimpleNamespace(onDeviceCode=show_code, signal=None)))
+
+class _DeviceCodeInteraction:
+    """The terminal side of a device-code login: the code is printed, and nothing is ever prompted for."""
+
+    def __init__(self) -> None:
+        from misaka.utils.js import AbortController
+
+        self.signal = AbortController().signal
+
+    async def prompt(self, prompt):
+        raise RuntimeError("Login cancelled")
+
+    def notify(self, event):
+        if event.type == "device_code":
+            print(f"Open {event.verificationUri}\nDevice code: {event.userCode}")
+
+
+async def login_and_store(oauth, auth_path, key):
+    """Run ``oauth.login`` and persist the credential under ``key`` through the store's ``modify``, as pi's apps do
+    after ``Models.login``."""
+    from misaka.ai.auth.types import LoginOptions
+    from misaka.core.auth_storage import AuthStorage
+    from misaka.core.provider_attribution import CLIENT_NAME
+
+    credential = await oauth.login(_DeviceCodeInteraction(), LoginOptions(agentName=CLIENT_NAME))
+
+    async def persist(_current):
+        return credential
+
+    await AuthStorage.create(auth_path).modify(key, persist)
 
 
 def _setup(args, *, interactive=False):
@@ -225,19 +250,19 @@ def _accounts(args):
 
     storage = AuthStorage.create(_auth_path())
     if args.op == "accounts":
-        for key, value in storage.getAll().items():
-            if (key == "xai" or key.startswith("xai:")) and isinstance(value, dict):
-                print(f"{key.partition(':')[2] or '(default)'}: {value.get('type', 'unknown')}")
+        for info in asyncio.run(storage.list()):
+            if info.providerId == "xai" or info.providerId.startswith("xai:"):
+                print(f"{info.providerId.partition(':')[2] or '(default)'}: {info.type}")
         return
     account = args.key  # absent means the same default grant as /login xai
     key = oauth_account_key("xai", account)
     if args.op == "logout":
-        storage.remove(key)
+        asyncio.run(storage.delete(key))
         print(f"Removed xAI account {account or '(default)'}")
     else:
-        def show_code(info):
-            print(f"Open {info.verificationUri}\nDevice code: {info.userCode}")
-        asyncio.run(storage.login("xai", SimpleNamespace(onDeviceCode=show_code, signal=None), account=account))
+        from misaka.ai.auth.oauth.xai import xaiOAuth
+
+        asyncio.run(login_and_store(xaiOAuth, _auth_path(), key))
         print(f"Saved xAI account {account or '(default)'}")
 
 

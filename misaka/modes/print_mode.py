@@ -1,9 +1,11 @@
-"""Print mode for single-shot non-interactive execution."""
+"""Translated from pi's ``packages/coding-agent/src/modes/print-mode.ts`` (v1.3.0).
+
+Print mode for single-shot non-interactive execution.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import signal
 import sys
 from dataclasses import dataclass, field
@@ -42,11 +44,12 @@ def _content_type(block: Any) -> str | None:
 
 
 def _serialize_json_line(value: Any) -> str:
-    from misaka.modes.jsonl import to_json_event
-    return json.dumps(to_json_event(value), ensure_ascii=False, separators=(",", ":")) + "\n"
+    from misaka.modes.json_event import toJsonEvent
+    from misaka.utils.js import jsonStringify
+    return jsonStringify(toJsonEvent(value)) + "\n"
 
 
-async def run_print_mode(runtime_host: Any, options: PrintModeOptions | dict[str, Any]) -> int:
+async def runPrintMode(runtime_host: Any, options: PrintModeOptions | dict[str, Any]) -> int:
     resolved = options if isinstance(options, PrintModeOptions) else PrintModeOptions(**dict(options or {}))
     session = runtime_host.session
     unsubscribe = None
@@ -178,6 +181,9 @@ async def run_print_mode(runtime_host: Any, options: PrintModeOptions | dict[str
                 for content in _message_content(last_message) or []:
                     if _content_type(content) == "text":
                         writeRawStdout(f"{read_field(content, 'text', '')}\n")
+                if stop_reason == "length":
+                    print("Response was truncated: the model reached its output token limit.", file=sys.stderr)
+                    return 1
 
         return 0
     except Exception as error:  # noqa: BLE001
@@ -189,6 +195,5 @@ async def run_print_mode(runtime_host: Any, options: PrintModeOptions | dict[str
         await dispose_runtime()
         await flushRawStdout()
 
-runPrintMode = run_print_mode
 
 __all__ = ["PrintModeOptions", "runPrintMode"]

@@ -314,9 +314,9 @@ def test_cli_does_not_select_an_unsupported_capability(capsys):
 
 async def make_session(tmp_path, factories, *, allowed=None):
     from misaka.core.auth_storage import AuthStorage
-    from misaka.core.model_registry import ModelRegistry
+    from misaka.core.model_runtime import ModelRuntime
     from misaka.core.resource_loader import DefaultResourceLoader
-    from misaka.core.sdk import create_agent_session
+    from misaka.core.sdk import createAgentSession
     from misaka.core.session_manager import SessionManager
 
     owner = part(tmp_path / "profile")
@@ -324,13 +324,14 @@ async def make_session(tmp_path, factories, *, allowed=None):
     loader = DefaultResourceLoader({"cwd": str(tmp_path), "agentDir": str(tmp_path / "agent"),
                                     "extensionFactories": factories, "noExtensions": True})
     await loader.reload()
-    options = {"cwd": str(tmp_path), "agentDir": str(tmp_path / "agent"), "authStorage": storage,
-               "modelRegistry": ModelRegistry.inMemory(storage), "resourceLoader": loader,
+    options = {"cwd": str(tmp_path), "agentDir": str(tmp_path / "agent"),
+               "modelRuntime": await ModelRuntime.create({"authStorage": storage, "modelsPath": None}),
+               "resourceLoader": loader,
                "sessionManager": SessionManager.inMemory(str(tmp_path)),
                "parts": [owner], "customTools": list(owner.tools)}
     if allowed is not None:
         options["tools"] = allowed
-    session = (await create_agent_session(options))["session"]
+    session = (await createAgentSession(options))["session"]
     return owner, session, loader
 
 
@@ -481,7 +482,7 @@ def test_cli_discovers_explicit_plugin_once_and_does_not_leak_it(tmp_path, capsy
 
 def test_cli_project_extension_requires_explicit_selection_even_when_trusted(tmp_path, capsys):
     from misaka.config import CONFIG_DIR_NAME
-    from misaka.core.project_trust import ProjectTrustStore
+    from misaka.core.trust_manager import ProjectTrustStore
 
     path, marker = tmp_path / CONFIG_DIR_NAME / "extensions" / "plugin.py", tmp_path / "executed"
     plugin_file(path, marker)
@@ -509,16 +510,13 @@ def test_cli_reports_failed_plugin_and_publishes_no_partial_provider(tmp_path, c
 
 
 def test_install_and_oauth_post_setup_only_run_when_explicit(monkeypatch):
-    from misaka.core.auth_storage import AuthStorage
-
     installs, logins = [], []
     monkeypatch.setattr("subprocess.run", lambda args, **kwargs: installs.append((args, kwargs)))
 
-    async def login(_storage, provider, callbacks):
-        logins.append(provider)
-        callbacks.onDeviceCode(SimpleNamespace(verificationUri="https://auth.x.ai/device", userCode="CODE"))
+    async def login_and_store(_oauth, _auth_path, key):
+        logins.append(key)
 
-    monkeypatch.setattr(AuthStorage, "login", login)
+    monkeypatch.setattr("misaka.cli.web.login_and_store", login_and_store)
     app.main(["web", "providers"])
     app.main(["web", "status"])
     assert not installs and not logins
@@ -543,8 +541,8 @@ def test_invalid_setup_schema_does_not_replace_an_existing_provider(schema):
 async def test_cancelled_factory_has_no_registration_and_cannot_write_late(tmp_path):
     from misaka.core.event_bus import createEventBus
     from misaka.core.extensions.loader import (
-        create_extension_runtime,
-        load_extension_from_factory,
+        createExtensionRuntime,
+        loadExtensionFromFactory,
     )
 
     entered, apis = asyncio.Event(), []
@@ -555,8 +553,8 @@ async def test_cancelled_factory_has_no_registration_and_cannot_write_late(tmp_p
         entered.set()
         await asyncio.Event().wait()
 
-    runtime = create_extension_runtime()
-    pending = asyncio.create_task(load_extension_from_factory(factory, str(tmp_path), createEventBus(), runtime, "cancelled"))
+    runtime = createExtensionRuntime()
+    pending = asyncio.create_task(loadExtensionFromFactory(factory, str(tmp_path), createEventBus(), runtime, "cancelled"))
     await entered.wait()
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):

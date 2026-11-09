@@ -2,7 +2,7 @@
 
 Upstream's contract with its host is one list per turn: *the messages the model is
 actually being sent*, growing as the turn appends and shrinking when compaction
-rewrites it. misaka's equivalent is ``build_session_context(branch).messages`` -- and
+rewrites it. misaka's equivalent is ``buildSessionContext(branch).messages`` -- and
 that includes the compaction-summary message, which is why it is converted here rather
 than dropped. Upstream recognises its own summary scaffold, keeps it out of the durable
 store, and its ingest cursor counts it, so replaying it is what keeps the cursor and the
@@ -24,7 +24,7 @@ from __future__ import annotations
 import dataclasses
 import json
 
-from misaka.agent.harness.messages import convert_to_llm
+from misaka.core.messages import convertToLlm
 from misaka.utils.values import read_field
 
 # Placeholder for a content block that has no useful text: the durable store keeps the
@@ -34,6 +34,9 @@ _OMITTED = "[{kind} omitted]"
 # Blocks that are not the message's content in upstream's shape: tool calls travel as
 # ``tool_calls``, and reasoning does not travel at all (see the module docstring).
 _NOT_CONTENT = frozenset({"toolCall", "thinking"})
+
+NOTICE = "notice"
+AGENT = "agent"
 
 
 def is_task_message(message) -> bool:
@@ -48,6 +51,42 @@ def is_task_message(message) -> bool:
         details = read_field(message, 'details')
         return isinstance(details, dict) and details.get(TURN) is True
     return False
+
+
+def archive_role(message) -> str | None:
+    """Who a custom message is in the archive, or None for a role it keeps. ``convertToLlm`` makes
+    every custom message a user turn, which is right for the model and wrong for upstream, whose
+    summaries, focus and preserved objective read a user row as the user asking. Only a task
+    message is that (``is_task_message``): mail reads ``agent:<sender>``, anything else ``notice``.
+    The role lives in the archive only: ``Replay.restore`` gives the model the original."""
+    from misaka.core.moments import SENDERS
+
+    if read_field(message, 'role') != 'custom' and read_field(message, 'type') != 'custom_message':
+        return None
+    if is_task_message(message):
+        return None
+    details = read_field(message, 'details')
+    senders = details.get(SENDERS) if isinstance(details, dict) else None
+    return f"{AGENT}:{','.join(senders)}" if senders else NOTICE
+
+
+def is_archive_role(role) -> bool:
+    return role == NOTICE or str(role).startswith(AGENT + ":")
+
+
+def install() -> None:
+    """Let ``lcm_grep(role=...)`` ask for the roles ``archive_role`` writes."""
+    from ..vendor import tools
+    original = tools._parse_grep_role
+    if getattr(original, "misaka_archive_roles", False):
+        return
+
+    def parse(value):
+        role = str(value or "").strip()
+        return (role, None) if is_archive_role(role) else original(value)
+
+    parse.misaka_archive_roles = True
+    tools._parse_grep_role = parse
 
 
 def is_memory(message) -> bool:
@@ -135,11 +174,18 @@ def to_upstream(message) -> dict:
     return converted
 
 
+def _rows(message) -> list[dict]:
+    """One native message as upstream rows, under the role it has in the archive."""
+    role = archive_role(message)
+    rows = [to_upstream(converted) for converted in convertToLlm([message])]
+    return [{**row, "role": role} for row in rows] if role else rows
+
+
 def upstream_messages(messages) -> list[dict]:
-    """A misaka active context (``build_session_context(...).messages``), converted; what its
+    """A misaka active context (``buildSessionContext(...).messages``), converted; what its
     sender marked as not memory is left out, here and only here, so the live view, the
     session's originals and the replay alignment all agree on the same list."""
-    return [to_upstream(message) for message in convert_to_llm([m for m in messages if is_memory(m)])]
+    return [row for message in messages if is_memory(message) for row in _rows(message)]
 
 
 
@@ -240,18 +286,23 @@ NATIVE_METADATA = frozenset({'_compressed_summary', '_compressed_summary_has_use
 
 
 def preserve_sources(before, after):
-    """Ingest preserves ordinal positions, including cached sanitized replacements."""
+    """Ingest preserves ordinal positions, including cached sanitized replacements, and each
+    row's entry binding (``entry_rows.KEY``): a cached replay remembered from a tagged list must
+    not hand its tags to an untagged one, whose ``Replay.unchanged`` compares whole rows."""
+    from .entry_rows import KEY
+
     if len(before) != len(after):
         raise ValueError('LCM ingest changed message cardinality')
     result = []
     for original, replay in zip(before, after):
-        if original.get(SOURCE) == replay.get(SOURCE):
+        if all(original.get(key) == replay.get(key) for key in (SOURCE, KEY)):
             result.append(replay)
         else:
             replay = dict(replay)
-            replay.pop(SOURCE, None)
-            if SOURCE in original:
-                replay[SOURCE] = original[SOURCE]
+            for key in (SOURCE, KEY):
+                replay.pop(key, None)
+                if key in original:
+                    replay[key] = original[key]
             result.append(replay)
     return result
 
@@ -287,13 +338,10 @@ class Replay:
         for message in messages:
             if not is_memory(message):
                 continue                    # the same rule as upstream_messages, or the source ordinals drift
-            converted = convert_to_llm([message])
-            if not converted:
-                continue
-            for converted_message in converted:
+            for row in _rows(message):
                 index = len(self.originals)
                 self.originals.append(copy.deepcopy(message))
-                self.messages.append({**to_upstream(converted_message), SOURCE: index})
+                self.messages.append({**row, SOURCE: index})
 
     def unchanged(self, messages):
         """Receipt-time jitter is lost on restore; all other fields must match.
@@ -343,6 +391,8 @@ class Replay:
                     restored.append(copy.deepcopy(self.originals[source]))
                     continue
             role = replay.get('role')
+            if before is not None and is_archive_role(role):
+                role = 'user'
             if role not in {'user', 'assistant', 'tool'}:
                 raise ValueError(f'Unsupported LCM replay role: {role}')
             original = self.originals[source] if before is not None else None
@@ -369,7 +419,7 @@ class Replay:
                     block = {'type': 'image', 'mimeType': header[5:], 'data': data}
                 native_blocks.append(block)
             if role == 'assistant':
-                from misaka.ai.providers._common import _empty_usage
+                from misaka.ai.api._common import _empty_usage
                 for call in replay.get('tool_calls') or []:
                     function = call['function']
                     arguments = function.get('arguments', '{}')
@@ -389,7 +439,7 @@ class Replay:
             payload['content'] = content if role == 'user' and isinstance(content, str) else native_blocks
             if payload['role'] == 'custom':
                 # Custom-message metadata belongs to its native UI wrapper, not the wire.
-                convert_to_llm([payload])
+                convertToLlm([payload])
                 restored.append(payload)
             else:
                 restored.append(validate_message(payload))

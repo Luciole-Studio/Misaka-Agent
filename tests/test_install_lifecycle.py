@@ -94,7 +94,8 @@ def test_a_release_archive_is_updated_by_the_installer(tmp_path, monkeypatch, ca
     assert update.run(apply=True) == 0
     out = capsys.readouterr().out
     assert says in out
-    assert ("install.sh | sh" in out) == (latest == "v0.18.7") and "pip install" not in out
+    installer = "install.ps1 | iex" if os.name == "nt" else "install.sh | sh"
+    assert (installer in out) == (latest == "v0.18.7") and "pip install" not in out
     assert "Tracking the main branch" not in out and "could not be compared" not in out
 
 
@@ -122,12 +123,12 @@ def test_an_archive_homebrew_or_winget_put_in_place_is_theirs_to_update(tmp_path
 def test_the_users_commands_do_not_inherit_the_archives_python_flags(tmp_path, monkeypatch):
     """The launcher sets them for MISAKA's own Python; under PYTHONSAFEPATH a skill's script could
     not import the module beside it."""
-    from misaka.utils.shell import get_shell_env
+    from misaka.utils.shell import getShellEnv
     monkeypatch.setenv("PYTHONSAFEPATH", "1")
     monkeypatch.setenv("PYTHONNOUSERSITE", "1")
-    assert get_shell_env()["PYTHONSAFEPATH"] == "1", "outside an archive the user's own setting stands"
+    assert getShellEnv()["PYTHONSAFEPATH"] == "1", "outside an archive the user's own setting stands"
     monkeypatch.setattr(sys, "prefix", str(_archive(tmp_path) / "python"))
-    env = get_shell_env()
+    env = getShellEnv()
     assert "PYTHONSAFEPATH" not in env and "PYTHONNOUSERSITE" not in env
 
 
@@ -153,13 +154,101 @@ def test_adding_an_extra_keeps_the_ones_installed(monkeypatch):
     assert command == ["uv", "tool", "install", "--force", f"misaka[pageindex,providers] @ git+{update.REPO_URL}"]
 
 
+# -- update: an install made from another branch follows that branch -------------------------
+
+def _from_branch(installer="uv tool", revision="heretic-0.19.17"):
+    return update.Install("git", False, installer, None, "c0ffee", "0.19.17", revision)
+
+
+def test_the_revision_an_install_was_made_from_is_read_from_its_record(monkeypatch):
+    import importlib.metadata
+    import json
+
+    record = {"url": update.REPO_URL, "vcs_info": {"vcs": "git", "commit_id": "c0ffee",
+                                                   "requested_revision": "heretic-0.19.17"}}
+    dist = SimpleNamespace(version="0.19.17", read_text=lambda name: (
+        json.dumps(record) if name == "direct_url.json" else "uv"))
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda name: dist)
+    found = update.describe()
+    assert (found.kind, found.commit, found.revision, found.follows) == ("git", "c0ffee", "heretic-0.19.17",
+                                                                        "heretic-0.19.17")
+    del record["vcs_info"]["requested_revision"]
+    assert update.describe().follows == update.BRANCH
+
+
+def test_an_install_from_another_branch_is_compared_with_that_branch(monkeypatch, capsys):
+    """2026-10-13: an install of heretic-0.19.17 -- ahead of main by 16 commits -- was compared with
+    main, told "this install's commit is not an ancestor of main" and to resolve it in a checkout it
+    does not have, and the check exited 1."""
+    asked = []
+    monkeypatch.setattr(update, "describe", lambda: _from_branch())
+    monkeypatch.setattr(update, "github_token", lambda: ("t", "GITHUB_TOKEN"))
+    monkeypatch.setattr(update, "_api", lambda path: asked.append(path) or ({"status": "identical", "ahead_by": 0}, None))
+    assert update.run() == 0
+    out = capsys.readouterr().out
+    assert asked == ["/compare/c0ffee...heretic-0.19.17"]
+    assert "Up to date with heretic-0.19.17." in out and "main" not in out
+    monkeypatch.setattr(update, "_api", lambda path: ({"status": "ahead", "ahead_by": 2}, None))
+    monkeypatch.setattr(update, "installed_extras", list)
+    assert update.run() == 0
+    out = capsys.readouterr().out
+    assert "2 commit(s) behind heretic-0.19.17." in out and "uv tool upgrade misaka" in out
+
+
+def test_a_comparison_that_fails_does_not_send_a_git_install_to_a_checkout(monkeypatch, capsys):
+    monkeypatch.setattr(update, "describe", lambda: _from_branch())
+    monkeypatch.setattr(update, "github_token", lambda: (None, ""))
+    monkeypatch.setattr(update, "_api", lambda path: ({"status": "diverged"}, None))
+    assert update.run() == 1
+    out = capsys.readouterr().out
+    assert "not an ancestor of heretic-0.19.17" in out and "checkout" not in out
+
+
+def test_reinstalling_or_adding_an_extra_keeps_the_branch(monkeypatch):
+    """A requirement without the revision installs main: adding an extra from setup would have put a
+    heretic install back on main, whose code cannot open the board the branch's code migrated."""
+    monkeypatch.setattr(update, "installed_extras", lambda: ["providers"])
+    source = f"git+{update.REPO_URL}@heretic-0.19.17"
+    assert update.adding_extras(_from_branch(), ["pageindex"]) == [
+        "uv", "tool", "install", "--force", f"misaka[pageindex,providers] @ {source}"]
+    first, second = update._install_commands(_from_branch("pip"))
+    assert first[-1] == f"misaka @ {source}" and second[-1] == f"misaka[providers] @ {source}"
+    assert update._install_commands(_from_branch("uv"))[0][-1] == f"misaka[providers] @ {source}"
+    assert update._install_commands(_from_branch()) == [["uv", "tool", "upgrade", "misaka"]]   # uv's receipt has it
+
+
+def test_a_checkout_follows_the_branch_of_origin_it_tracks(tmp_path):
+    import subprocess
+
+    def git(cwd, *args):
+        subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
+
+    origin, checkout = tmp_path / "origin.git", tmp_path / "checkout"
+    git(tmp_path, "init", "--bare", "-b", "main", str(origin))
+    git(tmp_path, "clone", str(origin), str(checkout))
+    for args in (("config", "user.email", "t@example.com"), ("config", "user.name", "t"),
+                 ("commit", "--allow-empty", "-m", "one"), ("push", "origin", "HEAD:main"),
+                 ("checkout", "-b", "feature/x"), ("commit", "--allow-empty", "-m", "two"),
+                 ("push", "-u", "origin", "feature/x")):
+        git(checkout, *args)
+    install = update.Install("checkout", True, "uv", checkout, None, "0.19.17")
+    state = update._checkout_state(install)
+    assert (state["follows"], state["behind"], state["reason"]) == ("feature/x", 0, None)
+    git(checkout, "reset", "--hard", "HEAD~1")              # one commit behind its branch, ahead of nothing
+    state = update._checkout_state(install)
+    assert (state["follows"], state["behind"], state["reason"]) == ("feature/x", 1, None)
+    git(checkout, "branch", "--unset-upstream")             # no upstream: main, as before
+    state = update._checkout_state(install)
+    assert state["follows"] == "main"
+
+
 # -- update: running work, the snapshot, the rollback -----------------------------------------
 
 def _apply_setup(monkeypatch, install, *, blocking=(), panes=(), starts=None):
     calls = []
     monkeypatch.setattr(update, "describe", lambda: install)
     monkeypatch.setattr(update, "_checkout_state", lambda _install: {"head": "old", "behind": 1, "dirty": False, "reason": None})
-    monkeypatch.setattr(update, "_behind", lambda _commit: (1, None))
+    monkeypatch.setattr(update, "_behind", lambda _commit, _head=update.BRANCH: (1, None))
     monkeypatch.setattr(update, "installed_extras", list)
     monkeypatch.setattr(update, "running_work", lambda: (list(blocking), list(panes)))
     monkeypatch.setattr(update, "prompt_choice", lambda *_a, **_k: 1)
@@ -211,10 +300,16 @@ def _seed_home(root: Path) -> None:
 
 def test_an_update_snapshot_holds_settings_credentials_boards_and_roles(fresh_home, monkeypatch):
     _seed_home(fresh_home)
+    lastOrder = home.path("roles_root") / "last_order"
+    home.path("mcp_config", lastOrder).write_text('{"mcpServers": {}}', encoding="utf-8")
+    home.path("mcp_auth", lastOrder).parent.mkdir(parents=True)
+    home.path("mcp_auth", lastOrder).write_text("{}", encoding="utf-8")
     shot = backup.snapshot("update")
     assert (shot / "settings.json").read_text(encoding="utf-8") == '{"a": 1}'
     assert (shot / "credentials" / "auth.json").exists()
     assert (shot / "profiles" / "last_order" / "settings.json").exists()
+    assert (shot / "profiles" / "last_order" / "mcp.json").exists()
+    assert (shot / "profiles" / "last_order" / "credentials" / "mcp-auth.json").exists()
     with closing(sqlite3.connect(shot / "state" / "board.db")) as con:
         assert con.execute("SELECT x FROM t").fetchone() == (1,)
     assert not (shot / "cache").exists()
@@ -338,9 +433,9 @@ def test_a_run_whose_driver_died_does_not_hold_up_an_update(tmp_path, monkeypatc
         runs.init(con)
         live = runs.create(con, workspace=str(tmp_path), question="Live")
         dead = runs.create(con, workspace=str(tmp_path), question="Dead")
-        con.execute("UPDATE research_runs SET driver_lock='d1', driver_expires=? WHERE id=?",
+        con.execute("UPDATE graphs SET lease_token='d1', lease_expires=? WHERE id=?",
                     (int(time.time()) + 600, live["id"]))
-        con.execute("UPDATE research_runs SET driver_lock='d2', driver_expires=? WHERE id=?",
+        con.execute("UPDATE graphs SET lease_token='d2', lease_expires=? WHERE id=?",
                     (int(time.time()) - 600, dead["id"]))
     found = update.active_runs()
     assert [line.split()[0] for line in found] == [live["id"]]

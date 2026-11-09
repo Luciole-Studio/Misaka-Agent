@@ -14,8 +14,6 @@ from misaka.core.tools.bash import (
     BashToolDetails,
     BashToolInput,
     BashToolOptions,
-    create_bash_tool,
-    create_bash_tool_definition,
     createBashTool,
     createBashToolDefinition,
     createLocalBashOperations,
@@ -25,13 +23,10 @@ from misaka.core.tools.edit import (
     EditToolDetails,
     EditToolInput,
     EditToolOptions,
-    create_edit_tool,
-    create_edit_tool_definition,
     createEditTool,
     createEditToolDefinition,
 )
 from misaka.core.tools.file_mutation_queue import (
-    with_file_mutation_queue,
     withFileMutationQueue,
 )
 from misaka.core.tools.find import (
@@ -39,8 +34,6 @@ from misaka.core.tools.find import (
     FindToolDetails,
     FindToolInput,
     FindToolOptions,
-    create_find_tool,
-    create_find_tool_definition,
     createFindTool,
     createFindToolDefinition,
 )
@@ -49,8 +42,6 @@ from misaka.core.tools.grep import (
     GrepToolDetails,
     GrepToolInput,
     GrepToolOptions,
-    create_grep_tool,
-    create_grep_tool_definition,
     createGrepTool,
     createGrepToolDefinition,
 )
@@ -59,15 +50,11 @@ from misaka.core.tools.ls import (
     LsToolDetails,
     LsToolInput,
     LsToolOptions,
-    create_ls_tool,
-    create_ls_tool_definition,
     createLsTool,
     createLsToolDefinition,
 )
 from misaka.core.tools.office import (
     OfficeToolInput,
-    create_office_tool,
-    create_office_tool_definition,
     createOfficeTool,
     createOfficeToolDefinition,
 )
@@ -78,8 +65,6 @@ from misaka.core.tools.powershell import (
     PowerShellToolDetails,
     PowerShellToolInput,
     PowerShellToolOptions,
-    create_powershell_tool,
-    create_powershell_tool_definition,
     createLocalPowerShellOperations,
     createPowerShellTool,
     createPowerShellToolDefinition,
@@ -89,8 +74,6 @@ from misaka.core.tools.read import (
     ReadToolDetails,
     ReadToolInput,
     ReadToolOptions,
-    create_read_tool,
-    create_read_tool_definition,
     createReadTool,
     createReadToolDefinition,
 )
@@ -108,21 +91,19 @@ from misaka.core.tools.write import (
     WriteOperations,
     WriteToolInput,
     WriteToolOptions,
-    create_write_tool,
-    create_write_tool_definition,
     createWriteTool,
     createWriteToolDefinition,
 )
 
 type Tool = AgentTool
 type ToolDef = ToolDefinition[Any, Any]
+# MISAKA fork: `office` is misaka's own built-in tool (see `tools/office.py`).
 type ToolName = Literal[
     "read", "bash", "powershell", "edit", "write", "office", "grep", "find", "ls"
 ]
-all_tool_names: set[ToolName] = {
+allToolNames: set[ToolName] = {
     "read", "bash", "powershell", "edit", "write", "office", "grep", "find", "ls"
 }
-allToolNames = all_tool_names
 
 class ToolsOptions(TypedDict, total=False):
     read: ReadToolOptions | Mapping[str, Any]
@@ -142,162 +123,154 @@ def _get_tool_options(options: ToolsOptions | Mapping[str, Any] | None, key: Too
     return options.get(key)
 
 
-def create_tool_definition(
+def createToolDefinition(
     tool_name: ToolName,
     cwd: str,
     options: ToolsOptions | Mapping[str, Any] | None = None,
 ) -> ToolDef:
     match tool_name:
         case "read":
-            return create_read_tool_definition(cwd, _get_tool_options(options, "read"))
+            return createReadToolDefinition(cwd, _get_tool_options(options, "read"))
         case "bash":
-            return create_bash_tool_definition(cwd, _get_tool_options(options, "bash"))
+            return createBashToolDefinition(cwd, _get_tool_options(options, "bash"))
         case "powershell":
-            return create_powershell_tool_definition(
+            return createPowerShellToolDefinition(
                 cwd, _get_tool_options(options, "powershell")
             )
         case "edit":
-            return create_edit_tool_definition(cwd, _get_tool_options(options, "edit"))
+            return createEditToolDefinition(cwd, _get_tool_options(options, "edit"))
         case "write":
-            return create_write_tool_definition(
+            return createWriteToolDefinition(
                 cwd, _get_tool_options(options, "write")
             )
         case "office":
-            return create_office_tool_definition(
+            return createOfficeToolDefinition(
                 cwd, _get_tool_options(options, "office")
             )
         case "grep":
-            return create_grep_tool_definition(cwd, _get_tool_options(options, "grep"))
+            return createGrepToolDefinition(cwd, _get_tool_options(options, "grep"))
         case "find":
-            return create_find_tool_definition(cwd, _get_tool_options(options, "find"))
+            return createFindToolDefinition(cwd, _get_tool_options(options, "find"))
         case "ls":
-            return create_ls_tool_definition(cwd, _get_tool_options(options, "ls"))
+            return createLsToolDefinition(cwd, _get_tool_options(options, "ls"))
         case _:
             raise RuntimeError(f"Unknown tool name: {tool_name}")
 
 
-def create_tool(
+def createTool(
     tool_name: ToolName,
     cwd: str,
     options: ToolsOptions | Mapping[str, Any] | None = None,
 ) -> Tool:
     match tool_name:
         case "read":
-            return create_read_tool(cwd, _get_tool_options(options, "read"))
+            return createReadTool(cwd, _get_tool_options(options, "read"))
         case "bash":
-            return create_bash_tool(cwd, _get_tool_options(options, "bash"))
+            return createBashTool(cwd, _get_tool_options(options, "bash"))
         case "powershell":
-            return create_powershell_tool(cwd, _get_tool_options(options, "powershell"))
+            return createPowerShellTool(cwd, _get_tool_options(options, "powershell"))
         case "edit":
-            return create_edit_tool(cwd, _get_tool_options(options, "edit"))
+            return createEditTool(cwd, _get_tool_options(options, "edit"))
         case "write":
-            return create_write_tool(cwd, _get_tool_options(options, "write"))
+            return createWriteTool(cwd, _get_tool_options(options, "write"))
         case "office":
-            return create_office_tool(cwd, _get_tool_options(options, "office"))
+            return createOfficeTool(cwd, _get_tool_options(options, "office"))
         case "grep":
-            return create_grep_tool(cwd, _get_tool_options(options, "grep"))
+            return createGrepTool(cwd, _get_tool_options(options, "grep"))
         case "find":
-            return create_find_tool(cwd, _get_tool_options(options, "find"))
+            return createFindTool(cwd, _get_tool_options(options, "find"))
         case "ls":
-            return create_ls_tool(cwd, _get_tool_options(options, "ls"))
+            return createLsTool(cwd, _get_tool_options(options, "ls"))
         case _:
             raise RuntimeError(f"Unknown tool name: {tool_name}")
 
 
-def create_coding_tool_definitions(
+def createCodingToolDefinitions(
     cwd: str,
     options: ToolsOptions | Mapping[str, Any] | None = None,
 ) -> list[ToolDef]:
     return [
-        create_read_tool_definition(cwd, _get_tool_options(options, "read")),
-        create_bash_tool_definition(cwd, _get_tool_options(options, "bash")),
-        create_edit_tool_definition(cwd, _get_tool_options(options, "edit")),
-        create_write_tool_definition(cwd, _get_tool_options(options, "write")),
+        createReadToolDefinition(cwd, _get_tool_options(options, "read")),
+        createBashToolDefinition(cwd, _get_tool_options(options, "bash")),
+        createEditToolDefinition(cwd, _get_tool_options(options, "edit")),
+        createWriteToolDefinition(cwd, _get_tool_options(options, "write")),
     ]
 
 
-def create_read_only_tool_definitions(
+def createReadOnlyToolDefinitions(
     cwd: str,
     options: ToolsOptions | Mapping[str, Any] | None = None,
 ) -> list[ToolDef]:
     return [
-        create_read_tool_definition(cwd, _get_tool_options(options, "read")),
-        create_grep_tool_definition(cwd, _get_tool_options(options, "grep")),
-        create_find_tool_definition(cwd, _get_tool_options(options, "find")),
-        create_ls_tool_definition(cwd, _get_tool_options(options, "ls")),
+        createReadToolDefinition(cwd, _get_tool_options(options, "read")),
+        createGrepToolDefinition(cwd, _get_tool_options(options, "grep")),
+        createFindToolDefinition(cwd, _get_tool_options(options, "find")),
+        createLsToolDefinition(cwd, _get_tool_options(options, "ls")),
     ]
 
 
-def create_all_tool_definitions(
+def createAllToolDefinitions(
     cwd: str,
     options: ToolsOptions | Mapping[str, Any] | None = None,
 ) -> dict[ToolName, ToolDef]:
     return {
-        "read": create_read_tool_definition(cwd, _get_tool_options(options, "read")),
-        "bash": create_bash_tool_definition(cwd, _get_tool_options(options, "bash")),
-        "powershell": create_powershell_tool_definition(
+        "read": createReadToolDefinition(cwd, _get_tool_options(options, "read")),
+        "bash": createBashToolDefinition(cwd, _get_tool_options(options, "bash")),
+        "powershell": createPowerShellToolDefinition(
             cwd, _get_tool_options(options, "powershell")
         ),
-        "edit": create_edit_tool_definition(cwd, _get_tool_options(options, "edit")),
-        "write": create_write_tool_definition(cwd, _get_tool_options(options, "write")),
-        "office": create_office_tool_definition(cwd, _get_tool_options(options, "office")),
-        "grep": create_grep_tool_definition(cwd, _get_tool_options(options, "grep")),
-        "find": create_find_tool_definition(cwd, _get_tool_options(options, "find")),
-        "ls": create_ls_tool_definition(cwd, _get_tool_options(options, "ls")),
+        "edit": createEditToolDefinition(cwd, _get_tool_options(options, "edit")),
+        "write": createWriteToolDefinition(cwd, _get_tool_options(options, "write")),
+        "office": createOfficeToolDefinition(cwd, _get_tool_options(options, "office")),
+        "grep": createGrepToolDefinition(cwd, _get_tool_options(options, "grep")),
+        "find": createFindToolDefinition(cwd, _get_tool_options(options, "find")),
+        "ls": createLsToolDefinition(cwd, _get_tool_options(options, "ls")),
     }
 
 
-def create_coding_tools(
+def createCodingTools(
     cwd: str,
     options: ToolsOptions | Mapping[str, Any] | None = None,
 ) -> list[Tool]:
     return [
-        create_read_tool(cwd, _get_tool_options(options, "read")),
-        create_bash_tool(cwd, _get_tool_options(options, "bash")),
-        create_edit_tool(cwd, _get_tool_options(options, "edit")),
-        create_write_tool(cwd, _get_tool_options(options, "write")),
+        createReadTool(cwd, _get_tool_options(options, "read")),
+        createBashTool(cwd, _get_tool_options(options, "bash")),
+        createEditTool(cwd, _get_tool_options(options, "edit")),
+        createWriteTool(cwd, _get_tool_options(options, "write")),
     ]
 
 
-def create_read_only_tools(
+def createReadOnlyTools(
     cwd: str,
     options: ToolsOptions | Mapping[str, Any] | None = None,
 ) -> list[Tool]:
     return [
-        create_read_tool(cwd, _get_tool_options(options, "read")),
-        create_grep_tool(cwd, _get_tool_options(options, "grep")),
-        create_find_tool(cwd, _get_tool_options(options, "find")),
-        create_ls_tool(cwd, _get_tool_options(options, "ls")),
+        createReadTool(cwd, _get_tool_options(options, "read")),
+        createGrepTool(cwd, _get_tool_options(options, "grep")),
+        createFindTool(cwd, _get_tool_options(options, "find")),
+        createLsTool(cwd, _get_tool_options(options, "ls")),
     ]
 
 
-def create_all_tools(
+def createAllTools(
     cwd: str,
     options: ToolsOptions | Mapping[str, Any] | None = None,
 ) -> dict[ToolName, Tool]:
     return {
-        "read": create_read_tool(cwd, _get_tool_options(options, "read")),
-        "bash": create_bash_tool(cwd, _get_tool_options(options, "bash")),
-        "powershell": create_powershell_tool(
+        "read": createReadTool(cwd, _get_tool_options(options, "read")),
+        "bash": createBashTool(cwd, _get_tool_options(options, "bash")),
+        "powershell": createPowerShellTool(
             cwd, _get_tool_options(options, "powershell")
         ),
-        "edit": create_edit_tool(cwd, _get_tool_options(options, "edit")),
-        "write": create_write_tool(cwd, _get_tool_options(options, "write")),
-        "office": create_office_tool(cwd, _get_tool_options(options, "office")),
-        "grep": create_grep_tool(cwd, _get_tool_options(options, "grep")),
-        "find": create_find_tool(cwd, _get_tool_options(options, "find")),
-        "ls": create_ls_tool(cwd, _get_tool_options(options, "ls")),
+        "edit": createEditTool(cwd, _get_tool_options(options, "edit")),
+        "write": createWriteTool(cwd, _get_tool_options(options, "write")),
+        "office": createOfficeTool(cwd, _get_tool_options(options, "office")),
+        "grep": createGrepTool(cwd, _get_tool_options(options, "grep")),
+        "find": createFindTool(cwd, _get_tool_options(options, "find")),
+        "ls": createLsTool(cwd, _get_tool_options(options, "ls")),
     }
 
 
-createToolDefinition = create_tool_definition
-createTool = create_tool
-createCodingToolDefinitions = create_coding_tool_definitions
-createReadOnlyToolDefinitions = create_read_only_tool_definitions
-createAllToolDefinitions = create_all_tool_definitions
-createCodingTools = create_coding_tools
-createReadOnlyTools = create_read_only_tools
-createAllTools = create_all_tools
 
 
 __all__ = [
@@ -346,7 +319,6 @@ __all__ = [
     "WriteToolInput",
     "WriteToolOptions",
     "allToolNames",
-    "all_tool_names",
     "createAllToolDefinitions",
     "createAllTools",
     "createBashTool",
@@ -375,20 +347,9 @@ __all__ = [
     "createToolDefinition",
     "createWriteTool",
     "createWriteToolDefinition",
-    "create_bash_tool",
-    "create_edit_tool",
-    "create_find_tool",
-    "create_grep_tool",
-    "create_ls_tool",
-    "create_office_tool",
-    "create_office_tool_definition",
-    "create_powershell_tool",
-    "create_read_tool",
-    "create_write_tool",
     "formatSize",
     "truncateHead",
     "truncateLine",
     "truncateTail",
     "withFileMutationQueue",
-    "with_file_mutation_queue",
 ]

@@ -1,16 +1,19 @@
-"""Core agent loop, tool execution, and continuation helpers."""
+"""Agent loop that works with AgentMessage throughout.
+Transforms to Message[] only at the LLM call boundary.
+
+Translated from pi's ``packages/agent/src/agent-loop.ts`` (v1.3.0).
+"""
 
 from __future__ import annotations
 
 import asyncio
-import inspect
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, fields, is_dataclass, replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
-from misaka.agent.stream_fn import get_default_stream_fn
+from misaka.agent.stream_fn import getDefaultStreamFn
 from misaka.agent.types import (
     AfterToolCallContext,
     AfterToolCallResult,
@@ -22,6 +25,7 @@ from misaka.agent.types import (
     AgentStartEvent,
     AgentTool,
     AgentToolCall,
+    AgentToolCallOutcome,
     AgentToolResult,
     AgentTurnContext,
     BeforeToolCallContext,
@@ -29,7 +33,9 @@ from misaka.agent.types import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    PrepareNextTurnContext,
     PrepareRequestContext,
+    StreamFn,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
@@ -39,6 +45,7 @@ from misaka.agent.types import (
 from misaka.ai.types import (
     AssistantMessage,
     Context,
+    MessageValue,
     SystemMessage,
     TextContent,
     ToolResultMessage,
@@ -48,59 +55,363 @@ from misaka.ai.types import (
 from misaka.ai.utils.event_stream import EventStream, spawn_stream_task
 from misaka.ai.utils.transcript import (
     ToolStateChanges,
-    get_current_tools,
-    get_tool_state_changes,
-    normalize_context,
-    to_tool_declaration,
+    getCurrentTools,
+    getToolStateChanges,
+    normalizeContext,
+    toToolDeclaration,
 )
-from misaka.ai.utils.validation import validate_tool_arguments
-from misaka.utils.values import maybe_await, signal_aborted
+from misaka.ai.utils.validation import validateToolArguments
+from misaka.utils.js import UNDEFINED, errorMessage, jsRound, startTask
+from misaka.utils.values import maybe_await, read_field, signal_aborted
 
 type AgentEventSink = Callable[[AgentEvent], Awaitable[None] | None]
 
 
-@dataclass(slots=True)
-class ExecutedToolCallBatch:
-    messages: list[ToolResultMessage]
-    terminate: bool
+def agentLoop(
+    prompts: list[AgentMessage],
+    context: AgentContext,
+    config: AgentLoopConfig,
+    signal: Any | None,
+    streamFn: StreamFn | None,
+) -> EventStream[AgentEvent, list[AgentMessage]]:
+    """Start an agent loop with a new prompt message.
+    The prompt is added to the context and events are emitted for it.
+    """
+    stream = _createAgentStream()
+
+    async def push(event: AgentEvent) -> None:
+        stream.push(event)
+
+    async def run() -> None:
+        try:
+            stream.end(await runAgentLoop(prompts, context, config, push, signal, streamFn))
+        except BaseException as error:  # noqa: BLE001 - handed to the stream's consumer
+            _failStream(stream, error)
+
+    # MISAKA fork: the task is held until it finishes (the event loop keeps only a weak reference to a task).
+    spawn_stream_task(run())
+    return stream
 
 
-@dataclass(slots=True)
-class PreparedToolCall:
-    kind: str
-    toolCall: AgentToolCall
-    tool: AgentTool
-    args: Any
+def agentLoopContinue(
+    context: AgentContext,
+    config: AgentLoopConfig,
+    signal: Any | None,
+    streamFn: StreamFn | None,
+) -> EventStream[AgentEvent, list[AgentMessage]]:
+    """Continue an agent loop from the current context without adding a new message.
+    Used for retries - context already has user message or tool results.
+
+    **Important:** The last message in context must convert to a `user` or `toolResult` message
+    via `convertToLlm`. If it doesn't, the LLM provider will reject the request.
+    This cannot be validated here since `convertToLlm` is only called once per turn.
+    """
+    if len(context.messages) == 0:
+        raise RuntimeError("Cannot continue: no messages in context")
+
+    if _role(context.messages[-1]) == "assistant":
+        raise RuntimeError("Cannot continue from message role: assistant")
+
+    stream = _createAgentStream()
+
+    async def push(event: AgentEvent) -> None:
+        stream.push(event)
+
+    async def run() -> None:
+        try:
+            stream.end(await runAgentLoopContinue(context, config, push, signal, streamFn))
+        except BaseException as error:  # noqa: BLE001 - handed to the stream's consumer
+            _failStream(stream, error)
+
+    spawn_stream_task(run())
+    return stream
 
 
-@dataclass(slots=True)
-class ImmediateToolCallOutcome:
-    kind: str
-    result: AgentToolResult
-    isError: bool
+async def runAgentLoop(
+    prompts: list[AgentMessage],
+    context: AgentContext,
+    config: AgentLoopConfig,
+    emit: AgentEventSink,
+    signal: Any | None,
+    streamFn: StreamFn | None,
+) -> list[AgentMessage]:
+    initialMessages = _declareToolChanges(context, prompts)
+    newMessages: list[AgentMessage] = [*initialMessages]
+    currentContext = AgentContext(messages=[*context.messages, *initialMessages], tools=context.tools)
+
+    await _emit(emit, AgentStartEvent())
+    await _emit(emit, TurnStartEvent())
+    for message in initialMessages:
+        await _emit(emit, MessageStartEvent(message=message))
+        await _emit(emit, MessageEndEvent(message=message))
+
+    await _runLoop(currentContext, newMessages, config, signal, emit, streamFn or getDefaultStreamFn())
+    return newMessages
 
 
-@dataclass(slots=True)
-class ExecutedToolCallOutcome:
-    result: AgentToolResult
-    isError: bool
+async def runAgentLoopContinue(
+    context: AgentContext,
+    config: AgentLoopConfig,
+    emit: AgentEventSink,
+    signal: Any | None,
+    streamFn: StreamFn | None,
+) -> list[AgentMessage]:
+    if len(context.messages) == 0:
+        raise RuntimeError("Cannot continue: no messages in context")
+
+    if _role(context.messages[-1]) == "assistant":
+        raise RuntimeError("Cannot continue from message role: assistant")
+
+    newMessages: list[AgentMessage] = []
+    currentContext = AgentContext(messages=context.messages, tools=context.tools)
+
+    await _emit(emit, AgentStartEvent())
+    await _emit(emit, TurnStartEvent())
+
+    await _runLoop(currentContext, newMessages, config, signal, emit, streamFn or getDefaultStreamFn())
+    return newMessages
 
 
-class StreamOptionsNamespace(SimpleNamespace):
-    """A SimpleNamespace subclass that supports dict() conversion and ** unpacking.
+def _failStream(stream: EventStream[AgentEvent, list[AgentMessage]], error: BaseException) -> None:
+    """MISAKA fork: upstream leaves the stream open when the loop rejects (an unhandled rejection); here the failure
+    reaches `result()` and the stream ends, so a consumer does not wait forever."""
+    result = stream.result()
+    if not result.done():
+        result.set_exception(error)
+    stream.end([])
 
-    In TypeScript, the agent loop spreads ``config`` into a plain object via
-    ``{ ...config, apiKey, signal }``.  Downstream code (e.g. ``sdk.py``) then
-    spreads that object again with ``{ ...options, ... }``.  JavaScript object
-    spread works transparently on any object, but Python's ``dict()`` and ``**``
-    unpacking require the target to expose ``keys()`` and ``__getitem__()`` (the
-    informal mapping protocol).  Without these methods, ``dict(namespace)`` raises
-    ``TypeError: 'StreamOptionsNamespace' object is not iterable``.
 
-    It deliberately does *not* answer None for a missing attribute. Providers read their
-    options with ``getattr(options, name, default)``, and a ``__getattr__`` that returns
-    None intercepts that call before the default can apply -- so every option a provider
-    tried to default was silently None instead. Missing now means missing.
+def _createAgentStream() -> EventStream[AgentEvent, list[AgentMessage]]:
+    return EventStream(
+        lambda event: event.type == "agent_end",
+        lambda event: event.messages if event.type == "agent_end" else [],
+    )
+
+
+def _thinkingLevelOf(update: Any, current: Any) -> Any:
+    """``update.thinkingLevel === undefined ? config.reasoning : update.thinkingLevel === "off" ? undefined : ...``."""
+    if update.thinkingLevel is None:
+        return current
+    return None if update.thinkingLevel == "off" else update.thinkingLevel
+
+
+async def _runLoop(
+    initialContext: AgentContext,
+    newMessages: list[AgentMessage],
+    initialConfig: AgentLoopConfig,
+    signal: Any | None,
+    emit: AgentEventSink,
+    streamFunction: StreamFn,
+) -> None:
+    """Main loop logic shared by agentLoop and agentLoopContinue."""
+    currentContext = initialContext
+    config = initialConfig
+    lastCompletedTurn: PrepareNextTurnContext | None = None
+    explicitContinuation = False
+    # Check for steering messages at start (user may have typed while waiting)
+    pendingMessages: list[AgentMessage] = list(
+        (await maybe_await(config.getSteeringMessages()) if config.getSteeringMessages else None) or []
+    )
+
+    # Outer loop: continues when queued follow-up messages arrive after agent would stop
+    while True:
+        hasMoreToolCalls = True
+
+        # Inner loop: process tool calls and steering messages
+        while hasMoreToolCalls or len(pendingMessages) > 0:
+            preparedMessages: list[AgentMessage] = []
+            if lastCompletedTurn is not None:
+                nextTurnSnapshot = (
+                    await maybe_await(config.prepareNextTurn(lastCompletedTurn)) if config.prepareNextTurn else None
+                )
+                if nextTurnSnapshot:
+                    currentContext = nextTurnSnapshot.context or currentContext
+                    preparedMessages = list(nextTurnSnapshot.messages or [])
+                    config = replace(
+                        config,
+                        model=nextTurnSnapshot.model or config.model,
+                        reasoning=_thinkingLevelOf(nextTurnSnapshot, config.reasoning),
+                    )
+                # Preparation can be long-running (for example, compaction). Pick up steering
+                # queued while it ran. Only poll again if the earlier poll returned nothing;
+                # otherwise one-at-a-time mode would deliver two messages in this turn.
+                if len(pendingMessages) == 0:
+                    pendingMessages = list(
+                        (await maybe_await(config.getSteeringMessages()) if config.getSteeringMessages else None) or []
+                    )
+                await _emit(emit, TurnStartEvent())
+
+            # Process prepared and queued messages before the next assistant response.
+            for message in _declareToolChanges(currentContext, [*preparedMessages, *pendingMessages]):
+                await _emit(emit, MessageStartEvent(message=message))
+                await _emit(emit, MessageEndEvent(message=message))
+                currentContext.messages.append(message)
+                newMessages.append(message)
+            pendingMessages = []
+
+            requestUpdate = (
+                await maybe_await(
+                    config.prepareRequest(
+                        PrepareRequestContext(
+                            context=currentContext,
+                            model=config.model,
+                            thinkingLevel=config.reasoning if config.reasoning is not None else "off",
+                        ),
+                        signal,
+                    )
+                )
+                if config.prepareRequest
+                else None
+            )
+            if requestUpdate:
+                currentContext = requestUpdate.context or currentContext
+                config = replace(
+                    config,
+                    model=requestUpdate.model or config.model,
+                    reasoning=_thinkingLevelOf(requestUpdate, config.reasoning),
+                )
+
+            # Stream assistant response
+            message = await _streamAssistantResponse(currentContext, config, signal, emit, streamFunction)
+            newMessages.append(message)
+
+            if message.stopReason in ("error", "aborted"):
+                lastCompletedTurn = AgentTurnContext(
+                    message=message,
+                    toolResults=[],
+                    context=currentContext,
+                    newMessages=newMessages,
+                )
+                if config.finishTurn:
+                    await maybe_await(config.finishTurn(lastCompletedTurn, signal))
+                await _emit(emit, TurnEndEvent(message=message, toolResults=[]))
+                await _emit(emit, AgentEndEvent(messages=newMessages))
+                return
+
+            # Check for tool calls
+            toolCalls = [content for content in message.content if content.type == "toolCall"]
+
+            toolResults: list[ToolResultMessage] = []
+            hasMoreToolCalls = False
+            if len(toolCalls) > 0:
+                # A "length" stop means the output was cut off by the token limit, so
+                # every tool call in the message may carry truncated arguments. Fail
+                # them all instead of executing potentially borked calls.
+                executedToolBatch = (
+                    await _failToolCallsFromTruncatedMessage(toolCalls, emit)
+                    if message.stopReason == "length"
+                    else await _executeToolCalls(currentContext, message, config, signal, emit)
+                )
+                toolResults.extend(executedToolBatch.messages)
+                hasMoreToolCalls = not executedToolBatch.terminate
+
+                for result in toolResults:
+                    currentContext.messages.append(result)
+                    newMessages.append(result)
+
+            lastCompletedTurn = AgentTurnContext(
+                message=message,
+                toolResults=toolResults,
+                context=currentContext,
+                newMessages=newMessages,
+            )
+            decision = await maybe_await(config.finishTurn(lastCompletedTurn, signal)) if config.finishTurn else None
+            await _emit(emit, TurnEndEvent(message=message, toolResults=toolResults))
+
+            if read_field(decision, "action") == "end":
+                await _emit(emit, AgentEndEvent(messages=newMessages))
+                return
+
+            explicitContinuation = read_field(decision, "action") == "continue"
+            pendingMessages = list(
+                (await maybe_await(config.getSteeringMessages()) if config.getSteeringMessages else None) or []
+            )
+            if hasMoreToolCalls or len(pendingMessages) > 0:
+                explicitContinuation = False
+
+        # Agent would stop here. Check for follow-up messages.
+        followUpMessages = list(
+            (await maybe_await(config.getFollowUpMessages()) if config.getFollowUpMessages else None) or []
+        )
+        if len(followUpMessages) > 0:
+            # Set as pending so inner loop processes them
+            explicitContinuation = False
+            pendingMessages = followUpMessages
+            continue
+
+        # No natural request was selected, so fulfill the continuation decision with one context-only turn.
+        if explicitContinuation:
+            explicitContinuation = False
+            continue
+
+        # No more messages, exit
+        break
+
+    await _emit(emit, AgentEndEvent(messages=newMessages))
+
+
+def _declareToolChanges(context: AgentContext, pendingMessages: list[AgentMessage]) -> list[AgentMessage]:
+    """Declare tool loadout changes to the model.
+
+    `context.tools` is what the runtime can execute; the transcript's system messages declare
+    what the model may call. Before each request the difference becomes `toolsAdded` and
+    `toolsRemoved` on a system message. When a pending system message exists, its tool fields
+    are treated as intent and replaced with the delta between the committed transcript and
+    the executable set, so replay always yields exactly `context.tools`. Otherwise a new
+    system message is inserted before the first non-system pending message.
+    """
+    systemIndex = -1
+    for i in range(len(pendingMessages) - 1, -1, -1):
+        if _role(pendingMessages[i]) == "system":
+            systemIndex = i
+            break
+    pending: Any = pendingMessages[systemIndex] if systemIndex >= 0 else None
+    baseline = (
+        [
+            _withToolChanges(pending, _NO_CHANGES) if index == systemIndex else message
+            for index, message in enumerate(pendingMessages)
+        ]
+        if pending is not None
+        else pendingMessages
+    )
+    changes = getToolStateChanges(
+        getCurrentTools([*context.messages, *baseline]),
+        [toToolDeclaration(tool) for tool in context.tools or []],
+    )
+    unchanged = len(changes.toolsAdded) == 0 and len(changes.toolsRemoved) == 0
+
+    if pending is not None:
+        # Keep the caller's message object when it already declares no tool changes.
+        if unchanged and not pending.toolsAdded and not pending.toolsRemoved:
+            return pendingMessages
+        return [_withToolChanges(pending, changes) if index == systemIndex else message for index, message in enumerate(baseline)]
+    if unchanged:
+        return pendingMessages
+    update = _withToolChanges(SystemMessage(content="", timestamp=int(time.time() * 1000)), changes)
+    insertIndex = next((index for index, message in enumerate(pendingMessages) if _role(message) != "system"), -1)
+    index = len(pendingMessages) if insertIndex == -1 else insertIndex
+    return [*pendingMessages[:index], update, *pendingMessages[index:]]
+
+
+_NO_CHANGES = ToolStateChanges(toolsAdded=[], toolsRemoved=[])
+
+
+def _withToolChanges(message: SystemMessage, changes: ToolStateChanges) -> SystemMessage:
+    """Copy a system message with its tool fields replaced by `changes`; empty lists omit the field."""
+    return message.model_copy(
+        update={
+            "toolsAdded": list(changes.toolsAdded) if len(changes.toolsAdded) > 0 else None,
+            "toolsRemoved": list(changes.toolsRemoved) if len(changes.toolsRemoved) > 0 else None,
+        }
+    )
+
+
+class _StreamOptions(SimpleNamespace):
+    """MISAKA fork: ``{ ...config, apiKey, signal }`` as an object the adapters read by attribute, which also spreads
+    like a mapping (``dict(options)``, ``**options``) as the JavaScript object does.
+
+    A missing option is missing: providers read ``getattr(options, name, default)``, so there is no ``__getattr__``
+    answering None.
     """
 
     def keys(self):
@@ -121,7 +432,6 @@ class StreamOptionsNamespace(SimpleNamespace):
     def __len__(self) -> int:
         return len(self.__dict__)
 
-
     def model_dump(self, *, exclude_none: bool = False) -> dict[str, Any]:
         payload = dict(self.__dict__)
         if exclude_none:
@@ -129,615 +439,371 @@ class StreamOptionsNamespace(SimpleNamespace):
         return payload
 
 
-@dataclass(slots=True)
-class FinalizedToolCallOutcome:
-    toolCall: AgentToolCall
-    result: AgentToolResult
-    isError: bool
+def _spread(value: Any) -> dict[str, Any]:
+    """MISAKA fork: ``{ ...config }`` for the loop config (a dataclass) or a mapping; a member left ``UNDEFINED`` is
+    not spread."""
+    if isinstance(value, dict):
+        return {key: item for key, item in value.items() if item is not UNDEFINED}
+    if is_dataclass(value):
+        return {field.name: getattr(value, field.name) for field in fields(value) if getattr(value, field.name) is not UNDEFINED}
+    return {key: item for key, item in vars(value).items() if item is not UNDEFINED}
 
 
-def agent_loop(
-    prompts: list[AgentMessage],
-    context: AgentContext,
-    config: AgentLoopConfig,
-    signal: Any | None = None,
-    stream_fn=None,
-) -> EventStream[AgentEvent, list[AgentMessage]]:
-    stream = _create_agent_stream()
-
-    async def run() -> None:
-        try:
-            messages = await run_agent_loop(prompts, context, config, _push_event(stream), signal, stream_fn)
-            stream.end(messages)
-        except BaseException as error:  # noqa: BLE001
-            stream.result().set_exception(error)
-            stream.end([])
-
-    # Not a bare `create_task`: the event loop holds only a weak reference, so the task
-    # can be collected mid-run ("Task was destroyed but it is pending"). pi has no such
-    # hazard -- V8 keeps the promise `void run().then()` returns alive. This is the
-    # repo's own helper for exactly this shape.
-    spawn_stream_task(run())
-    return stream
-
-
-async def run_agent_loop(
-    prompts: list[AgentMessage],
-    context: AgentContext,
-    config: AgentLoopConfig,
-    emit: AgentEventSink,
-    signal: Any | None = None,
-    stream_fn=None,
-) -> list[AgentMessage]:
-    initial_messages = declare_tool_changes(context, [_copy_agent_message(prompt) for prompt in prompts])
-    new_messages = [*initial_messages]
-    current_context = AgentContext(
-        messages=[*_copy_agent_messages(context.messages), *initial_messages],
-        tools=_copy_tools(context.tools),
-    )
-
-    await _emit(emit, AgentStartEvent())
-    await _emit(emit, TurnStartEvent())
-    for message in initial_messages:
-        await _emit(emit, MessageStartEvent(message=message))
-        await _emit(emit, MessageEndEvent(message=message))
-
-    resolved_stream_fn = stream_fn if stream_fn is not None else get_default_stream_fn()
-    await _run_loop(current_context, new_messages, config, signal, emit, resolved_stream_fn)
-    return new_messages
-
-
-async def run_agent_loop_continue(
-    context: AgentContext,
-    config: AgentLoopConfig,
-    emit: AgentEventSink,
-    signal: Any | None = None,
-    stream_fn=None,
-) -> list[AgentMessage]:
-    if not context.messages:
-        raise RuntimeError("Cannot continue: no messages in context")
-    if getattr(context.messages[-1], "role", None) == "assistant":
-        raise RuntimeError("Cannot continue from message role: assistant")
-
-    new_messages: list[AgentMessage] = []
-    current_context = AgentContext(
-        messages=_copy_agent_messages(context.messages),
-        tools=_copy_tools(context.tools),
-    )
-
-    await _emit(emit, AgentStartEvent())
-    await _emit(emit, TurnStartEvent())
-    resolved_stream_fn = stream_fn if stream_fn is not None else get_default_stream_fn()
-    await _run_loop(current_context, new_messages, config, signal, emit, resolved_stream_fn)
-    return new_messages
-
-
-async def _run_loop(
-    initial_context: AgentContext,
-    new_messages: list[AgentMessage],
-    initial_config: AgentLoopConfig,
-    signal: Any | None,
-    emit: AgentEventSink,
-    stream_fn,
-) -> None:
-    """Main loop logic shared by agentLoop and agentLoopContinue."""
-    current_context = initial_context
-    config = initial_config
-    last_completed_turn: AgentTurnContext | None = None
-    explicit_continuation = False
-    # Check for steering messages at start (user may have typed while waiting)
-    pending_messages = list(await maybe_await(config.getSteeringMessages()) if config.getSteeringMessages else [])
-
-    # Outer loop: continues when queued follow-up messages arrive after agent would stop
-    while True:
-        has_more_tool_calls = True
-
-        # Inner loop: process tool calls and steering messages
-        while has_more_tool_calls or pending_messages:
-            prepared_messages: list[AgentMessage] = []
-            if last_completed_turn is not None:
-                next_turn_snapshot = (
-                    await maybe_await(config.prepareNextTurn(last_completed_turn))
-                    if config.prepareNextTurn
-                    else None
-                )
-                if next_turn_snapshot:
-                    current_context = next_turn_snapshot.context or current_context
-                    prepared_messages = list(next_turn_snapshot.messages or [])
-                    config = replace(
-                        config,
-                        model=next_turn_snapshot.model or config.model,
-                        reasoning=(
-                            config.reasoning
-                            if next_turn_snapshot.thinkingLevel is None
-                            else None
-                            if next_turn_snapshot.thinkingLevel == "off"
-                            else next_turn_snapshot.thinkingLevel
-                        ),
-                    )
-
-                # Preparation can be long-running (for example, compaction). Pick up steering
-                # queued while it ran. Only poll again if the earlier poll returned nothing;
-                # otherwise one-at-a-time mode would deliver two messages in this turn.
-                if not pending_messages:
-                    pending_messages = list(
-                        await maybe_await(config.getSteeringMessages())
-                        if config.getSteeringMessages
-                        else []
-                    )
-                await _emit(emit, TurnStartEvent())
-
-            # Process prepared and queued messages before the next assistant response.
-            for message in declare_tool_changes(
-                current_context, [_copy_agent_message(m) for m in [*prepared_messages, *pending_messages]]
-            ):
-                await _emit(emit, MessageStartEvent(message=message))
-                await _emit(emit, MessageEndEvent(message=message))
-                current_context.messages.append(message)
-                new_messages.append(message)
-            pending_messages = []
-
-            request_update = (
-                await maybe_await(
-                    config.prepareRequest(
-                        PrepareRequestContext(
-                            context=current_context,
-                            model=config.model,
-                            thinkingLevel=config.reasoning or "off",
-                        ),
-                        signal,
-                    )
-                )
-                if config.prepareRequest
-                else None
-            )
-            if request_update:
-                current_context = request_update.context or current_context
-                config = replace(
-                    config,
-                    model=request_update.model or config.model,
-                    reasoning=(
-                        config.reasoning
-                        if request_update.thinkingLevel is None
-                        else None
-                        if request_update.thinkingLevel == "off"
-                        else request_update.thinkingLevel
-                    ),
-                )
-
-            # Stream assistant response
-            message = await stream_assistant_response(current_context, config, signal, emit, stream_fn)
-            new_messages.append(message)
-
-            if message.stopReason in {"error", "aborted"}:
-                last_completed_turn = AgentTurnContext(
-                    message=message,
-                    toolResults=[],
-                    context=current_context,
-                    newMessages=new_messages,
-                )
-                if config.finishTurn:
-                    await maybe_await(config.finishTurn(last_completed_turn, signal))
-                await _emit(emit, TurnEndEvent(message=message, toolResults=[]))
-                await _emit(emit, AgentEndEvent(messages=new_messages[:]))
-                return
-
-            # Check for tool calls
-            tool_calls = [block for block in message.content if block.type == "toolCall"]
-            tool_results: list[ToolResultMessage] = []
-            has_more_tool_calls = False
-            if tool_calls:
-                # A "length" stop means the output was cut off by the token limit, so
-                # every tool call in the message may carry truncated arguments. Fail
-                # them all instead of executing potentially borked calls.
-                executed_tool_batch = (
-                    await _fail_tool_calls_from_truncated_message(tool_calls, emit)
-                    if message.stopReason == "length"
-                    else await execute_tool_calls(
-                        current_context, message, config, signal, emit
-                    )
-                )
-                tool_results.extend(executed_tool_batch.messages)
-                has_more_tool_calls = not executed_tool_batch.terminate
-
-                for result in tool_results:
-                    current_context.messages.append(result)
-                    new_messages.append(result)
-
-            last_completed_turn = AgentTurnContext(
-                message=message,
-                toolResults=tool_results,
-                context=current_context,
-                newMessages=new_messages,
-            )
-            decision = (
-                await maybe_await(config.finishTurn(last_completed_turn, signal)) if config.finishTurn else None
-            )
-            await _emit(emit, TurnEndEvent(message=message, toolResults=tool_results))
-            if _decision_action(decision) == "end":
-                await _emit(emit, AgentEndEvent(messages=new_messages[:]))
-                return
-            explicit_continuation = _decision_action(decision) == "continue"
-
-            pending_messages = list(
-                await maybe_await(config.getSteeringMessages()) if config.getSteeringMessages else []
-            )
-            if has_more_tool_calls or pending_messages:
-                explicit_continuation = False
-
-        # Agent would stop here. Check for follow-up messages.
-        follow_up_messages = list(
-            await maybe_await(config.getFollowUpMessages()) if config.getFollowUpMessages else []
-        )
-        if follow_up_messages:
-            # Set as pending so inner loop processes them
-            explicit_continuation = False
-            pending_messages = follow_up_messages
-            continue
-
-        # No natural request was selected, so fulfill the continuation decision with one context-only turn.
-        if explicit_continuation:
-            explicit_continuation = False
-            continue
-
-        # No more messages, exit
-        break
-
-    await _emit(emit, AgentEndEvent(messages=new_messages[:]))
-
-
-def _decision_action(decision: Any) -> str | None:
-    """``decision?.action``: the decision may be a dataclass or a plain mapping."""
-    if decision is None:
-        return None
-    if isinstance(decision, dict):
-        return decision.get("action")
-    return getattr(decision, "action", None)
-
-
-def declare_tool_changes(context: AgentContext, pending_messages: list[AgentMessage]) -> list[AgentMessage]:
-    """Declare tool loadout changes to the model.
-
-    `context.tools` is what the runtime can execute; the transcript's system messages declare
-    what the model may call. Before each request the difference becomes `toolsAdded` and
-    `toolsRemoved` on a system message. When a pending system message exists, its tool fields
-    are treated as intent and replaced with the delta between the committed transcript and
-    the executable set, so replay always yields exactly `context.tools`. Otherwise a new
-    system message is inserted before the first non-system pending message.
-    """
-    system_index = -1
-    for i in range(len(pending_messages) - 1, -1, -1):
-        if _role(pending_messages[i]) == "system":
-            system_index = i
-            break
-    pending = pending_messages[system_index] if system_index >= 0 else None
-    baseline = (
-        [
-            _with_tool_changes(pending, NO_CHANGES) if index == system_index else message
-            for index, message in enumerate(pending_messages)
-        ]
-        if pending is not None
-        else pending_messages
-    )
-    changes = get_tool_state_changes(
-        get_current_tools([*context.messages, *baseline]),
-        [to_tool_declaration(tool) for tool in context.tools or []],
-    )
-    unchanged = len(changes.toolsAdded) == 0 and len(changes.toolsRemoved) == 0
-    if pending is not None:
-        # Keep the caller's message object when it already declares no tool changes.
-        if unchanged and not pending.toolsAdded and not pending.toolsRemoved:
-            return pending_messages
-        return [
-            _with_tool_changes(pending, changes) if index == system_index else message
-            for index, message in enumerate(baseline)
-        ]
-    if unchanged:
-        return pending_messages
-    update = _with_tool_changes(SystemMessage(content="", timestamp=int(time.time() * 1000)), changes)
-    insert_index = next(
-        (index for index, message in enumerate(pending_messages) if _role(message) != "system"),
-        -1,
-    )
-    index = len(pending_messages) if insert_index == -1 else insert_index
-    return [*pending_messages[:index], update, *pending_messages[index:]]
-
-
-NO_CHANGES = ToolStateChanges(toolsAdded=[], toolsRemoved=[])
-
-
-def _role(message: Any) -> Any:
-    # Custom messages (`create_custom_message`) are plain mappings; the rest are models.
-    if isinstance(message, dict):
-        return message.get("role")
-    return getattr(message, "role", None)
-
-
-def _with_tool_changes(message: SystemMessage, changes: ToolStateChanges) -> SystemMessage:
-    """Copy a system message with its tool fields replaced by `changes`; empty lists omit the field."""
-    return message.model_copy(
-        update={
-            "toolsAdded": list(changes.toolsAdded) if len(changes.toolsAdded) > 0 else None,
-            "toolsRemoved": list(changes.toolsRemoved) if len(changes.toolsRemoved) > 0 else None,
-        }
-    )
-
-
-async def stream_assistant_response(
+async def _streamAssistantResponse(
     context: AgentContext,
     config: AgentLoopConfig,
     signal: Any | None,
     emit: AgentEventSink,
-    stream_fn=None,
+    streamFunction: StreamFn,
 ) -> AssistantMessage:
+    """Stream an assistant response from the LLM.
+    This is where AgentMessage[] gets transformed to Message[] for the LLM.
+    """
+    # Apply context transform if configured (AgentMessage[] → AgentMessage[])
     messages = context.messages
     if config.transformContext:
         messages = list(await maybe_await(config.transformContext(messages, signal)))
 
-    llm_messages = list(await maybe_await(config.convertToLlm(messages)))
-    validated_messages = [validate_message(_model_dump(message)) for message in llm_messages]
-    llm_context = normalize_context(Context(messages=validated_messages))
-    stream_function = stream_fn if stream_fn is not None else get_default_stream_fn()
-    resolved_api_key = (
-        await maybe_await(config.getApiKey(config.model.provider))
-        if config.getApiKey
-        else None
-    ) or config.apiKey
-    response_options_payload = _to_mapping(config)
-    response_options_payload["apiKey"] = resolved_api_key
-    response_options_payload["signal"] = signal
-    response_options = StreamOptionsNamespace(**response_options_payload)
-    response = await maybe_await(stream_function(config.model, llm_context, response_options))
+    # Convert to LLM-compatible messages (AgentMessage[] → Message[])
+    llmMessages = list(await maybe_await(config.convertToLlm(messages)))
 
-    partial_message: AssistantMessage | None = None
-    added_partial = False
+    # MISAKA fork: `convertToLlm` may hand back mappings or messages of other model classes; they are validated into
+    # the message models the adapters read (message models pass through as they are).
+    llmContext = normalizeContext(
+        Context(
+            messages=[
+                message if isinstance(message, MessageValue) else validate_message(_modelDump(message))
+                for message in llmMessages
+            ]
+        )
+    )
+
+    # Resolve API key (important for expiring tokens)
+    resolvedApiKey = (
+        await maybe_await(config.getApiKey(config.model.provider)) if config.getApiKey else None
+    ) or config.apiKey
+
+    response = await maybe_await(
+        streamFunction(config.model, llmContext, _StreamOptions(**{**_spread(config), "apiKey": resolvedApiKey, "signal": signal}))
+    )
+
+    # Record the requested level, whichever stream function answered.
+    async def result() -> AssistantMessage:
+        message = await response.result()
+        message.thinkingLevel = config.reasoning if config.reasoning is not None else "off"
+        return message
+
+    partialMessage: AssistantMessage | None = None
+    addedPartial = False
 
     async for event in response:
-        if event.type == "start":
-            partial_message = event.partial.model_copy(deep=True)
-            context.messages.append(partial_message)
-            added_partial = True
-            await _emit(emit, MessageStartEvent(message=partial_message.model_copy(deep=True)))
-            continue
+        match event.type:
+            case "start":
+                partialMessage = event.partial
+                context.messages.append(partialMessage)
+                addedPartial = True
+                await _emit(emit, MessageStartEvent(message=partialMessage.model_copy()))
 
-        if event.type in {
-            "text_start",
-            "text_delta",
-            "text_end",
-            "thinking_start",
-            "thinking_delta",
-            "thinking_end",
-            "toolcall_start",
-            "toolcall_delta",
-            "toolcall_end",
-        }:
-            if partial_message is not None:
-                # One deep copy per event, and it goes to the event -- not to the context.
-                # The copy exists to isolate consumers, which is where the risk is: the
-                # extension runner hands ``message`` straight to third-party handlers, and
-                # the TUI keeps it as ``streamingMessage`` and passes an inner ``arguments``
-                # dict to a component by reference. What the *context* needs is the message
-                # as it currently stands, which the provider's own ``partial`` already is --
-                # and is what ``response.result()`` puts there at the end of the stream
-                # anyway. So the second copy that used to feed the context is gone, and the
-                # remaining one is the boundary a consumer cannot write through.
-                partial_message = event.partial
-                context.messages[-1] = partial_message
-                await _emit(
-                    emit,
-                    MessageUpdateEvent(
-                        assistantMessageEvent=event,
-                        message=event.partial.model_copy(deep=True),
-                    ),
-                )
-            continue
+            case (
+                "text_start"
+                | "text_delta"
+                | "text_end"
+                | "thinking_start"
+                | "thinking_delta"
+                | "thinking_end"
+                | "toolcall_start"
+                | "toolcall_delta"
+                | "toolcall_end"
+            ):
+                if partialMessage is not None:
+                    partialMessage = event.partial
+                    context.messages[-1] = partialMessage
+                    await _emit(
+                        emit,
+                        MessageUpdateEvent(
+                            assistantMessageEvent=event,
+                            message=partialMessage.model_copy(),
+                        ),
+                    )
 
-        if event.type in {"done", "error"}:
-            final_message = _uniquify_tool_call_ids(await response.result())
-            if added_partial:
-                context.messages[-1] = final_message
-            else:
-                context.messages.append(final_message)
-                await _emit(emit, MessageStartEvent(message=final_message.model_copy(deep=True)))
-            await _emit(emit, MessageEndEvent(message=final_message))
-            return final_message
+            case "done" | "error":
+                finalMessage = _uniquifyToolCallIds(await result())
+                if addedPartial:
+                    context.messages[-1] = finalMessage
+                else:
+                    context.messages.append(finalMessage)
+                if not addedPartial:
+                    await _emit(emit, MessageStartEvent(message=finalMessage.model_copy()))
+                await _emit(emit, MessageEndEvent(message=finalMessage))
+                return finalMessage
 
-    final_message = _uniquify_tool_call_ids(await response.result())
-    if added_partial:
-        context.messages[-1] = final_message
+    finalMessage = _uniquifyToolCallIds(await result())
+    if addedPartial:
+        context.messages[-1] = finalMessage
     else:
-        context.messages.append(final_message)
-        await _emit(emit, MessageStartEvent(message=final_message.model_copy(deep=True)))
-    await _emit(emit, MessageEndEvent(message=final_message))
-    return final_message
+        context.messages.append(finalMessage)
+        await _emit(emit, MessageStartEvent(message=finalMessage.model_copy()))
+    await _emit(emit, MessageEndEvent(message=finalMessage))
+    return finalMessage
 
 
-def _uniquify_tool_call_ids(message: AssistantMessage) -> AssistantMessage:
-    """Hermes per-turn ID normalization, not action deduplication.
-
-    Normalize before message_end persistence; keep Responses item-id suffixes.
-    """
-    seen = set()
+def _uniquifyToolCallIds(message: AssistantMessage) -> AssistantMessage:
+    """MISAKA fork: Hermes' per-turn tool-call ID normalization (not action deduplication), applied before the
+    message is persisted at `message_end`. A duplicate ID gets a `_d<n>` suffix; Responses item-id suffixes after `|`
+    are kept."""
+    seen: set[str] = set()
     for index, block in enumerate(message.content):
         if block.type != "toolCall":
             continue
-        call_id = block.id.strip().split("|", 1)[0]
-        if not call_id:
+        callId = block.id.strip().split("|", 1)[0]
+        if not callId:
             continue
-        if call_id in seen:
-            call_id = next(f"{call_id}_d{n}" for n in range(2, len(seen) + 3)
-                           if f"{call_id}_d{n}" not in seen)
-            _, separator, item_id = block.id.partition("|")
-            message.content[index] = block.model_copy(update={"id": call_id + separator + item_id})
-        seen.add(call_id)
+        if callId in seen:
+            callId = next(f"{callId}_d{n}" for n in range(2, len(seen) + 3) if f"{callId}_d{n}" not in seen)
+            _, separator, itemId = block.id.partition("|")
+            message.content[index] = block.model_copy(update={"id": callId + separator + itemId})
+        seen.add(callId)
     return message
 
 
-async def execute_tool_calls(
-    current_context: AgentContext,
-    assistant_message: AssistantMessage,
-    config: AgentLoopConfig,
-    signal: Any | None,
+async def _failToolCallsFromTruncatedMessage(
+    toolCalls: list[AgentToolCall],
     emit: AgentEventSink,
-) -> ExecutedToolCallBatch:
-    _uniquify_tool_call_ids(assistant_message)
-    tool_calls = [block for block in assistant_message.content if block.type == "toolCall"]
-    has_sequential_tool_call = any(
-        any(
-            tool.name == tool_call.name and tool.executionMode == "sequential"
-            for tool in current_context.tools or []
-        )
-        for tool_call in tool_calls
-    )
-    if config.toolExecution == "sequential" or has_sequential_tool_call:
-        return await execute_tool_calls_sequential(current_context, assistant_message, tool_calls, config, signal, emit)
-    return await execute_tool_calls_parallel(current_context, assistant_message, tool_calls, config, signal, emit)
-
-
-async def execute_tool_calls_sequential(
-    current_context: AgentContext,
-    assistant_message: AssistantMessage,
-    tool_calls: list[AgentToolCall],
-    config: AgentLoopConfig,
-    signal: Any | None,
-    emit: AgentEventSink,
-) -> ExecutedToolCallBatch:
-    finalized_calls: list[FinalizedToolCallOutcome] = []
+) -> _ExecutedToolCallBatch:
+    """Fail all tool calls from an assistant message that was truncated by the
+    output token limit. Streamed tool-call arguments are finalized with a
+    best-effort JSON salvage parser, so a truncated message can yield tool calls
+    whose arguments parse and validate but are silently incomplete. None of them
+    are safe to execute; report each as an error so the model can re-issue them.
+    """
     messages: list[ToolResultMessage] = []
-
-    for tool_call in tool_calls:
+    for toolCall in toolCalls:
         await _emit(
             emit,
-            ToolExecutionStartEvent(
-                toolCallId=tool_call.id,
-                toolName=tool_call.name,
-                args=tool_call.arguments,
+            ToolExecutionStartEvent(toolCallId=toolCall.id, toolName=toolCall.name, args=toolCall.arguments),
+        )
+        finalized = _FinalizedToolCallOutcome(
+            toolCall=toolCall,
+            result=_createErrorToolResult(
+                f'Tool call "{toolCall.name}" was not executed: the response hit the output token limit, so its '
+                "arguments may be truncated. Re-issue the tool call with complete arguments."
             ),
+            isError=True,
+        )
+        await _emitToolExecutionEnd(finalized, emit)
+        toolResultMessage = _createToolResultMessage(finalized)
+        await _emitToolResultMessage(toolResultMessage, emit)
+        messages.append(toolResultMessage)
+    return _ExecutedToolCallBatch(messages=messages, terminate=False)
+
+
+async def _executeToolCalls(
+    currentContext: AgentContext,
+    assistantMessage: AssistantMessage,
+    config: AgentLoopConfig,
+    signal: Any | None,
+    emit: AgentEventSink,
+) -> _ExecutedToolCallBatch:
+    """Execute tool calls from an assistant message."""
+    # MISAKA fork: duplicate tool-call IDs are normalized before any result is keyed by them.
+    _uniquifyToolCallIds(assistantMessage)
+    toolCalls = [content for content in assistantMessage.content if content.type == "toolCall"]
+    hasSequentialToolCall = any(
+        getattr(next((t for t in currentContext.tools or [] if t.name == tc.name), None), "executionMode", None)
+        == "sequential"
+        for tc in toolCalls
+    )
+    if config.toolExecution == "sequential" or hasSequentialToolCall:
+        return await _executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit)
+    return await _executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit)
+
+
+@dataclass(slots=True)
+class _ExecutedToolCallBatch:
+    messages: list[ToolResultMessage]
+    terminate: bool
+
+
+async def _executeToolCallsSequential(
+    currentContext: AgentContext,
+    assistantMessage: AssistantMessage,
+    toolCalls: list[AgentToolCall],
+    config: AgentLoopConfig,
+    signal: Any | None,
+    emit: AgentEventSink,
+) -> _ExecutedToolCallBatch:
+    finalizedCalls: list[_FinalizedToolCallOutcome] = []
+    messages: list[ToolResultMessage] = []
+
+    for toolCall in toolCalls:
+        await _emit(
+            emit,
+            ToolExecutionStartEvent(toolCallId=toolCall.id, toolName=toolCall.name, args=toolCall.arguments),
         )
 
-        preparation = await prepare_tool_call(current_context, assistant_message, tool_call, config, signal)
-        if isinstance(preparation, ImmediateToolCallOutcome):
-            finalized = FinalizedToolCallOutcome(
-                toolCall=tool_call,
+        preparation = await _prepareToolCall(currentContext, assistantMessage, toolCall, config, signal)
+        if preparation.kind == "immediate":
+            finalized = _FinalizedToolCallOutcome(
+                toolCall=toolCall,
                 result=preparation.result,
                 isError=preparation.isError,
             )
         else:
-            executed = await execute_prepared_tool_call(preparation, signal, emit)
-            finalized = await finalize_executed_tool_call(
-                current_context,
-                assistant_message,
+            executed = await _executePreparedToolCall(preparation, signal, _emitToolExecutionUpdate(toolCall, emit))
+            finalized = await _finalizeExecutedToolCall(
+                currentContext,
+                assistantMessage,
                 preparation,
                 executed,
                 config,
                 signal,
             )
 
-        await emit_tool_execution_end(finalized, emit)
-        tool_result_message = create_tool_result_message(finalized)
-        await emit_tool_result_message(tool_result_message, emit)
-        finalized_calls.append(finalized)
-        messages.append(tool_result_message)
+        await _emitToolExecutionEnd(finalized, emit)
+        toolResultMessage = _createToolResultMessage(finalized)
+        await _emitToolResultMessage(toolResultMessage, emit)
+        finalizedCalls.append(finalized)
+        messages.append(toolResultMessage)
 
         if signal_aborted(signal):
             break
 
-    for finalized in await _answer_unreached_tool_calls(tool_calls, len(finalized_calls), emit):
-        tool_result_message = create_tool_result_message(finalized)
-        await emit_tool_result_message(tool_result_message, emit)
-        finalized_calls.append(finalized)
-        messages.append(tool_result_message)
-
-    return ExecutedToolCallBatch(
+    return _ExecutedToolCallBatch(
         messages=messages,
-        terminate=should_terminate_tool_batch(finalized_calls),
+        terminate=_shouldTerminateToolBatch(finalizedCalls),
     )
 
 
-async def execute_tool_calls_parallel(
-    current_context: AgentContext,
-    assistant_message: AssistantMessage,
-    tool_calls: list[AgentToolCall],
+async def _executeToolCallsParallel(
+    currentContext: AgentContext,
+    assistantMessage: AssistantMessage,
+    toolCalls: list[AgentToolCall],
     config: AgentLoopConfig,
     signal: Any | None,
     emit: AgentEventSink,
-) -> ExecutedToolCallBatch:
-    finalized_entries: list[FinalizedToolCallOutcome | Awaitable[FinalizedToolCallOutcome]] = []
+) -> _ExecutedToolCallBatch:
+    finalizedCalls: list[_FinalizedToolCallEntry] = []
 
-    for tool_call in tool_calls:
+    for toolCall in toolCalls:
         await _emit(
             emit,
-            ToolExecutionStartEvent(
-                toolCallId=tool_call.id,
-                toolName=tool_call.name,
-                args=tool_call.arguments,
-            ),
+            ToolExecutionStartEvent(toolCallId=toolCall.id, toolName=toolCall.name, args=toolCall.arguments),
         )
 
-        preparation = await prepare_tool_call(current_context, assistant_message, tool_call, config, signal)
-        if isinstance(preparation, ImmediateToolCallOutcome):
-            finalized = FinalizedToolCallOutcome(
-                toolCall=tool_call,
+        preparation = await _prepareToolCall(currentContext, assistantMessage, toolCall, config, signal)
+        if preparation.kind == "immediate":
+            finalized = _FinalizedToolCallOutcome(
+                toolCall=toolCall,
                 result=preparation.result,
                 isError=preparation.isError,
             )
-            await emit_tool_execution_end(finalized, emit)
-            finalized_entries.append(finalized)
+            await _emitToolExecutionEnd(finalized, emit)
+            finalizedCalls.append(finalized)
             if signal_aborted(signal):
                 break
             continue
 
-        async def finalize(prepared: PreparedToolCall = preparation) -> FinalizedToolCallOutcome:
-            executed = await execute_prepared_tool_call(prepared, signal, emit)
-            finalized = await finalize_executed_tool_call(
-                current_context,
-                assistant_message,
-                prepared,
+        async def entry(
+            preparation: _PreparedToolCall = preparation, toolCall: AgentToolCall = toolCall
+        ) -> _FinalizedToolCallOutcome:
+            if signal_aborted(signal):
+                finalized = _FinalizedToolCallOutcome(
+                    toolCall=toolCall,
+                    result=_createErrorToolResult("Operation aborted"),
+                    isError=True,
+                )
+                await _emitToolExecutionEnd(finalized, emit)
+                return finalized
+            executed = await _executePreparedToolCall(preparation, signal, _emitToolExecutionUpdate(toolCall, emit))
+            finalized = await _finalizeExecutedToolCall(
+                currentContext,
+                assistantMessage,
+                preparation,
                 executed,
                 config,
                 signal,
             )
-            await emit_tool_execution_end(finalized, emit)
+            await _emitToolExecutionEnd(finalized, emit)
             return finalized
 
-        finalized_entries.append(finalize())
+        finalizedCalls.append(entry)
         if signal_aborted(signal):
             break
 
-    finalized_entries.extend(
-        await _answer_unreached_tool_calls(tool_calls, len(finalized_entries), emit)
-    )
-
-    ordered_finalized_calls = await asyncio.gather(
-        *[
-            entry if inspect.isawaitable(entry) else _return_value(entry)
-            for entry in finalized_entries
-        ]
+    orderedFinalizedCalls = await asyncio.gather(
+        *(entry() if callable(entry) else _resolved(entry) for entry in finalizedCalls)
     )
     messages: list[ToolResultMessage] = []
-    for finalized in ordered_finalized_calls:
-        tool_result_message = create_tool_result_message(finalized)
-        await emit_tool_result_message(tool_result_message, emit)
-        messages.append(tool_result_message)
+    for finalized in orderedFinalizedCalls:
+        toolResultMessage = _createToolResultMessage(finalized)
+        await _emitToolResultMessage(toolResultMessage, emit)
+        messages.append(toolResultMessage)
 
-    return ExecutedToolCallBatch(
+    return _ExecutedToolCallBatch(
         messages=messages,
-        terminate=should_terminate_tool_batch(ordered_finalized_calls),
+        terminate=_shouldTerminateToolBatch(orderedFinalizedCalls),
     )
 
 
-def _reraise_if_not_tool_failure(error: BaseException, signal: Any | None) -> None:
-    """Let interpreter-level exits and a caller's cancellation through.
+async def _resolved(value: _FinalizedToolCallOutcome) -> _FinalizedToolCallOutcome:
+    """``Promise.resolve(entry)``."""
+    return value
 
-    These handlers turn any exception into an error tool result, which is right for a
-    tool that failed but wrong for ``CancelledError``: swallowing it means the caller's
-    ``task.cancel()`` never arrives and the loop keeps running. When our own abort
-    signal is set the cancellation is ours, and the aborted result is the honest answer.
 
-    ``KeyboardInterrupt`` / ``SystemExit`` are never a tool failure either. pi catches
-    ``Exception`` here (agent.ts:502), and JS has no equivalent of these two; catching
-    ``BaseException`` without letting them out turns Ctrl-C inside a tool into a
-    "the model errored" message while the process keeps running.
+@dataclass(slots=True)
+class _PreparedToolCall:
+    toolCall: AgentToolCall
+    tool: AgentTool
+    args: Any
+    kind: Literal["prepared"] = "prepared"
+
+
+@dataclass(slots=True)
+class _ImmediateToolCallOutcome:
+    result: AgentToolResult
+    isError: bool
+    kind: Literal["immediate"] = "immediate"
+
+
+@dataclass(slots=True)
+class _ExecutedToolCallOutcome:
+    result: AgentToolResult
+    isError: bool
+    durationMs: int
+
+
+_FinalizedToolCallOutcome = AgentToolCallOutcome
+
+# The `beforeToolCall` and `afterToolCall` hooks of `AgentLoopConfig`.
+# MISAKA fork: upstream's `Pick<AgentLoopConfig, "beforeToolCall" | "afterToolCall">` is anything carrying the two.
+type ToolCallHooks = Any
+
+type _ToolUpdateSink = Callable[[AgentToolResult], Awaitable[None] | None]
+
+type _FinalizedToolCallEntry = _FinalizedToolCallOutcome | Callable[[], Awaitable[_FinalizedToolCallOutcome]]
+
+
+def _shouldTerminateToolBatch(finalizedCalls: list[_FinalizedToolCallOutcome]) -> bool:
+    return len(finalizedCalls) > 0 and all(finalized.result.terminate is True for finalized in finalizedCalls)
+
+
+def _prepareToolCallArguments(tool: AgentTool, toolCall: AgentToolCall) -> AgentToolCall:
+    if not tool.prepareArguments:
+        return toolCall
+    preparedArguments = tool.prepareArguments(toolCall.arguments)
+    if preparedArguments is toolCall.arguments:
+        return toolCall
+    return toolCall.model_copy(update={"arguments": preparedArguments})
+
+
+def _reraiseIfNotToolFailure(error: BaseException, signal: Any | None) -> None:
+    """MISAKA fork: let interpreter-level exits and a caller's cancellation through.
+
+    The loop turns any failure into an error tool result, which is right for a tool that failed but wrong for
+    ``CancelledError``: swallowing it means the caller's ``task.cancel()`` never arrives and the loop keeps running.
+    When our own abort signal is set the cancellation is ours, and the aborted result is the honest answer.
+    ``KeyboardInterrupt`` and ``SystemExit`` are never a tool failure either (JavaScript has no equivalent of the
+    two), so Ctrl-C inside a tool does not turn into "the model errored" while the process keeps running.
     """
     if isinstance(error, KeyboardInterrupt | SystemExit):
         raise error
@@ -745,247 +811,225 @@ def _reraise_if_not_tool_failure(error: BaseException, signal: Any | None) -> No
         raise error
 
 
-def _aborted_outcome(tool_call: AgentToolCall) -> FinalizedToolCallOutcome:
-    return FinalizedToolCallOutcome(
-        toolCall=tool_call,
-        result=create_error_tool_result("Operation aborted"),
-        isError=True,
-    )
-
-
-async def _answer_unreached_tool_calls(
-    tool_calls: list[AgentToolCall],
-    done: int,
-    emit: AgentEventSink,
-) -> list[FinalizedToolCallOutcome]:
-    """Every tool call in the assistant message needs a result, abort or not.
-
-    Breaking out of the batch used to leave the tail unanswered, and a conversation whose
-    assistant message has tool calls without matching results is rejected by the provider
-    on the next request -- the abort would surface as a broken session one turn later.
-    """
-    answered: list[FinalizedToolCallOutcome] = []
-    for tool_call in tool_calls[done:]:
-        await _emit(
-            emit,
-            ToolExecutionStartEvent(
-                toolCallId=tool_call.id, toolName=tool_call.name, args=tool_call.arguments
-            ),
-        )
-        finalized = _aborted_outcome(tool_call)
-        await emit_tool_execution_end(finalized, emit)
-        answered.append(finalized)
-    return answered
-
-
-def should_terminate_tool_batch(finalized_calls: list[FinalizedToolCallOutcome]) -> bool:
-    return bool(finalized_calls) and all(finalized.result.terminate is True for finalized in finalized_calls)
-
-
-def prepare_tool_call_arguments(tool: AgentTool, tool_call: AgentToolCall) -> AgentToolCall:
-    if tool.prepareArguments is None:
-        return tool_call
-    prepared_arguments = tool.prepareArguments(tool_call.arguments)
-    if prepared_arguments is tool_call.arguments:
-        return tool_call
-    return tool_call.model_copy(update={"arguments": prepared_arguments})
-
-
-async def prepare_tool_call(
-    current_context: AgentContext,
-    assistant_message: AssistantMessage,
-    tool_call: AgentToolCall,
-    config: AgentLoopConfig,
+async def _prepareToolCall(
+    currentContext: AgentContext,
+    assistantMessage: AssistantMessage,
+    toolCall: AgentToolCall,
+    config: ToolCallHooks,
     signal: Any | None,
-) -> PreparedToolCall | ImmediateToolCallOutcome:
-    if tool_call.argumentsError is not None:
-        return ImmediateToolCallOutcome(
-            kind="immediate", result=create_error_tool_result(tool_call.argumentsError), isError=True,
-        )
-    tool = next((candidate for candidate in current_context.tools or [] if candidate.name == tool_call.name), None)
+    tools: list[AgentTool] | None = None,
+) -> _PreparedToolCall | _ImmediateToolCallOutcome:
+    if tools is None:
+        tools = currentContext.tools or []
+    tool = next((t for t in tools if t.name == toolCall.name), None)
     if tool is None:
-        tool = next((candidate for candidate in current_context.tools or []
-                     if tool_call.name in getattr(candidate, "aliases", ())), None)
+        # MISAKA fork: a legacy alias resolves to its tool. Exact names win; permission and schema checks see the
+        # canonical tool, while the transcript keeps its historical wire call and call ID.
+        tool = next((t for t in tools if toolCall.name in getattr(t, "aliases", ())), None)
         if tool is not None:
-            # Exact names win. Permission/schema checks see the canonical tool,
-            # while the transcript retains its historical wire call and call ID.
-            tool_call = tool_call.model_copy(update={"name": tool.name})
+            toolCall = toolCall.model_copy(update={"name": tool.name})
     if tool is None:
-        return ImmediateToolCallOutcome(
-            kind="immediate",
-            result=create_error_tool_result(f"Tool {tool_call.name} not found"),
+        return _ImmediateToolCallOutcome(
+            result=_createErrorToolResult(f"Tool {toolCall.name} not found"),
             isError=True,
         )
 
     try:
-        prepared_tool_call = prepare_tool_call_arguments(tool, tool_call)
-        validated_args = validate_tool_arguments(tool, prepared_tool_call)
+        preparedToolCall = _prepareToolCallArguments(tool, toolCall)
+        validatedArgs = validateToolArguments(tool, preparedToolCall)
         if config.beforeToolCall:
-            before_result = await maybe_await(
-                config.beforeToolCall(
-                    BeforeToolCallContext(
-                        assistantMessage=assistant_message,
-                        toolCall=tool_call,
-                        args=validated_args,
-                        context=current_context,
-                    ),
-                    signal,
+            beforeResult = _coerceBeforeToolCallResult(
+                await maybe_await(
+                    config.beforeToolCall(
+                        BeforeToolCallContext(
+                            assistantMessage=assistantMessage,
+                            toolCall=toolCall,
+                            args=validatedArgs,
+                            context=currentContext,
+                        ),
+                        signal,
+                    )
                 )
             )
-            before_result = _coerce_before_tool_call_result(before_result)
             if signal_aborted(signal):
-                return ImmediateToolCallOutcome(
-                    kind="immediate",
-                    result=create_error_tool_result("Operation aborted"),
+                return _ImmediateToolCallOutcome(
+                    result=_createErrorToolResult("Operation aborted"),
                     isError=True,
                 )
-            if before_result and before_result.block:
-                result = create_error_tool_result(before_result.reason or "Tool execution was blocked")
-                if before_result.terminate is True:  # pi 1eb988c: blocked calls can still end the batch early
+            if beforeResult is not None and beforeResult.block:
+                result = _createErrorToolResult(beforeResult.reason or "Tool execution was blocked")
+                if beforeResult.terminate is True:
                     result.terminate = True
-                return ImmediateToolCallOutcome(
-                    kind="immediate",
-                    result=result,
-                    isError=True,
+                return _ImmediateToolCallOutcome(result=result, isError=True)
+            # MISAKA fork: CCB PreToolUse.updatedInput replaces the arguments, validated again. A call whose own
+            # arguments failed to parse never gets here: validateToolArguments refused it above.
+            if beforeResult is not None and beforeResult.updatedInput is not None:
+                validatedArgs = validateToolArguments(
+                    tool, toolCall.model_copy(update={"arguments": beforeResult.updatedInput})
                 )
-            if before_result and before_result.updatedInput is not None:
-                updated_call = tool_call.model_copy(update={"arguments": before_result.updatedInput})
-                validated_args = validate_tool_arguments(tool, updated_call)
         if signal_aborted(signal):
-            return ImmediateToolCallOutcome(
-                kind="immediate",
-                result=create_error_tool_result("Operation aborted"),
+            return _ImmediateToolCallOutcome(
+                result=_createErrorToolResult("Operation aborted"),
                 isError=True,
             )
-        return PreparedToolCall(kind="prepared", toolCall=tool_call, tool=tool, args=validated_args)
-    except BaseException as error:  # noqa: BLE001
-        _reraise_if_not_tool_failure(error, signal)
-        return ImmediateToolCallOutcome(
-            kind="immediate",
-            result=create_error_tool_result(str(error)),
-            isError=True,
+        return _PreparedToolCall(toolCall=toolCall, tool=tool, args=validatedArgs)
+    except BaseException as error:  # noqa: BLE001 - `catch (error)`; see `_reraiseIfNotToolFailure`
+        _reraiseIfNotToolFailure(error, signal)
+        return _ImmediateToolCallOutcome(result=_createErrorToolResult(errorMessage(error)), isError=True)
+
+
+def _emitToolExecutionUpdate(toolCall: AgentToolCall, emit: AgentEventSink) -> _ToolUpdateSink:
+    def sink(partialResult: AgentToolResult) -> Awaitable[None] | None:
+        return emit(
+            ToolExecutionUpdateEvent(
+                toolCallId=toolCall.id,
+                toolName=toolCall.name,
+                args=toolCall.arguments,
+                partialResult=partialResult,
+            )
         )
 
+    return sink
 
-async def execute_prepared_tool_call(
-    prepared: PreparedToolCall,
+
+@dataclass(slots=True, kw_only=True)
+class RunToolCallOptions:
+    """Options for `runToolCall`."""
+
+    # Tools the call resolves against.
+    tools: list[AgentTool]
+    # Passed to the hooks as the message that issued the call.
+    assistantMessage: AssistantMessage
+    # Passed to the hooks as the current agent context.
+    context: AgentContext
+    beforeToolCall: Any | None = None
+    afterToolCall: Any | None = None
+    signal: Any | None = None
+    onUpdate: _ToolUpdateSink | None = None
+
+
+async def runToolCall(toolCall: AgentToolCall, options: RunToolCallOptions) -> AgentToolCallOutcome:
+    """Run one tool call through the same steps as a model-issued call: argument preparation, schema
+    validation, `beforeToolCall`, execution, and `afterToolCall`. Emits no events and adds no
+    messages. Tools that call other tools use this so the hooks (for example permission checks)
+    apply to those calls too.
+
+    Never rejects for tool failures: unknown tools, validation errors, blocked calls, and thrown
+    errors come back as `isError: true`.
+    """
+    assistantMessage, context, signal = options.assistantMessage, options.context, options.signal
+    preparation = await _prepareToolCall(context, assistantMessage, toolCall, options, signal, options.tools)
+    if preparation.kind == "immediate":
+        return AgentToolCallOutcome(toolCall=toolCall, result=preparation.result, isError=preparation.isError)
+    executed = await _executePreparedToolCall(
+        preparation, signal, options.onUpdate if options.onUpdate is not None else (lambda _partialResult: None)
+    )
+    return await _finalizeExecutedToolCall(context, assistantMessage, preparation, executed, options, signal)
+
+
+async def _executePreparedToolCall(
+    prepared: _PreparedToolCall,
     signal: Any | None,
-    emit: AgentEventSink,
-) -> ExecutedToolCallOutcome:
-    update_tasks: list[asyncio.Task[None]] = []
-    accepting_updates = True
+    onUpdate: _ToolUpdateSink,
+) -> _ExecutedToolCallOutcome:
+    updateEvents: list[asyncio.Future[Any]] = []
+    acceptingUpdates = True
+    startedAt = time.perf_counter()
 
-    def on_update(partial_result: AgentToolResult) -> None:
-        if not accepting_updates:
+    def elapsed() -> int:
+        return jsRound((time.perf_counter() - startedAt) * 1000)
+
+    def update(partialResult: AgentToolResult) -> None:
+        if not acceptingUpdates:
             return
-
-        async def emit_update() -> None:
-            await _emit(
-                emit,
-                ToolExecutionUpdateEvent(
-                    toolCallId=prepared.toolCall.id,
-                    toolName=prepared.toolCall.name,
-                    args=prepared.toolCall.arguments,
-                    partialResult=partial_result,
-                ),
-            )
-
-        update_tasks.append(asyncio.create_task(emit_update()))
+        updateEvents.append(startTask(maybe_await(onUpdate(partialResult))))
 
     try:
-        result = await maybe_await(
-            prepared.tool.execute(prepared.toolCall.id, prepared.args, signal, on_update)
+        result = _coerceAgentToolResult(
+            await maybe_await(prepared.tool.execute(prepared.toolCall.id, prepared.args, signal, update))
         )
-        accepting_updates = False
-        if update_tasks:
-            await asyncio.gather(*update_tasks)
-        return ExecutedToolCallOutcome(result=_coerce_agent_tool_result(result), isError=False)
-    except BaseException as error:  # noqa: BLE001
-        accepting_updates = False
-        if update_tasks:
-            await asyncio.gather(*update_tasks, return_exceptions=True)
-        _reraise_if_not_tool_failure(error, signal)
-        return ExecutedToolCallOutcome(
-            result=create_error_tool_result(str(error)),
+        durationMs = elapsed()
+        acceptingUpdates = False
+        await asyncio.gather(*updateEvents)
+        return _ExecutedToolCallOutcome(result=result, isError=result.isError is True, durationMs=durationMs)
+    except BaseException as error:  # noqa: BLE001 - `catch (error)`; see `_reraiseIfNotToolFailure`
+        durationMs = elapsed()
+        acceptingUpdates = False
+        await asyncio.gather(*updateEvents, return_exceptions=True)
+        _reraiseIfNotToolFailure(error, signal)
+        return _ExecutedToolCallOutcome(
+            result=_createErrorToolResult(errorMessage(error)),
             isError=True,
+            durationMs=durationMs,
         )
     finally:
-        accepting_updates = False
+        acceptingUpdates = False
 
 
-async def finalize_executed_tool_call(
-    current_context: AgentContext,
-    assistant_message: AssistantMessage,
-    prepared: PreparedToolCall,
-    executed: ExecutedToolCallOutcome,
-    config: AgentLoopConfig,
+async def _finalizeExecutedToolCall(
+    currentContext: AgentContext,
+    assistantMessage: AssistantMessage,
+    prepared: _PreparedToolCall,
+    executed: _ExecutedToolCallOutcome,
+    config: ToolCallHooks,
     signal: Any | None,
-) -> FinalizedToolCallOutcome:
+) -> _FinalizedToolCallOutcome:
     result = executed.result
-    is_error = executed.isError
+    isError = executed.isError
 
     if config.afterToolCall:
         try:
-            after_result = await maybe_await(
+            afterResult = await maybe_await(
                 config.afterToolCall(
                     AfterToolCallContext(
-                        assistantMessage=assistant_message,
+                        assistantMessage=assistantMessage,
                         toolCall=prepared.toolCall,
                         args=prepared.args,
                         result=result,
-                        isError=is_error,
-                        context=current_context,
+                        isError=isError,
+                        context=currentContext,
                     ),
                     signal,
                 )
             )
-            if after_result is not None:
-                normalized_after_result = _coerce_after_tool_call_result(after_result)
-                # pi spreads the executed result first ({...result, content, details, usage,
-                # terminate}), so every field the hook leaves undefined survives.
-                result = AgentToolResult(
-                    content=(
-                        normalized_after_result.content
-                        if normalized_after_result.content is not None
-                        else result.content
-                    ),
-                    details=(
-                        normalized_after_result.details
-                        if normalized_after_result.details is not None
-                        else result.details
-                    ),
-                    usage=(
-                        normalized_after_result.usage
-                        if normalized_after_result.usage is not None
-                        else result.usage
-                    ),
-                    terminate=(
-                        normalized_after_result.terminate
-                        if normalized_after_result.terminate is not None
-                        else result.terminate
-                    ),
+            if afterResult:
+                afterResult = _coerceAfterToolCallResult(afterResult)
+                # Structured content not replaced along with the content may no longer match it.
+                structuredContent = (
+                    afterResult.structuredContent
+                    if afterResult.structuredContent is not None
+                    else (None if afterResult.content is not None else result.structuredContent)
                 )
-                is_error = normalized_after_result.isError if normalized_after_result.isError is not None else is_error
-        except BaseException as error:  # noqa: BLE001
-            _reraise_if_not_tool_failure(error, signal)
-            result = create_error_tool_result(str(error))
-            is_error = True
+                result = replace(
+                    result,
+                    content=afterResult.content if afterResult.content is not None else result.content,
+                    details=afterResult.details if afterResult.details is not None else result.details,
+                    usage=afterResult.usage if afterResult.usage is not None else result.usage,
+                    terminate=afterResult.terminate if afterResult.terminate is not None else result.terminate,
+                    structuredContent=structuredContent,
+                )
+                isError = afterResult.isError if afterResult.isError is not None else isError
+        except BaseException as error:  # noqa: BLE001 - `catch (error)`; see `_reraiseIfNotToolFailure`
+            _reraiseIfNotToolFailure(error, signal)
+            result = _createErrorToolResult(errorMessage(error))
+            isError = True
 
-    return FinalizedToolCallOutcome(
+    return _FinalizedToolCallOutcome(
         toolCall=prepared.toolCall,
         result=result,
-        isError=is_error,
+        isError=isError,
+        durationMs=executed.durationMs,
     )
 
 
-def create_error_tool_result(message: str) -> AgentToolResult:
+def _createErrorToolResult(message: str) -> AgentToolResult:
     return AgentToolResult(
         content=[TextContent(text=message)],
         details={},
     )
 
 
-async def emit_tool_execution_end(finalized: FinalizedToolCallOutcome, emit: AgentEventSink) -> None:
+async def _emitToolExecutionEnd(finalized: _FinalizedToolCallOutcome, emit: AgentEventSink) -> None:
     await _emit(
         emit,
         ToolExecutionEndEvent(
@@ -993,187 +1037,94 @@ async def emit_tool_execution_end(finalized: FinalizedToolCallOutcome, emit: Age
             toolName=finalized.toolCall.name,
             result=finalized.result,
             isError=finalized.isError,
+            durationMs=finalized.durationMs,
         ),
     )
 
 
-def create_tool_result_message(finalized: FinalizedToolCallOutcome) -> ToolResultMessage:
+def _createToolResultMessage(finalized: _FinalizedToolCallOutcome) -> ToolResultMessage:
     return ToolResultMessage(
         toolCallId=finalized.toolCall.id,
         toolName=finalized.toolCall.name,
-        # pi agent-loop.ts:780 `content: finalized.result.content ?? []` -- untyped tools
-        # (extensions, MCP) can return a result with no content; normalize so the null
-        # never enters session history or a provider payload.
-        content=[validate_user_content(_model_dump(block)) for block in finalized.result.content or []],
+        # Untyped tools (JS extensions) can return results without content; normalize
+        # so the null never enters session history or provider payloads.
+        content=[validate_user_content(_modelDump(block)) for block in finalized.result.content or []],
         details=finalized.result.details,
         usage=finalized.result.usage,
         isError=finalized.isError,
+        durationMs=finalized.durationMs,
         timestamp=int(time.time() * 1000),
     )
 
 
-async def emit_tool_result_message(tool_result_message: ToolResultMessage, emit: AgentEventSink) -> None:
-    await _emit(emit, MessageStartEvent(message=tool_result_message))
-    await _emit(emit, MessageEndEvent(message=tool_result_message))
-
-
-async def _fail_tool_calls_from_truncated_message(
-    tool_calls: list[AgentToolCall],
-    emit: AgentEventSink,
-) -> ExecutedToolCallBatch:
-    """Answer, but never execute, tool calls from a length-truncated response."""
-    messages: list[ToolResultMessage] = []
-    for tool_call in tool_calls:
-        await _emit(
-            emit,
-            ToolExecutionStartEvent(
-                toolCallId=tool_call.id,
-                toolName=tool_call.name,
-                args=tool_call.arguments,
-            ),
-        )
-        finalized = FinalizedToolCallOutcome(
-            toolCall=tool_call,
-            result=create_error_tool_result(
-                f'Tool call "{tool_call.name}" was not executed: the response hit the '
-                "output token limit, so its arguments may be truncated. Re-issue the "
-                "tool call with complete arguments; split large payloads into smaller "
-                "calls if necessary."
-            ),
-            isError=True,
-        )
-        await emit_tool_execution_end(finalized, emit)
-        message = create_tool_result_message(finalized)
-        await emit_tool_result_message(message, emit)
-        messages.append(message)
-    return ExecutedToolCallBatch(messages=messages, terminate=False)
-
-
-def _create_agent_stream() -> EventStream[AgentEvent, list[AgentMessage]]:
-    return EventStream(
-        lambda event: event.type == "agent_end",
-        lambda event: event.messages if event.type == "agent_end" else [],
-    )
-
-
-def _push_event(stream: EventStream[AgentEvent, list[AgentMessage]]) -> AgentEventSink:
-    async def emit(event: AgentEvent) -> None:
-        stream.push(event)
-
-    return emit
+async def _emitToolResultMessage(toolResultMessage: ToolResultMessage, emit: AgentEventSink) -> None:
+    await _emit(emit, MessageStartEvent(message=toolResultMessage))
+    await _emit(emit, MessageEndEvent(message=toolResultMessage))
 
 
 async def _emit(emit: AgentEventSink, event: AgentEvent) -> None:
+    """MISAKA fork: ``await emit(event)`` for a sink that may be synchronous."""
     await maybe_await(emit(event))
 
 
-async def _return_value(value: FinalizedToolCallOutcome) -> FinalizedToolCallOutcome:
-    return value
+def _role(message: Any) -> Any:
+    """MISAKA fork: ``message.role`` for a message model or a custom message mapping."""
+    return read_field(message, "role")
 
 
-def _copy_agent_message(message: AgentMessage) -> AgentMessage:
-    if hasattr(message, "model_copy"):
-        return message.model_copy(deep=True)
-    if isinstance(message, dict):
-        return dict(message)
-    return message
+def _modelDump(value: Any) -> Any:
+    dump = getattr(value, "model_dump", None)
+    return dump() if callable(dump) else value
 
 
-def _copy_agent_messages(messages: list[AgentMessage]) -> list[AgentMessage]:
-    return [_copy_agent_message(message) for message in messages]
-
-
-def _copy_tools(tools: list[AgentTool] | None) -> list[AgentTool] | None:
-    if tools is None:
-        return None
-    # Shallow, not deep. pi hands `context.tools` straight through (agent-loop.ts:105,
-    # 296) and copies nothing; Misaka keeps a per-pass object so a stray attribute write
-    # cannot reach the caller's tool list, but the deep walk was doing real damage:
-    #   - it re-copied every tool's `parameters` JSON schema on *every* LLM round trip,
-    #     which for MCP/extension tools grows with the schema;
-    #   - `copy.deepcopy` of a bound method copies `__self__` too, so a tool whose
-    #     `execute`/`prepareArguments` is a bound method (the passthrough at
-    #     tool_definition_wrapper.py:39) ran against a duplicate of its own object and
-    #     any state it recorded was invisible to the original.
-    # A shallow copy shares both the schema and the callables, which is what the loop
-    # actually needs.
-    return [tool.model_copy() for tool in tools]
-
-
-def _model_dump(value: Any) -> Any:
-    if hasattr(value, "model_dump"):
-        return value.model_dump()
-    return value
-
-
-def _to_mapping(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return dict(value)
-    if hasattr(value, "model_dump"):
-        dumped = value.model_dump()
-        if isinstance(dumped, dict):
-            return dict(dumped)
-    if hasattr(value, "__dict__"):
-        return dict(vars(value))
-    if is_dataclass(value):
-        return {field.name: getattr(value, field.name) for field in fields(value)}
-    raise TypeError(f"Cannot convert {type(value).__name__} to mapping")
-
-
-def _coerce_agent_tool_result(value: AgentToolResult | dict[str, Any]) -> AgentToolResult:
+def _coerceAgentToolResult(value: AgentToolResult | dict[str, Any]) -> AgentToolResult:
+    """MISAKA fork: a tool (an extension's, an MCP bridge's) may return a plain mapping."""
     if isinstance(value, AgentToolResult):
         return value
-    content = [
-        validate_user_content(_model_dump(block))
-        for block in value.get("content") or []  # explicit `content: None` is the same as absent
-    ]
     return AgentToolResult(
-        content=content,
+        content=[validate_user_content(_modelDump(block)) for block in value.get("content") or []],
         details=value.get("details"),
+        structuredContent=value.get("structuredContent"),
         usage=value.get("usage"),
+        isError=value.get("isError"),
         terminate=value.get("terminate"),
     )
 
 
-def _coerce_after_tool_call_result(value: AfterToolCallResult | dict[str, Any]) -> AfterToolCallResult:
+def _coerceAfterToolCallResult(value: AfterToolCallResult | dict[str, Any]) -> AfterToolCallResult:
+    """MISAKA fork: a hook may return a plain mapping."""
     if isinstance(value, AfterToolCallResult):
         return value
     content = value.get("content")
-    normalized_content = None
-    if content is not None:
-        normalized_content = [validate_user_content(_model_dump(block)) for block in content]
     return AfterToolCallResult(
-        content=normalized_content,
+        content=None if content is None else [validate_user_content(_modelDump(block)) for block in content],
         details=value.get("details"),
+        structuredContent=value.get("structuredContent"),
         isError=value.get("isError"),
         usage=value.get("usage"),
         terminate=value.get("terminate"),
     )
 
 
-def _coerce_before_tool_call_result(
-    value: BeforeToolCallResult | dict[str, Any] | None,
-) -> BeforeToolCallResult | None:
+def _coerceBeforeToolCallResult(value: BeforeToolCallResult | dict[str, Any] | None) -> BeforeToolCallResult | None:
+    """MISAKA fork: a hook may return a plain mapping."""
     if value is None or isinstance(value, BeforeToolCallResult):
         return value
     return BeforeToolCallResult(
         block=value.get("block"),
         reason=value.get("reason"),
-        updatedInput=value.get("updatedInput"),
-        # pi agent-loop.ts:637-644 honours `terminate` on a blocked call regardless of how
-        # the hook spelled its result; dropping it here silently disarmed dict-returning hooks.
         terminate=value.get("terminate"),
+        updatedInput=value.get("updatedInput"),
     )
 
 
 __all__ = [
     "AgentEventSink",
-    "agent_loop",
-    "create_tool_result_message",
-    "declare_tool_changes",
-    "emit_tool_result_message",
-    "execute_tool_calls",
-    "run_agent_loop",
-    "run_agent_loop_continue",
-    "stream_assistant_response",
+    "RunToolCallOptions",
+    "ToolCallHooks",
+    "agentLoop",
+    "agentLoopContinue",
+    "runAgentLoop",
+    "runAgentLoopContinue",
+    "runToolCall",
 ]

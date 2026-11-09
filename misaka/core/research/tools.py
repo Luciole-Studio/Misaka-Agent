@@ -10,12 +10,13 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from misaka import workspace as workspace_index
+from misaka.ai.utils.typebox_helpers import typeboxSchema
 from misaka.config import CFG
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.platform import tasks as task_store
 from misaka.core.platform.prompt_guard import untrusted
-from misaka.core.research import graph, ledger, runs
-from misaka.core.tools.truncate import TruncationOptions, format_size, truncate_head
+from misaka.core.research import ledger, runs, views
+from misaka.core.tools.truncate import TruncationOptions, formatSize, truncateHead
 
 # One tool result is one prompt turn for the smallest window in play (272k); the whole index of a
 # mature project renders to megabytes (2026-09-24: 1.85 MB, 25k lines, a Sister at 1.19M tokens).
@@ -68,11 +69,11 @@ def register(harn):
         if params.view == "workspace":
             tree = workspace_index.outline(con, workspace=workspace, run_id=run["id"], research_store=runs)
             stamp = datetime.now(UTC).isoformat(timespec="seconds")
-            truncation = truncate_head(workspace_index.render(tree),
+            truncation = truncateHead(workspace_index.render(tree),
                                        TruncationOptions(maxLines=2**31 - 1, maxBytes=WORKSPACE_VIEW_MAX_BYTES))
             text = truncation.content
             if truncation.truncated:
-                text += (f"\n\n[{format_size(WORKSPACE_VIEW_MAX_BYTES)} limit reached: {truncation.outputLines} of "
+                text += (f"\n\n[{formatSize(WORKSPACE_VIEW_MAX_BYTES)} limit reached: {truncation.outputLines} of "
                          f"{truncation.totalLines} index lines shown. Narrow the question instead of re-reading: "
                          "doc_list / doc_find for materials, find / grep under a card's folder for its outputs; "
                          "the run, issues and findings views stay small.]")
@@ -84,13 +85,10 @@ def register(harn):
             value = runs.summary(con, run["id"])
             return _text("\n".join(f"{k}: {v}" for k, v in value.items()))
         if params.view == "graph":
-            return _text(untrusted("research-graph", graph.render_graph(graph.snapshot(con, run))))
+            return _text(untrusted("research-graph", views.render_graph(views.snapshot(con, run))))
         if params.view == "issues":
-            rows = con.execute(
-                "SELECT * FROM research_issues WHERE run_id=? AND (? IS NULL OR branch_id=?) "
-                "ORDER BY branch_id,round,origin,priority DESC",
-                (run["id"], params.node, params.node),
-            ).fetchall()
+            rows = sorted(runs.issues(con, run["id"], node_id=params.node),
+                          key=lambda r: (r["branch_id"] or "", r["round"], r["origin"], -r["priority"]))
             return _text(untrusted("research-issues", "\n".join(
                 f"{r['id']} node {r['branch_id']} round {r['round']} [{r['origin']}/{r['kind']}] "
                 f"→ {r['disposition'] or 'undisposed'}" + (f" ({runs.destination(r)})" if runs.destination(r) else "")
@@ -118,7 +116,7 @@ def register(harn):
             "with their dispositions, and findings. Each call reads current records; saved workspace-index and graph "
             "files are snapshots. This tool is read-only."
         ),
-        parameters=Params.model_json_schema(), execute=execute,
+        parameters=typeboxSchema(Params), execute=execute,
         promptSnippet="Inspect live research state, material paths, and declarations",
         promptGuidelines=[
             ("For research state or file locations, use misaka_research_view(view='workspace', run_id=...) instead of a saved index. "
@@ -153,7 +151,7 @@ def register(harn):
                          "where it was -- without waiting for the level to end and the run to be resumed")
     harn.registerTool(ToolDefinition(
         name="misaka_research_retry", label="Retry a failed research node", description=retry_description,
-        parameters=Retry.model_json_schema(), execute=execute_retry, promptSnippet=retry_description,
+        parameters=typeboxSchema(Retry), execute=execute_retry, promptSnippet=retry_description,
         promptGuidelines=[("When a research node fails -- a provider refused its request, a Sister card failed, its process "
                            "died -- and the cause was passing, misaka_research_retry(node=...) runs it again at once; a "
                            "node that keeps failing the same way is left for the user.")],

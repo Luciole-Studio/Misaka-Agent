@@ -8,21 +8,24 @@ windows sharing one role's file overwrote each other's entries with their own st
 import json
 from types import SimpleNamespace
 
+from misaka.modes.interactive.interactive_mode import InteractiveMode
+from misaka.modes.interactive.theme.theme import getEditorTheme, getMarkdownTheme
+from misaka.ui.tui import Container
 from misaka.ui.tui.components.editor import Editor
-from misaka.ui.tui.interactive.interactive_mode import InteractiveMode
-from misaka.ui.tui.interactive.theme.theme import get_editor_theme
 
 
 def _editor(monkeypatch, path):
     monkeypatch.setenv("MISAKA_INPUT_HISTORY", str(path))
-    return Editor(SimpleNamespace(requestRender=lambda *a: None), get_editor_theme())
+    return Editor(SimpleNamespace(requestRender=lambda *a: None), getEditorTheme())
 
 
 def _load_session(editor, prompts):
-    host = SimpleNamespace(editor=editor)
+    host = SimpleNamespace(editor=editor, chatContainer=Container(), outputPad=1, toolOutputExpanded=False,
+                           getMarkdownThemeWithSettings=getMarkdownTheme, getMarkdownTransformers=list)
+    host.getUserMessageText = lambda message: InteractiveMode.getUserMessageText(host, message)
     for text in prompts:
-        InteractiveMode._rememberUserMessage(host, {"role": "user", "content": text, "timestamp": 1},
-                                             {"populateHistory": True})
+        InteractiveMode.addMessageToChat(host, {"role": "user", "content": text, "timestamp": 1},
+                                         {"populateHistory": True})
 
 
 def test_reopening_a_session_does_not_refill_a_persisted_history(tmp_path, monkeypatch):
@@ -37,7 +40,7 @@ def test_reopening_a_session_does_not_refill_a_persisted_history(tmp_path, monke
 
 def test_without_a_history_file_the_session_still_fills_the_in_memory_history(monkeypatch):
     monkeypatch.delenv("MISAKA_INPUT_HISTORY", raising=False)
-    editor = Editor(SimpleNamespace(requestRender=lambda *a: None), get_editor_theme())
+    editor = Editor(SimpleNamespace(requestRender=lambda *a: None), getEditorTheme())
     _load_session(editor, ["first", "second"])
     assert editor.history == ["second", "first"]
 

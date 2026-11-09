@@ -21,7 +21,8 @@ class Task(Params):
     question: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
     deliverable: str = Field(min_length=1, description=(
-        "The file's name on the first line, such as `naval-balance.md`; what it must contain on the lines after it."))
+        "The file's name on the first line, such as `naval-balance.md`; what it must contain on the lines after it. "
+        "One file per card: other files it writes (a script, data) are named on those lines too."))
     assignee: str = Field(min_length=1)
     assignee_reason: str = Field(min_length=1)
     method: str = ""
@@ -191,6 +192,9 @@ class Alternative(Params):
 class DecideOption(Option):
     sources: list[str] = Field(default_factory=list, description=(
         "Ids of the divergence proposals and branch-disposed red-team issues that make up this possibility."))
+    answers: list[str] = Field(default_factory=list, description=(
+        "Ids of paths the paths list shows declined, covered or left unopened that this option brings back; its "
+        "premise says what answers the reason recorded for each. Empty for a possibility new to the run."))
 
 
 class DecideDecision(Decision):
@@ -267,8 +271,9 @@ class Consent(Params):
 class ReconcileNode(Params):
     question: str = Field(min_length=1, description="The new node's question, written for its Last Order.")
     options: list[str] = Field(min_length=1, description=(
-        "Pending option ids this node pursues. Options from several nodes that ask the same question go "
-        "to one node, which then has each of their nodes as a parent."))
+        "Pending option ids this node pursues -- or ids of proposals whose coverage this reconciliation reopens. "
+        "Options from several nodes that ask the same question go to one node, which then has each of their "
+        "nodes as a parent."))
     rationale: str = Field(min_length=1)
 
 
@@ -280,8 +285,23 @@ class ReconcileJoin(Params):
 
 
 class NotPursued(Params):
-    option: str = Field(min_length=1)
+    option: str = Field(min_length=1, description=(
+        "A pending option's id, or the id of a proposal whose coverage this reconciliation reopens."))
     reason: str = Field(min_length=1)
+    covered_by: str = Field("", description=(
+        "When a node answers it -- it already pursues this possibility, or this option complements it: that "
+        "node's id, or the id of a pending option this reconciliation opens. Empty when a limit stops it or it is "
+        "a correction."))
+
+
+class Coverage(Params):
+    proposal: str = Field(min_length=1, description="The id of a coverage claim listed in the material.")
+    verdict: Literal["holds", "reopen"] = Field(description=(
+        "holds: the covering node's research answers it. reopen: it does not -- the proposal is a possibility of "
+        "its own and gets an outcome like a pending option: its id in a node's options, or in not_pursued."))
+    note: str = Field(min_length=1, description=(
+        "holds: how that node's research answers it. reopen: what that research leaves unanswered. The proposal "
+        "keeps its own premise; this note is the record of the verdict."))
 
 
 class Relation(Params):
@@ -299,6 +319,8 @@ class Reconcile(Params):
     joins: list[ReconcileJoin] = Field(default_factory=list)
     not_pursued: list[NotPursued] = Field(default_factory=list)
     relations: list[Relation] = Field(default_factory=list)
+    coverage: list[Coverage] = Field(default_factory=list, description=(
+        "One verdict for every coverage claim in the material; [] when there are none."))
     summary: str = Field(min_length=1, description="One or two lines on what this reconciliation does, for the record.")
 
 
@@ -469,7 +491,8 @@ def plan_change_tool(con, run, node, *, round, session_file, validate):
 
 RECONCILE_DESCRIPTION = ("Root Last Order: record this level's reconciliation -- which pending options open as nodes "
                          "(options asking the same question share one node), which finished nodes a join carries "
-                         "forward, which options are not pursued and why, and how nodes relate")
+                         "forward, which options are not pursued and why, whether each coverage claim across lines "
+                         "holds, and how nodes relate")
 
 
 def _run_owner(session_file, ctx):

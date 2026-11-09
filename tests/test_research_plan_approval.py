@@ -85,7 +85,8 @@ async def chat(board, tmp_path, monkeypatch):
     monkeypatch.setattr(workflow, "run", drive)
     state.part = research.ResearchPart()
     state.part.attach(SimpleNamespace(moments=SimpleNamespace(
-        send_message=send_message, send_user_message=state.user_messages.append)))
+        send_message=send_message,
+        send_user_message=lambda content, options=None: state.user_messages.append((content, options)))))
     state.ctx = SimpleNamespace(
         cwd=str(tmp_path), isIdle=lambda: True, sessionManager=SimpleNamespace(sessionId="fixture"),
         ui=SimpleNamespace(custom=custom, notify=lambda text, kind: state.notices.append((text, kind))))
@@ -149,6 +150,8 @@ async def test_dismissed_or_invalid_picker_does_not_arm_research(chat, board, ac
     assert runs.listing(board) == []
     assert chat.driven == []
     assert bool(chat.user_messages) is (action == "clarify")
+    # A run a notification woke may be starting when the picker returns: the choice is queued, not refused.
+    assert all(options == {"deliverAs": "followUp"} for _content, options in chat.user_messages)
     if action == "invalid":
         assert chat.notices[-1][1] == "error"
     # A dismissed selection must not leak a mode into the next explicit activation.
@@ -188,7 +191,7 @@ def test_initial_and_followup_prompts_use_saved_mode(board, tmp_path, monkeypatc
         prompt = call.call_args.args[5]
     else:
         monkeypatch.setattr(planner, "task_sources", lambda *a: {})
-        monkeypatch.setattr(planner, "find_most_recent_session", lambda *a: None)
+        monkeypatch.setattr(planner, "findMostRecentSession", lambda *a: None)
         call = Mock(return_value=(None, "Conclusion", None))
         monkeypatch.setattr(planner, "_call", call)
         planner.synthesize(board, run, cfg, object(), node, [], followup=object(), left=1)

@@ -77,6 +77,7 @@ def _txn(con):
 NOTIFICATION_SCHEMA_VERSION = 1
 EVENT_RETENTION_SECONDS = 30 * 86400      # an event every subscriber has passed is history
 SUBSCRIPTION_IDLE_SECONDS = 30 * 86400    # a subscriber silent this long has left for good
+HEARTBEAT_SECONDS = 86400                 # how often a poll that finds nothing says the subscriber is still there
 SUBSCRIBE_LOOKBACK_SECONDS = 7 * 86400    # what a new subscriber is told about from before it arrived
 
 
@@ -86,9 +87,10 @@ def prune(con, *, now=None):
     The trigger appends one row per terminal transition, so the table grows for the life of
     the board. A row is dropped only once every subscription's cursor is past it, so a
     subscriber that has been away still gets what it missed. That rule needs the other half:
-    a research run's chat subscription outlives the run, and one abandoned cursor would
+    a workflow run's chat subscription outlives the run, and one abandoned cursor would
     otherwise pin the whole table forever. A subscription that has neither leased nor
-    acknowledged anything in ``SUBSCRIPTION_IDLE_SECONDS`` is gone; a session that comes back
+    acknowledged anything in ``SUBSCRIPTION_IDLE_SECONDS`` -- nor been polled: a poll that finds
+    nothing refreshes it once per ``HEARTBEAT_SECONDS`` -- is gone; a session that comes back
     later resubscribes and reads from ``SUBSCRIBE_LOOKBACK_SECONDS`` ago.
     """
     now = int(time.time()) if now is None else int(now)
@@ -179,11 +181,16 @@ def claim_next(con, subscription_id, *, token=None, ttl_seconds=60):
              sub["resource_id"], sub["resource_id"], sub["kind"], sub["kind"]),
         ).fetchone()
         if event is None:
-            con.execute(
-                "UPDATE notification_subscriptions SET lease_token=NULL,leased_event_id=NULL,"
-                "lease_expires=NULL,updated_at=? WHERE id=?",
-                (now, subscription_id),
-            )
+            # Nothing to hand out: write only an expired lease to clear, or the daily heartbeat that
+            # keeps ``prune`` off a subscriber still polling. Writing on every poll rewrote the board
+            # every few seconds while nothing happened (0.19.17 on a Mac: ~57 KB of WAL a minute).
+            if (sub["lease_token"] is not None or sub["leased_event_id"] is not None
+                    or sub["lease_expires"] is not None or int(sub["updated_at"]) <= now - HEARTBEAT_SECONDS):
+                con.execute(
+                    "UPDATE notification_subscriptions SET lease_token=NULL,leased_event_id=NULL,"
+                    "lease_expires=NULL,updated_at=? WHERE id=?",
+                    (now, subscription_id),
+                )
             return None
         cur = con.execute(
             "UPDATE notification_subscriptions SET lease_token=?,leased_event_id=?,"

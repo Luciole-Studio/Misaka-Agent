@@ -16,6 +16,7 @@
 | git | プロジェクトとその履歴 | `xcode-select --install` | `sudo apt install git` | `winget install Git.Git` |
 | ripgrep、fd | ファイル検索 | `brew install ripgrep fd` | `sudo apt install ripgrep fd-find` | `winget install BurntSushi.ripgrep.MSVC`, `winget install sharkdp.fd` |
 | poppler | PDF の読み取り | `brew install poppler` | `sudo apt install poppler-utils` | `winget install oschwartz10612.Poppler` |
+| MinerU（任意） | スキャンした PDF と DjVu、特に縦書きの中国語・日本語と手書き。`misaka setup documents` からインストールできる | `uv tool install mineru`、加えて `brew install tesseract` | `uv tool install mineru`、加えて `sudo apt install tesseract-ocr` | `uv tool install mineru`、加えて `winget install UB-Mannheim.TesseractOCR` |
 | ocrmypdf（任意） | スキャンした PDF | `brew install ocrmypdf tesseract-lang` | `sudo apt install ocrmypdf tesseract-ocr-chi-sim tesseract-ocr-jpn` | [OCRmyPDF の Windows 向け手順](https://ocrmypdf.readthedocs.io/en/latest/installation.html#installing-on-windows)を参照 |
 | DjVuLibre（任意） | DjVu ファイル | `brew install djvulibre` | `sudo apt install djvulibre-bin` | `winget install DjVuLibre.DjView` |
 | LibreOffice（任意） | 古い `.doc`、`.xls`、`.ppt` ファイル、スライドの表示、EMF/WMF で保存された Word の図表 | `brew install --cask libreoffice` | `sudo apt install libreoffice` | `winget install TheDocumentFoundation.LibreOffice` |
@@ -39,7 +40,7 @@ Homebrew と winget は [release/README.md](../release/README.md) を見てく�
 
 | 追加機能 | 加わるもの |
 |---|---|
-| `providers` | すべてのモデルプロバイダの SDK。一社だけなら `anthropic`、`openai`、`google`、`bedrock`、`mistral` のいずれかを指定します（OpenRouter や OpenAI 互換のサービスは `openai`）。 |
+| `providers` | すべてのモデルプロバイダの SDK。一社だけなら `anthropic`、`openai`、`google`、`bedrock` のいずれかを指定します（OpenRouter、Kimi Code や OpenAI 互換のサービスは `openai`。Mistral は SDK が要りません）。 |
 | `browser` | ウェブブラウザを操作するツール |
 | `lcm-semantic` | 過去の会話を意味で検索する機能 |
 

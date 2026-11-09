@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import pytest
 
-from misaka.core.tools import create_all_tool_definitions
+from misaka.core.tools import createAllToolDefinitions
 from misaka.core.tools.download_file import create_download_file_tool_definition
 from misaka.core.tools.web_fetch import create_web_fetch_tool_definition
-from misaka.ui.tui.interactive.components.tool_execution import ToolRenderContext
-from misaka.ui.tui.interactive.theme.theme import theme
+from misaka.modes.interactive.components.tool_execution import ToolRenderContext
+from misaka.modes.interactive.theme.theme import theme
 
 ARGS = {
     "read": {"path": "notes.md", "offset": 3, "limit": 10},
@@ -31,7 +31,7 @@ ARGS = {
 
 
 def _definitions(cwd):
-    definitions = dict(create_all_tool_definitions(cwd))
+    definitions = dict(createAllToolDefinitions(cwd))
     definitions["web_fetch"] = create_web_fetch_tool_definition(cwd)
     definitions["download_file"] = create_download_file_tool_definition(cwd)
     return definitions
@@ -41,7 +41,7 @@ def _context(args, cwd, *, partial, expanded, error=False):
     return ToolRenderContext(
         args=args, toolCallId="call_1", invalidate=lambda: None, lastComponent=None, state={},
         cwd=cwd, executionStarted=True, argsComplete=True, isPartial=partial, expanded=expanded,
-        showImages=False, isError=error,
+        showImages=False, isError=error, durationMs=None, outputPad=1,
     )
 
 

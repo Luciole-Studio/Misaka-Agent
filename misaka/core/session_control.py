@@ -250,9 +250,10 @@ class SessionControl:
             accepted = asyncio.get_running_loop().create_future()
             accepted.add_done_callback(lambda result: result.exception() if not result.cancelled() else None)
 
-            def preflight(ok):
+            def preflight(disposition):
+                # Called only for an accepted prompt; `finally` below reports a rejected one.
                 if not accepted.done():
-                    accepted.set_result(ok)
+                    accepted.set_result(bool(disposition))
 
             async def deliver():
                 try:

@@ -1,284 +1,446 @@
-"""Buffered stdin sequence splitting for terminal input streams.
+"""Translated from pi-tui's ``packages/tui/src/stdin-buffer.ts`` (v1.3.0).
 
-PORT-NOTE: upstream receives strings from Node after setEncoding("utf8"), where
-StringDecoder buffers partial multi-byte sequences across chunks. Here the input is raw
-bytes, so an incremental decoder is required; otherwise a >4KB CJK paste split at an
-os.read boundary yields U+FFFD (reliably reproducible).
-The flush timer runs on the event loop via loop.call_soon_threadsafe (Node's
-single-threaded semantics), which removes the race between the timer thread and the
-main thread over the buffer. threading.Timer.cancel() is a no-op once the timer thread
-is past its own cancelled check, so every armed timer carries a generation number and a
-callback whose generation is stale returns without touching the buffer.
+StdinBuffer buffers input and emits complete sequences.
 
-PORT-NOTE (known residual, faithful to upstream): the arming site picks its window from
-the *whole* pending buffer -- `escapeTimeoutMs` when it is exactly one ESC, `timeoutMs`
-otherwise (stdin-buffer.ts:388 is the same ternary). So a bracketed paste whose opener is
-split right after the lone ESC (`b"\\x1b"` then `b"[200~..."`, the shape ssh/tmux produce
-when read(2) returns a single byte) still only gets the escape window, and a gap wider
-than `escapeTimeoutMs` shatters it into per-character key events with the literal
-`\\x1b[201~` closer landing in the text. Every other split point of the same opener is
-covered by the 50ms sequence window. Raising `tui.esc_timeout_ms` in settings.json (ssh already gets
-100ms, see terminal.resolve_escape_timeout_ms) reassembles it. Deliberately not diverged
-from upstream here; tests/test_stdin_buffer_timeouts.py pins the residual so a future
-change to it is a visible decision rather than a silent one.
+This is necessary because stdin data events can arrive in partial chunks,
+especially for escape sequences like mouse events. Without buffering,
+partial sequences can be misinterpreted as regular keypresses.
+
+For example, the mouse SGR sequence `\\x1b[<35;20;5m` might arrive as:
+- Event 1: `\\x1b`
+- Event 2: `[<35`
+- Event 3: `;20;5m`
+
+The buffer accumulates these until a complete sequence is detected.
+Call the `process()` method to feed input data.
+
+Based on code from OpenTUI (https://github.com/anomalyco/opentui)
+MIT License - Copyright (c) 2025 opentui
+
+MISAKA forks, each marked where it happens:
+
+- Node's ``EventEmitter`` is the ``on``/``emit`` pair of the class itself.
+- Raw bytes are decoded here (Node decodes them in the stdin stream).
+- ``setTimeout`` is a timer on the asyncio event loop the input arrives on.
+- Strings are Python strings: a character outside the Basic Multilingual Plane is one sequence, where JavaScript
+  splits it into two surrogate halves.
 """
 
 from __future__ import annotations
 
 import asyncio
 import codecs
-import threading
-from collections import defaultdict
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
-_ESC = "\x1b"
-_BRACKETED_PASTE_START = "\x1b[200~"
-_BRACKETED_PASTE_END = "\x1b[201~"
+from misaka.utils.js_regexp import RegExp
 
+ESC = "\x1b"
 DEFAULT_SEQUENCE_TIMEOUT_MS = 50
 DEFAULT_ESCAPE_TIMEOUT_MS = 10
+BRACKETED_PASTE_START = "\x1b[200~"
+BRACKETED_PASTE_END = "\x1b[201~"
+# Color and program-status OSC replies, XTVersion, and Kitty graphics replies.
+# Until their header is complete, the input may be batched legacy Alt keystrokes.
+TERMINAL_REPLY_HEADER_PATTERN = RegExp(r"^\x1b(?:\](?:1[01];|4;\d{1,3};|7501;\?)|P>\||_G(?:[a-z]=\d+,)*[a-z]=\d+;)")
 
-type SequenceStatus = Literal["complete", "incomplete", "not-escape"]
-type StdinBufferEvent = Literal["data", "paste"]
+
+def isControlString(data: str) -> bool:
+    return data.startswith(f"{ESC}]") or data.startswith(f"{ESC}P") or data.startswith(f"{ESC}_")  # noqa: PIE810
 
 
-def _is_complete_sequence(data: str) -> SequenceStatus:
-    if not data.startswith(_ESC):
+def isCompleteSequence(data: str) -> Literal["complete", "incomplete", "not-escape"]:
+    """Check if a string is a complete escape sequence or needs more data"""
+    if not data.startswith(ESC):
         return "not-escape"
+
     if len(data) == 1:
         return "incomplete"
 
-    after_esc = data[1:]
-    if after_esc.startswith("["):
-        if after_esc.startswith("[M"):
+    afterEsc = data[1:]
+
+    # CSI sequences: ESC [
+    if afterEsc.startswith("["):
+        # Check for old-style mouse sequence: ESC[M + 3 bytes
+        if afterEsc.startswith("[M"):
+            # Old-style mouse needs ESC[M + 3 bytes = 6 total
             return "complete" if len(data) >= 6 else "incomplete"
-        return _is_complete_csi_sequence(data)
-    if after_esc.startswith("]"):
-        return _is_complete_osc_sequence(data)
-    if after_esc.startswith("P"):
-        return _is_complete_dcs_sequence(data)
-    if after_esc.startswith("_"):
-        return _is_complete_apc_sequence(data)
-    if after_esc.startswith("O"):
-        return "complete" if len(after_esc) >= 2 else "incomplete"
-    if len(after_esc) == 1:
+        return isCompleteCsiSequence(data)
+
+    # OSC sequences: ESC ]
+    if afterEsc.startswith("]"):
+        return isCompleteOscSequence(data)
+
+    # DCS sequences: ESC P ... ESC \ (includes XTVersion responses)
+    if afterEsc.startswith("P"):
+        return isCompleteDcsSequence(data)
+
+    # APC sequences: ESC _ ... ESC \ (includes Kitty graphics responses)
+    if afterEsc.startswith("_"):
+        return isCompleteApcSequence(data)
+
+    # SS3 sequences: ESC O
+    if afterEsc.startswith("O"):
+        # ESC O followed by a single character
+        return "complete" if len(afterEsc) >= 2 else "incomplete"
+
+    # Meta key sequences: ESC followed by a single character
+    if len(afterEsc) == 1:
         return "complete"
+
+    # Unknown escape sequence - treat as complete
     return "complete"
 
 
-def _is_complete_csi_sequence(data: str) -> SequenceStatus:
-    if not data.startswith(f"{_ESC}["):
+def isCompleteCsiSequence(data: str) -> Literal["complete", "incomplete"]:
+    """Check if CSI sequence is complete
+    CSI sequences: ESC [ ... followed by a final byte (0x40-0x7E)
+    """
+    if not data.startswith(f"{ESC}["):
         return "complete"
+
+    # Need at least ESC [ and one more character
     if len(data) < 3:
         return "incomplete"
 
     payload = data[2:]
-    last_char = payload[-1]
-    last_char_code = ord(last_char)
-    if 0x40 <= last_char_code <= 0x7E:
+
+    # CSI sequences end with a byte in the range 0x40-0x7E (@-~)
+    # This includes all letters and several special characters
+    lastChar = payload[len(payload) - 1]
+    lastCharCode = ord(lastChar)
+
+    if lastCharCode >= 0x40 and lastCharCode <= 0x7E:
+        # Special handling for SGR mouse sequences
+        # Format: ESC[<B;X;Ym or ESC[<B;X;YM
         if payload.startswith("<"):
-            if _matches_sgr_mouse(payload):
+            # Must have format: <digits;digits;digits[Mm]
+            mouseMatch = RegExp(r"^<\d+;\d+;\d+[Mm]$").test(payload)
+            if mouseMatch:
                 return "complete"
-            if last_char in {"M", "m"}:
+            # If it ends with M or m but doesn't match the pattern, still incomplete
+            if lastChar == "M" or lastChar == "m":
+                # Check if we have the right structure
                 parts = payload[1:-1].split(";")
-                if len(parts) == 3 and all(part.isdigit() for part in parts):
+                if len(parts) == 3 and all(RegExp(r"^\d+$").test(p) for p in parts):
                     return "complete"
+
             return "incomplete"
+
         return "complete"
+
     return "incomplete"
 
 
-def _is_complete_osc_sequence(data: str) -> SequenceStatus:
-    if not data.startswith(f"{_ESC}]"):
+def isCompleteOscSequence(data: str) -> Literal["complete", "incomplete"]:
+    """Check if OSC sequence is complete
+    OSC sequences: ESC ] ... ST (where ST is ESC \\ or BEL)
+    """
+    if not data.startswith(f"{ESC}]"):
         return "complete"
-    return "complete" if data.endswith((f"{_ESC}\\", "\x07")) else "incomplete"
 
-
-def _is_complete_dcs_sequence(data: str) -> SequenceStatus:
-    if not data.startswith(f"{_ESC}P"):
+    # OSC sequences end with ST (ESC \) or BEL (\x07)
+    if data.endswith(f"{ESC}\\") or data.endswith("\x07"):  # noqa: PIE810 - upstream checks the two endings apart
         return "complete"
-    return "complete" if data.endswith(f"{_ESC}\\") else "incomplete"
+
+    return "incomplete"
 
 
-def _is_complete_apc_sequence(data: str) -> SequenceStatus:
-    if not data.startswith(f"{_ESC}_"):
+def isCompleteDcsSequence(data: str) -> Literal["complete", "incomplete"]:
+    """Check if DCS (Device Control String) sequence is complete
+    DCS sequences: ESC P ... ST (where ST is ESC \\)
+    Used for XTVersion responses like ESC P >| ... ESC \\
+    """
+    if not data.startswith(f"{ESC}P"):
         return "complete"
-    return "complete" if data.endswith(f"{_ESC}\\") else "incomplete"
+
+    # DCS sequences end with ST (ESC \)
+    if data.endswith(f"{ESC}\\"):
+        return "complete"
+
+    return "incomplete"
 
 
-def _matches_sgr_mouse(payload: str) -> bool:
-    if len(payload) < 2 or payload[0] != "<" or payload[-1] not in {"M", "m"}:
-        return False
-    parts = payload[1:-1].split(";")
-    return len(parts) == 3 and all(part.isdigit() for part in parts)
+def isCompleteApcSequence(data: str) -> Literal["complete", "incomplete"]:
+    """Check if APC (Application Program Command) sequence is complete
+    APC sequences: ESC _ ... ST (where ST is ESC \\)
+    Used for Kitty graphics responses like ESC _ G ... ESC \\
+    """
+    if not data.startswith(f"{ESC}_"):
+        return "complete"
+
+    # APC sequences end with ST (ESC \)
+    if data.endswith(f"{ESC}\\"):
+        return "complete"
+
+    return "incomplete"
 
 
-def _parse_unmodified_kitty_printable_codepoint(sequence: str) -> int | None:
-    import re
-
-    match = re.match(r"^\x1b\[(\d+)(?::\d*)?(?::\d+)?u$", sequence)
-    if match is None:
+# Split accumulated buffer into complete sequences
+def parseUnmodifiedKittyPrintableCodepoint(sequence: str) -> int | None:
+    match = RegExp(r"^\x1b\[(\d+)(?::\d*)?(?::\d+)?u$").exec(sequence)
+    if not match:
         return None
-    codepoint = int(match.group(1))
+
+    codepoint = int(match[1], 10)
     return codepoint if codepoint >= 32 else None
 
 
-def _extract_complete_sequences(buffer: str) -> tuple[list[str], str]:
+class ExtractedSequences(TypedDict):
+    sequences: list[str]
+    remainder: str
+
+
+def extractCompleteSequences(buffer: str) -> ExtractedSequences:
     sequences: list[str] = []
     pos = 0
 
     while pos < len(buffer):
         remaining = buffer[pos:]
-        if remaining.startswith(_ESC):
-            seq_end = 1
-            while seq_end <= len(remaining):
-                candidate = remaining[:seq_end]
-                status = _is_complete_sequence(candidate)
+
+        # Try to extract a sequence starting at this position
+        if remaining.startswith(ESC):
+            terminalReply = isControlString(remaining) and TERMINAL_REPLY_HEADER_PATTERN.test(remaining)
+            # Find the end of this escape sequence
+            seqEnd = 1
+            while seqEnd <= len(remaining):
+                if terminalReply and seqEnd > 2:
+                    char = remaining[seqEnd - 1]
+                    if char == "\x18" or char == "\x1a":
+                        # CAN and SUB cancel the string, not subsequent keyboard input.
+                        pos += seqEnd
+                        break
+                    if char == ESC and seqEnd < len(remaining) and remaining[seqEnd] != "\\":
+                        # A new escape sequence aborts an unterminated reply. Keep a
+                        # trailing ESC buffered until we can distinguish it from ST.
+                        pos += seqEnd - 1
+                        break
+                candidate = remaining[:seqEnd]
+                status = isCompleteSequence(candidate)
+
                 if status == "complete":
+                    # WezTerm with enable_kitty_keyboard sends the Escape key press as a
+                    # raw '\x1b' byte (simple text path in encode_kitty, ignoring
+                    # DISAMBIGUATE_ESCAPE_CODES) and the release as a full Kitty CSI-u
+                    # sequence. These arrive concatenated as '\x1b\x1b[27;...u'.
+                    # The buffer would normally treat '\x1b\x1b' as a complete meta-key
+                    # sequence (ESC + single char), leaving '[27;...u' to be typed as
+                    # plain text. If the character immediately following '\x1b\x1b'
+                    # would begin a new escape sequence, emit only the first ESC and
+                    # restart from the second.
                     if candidate == "\x1b\x1b":
-                        next_char = remaining[seq_end] if seq_end < len(remaining) else None
-                        if next_char in {"[", "]", "O", "P", "_"}:
-                            sequences.append(_ESC)
+                        nextChar = remaining[seqEnd] if seqEnd < len(remaining) else None
+                        if (
+                            nextChar == "["  # CSI
+                            or nextChar == "]"  # OSC
+                            or nextChar == "O"  # SS3
+                            or nextChar == "P"  # DCS
+                            or nextChar == "_"  # APC
+                        ):
+                            sequences.append(ESC)
                             pos += 1
                             break
                     sequences.append(candidate)
-                    pos += seq_end
+                    pos += seqEnd
                     break
-                if status == "incomplete":
-                    seq_end += 1
-                    continue
-                sequences.append(candidate)
-                pos += seq_end
-                break
+                elif status == "incomplete":
+                    seqEnd += 1
+                else:
+                    # Should not happen when starting with ESC
+                    sequences.append(candidate)
+                    pos += seqEnd
+                    break
 
-            if seq_end > len(remaining):
-                return sequences, remaining
+            if seqEnd > len(remaining):
+                return {"sequences": sequences, "remainder": remaining}
         else:
+            # Not an escape sequence - take a single character
             sequences.append(remaining[0])
             pos += 1
 
-    return sequences, ""
+    return {"sequences": sequences, "remainder": ""}
+
+
+class StdinBufferOptions(TypedDict, total=False):
+    # Maximum time to wait for an incomplete keyboard or mouse sequence
+    # (default: 50ms). Strings with a recognized terminal reply header wait for
+    # their terminator instead, so delayed replies cannot become keypresses.
+    # Ambiguous legacy Alt-key input still uses this timeout.
+    timeout: float
+    # Maximum time to wait after a lone ESC before treating it as Escape
+    # (default: 10ms). Increase for high-latency Alt+key input (SSH).
+    escapeTimeout: float
+
+
+StdinBufferEventMap = TypedDict(
+    "StdinBufferEventMap",
+    {
+        "data": tuple[str],
+        "paste": tuple[str],
+    },
+)
 
 
 class StdinBuffer:
-    """Buffer partial stdin chunks into logical terminal input sequences."""
+    """Buffers stdin input and emits complete sequences via the 'data' event.
+    Handles partial escape sequences that arrive across multiple chunks.
+    """
 
-    def __init__(self, options: dict[str, Any] | None = None,
-                 loop: asyncio.AbstractEventLoop | None = None) -> None:
-        opts = options or {}
-        self.buffer = ""
-        self.timeout: threading.Timer | None = None
-        timeout = opts.get("timeout")
-        self.timeoutMs = DEFAULT_SEQUENCE_TIMEOUT_MS if timeout is None else timeout
-        escape_timeout = opts.get("escapeTimeout")
-        # a lone ESC waits only long enough for an Alt+key second byte, so Escape stays snappy
-        self.escapeTimeoutMs = DEFAULT_ESCAPE_TIMEOUT_MS if escape_timeout is None else escape_timeout
-        self._timerSeq = 0
-        self.pasteMode = False
-        self.pasteBuffer = ""
+    def __init__(self, options: StdinBufferOptions | None = None, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        if options is None:
+            options = {}
+        self.buffer: str = ""
+        self.timeout: asyncio.TimerHandle | None = None
+        self.pasteMode: bool = False
+        self.pasteBuffer: str = ""
         self.pendingKittyPrintableCodepoint: int | None = None
-        self._listeners: dict[str, list[Callable[..., Any]]] = defaultdict(list)
-        self._loop = loop
-        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        # MISAKA fork: EventEmitter's listener table.
+        self.listeners: dict[str, list[Callable[[str], Any]]] = {}
+        # MISAKA fork: the loop `setTimeout` schedules on (`None`: the running loop when a timer is armed).
+        self.loop = loop
+        # MISAKA fork: upstream's terminal sets the stdin encoding to UTF-8, so Node's stream decodes each chunk
+        # and holds a partial character back for the next one. MISAKA's POSIX reader hands over raw `os.read`
+        # bytes; this decoder does what that stream decoder does.
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        timeout = options.get("timeout")
+        self.timeoutMs: float = timeout if timeout is not None else DEFAULT_SEQUENCE_TIMEOUT_MS
+        escapeTimeout = options.get("escapeTimeout")
+        self.escapeTimeoutMs: float = escapeTimeout if escapeTimeout is not None else DEFAULT_ESCAPE_TIMEOUT_MS
 
-    def on(self, event: StdinBufferEvent, listener: Callable[[str], Any]) -> StdinBuffer:
-        self._listeners[event].append(listener)
+    def on(self, event: Literal["data", "paste"], listener: Callable[[str], Any]) -> StdinBuffer:
+        """MISAKA fork: ``EventEmitter.on``."""
+        self.listeners.setdefault(event, []).append(listener)
         return self
 
+    def emit(self, event: Literal["data", "paste"], *args: str) -> bool:
+        """MISAKA fork: ``EventEmitter.emit``."""
+        listeners = self.listeners.get(event)
+        if not listeners:
+            return False
+        for listener in list(listeners):
+            listener(*args)
+        return True
+
     def process(self, data: str | bytes | bytearray) -> None:
-        self._cancelTimeout()
+        # MISAKA fork: bytes go through the stream decoder first (see `decoder`). A chunk that decodes to nothing
+        # (a character split across reads) is no data event in Node, so it neither emits nor touches the timer.
+        # Upstream's Buffer branch (a single byte above 127 becomes ESC + byte - 128, for 8-bit meta keys) is not
+        # ported: production input never takes it there, and here a lone byte of a split UTF-8 character would
+        # turn into an Alt+key.
+        if isinstance(data, (bytes, bytearray)):
+            data = self.decoder.decode(bytes(data))
+            if len(data) == 0:
+                return
 
-        if isinstance(data, (bytes, bytearray)) and len(data) == 1 and data[0] > 127:
-            # 8-bit meta (xterm metaSendsEscape=false): Alt+a arrives as a lone 0xE1, which the
-            # UTF-8 decoder would hold as a truncated sequence and then replace with U+FFFD.
-            # pi stdin-buffer.ts restores the ESC-prefixed form instead.
-            raw = "\x1b" + chr(data[0] - 128)
-        elif isinstance(data, (bytes, bytearray)):
-            raw = self._decoder.decode(bytes(data))  # a partial multi-byte sequence stays in the decoder until the next chunk
-        else:
-            raw = data
+        # Clear any pending timeout
+        if self.timeout:
+            self.timeout.cancel()
+            self.timeout = None
 
-        if raw == "" and self.buffer == "":
-            self._emitDataSequence("")
+        str_: str = data
+
+        if len(str_) == 0 and len(self.buffer) == 0:
+            self.emitDataSequence("")
             return
 
-        self.buffer += raw
+        self.buffer += str_
 
         if self.pasteMode:
             self.pasteBuffer += self.buffer
             self.buffer = ""
-            end_index = self.pasteBuffer.find(_BRACKETED_PASTE_END)
-            if end_index != -1:
-                pasted_content = self.pasteBuffer[:end_index]
-                remaining = self.pasteBuffer[end_index + len(_BRACKETED_PASTE_END) :]
+
+            endIndex = self.pasteBuffer.find(BRACKETED_PASTE_END)
+            if endIndex != -1:
+                pastedContent = self.pasteBuffer[:endIndex]
+                remaining = self.pasteBuffer[endIndex + len(BRACKETED_PASTE_END) :]
+
                 self.pasteMode = False
                 self.pasteBuffer = ""
                 self.pendingKittyPrintableCodepoint = None
-                self._emit("paste", pasted_content)
-                if remaining:
+
+                self.emit("paste", pastedContent)
+
+                if len(remaining) > 0:
                     self.process(remaining)
             return
 
-        start_index = self.buffer.find(_BRACKETED_PASTE_START)
-        if start_index != -1:
-            if start_index > 0:
-                before_paste = self.buffer[:start_index]
-                sequences, _remainder = _extract_complete_sequences(before_paste)
-                for sequence in sequences:
-                    self._emitDataSequence(sequence)
+        startIndex = self.buffer.find(BRACKETED_PASTE_START)
+        if startIndex != -1:
+            if startIndex > 0:
+                beforePaste = self.buffer[:startIndex]
+                result = extractCompleteSequences(beforePaste)
+                for sequence in result["sequences"]:
+                    self.emitDataSequence(sequence)
 
             self.pendingKittyPrintableCodepoint = None
-            self.buffer = self.buffer[start_index + len(_BRACKETED_PASTE_START) :]
+            self.buffer = self.buffer[startIndex + len(BRACKETED_PASTE_START) :]
             self.pasteMode = True
             self.pasteBuffer = self.buffer
             self.buffer = ""
 
-            end_index = self.pasteBuffer.find(_BRACKETED_PASTE_END)
-            if end_index != -1:
-                pasted_content = self.pasteBuffer[:end_index]
-                remaining = self.pasteBuffer[end_index + len(_BRACKETED_PASTE_END) :]
+            endIndex = self.pasteBuffer.find(BRACKETED_PASTE_END)
+            if endIndex != -1:
+                pastedContent = self.pasteBuffer[:endIndex]
+                remaining = self.pasteBuffer[endIndex + len(BRACKETED_PASTE_END) :]
+
                 self.pasteMode = False
                 self.pasteBuffer = ""
                 self.pendingKittyPrintableCodepoint = None
-                self._emit("paste", pasted_content)
-                if remaining:
+
+                self.emit("paste", pastedContent)
+
+                if len(remaining) > 0:
                     self.process(remaining)
             return
 
-        sequences, remainder = _extract_complete_sequences(self.buffer)
-        self.buffer = remainder
-        for sequence in sequences:
-            self._emitDataSequence(sequence)
+        result = extractCompleteSequences(self.buffer)
+        self.buffer = result["remainder"]
 
-        if self.buffer:
-            # A buffer that is exactly one ESC cannot tell "Escape key" from "first byte of
-            # a longer sequence", so it takes the short window -- including when it is the
-            # first byte of a bracketed-paste opener. See the module PORT-NOTE.
-            timeout_ms = self.escapeTimeoutMs if self.buffer == _ESC else self.timeoutMs
-            self._timerSeq += 1
-            seq = self._timerSeq
-            self.timeout = threading.Timer(timeout_ms / 1000.0, self._on_flush_timer, (seq,))
-            self.timeout.daemon = True
-            self.timeout.start()
+        for sequence in result["sequences"]:
+            self.emitDataSequence(sequence)
 
-    def _emitDataSequence(self, sequence: str) -> None:
-        raw_codepoint = ord(sequence) if len(sequence) == 1 else None
-        if (
-            raw_codepoint is not None
-            and self.pendingKittyPrintableCodepoint is not None
-            and raw_codepoint == self.pendingKittyPrintableCodepoint
-        ):
+        if len(self.buffer) > 0:
+            # Only a recognizable reply header establishes a delimited string.
+            # Flushing it would turn a delayed tail into text and an OSC's BEL
+            # terminator into Ctrl+G (the external editor shortcut). Other input,
+            # including Alt+] followed by text, must retain bounded recovery.
+            if TERMINAL_REPLY_HEADER_PATTERN.test(self.buffer):
+                return
+            timeoutMs = self.escapeTimeoutMs if self.buffer == ESC else self.timeoutMs
+
+            def onTimeout() -> None:
+                flushed = self.flush()
+
+                for sequence in flushed:
+                    if len(sequence) > 2 and isControlString(sequence):
+                        # Recover the Alt key and reparse its tail so batched text,
+                        # Enter, and control keys are not swallowed as one event.
+                        self.emitDataSequence(sequence[:2])
+                        self.process(sequence[2:])
+                    else:
+                        self.emitDataSequence(sequence)
+
+            # MISAKA fork: `setTimeout` on the event loop (see `loop`); input arrives on the loop's thread.
+            loop = self.loop if self.loop is not None else asyncio.get_running_loop()
+            self.timeout = loop.call_later(timeoutMs / 1000, onTimeout)
+
+    def emitDataSequence(self, sequence: str) -> None:
+        # MISAKA fork: a character outside the BMP is one sequence here, so its raw duplicate after a Kitty CSI-u
+        # sequence is dropped too (JavaScript sees two surrogate halves, neither matching the codepoint).
+        rawCodepoint = ord(sequence) if len(sequence) == 1 else None
+        if rawCodepoint is not None and rawCodepoint == self.pendingKittyPrintableCodepoint:
             self.pendingKittyPrintableCodepoint = None
             return
 
-        self.pendingKittyPrintableCodepoint = _parse_unmodified_kitty_printable_codepoint(sequence)
-        self._emit("data", sequence)
+        self.pendingKittyPrintableCodepoint = parseUnmodifiedKittyPrintableCodepoint(sequence)
+        self.emit("data", sequence)
 
     def flush(self) -> list[str]:
-        self._cancelTimeout()
+        if self.timeout:
+            self.timeout.cancel()
+            self.timeout = None
 
-        if self.buffer == "":
+        if len(self.buffer) == 0:
             return []
 
         sequences = [self.buffer]
@@ -287,8 +449,9 @@ class StdinBuffer:
         return sequences
 
     def clear(self) -> None:
-        self._cancelTimeout()
-        self._decoder.reset()
+        if self.timeout:
+            self.timeout.cancel()
+            self.timeout = None
         self.buffer = ""
         self.pasteMode = False
         self.pasteBuffer = ""
@@ -300,36 +463,9 @@ class StdinBuffer:
     def destroy(self) -> None:
         self.clear()
 
-    def _cancelTimeout(self) -> None:
-        if self.timeout is not None:
-            self.timeout.cancel()
-            self.timeout = None
-        # cancel() is a no-op once the timer thread is past its own check, so retire the
-        # generation as well: the callback that is already on its way finds itself stale.
-        self._timerSeq += 1
-
-    def _on_flush_timer(self, seq: int) -> None:
-        loop = self._loop
-        if loop is not None and not loop.is_closed():
-            try:
-                loop.call_soon_threadsafe(self._flush_timeout, seq)
-                return
-            except RuntimeError:
-                pass
-        self._flush_timeout(seq)
-
-    def _flush_timeout(self, seq: int) -> None:
-        if seq != self._timerSeq:
-            return  # a newer process() already took over the buffer
-        flushed = self.flush()
-        for sequence in flushed:
-            self._emitDataSequence(sequence)
-
-    def _emit(self, event: StdinBufferEvent, *args: Any) -> None:
-        for listener in list(self._listeners.get(event, [])):
-            listener(*args)
-
 
 __all__ = [
     "StdinBuffer",
+    "StdinBufferEventMap",
+    "StdinBufferOptions",
 ]

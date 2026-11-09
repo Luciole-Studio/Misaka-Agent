@@ -14,14 +14,31 @@ from misaka.cli import card_shell
 from misaka.core import wiring
 from misaka.core.network import dispatch, roster, sister_runtime, worker
 from misaka.core.network.wiring import capabilities
-from misaka.core.platform import cards
+from misaka.core.platform import cards, owners
 from misaka.core.subagent.runtime import SubagentManager
+
+
+async def published(part, base="BASE", ctx=None):
+    """What a part adds to the run's prompt: its sections, as a pi extension adds them, joined as the
+    prompt renders them. A part never returns a whole prompt, which would be forced."""
+    options = {"sections": {}}
+    assert await part.before_agent_start({"systemPrompt": base, "systemPromptOptions": options}, ctx) is None
+    return "\n\n".join(options["sections"].values())
 
 
 def catalog_payload(text):
     return json.loads(text.split('<<<UNTRUSTED-DATA name="sister-capabilities">>>\n', 1)[1]
                       .split('\n<<<END-UNTRUSTED-DATA>>>', 1)[0])
 
+
+
+class _StubOwner(owners.CardOwner):
+    """A workflow that owns ``card-1``: the board passes its context through without knowing it."""
+
+    name = "stub"
+
+    def card(self, con, task_id):
+        return {"run_id": "run-1", "branch_id": "node-1", "kind": "investigation", "scope": "run-1"} if task_id == "card-1" else None
 
 class SisterCatalogTests(unittest.IsolatedAsyncioTestCase):
     async def test_role_matrix_and_self_exclusion(self):
@@ -41,7 +58,7 @@ class SisterCatalogTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(part is not None, kind in allowed)
                     if part is None:
                         continue
-                    text = (await part.before_agent_start({"systemPrompt": "BASE"}, None))["systemPrompt"]
+                    text = await published(part)
                     data = catalog_payload(text)
                     self.assertEqual([item["id"] for item in data],
                                      ["10032", "10033"] if role == "last_order" else ["10033"])
@@ -53,10 +70,10 @@ class SisterCatalogTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("skills", entries[0])
 
     async def test_empty_sister_snapshot_never_reloads_or_adds_lo_research_contract(self):
-        part = capabilities.SisterCapabilitiesPart("/fixture", [], sister_id="10032", research_context=True)
+        part = capabilities.SisterCapabilitiesPart("/fixture", [], sister_id="10032", workflow_context=True)
         part.session = SimpleNamespace(getActiveToolNames=list)
         with patch.object(capabilities, "routing_catalog", side_effect=AssertionError("unexpected reload")):
-            text = (await part.before_agent_start({"systemPrompt": "BASE"}, None))["systemPrompt"]
+            text = await published(part)
         from misaka.config.identity import COORDINATOR_APPROVAL, COORDINATOR_ROLE
         from misaka.core.research.planner import RESEARCH_SISTER_DISCIPLINE
         self.assertNotIn(COORDINATOR_ROLE, text)
@@ -82,12 +99,13 @@ class CardContextTests(unittest.TestCase):
     def test_card_extras_and_single_catalog_owner(self):
         with closing(sqlite3.connect(":memory:")) as con:
             con.row_factory = sqlite3.Row
-            con.execute("CREATE TABLE research_run_tasks(task_id TEXT, run_id TEXT, branch_id TEXT, kind TEXT)")
-            con.execute("INSERT INTO research_run_tasks VALUES ('card-1','run-1','node-1','investigation')")
             row = {"id": "card-1", "assignee": "10032", "workspace": "/fixture"}
-            with patch.object(worker, "materials_on_hand", return_value="Existing material"):
+            with patch.object(owners, "_OWNERS", [_StubOwner()]), \
+                    patch.object(worker, "materials_on_hand", return_value="Existing material"):
                 extra = worker.card_extras(con, row)
-            self.assertEqual(extra["_research"], {"run_id": "run-1", "branch_id": "node-1", "kind": "investigation"})
+            self.assertEqual(extra["_owner_context"], {"run_id": "run-1", "branch_id": "node-1", "kind": "investigation",
+                                                  "scope": "run-1"})
+            self.assertEqual(extra["_owner"], "stub")
             self.assertEqual(extra["_materials"], "Existing material")
             assert "_colleagues" not in extra                     # the routing catalog is the system prompt's
             text = worker.card_prompt({**row, **extra, "body": "Task"})
@@ -99,16 +117,16 @@ class CardContextTests(unittest.TestCase):
     def test_durable_prepare_uses_shared_card_context(self):
         runtime = SimpleNamespace(con=object(), cfg={"token_cap": 100})
         row = {"id": "card-1", "workspace": "/fixture", "generation": 1, "claim_lock": "fixture"}
-        extra = {"_research": {"run_id": "run-1"}, "_materials": "Materials"}
+        extra = {"_owner_context": {"run_id": "run-1"}, "_materials": "Materials"}
         with patch.object(cards, "attachment_list", return_value=[]), \
                 patch.object(worker, "card_handoffs", return_value=[]), \
                 patch.object(worker, "card_extras", return_value=extra) as context, \
                 patch.object(sister_runtime.budget, "status", return_value={"mode": "normal"}):
             prepared = sister_runtime.SisterRuntime._prepare_card(runtime, row)
         context.assert_called_once_with(runtime.con, row, runtime.cfg)
-        self.assertEqual(prepared["_research"], extra["_research"])
+        self.assertEqual(prepared["_owner_context"], extra["_owner_context"])
         self.assertEqual(prepared["_materials"], "Materials")
-        self.assertNotIn("_research", row)
+        self.assertNotIn("_owner_context", row)
 
     def test_pane_prepare_uses_shared_card_context_before_session_setup(self):
         class SetupReached(Exception):
@@ -118,7 +136,7 @@ class CardContextTests(unittest.TestCase):
             profile = Path(directory) / "10032"
             profile.mkdir()
             row = {"id": "card-1", "workspace": directory, "assignee": "10032"}
-            extra = {"_research": {"run_id": "run-1"}, "_materials": "Materials"}
+            extra = {"_owner_context": {"run_id": "run-1"}, "_materials": "Materials"}
             con = sqlite3.connect(":memory:")
             with patch.object(card_shell.db, "connect", return_value=con), \
                     patch.object(card_shell.db, "get", return_value=row), \
@@ -133,7 +151,7 @@ class CardContextTests(unittest.TestCase):
                     self.assertRaises(SetupReached):
                 card_shell.launch("card-1")
             context.assert_called_once_with(con, row)
-            self.assertEqual(setup.call_args.args[0]["_research"], extra["_research"])
+            self.assertEqual(setup.call_args.args[0]["_owner_context"], extra["_owner_context"])
             self.assertEqual(setup.call_args.args[0]["_materials"], "Materials")
 
     def test_dispatch_and_restore_keep_shared_context_path(self):
@@ -145,13 +163,13 @@ class CardContextTests(unittest.TestCase):
 
     def test_durable_child_base_and_research_mode_on_fresh_and_resumed_starts(self):
         from misaka.config.identity import COMMON_CHARTER, SISTER_ROLE
-        from misaka.core.system_prompt import build_system_prompt
+        from misaka.core.system_prompt import buildSystemPrompt
         from misaka.core.tools.office import office_tool_system_prompt_contribution
         manager = object.__new__(sister_runtime._SisterManager)
         for persona in ("Persisted old persona", f"Current persona\n\n{COMMON_CHARTER}\n\n{SISTER_ROLE}"):
             task = SimpleNamespace(definition=SimpleNamespace(prompt=persona))
             for research in (None, {"run_id": "run-1"}):
-                manager.research = research
+                manager.owner_context = research
                 with patch.object(SubagentManager, "_child_flags", new=AsyncMock(
                         return_value=["--system-prompt", "/fixture/persona.md", "--approve"])):
                     flags = asyncio.run(manager._child_flags(task))
@@ -160,7 +178,7 @@ class CardContextTests(unittest.TestCase):
                 self.assertEqual(task.definition.prompt, persona)
                 sections = [persona] + [flags[i + 1] for i, value in enumerate(flags)
                                         if value == "--append-system-prompt" and i]
-                prompt = build_system_prompt({"cwd": "/fixture", "appendSystemPrompt": "\n\n".join(sections),
+                prompt = buildSystemPrompt({"cwd": "/fixture", "appendSystemPrompt": "\n\n".join(sections),
                                               "selectedTools": ["office"],
                                               "toolSnippets": {"office": "Office"},
                                               "promptGuidelines": office_tool_system_prompt_contribution["guidelines"]})
@@ -169,8 +187,7 @@ class CardContextTests(unittest.TestCase):
                 for rule in office_tool_system_prompt_contribution["guidelines"]:
                     self.assertIn(rule, prompt)
                 self.assertNotIn("[Research card]", prompt)  # only the mode overlay adds it
-                manager.skill_root = "/fixture/skills-ro"
-                self.assertEqual(manager.child_env_extra(task)["MISAKA_RESEARCH_CONTEXT"],
+                self.assertEqual(manager.child_env_extra(task)["MISAKA_WORKFLOW_CONTEXT"],
                                  "1" if research else "0")
 
 

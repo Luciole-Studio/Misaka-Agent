@@ -122,20 +122,21 @@ async def test_an_empty_or_cut_off_reading_is_never_kept(monkeypatch, tmp_path, 
     import sys
 
     from misaka.ai.types import Model
-    importlib.import_module("misaka.ai.stream")
-    stream = sys.modules["misaka.ai.stream"]      # the package re-exports a function by that name
+    importlib.import_module("misaka.ai.compat")
+    stream = sys.modules["misaka.ai.compat"]
 
     async def complete_simple(model, context, options):
         return NS(content=[NS(type="text", text=text) for text in texts], stopReason=stop, usage=None)
 
-    monkeypatch.setattr(stream, "complete_simple", complete_simple)
+    monkeypatch.setattr(stream, "completeSimple", complete_simple)
     monkeypatch.setattr(vision, "selected_model", lambda: ("p/m", "vision.model"))
     monkeypatch.setattr(extension, "_kept", {})
     model = Model(id="m", name="m", api="openai-completions", provider="p", baseUrl="https://x", reasoning=True,
                   input=["text", "image"], cost={"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
                   contextWindow=1000, maxTokens=1000)
-    ctx = NS(model=TEXT_ONLY, modelRegistry=NS(find=lambda p, m: model, getAuth=lambda m: asyncio.sleep(
-        0, NS(auth=NS(baseUrl="", apiKey="k", headers={}), env={}))))
+    ctx = NS(model=TEXT_ONLY, modelRegistry=NS(
+        find=lambda p, m: model, hasConfiguredAuth=lambda m: True,
+        getApiKeyAndHeaders=lambda m: asyncio.sleep(0, {"ok": True, "apiKey": "k", "headers": {}, "env": {}})))
     said = await vision.describe({"type": "image", "data": PNG, "mimeType": "image/png"}, "q", ctx, "p/m",
                                  setting="vision.model", purpose="t")
     assert (vision.CUT_OFF in said) == (stop == "length")

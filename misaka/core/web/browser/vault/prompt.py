@@ -1,6 +1,6 @@
 """Masked extension dialog using the existing TUI input/editor lifecycle."""
+from misaka.modes.interactive.components.extension_input import ExtensionInputComponent
 from misaka.ui.tui.components.input import Input
-from misaka.ui.tui.interactive.components.extension_input import ExtensionInputComponent
 
 
 class MaskedInput(Input):

@@ -10,7 +10,9 @@ from types import SimpleNamespace
 
 from misaka.core import session_manager
 from misaka.core.platform.prompt_guard import untrusted
-from misaka.ui.tui.interactive.interactive_mode import InteractiveMode
+from misaka.modes.interactive.interactive_mode import InteractiveMode
+from misaka.modes.interactive.theme.theme import getMarkdownTheme
+from misaka.ui.tui import Container
 
 SUMMARY = "[Session Arc Summary (d1, node 42)]\nT0 checked 130 titles.\n[Expand for details: node 42]"
 
@@ -58,7 +60,7 @@ def test_the_engine_names_its_summaries_on_the_entry_and_the_core_reads_nothing_
 
 def test_the_models_view_is_unchanged():
     entry = _entry([{"role": "user", "content": SUMMARY, "timestamp": 1}, KEPT], scaffolds=[0])
-    for_model = session_manager.session_entry_to_context_messages(entry)
+    for_model = session_manager.sessionEntryToContextMessages(entry)
     assert session_manager._message_role(for_model[0]) == "user"
     assert session_manager._content_text(for_model[0]) == SUMMARY
 
@@ -82,16 +84,24 @@ def test_a_compaction_without_an_engine_view_shows_pis_own_summary():
 def test_an_ordinary_entry_is_shown_as_is():
     entry = {"type": "message", "id": "m1", "message": {"role": "user", "content": "hello", "timestamp": 3}}
     assert session_manager.session_entry_to_display_messages(entry) == \
-        session_manager.session_entry_to_context_messages(entry)
+        session_manager.sessionEntryToContextMessages(entry)
+
+
+def _chat_host(editor):
+    host = SimpleNamespace(editor=editor, chatContainer=Container(), outputPad=1, toolOutputExpanded=False,
+                           hideThinkingBlock=False, hiddenThinkingLabel="Thinking...",
+                           getMarkdownThemeWithSettings=getMarkdownTheme, getMarkdownTransformers=list)
+    host.getUserMessageText = lambda message: InteractiveMode.getUserMessageText(host, message)
+    return host
 
 
 def test_a_compaction_summary_never_enters_the_editor_history():
     remembered = []
-    tui = SimpleNamespace(editor=SimpleNamespace(addToHistory=remembered.append))
+    tui = _chat_host(SimpleNamespace(addToHistory=remembered.append))
     entry = _entry([{"role": "user", "content": SUMMARY, "timestamp": 1}, KEPT], scaffolds=[0])
     for message in session_manager.session_entry_to_display_messages(entry):
-        InteractiveMode._rememberUserMessage(tui, message, {"populateHistory": True})
+        InteractiveMode.addMessageToChat(tui, message, {"populateHistory": True})
     assert remembered == []
     typed = {"role": "user", "content": "a real question", "timestamp": 4}
-    InteractiveMode._rememberUserMessage(tui, typed, {"populateHistory": True})
+    InteractiveMode.addMessageToChat(tui, typed, {"populateHistory": True})
     assert remembered == ["a real question"]

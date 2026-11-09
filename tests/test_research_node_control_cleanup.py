@@ -7,21 +7,21 @@ from types import SimpleNamespace
 import pytest
 
 from misaka.core.network.wiring.capabilities import SisterCapabilitiesPart
+from misaka.core.platform import tasks
 from misaka.core.research import runs, workflow
 from misaka.core.research.wiring import node
 from misaka.core.session_control import SessionControl
 
 
 @pytest.mark.parametrize("outcome", ["closed", "waiting", "failed", "cancelled", "replaced", "close_error", "release_error"])
-async def test_runner_restores_only_its_callbacks_and_closes_connection(monkeypatch, outcome):
-    con = sqlite3.connect(":memory:")
-    con.row_factory = sqlite3.Row
-    con.executescript("""
-        CREATE TABLE research_runs(id, stop_requested, driver_lock, phase, status);
-        INSERT INTO research_runs VALUES('run', 0, 'driver', 'active', 'active');
-        CREATE TABLE research_branches(id, runner_key, depth, status, last_error, run_id);
-        INSERT INTO research_branches VALUES('node', 'key', 1, 'executing', NULL, 'run');
-    """)
+async def test_runner_restores_only_its_callbacks_and_closes_connection(monkeypatch, tmp_path, outcome):
+    con = tasks.connect(str(tmp_path / "board.db"))
+    run = runs.create(con, workspace=str(tmp_path), question="Why?")
+    runs.set_state(con, run["id"], phase="active")
+    assert runs.acquire_driver(con, run["id"], "driver")
+    child = runs.create_node(con, run["id"], question="How?", parents=[runs.root(con, run["id"])["id"]])
+    con.execute("UPDATE research_execution SET runner_key='key', status='executing' WHERE id=?", (child["id"],))
+    run_id, node_id = run["id"], child["id"]
     session = SimpleNamespace(
         sessionManager=SimpleNamespace(sessionFile="/tmp/unused-fixture.jsonl"),
         moments=SimpleNamespace(parts=[SisterCapabilitiesPart("/tmp")], send_message=lambda *args: None))
@@ -31,17 +31,17 @@ async def test_runner_restores_only_its_callbacks_and_closes_connection(monkeypa
     replacement_check = lambda: None
     replacement_describe = lambda: {"owner": "replacement"}
     session.moments.parts.append(SimpleNamespace(control=control))
-    part = node.NodePart("run", "node", "key")
+    part = node.NodePart(run_id, node_id, "key")
     part.attach(session)
 
     async def expand(*args, **kwargs):
         control.check_active()
-        assert control.describe() == {"run_id": "run", "node": "node", "depth": 1,
+        assert control.describe() == {"run_id": run_id, "node": node_id, "depth": 1,
                                       "run_phase": "active", "run_status": "active", "node_phase": "executing"}
-        con.execute("UPDATE research_branches SET runner_key='other'")
+        con.execute("UPDATE research_execution SET runner_key='other'")
         with pytest.raises(RuntimeError, match="changed owners"):
             control.check_active()
-        con.execute("UPDATE research_branches SET runner_key='key'")
+        con.execute("UPDATE research_execution SET runner_key='key'")
         if outcome == "cancelled":
             raise asyncio.CancelledError
         if outcome == "failed":
@@ -50,7 +50,7 @@ async def test_runner_restores_only_its_callbacks_and_closes_connection(monkeypa
             control.check_active, control.describe = replacement_check, replacement_describe
         if outcome == "waiting":
             return {"questions": ["continue?"]}
-        con.execute("UPDATE research_branches SET status='closed'")
+        con.execute("UPDATE research_execution SET status='closed'")
         return "closed"
 
     monkeypatch.setattr(node.task_store, "connect", lambda *_: con)
@@ -81,7 +81,7 @@ async def test_runner_restores_only_its_callbacks_and_closes_connection(monkeypa
                 await part.run()
         else:
             await part.run()
-        assert released == [("research_branches", "node", "key")]
+        assert released == [("research_execution", node_id, "key")]
         assert control.check_active is (replacement_check if outcome == "replaced" else previous_check)
         assert control.describe is (replacement_describe if outcome == "replaced" else previous_describe)
         assert control.on_input is previous_input

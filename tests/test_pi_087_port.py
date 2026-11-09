@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from misaka.agent.agent import Agent
-from misaka.agent.agent_loop import declare_tool_changes
+from misaka.agent.agent_loop import _declareToolChanges
 from misaka.agent.guards import finish_turn_from_stop_predicate
 from misaka.agent.types import (
     AgentContext,
@@ -30,25 +30,25 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
 from misaka.ai.utils.transcript import (
-    collapse_system_messages,
-    get_current_system_prompt,
-    get_current_tools,
-    get_tool_state_changes,
-    normalize_context,
-    resolve_transcript_tools,
+    collapseSystemMessages,
+    getCurrentSystemPrompt,
+    getCurrentTools,
+    getToolStateChanges,
+    normalizeContext,
+    resolveTranscriptTools,
 )
 from misaka.core.cache_warmer import (
     CacheWarmer,
-    get_cache_warming_delay_ms,
-    get_prompt_cache_ttl_ms,
-    is_replayable,
+    getCacheWarmingDelayMs,
+    getPromptCacheTtlMs,
+    isReplayable,
 )
 from misaka.core.session_manager import SessionManager
 from misaka.core.settings_manager import InMemorySettingsStorage, SettingsManager
 from misaka.core.system_prompt import (
-    build_system_prompt,
-    build_system_prompt_sections,
-    diff_system_prompt_sections,
+    buildSystemPrompt,
+    buildSystemPromptSections,
+    diffSystemPromptSections,
 )
 
 MODEL = Model(
@@ -74,13 +74,13 @@ def _with_compat(compat: dict) -> Model:
 
 
 def test_normalize_context_folds_prompt_and_tools_into_a_leading_system_message():
-    transcript = normalize_context(Context(systemPrompt="be brief", messages=[_user("q")], tools=[_tool("a")]))
+    transcript = normalizeContext(Context(systemPrompt="be brief", messages=[_user("q")], tools=[_tool("a")]))
     assert [m.role for m in transcript.messages] == ["system", "user"]
-    assert get_current_system_prompt(transcript.messages) == "be brief"
-    assert [t.name for t in get_current_tools(transcript.messages)] == ["a"]
+    assert getCurrentSystemPrompt(transcript.messages) == "be brief"
+    assert [t.name for t in getCurrentTools(transcript.messages)] == ["a"]
     # Nothing to fold keeps an empty transcript empty; a second normalization is a no-op.
-    assert normalize_context(Context(messages=[])).messages == []
-    assert normalize_context(transcript) is transcript
+    assert normalizeContext(Context(messages=[])).messages == []
+    assert normalizeContext(transcript) is transcript
 
 
 def test_later_system_messages_patch_sections_and_change_tools():
@@ -89,45 +89,24 @@ def test_later_system_messages_patch_sections_and_change_tools():
         _user("q"),
         SystemMessage(content="", sections={"rules": None, "extra": "<extra>\nE\n</extra>"}, toolsRemoved=[{"name": "a"}], timestamp=2),
     ]
-    assert get_current_system_prompt(messages) == "base\n\n<extra>\nE\n</extra>"
-    assert [t.name for t in get_current_tools(messages)] == ["b"]
-    collapsed = collapse_system_messages(normalize_context(Context(messages=messages)))
+    assert getCurrentSystemPrompt(messages) == "base\n\n<extra>\nE\n</extra>"
+    assert [t.name for t in getCurrentTools(messages)] == ["b"]
+    collapsed = collapseSystemMessages(normalizeContext(Context(messages=messages)))
     assert [m.role for m in collapsed.messages] == ["system", "user"]
     assert collapsed.messages[0].sections == {"extra": "<extra>\nE\n</extra>"}
 
 
 def test_tool_state_changes_treat_a_redefinition_as_removal_plus_addition():
-    changes = get_tool_state_changes([_tool("a", "old"), _tool("b")], [_tool("a", "new"), _tool("c")])
+    changes = getToolStateChanges([_tool("a", "old"), _tool("b")], [_tool("a", "new"), _tool("c")])
     assert [t.name for t in changes.toolsAdded] == ["a", "c"]
     assert [t.name for t in changes.toolsRemoved] == ["a", "b"]
     # A transport that anchors additions cannot replay a removal: it sends the current list.
     messages = [SystemMessage(content="", toolsAdded=[_tool("a")], timestamp=0), SystemMessage(content="", toolsRemoved=[{"name": "a"}], toolsAdded=[_tool("c")], timestamp=1)]
-    assert resolve_transcript_tools(messages, True).anchorsAdditions is False
-    assert [t.name for t in resolve_transcript_tools(messages, True).requestTools] == ["c"]
+    assert resolveTranscriptTools(messages, True).anchorsAdditions is False
+    assert [t.name for t in resolveTranscriptTools(messages, True).requestTools] == ["c"]
     additive = [SystemMessage(content="", toolsAdded=[_tool("a")], timestamp=0), SystemMessage(content="", toolsAdded=[_tool("c")], timestamp=1)]
-    resolved = resolve_transcript_tools(additive, True)
+    resolved = resolveTranscriptTools(additive, True)
     assert resolved.anchorsAdditions is True and [t.name for t in resolved.requestTools] == ["a"]
-
-
-def test_anthropic_sends_native_tool_changes_only_when_the_model_supports_them():
-    from misaka.ai.providers.anthropic import DEFERRED_TOOL_PLACEHOLDER, build_params
-
-    native = _with_compat({"supportsMidConvoSystemMessages": True, "supportsMidConvoToolChanges": True})
-    transcript = normalize_context(Context(systemPrompt="p", messages=[
-        _user("q"),
-        SystemMessage(content="", toolsAdded=[_tool("late")], timestamp=2),
-        _user("again", 3),
-    ], tools=[_tool("first")]))
-    params = build_params(native, transcript, False, {"cacheRetention": "none"})
-    assert [tool["name"] for tool in params["tools"]] == ["first", DEFERRED_TOOL_PLACEHOLDER["name"], "late"]
-    assert params["tools"][2]["defer_loading"] is True
-    system_turns = [m for m in params["messages"] if m["role"] == "system"]
-    assert [b["type"] for b in system_turns[0]["content"]] == ["tool_addition"]
-    assert params["system"][0]["text"] == "p"
-    # Without native support the transcript collapses: one head, the current tool list, no system turns.
-    plain = build_params(MODEL, transcript, False, {"cacheRetention": "none"})
-    assert [tool["name"] for tool in plain["tools"]] == ["first", "late"]
-    assert all(m["role"] != "system" for m in plain["messages"])
 
 
 # --- agent: the loop declares tool changes and ends turns through finishTurn --------------
@@ -149,28 +128,28 @@ def test_a_stop_verdict_takes_the_tools_off_the_wrap_up_turn():
     from misaka.utils.values import read_field
 
     context = AgentContext(messages=[], tools=[_agent_tool("a")])
-    context.messages.extend(declare_tool_changes(context, [_user("q")]))
+    context.messages.extend(_declareToolChanges(context, [_user("q")]))
     guards = _SessionGuards(SimpleNamespace())
     guards._forcing = True
     update = guards.next_turn({"context": context})
     assert update.context.tools == [] and update.context.messages == context.messages
-    declared = declare_tool_changes(update.context, [_user("wrap up", 2)])
+    declared = _declareToolChanges(update.context, [_user("wrap up", 2)])
     assert [m.role for m in declared] == ["system", "user"]
     assert [read_field(tool, "name") for tool in declared[0].toolsRemoved] == ["a"]
 
 
 def test_declare_tool_changes_inserts_a_system_message_before_the_first_prompt():
     context = AgentContext(messages=[], tools=[_agent_tool("a")])
-    declared = declare_tool_changes(context, [_user("q")])
+    declared = _declareToolChanges(context, [_user("q")])
     assert [m.role for m in declared] == ["system", "user"]
     assert [t.name for t in declared[0].toolsAdded] == ["a"]
     # Once declared, an unchanged loadout adds nothing.
     context.messages.extend(declared)
-    assert declare_tool_changes(context, [_user("again", 2)]) == [_user("again", 2)]
+    assert _declareToolChanges(context, [_user("again", 2)]) == [_user("again", 2)]
     # A pending system message carries the delta itself instead of a second one.
     context.tools = [_agent_tool("a"), _agent_tool("b")]
     pending = SystemMessage(content="", sections={"x": "y"}, timestamp=3)
-    declared = declare_tool_changes(context, [pending, _user("more", 4)])
+    declared = _declareToolChanges(context, [pending, _user("more", 4)])
     assert len(declared) == 2 and [t.name for t in declared[0].toolsAdded] == ["b"] and declared[0].sections == {"x": "y"}
 
 
@@ -218,17 +197,17 @@ async def test_a_stop_predicate_becomes_a_finish_turn_that_ignores_hard_exits():
 
 def test_system_prompt_is_sections_and_a_change_is_a_named_patch():
     options = {"cwd": "/w", "selectedTools": ["bash"], "toolSnippets": {"bash": "Shell"}, "toolGuidelines": {"bash": ["Be careful"]}}
-    sections = build_system_prompt_sections(options)
+    sections = buildSystemPromptSections(options)
     assert list(sections) == ["preamble", "addendum", "tools", "rules", "cwd"] or list(sections) == ["preamble", "tools", "rules", "cwd"]
     assert sections["tools"].startswith("<tools>\n- bash: Shell") and "- Be careful" in sections["rules"]
-    assert build_system_prompt(options).endswith("<cwd>\n/w\n</cwd>")
-    later = build_system_prompt_sections({**options, "selectedTools": []})
-    patch = diff_system_prompt_sections(sections, later)
+    assert buildSystemPrompt(options).endswith("<cwd>\n/w\n</cwd>")
+    later = buildSystemPromptSections({**options, "selectedTools": []})
+    patch = diffSystemPromptSections(sections, later)
     assert set(patch) == {"tools", "rules"} and "(none)" in patch["tools"]
-    assert diff_system_prompt_sections(sections, sections) is None
+    assert diffSystemPromptSections(sections, sections) is None
     with pytest.raises(ValueError):
-        build_system_prompt_sections({**options, "sections": {"Preamble": "x"}})
-    assert build_system_prompt({**options, "forceSystemPrompt": "forced"}) == "forced"
+        buildSystemPromptSections({**options, "sections": {"Preamble": "x"}})
+    assert buildSystemPrompt({**options, "forceSystemPrompt": "forced"}) == "forced"
 
 
 def test_context_edit_omits_or_replaces_a_message_in_the_projection_only():
@@ -260,7 +239,7 @@ def test_compaction_records_the_system_head_and_retain_none_keeps_its_own_id():
     assert entry["systemMessage"].content == "prompt"
     messages = manager.buildSessionContext().messages
     assert [getattr(m, "role", None) for m in messages] == ["system", "compactionSummary"]
-    assert get_current_system_prompt(messages) == "prompt"
+    assert getCurrentSystemPrompt(messages) == "prompt"
 
 
 def _storage(settings: dict) -> InMemorySettingsStorage:
@@ -270,7 +249,7 @@ def _storage(settings: dict) -> InMemorySettingsStorage:
 
 
 def test_compaction_budgets_resolve_through_model_overrides_and_retry_delay_is_capped():
-    from misaka.ai.utils.retry import RetryPolicy, retry_delay_ms
+    from misaka.ai.utils.retry import RetryPolicy, retryDelayMs
 
     settings = SettingsManager.fromStorage(_storage({
         "compaction": {"reserveTokens": 100, "modelOverrides": {"fixture/fixture": {"keepRecentTokens": 7}}},
@@ -280,7 +259,7 @@ def test_compaction_budgets_resolve_through_model_overrides_and_retry_delay_is_c
     assert settings.getCompactionSettings() == {"enabled": True, "reserveTokens": 100, "keepRecentTokens": 20000}
     assert settings.getRetrySettings()["maxAgentDelayMs"] == 5000
     policy = RetryPolicy(enabled=True, maxRetries=9, baseDelayMs=2000, maxAgentDelayMs=5000)
-    assert retry_delay_ms(policy, 1) == 2000 and retry_delay_ms(policy, 9) == 5000
+    assert retryDelayMs(policy, 1) == 2000 and retryDelayMs(policy, 9) == 5000
     assert settings.getCacheWarmingMode() == "streaming"
     bad = SettingsManager.fromStorage(_storage({"compaction": {"reserveTokens": -1}}))
     with pytest.raises(ValueError):
@@ -288,11 +267,11 @@ def test_compaction_budgets_resolve_through_model_overrides_and_retry_delay_is_c
 
 
 def test_cache_warming_economics():
-    assert get_cache_warming_delay_ms(300_000) == 270_000 and get_cache_warming_delay_ms(5_000) is None
-    assert get_prompt_cache_ttl_ms(MODEL, {"cacheRetention": "long"}) == 3_600_000
-    assert get_prompt_cache_ttl_ms(MODEL, {"cacheRetention": "none"}) is None
-    assert is_replayable(MODEL, {"reasoning": "high"}) is False  # budget-based thinking changes the cache key
-    assert is_replayable(_with_compat({"forceAdaptiveThinking": True}), {"reasoning": "high"}) is True
+    assert getCacheWarmingDelayMs(300_000) == 270_000 and getCacheWarmingDelayMs(5_000) is None
+    assert getPromptCacheTtlMs(MODEL, {"cacheRetention": "long"}) == 3_600_000
+    assert getPromptCacheTtlMs(MODEL, {"cacheRetention": "none"}) is None
+    assert isReplayable(MODEL, {"reasoning": "high"}) is False  # budget-based thinking changes the cache key
+    assert isReplayable(_with_compat({"forceAdaptiveThinking": True}), {"reasoning": "high"}) is True
     manager = SessionManager.inMemory("/tmp")
     manager.appendMessage(AssistantMessage(
         content=[TextContent(text="x")], api="a", provider="fixture", model="fixture", stopReason="stop",

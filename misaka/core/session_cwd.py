@@ -20,7 +20,7 @@ class SessionCwdSource(Protocol):
     def getSessionFile(self) -> str | None: ...
 
 
-def get_missing_session_cwd_issue(
+def getMissingSessionCwdIssue(
     session_manager: SessionCwdSource,
     fallback_cwd: str,
 ) -> SessionCwdIssue | None:
@@ -39,7 +39,7 @@ def get_missing_session_cwd_issue(
     )
 
 
-def format_missing_session_cwd_error(issue: SessionCwdIssue) -> str:
+def formatMissingSessionCwdError(issue: SessionCwdIssue) -> str:
     session_file = f"\nSession file: {issue.sessionFile}" if issue.sessionFile else ""
     return (
         f"Stored session working directory does not exist: {issue.sessionCwd}"
@@ -47,7 +47,7 @@ def format_missing_session_cwd_error(issue: SessionCwdIssue) -> str:
     )
 
 
-def format_missing_session_cwd_prompt(issue: SessionCwdIssue) -> str:
+def formatMissingSessionCwdPrompt(issue: SessionCwdIssue) -> str:
     return (
         "cwd from session file does not exist\n"
         f"{issue.sessionCwd}\n\n"
@@ -58,13 +58,13 @@ def format_missing_session_cwd_prompt(issue: SessionCwdIssue) -> str:
 
 class MissingSessionCwdError(Exception):
     def __init__(self, issue: SessionCwdIssue) -> None:
-        super().__init__(format_missing_session_cwd_error(issue))
+        super().__init__(formatMissingSessionCwdError(issue))
         self.name = "MissingSessionCwdError"
         self.issue = issue
 
 
-def assert_session_cwd_exists(session_manager: SessionCwdSource, fallback_cwd: str) -> None:
-    issue = get_missing_session_cwd_issue(session_manager, fallback_cwd)
+def assertSessionCwdExists(session_manager: SessionCwdSource, fallback_cwd: str) -> None:
+    issue = getMissingSessionCwdIssue(session_manager, fallback_cwd)
     if issue is not None:
         raise MissingSessionCwdError(issue)
 

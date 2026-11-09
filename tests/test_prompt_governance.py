@@ -11,7 +11,7 @@ from unittest.mock import patch
 from misaka.config import identity, profiles
 from misaka.core.research import planner, prompting, report, workflow
 from misaka.core.skills import index
-from misaka.core.system_prompt import build_system_prompt
+from misaka.core.system_prompt import buildSystemPrompt
 
 
 class PromptGovernanceTests(unittest.TestCase):
@@ -61,13 +61,13 @@ class PromptGovernanceTests(unittest.TestCase):
 
     def test_base_prompt_tool_selection_and_exact_dedup(self):
         common = {"cwd": "/fixture", "toolSnippets": {"bash": "Shell", "grep": "Search"}}
-        empty = build_system_prompt({**common, "selectedTools": []})
+        empty = buildSystemPrompt({**common, "selectedTools": []})
         # pi 0.87: the prompt is built from tagged, independently replaceable sections.
         self.assertIn("<tools>\n(none)", empty)
         self.assertNotIn("Use bash for file operations", empty)
-        shell = build_system_prompt({**common, "selectedTools": ["bash"]})
+        shell = buildSystemPrompt({**common, "selectedTools": ["bash"]})
         self.assertIn("Use bash for file operations", shell)
-        dedicated = build_system_prompt({**common, "selectedTools": ["bash", "grep"],
+        dedicated = buildSystemPrompt({**common, "selectedTools": ["bash", "grep"],
                                          "promptGuidelines": [" same rule ", "same rule"]})
         self.assertNotIn("Prefer grep/find/ls", dedicated)
         self.assertEqual(dedicated.count("same rule"), 1)
@@ -75,7 +75,7 @@ class PromptGovernanceTests(unittest.TestCase):
         self.assertIn("Sisters are domain specialists", dedicated)
 
     def test_custom_prompt_contract_is_preserved(self):
-        prompt = build_system_prompt({"cwd": "/fixture", "customPrompt": "USER SYSTEM",
+        prompt = buildSystemPrompt({"cwd": "/fixture", "customPrompt": "USER SYSTEM",
                                       "appendSystemPrompt": "APPEND",
                                       "contextFiles": [{"path": "/fixture/PROJECT.md", "content": "PROJECT"}],
                                       "selectedTools": []})
@@ -124,7 +124,7 @@ class PromptGovernanceTests(unittest.TestCase):
                             patch.object(planner, "position", return_value="- fixture option"), \
                             patch.object(planner, "errata_above", return_value=""), \
                             patch.object(planner, "task_sources", return_value={}), \
-                            patch.object(planner, "find_most_recent_session", return_value=None), \
+                            patch.object(planner, "findMostRecentSession", return_value=None), \
                             patch.object(planner.runs, "plan_round", return_value=1), \
                             patch.object(planner, "_call", return_value=(None, "Conclusion", None)) as call:
                         planner.synthesize(object(), run, cfg, worker, node, [], followup=object(), left=1)
@@ -187,7 +187,7 @@ class PromptGovernanceTests(unittest.TestCase):
             with self.subTest(round=round_number, left=left), \
                     patch.object(planner, "_lo_session", return_value="/fixture"), \
                     patch.object(planner, "task_sources", return_value={}), \
-                    patch.object(planner, "find_most_recent_session", return_value=None), \
+                    patch.object(planner, "findMostRecentSession", return_value=None), \
                     patch.object(planner.runs, "plan_round", return_value=round_number), \
                     patch.object(planner, "_call", return_value=(None, "Conclusion", None)) as call:
                 result = planner.synthesize(object(), run, {"research_plan_approval": False},

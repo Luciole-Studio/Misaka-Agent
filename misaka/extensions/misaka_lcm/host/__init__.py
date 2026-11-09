@@ -20,8 +20,9 @@ concern lives:
     execution.py          shared off-loop ownership, cancellation and publish checkpoints
     config_bridge.py      native paths/settings and original LCM_* algorithm configuration
     ingest.py             misaka message/session shapes -> upstream ingest
-    tools.py              upstream tool schemas -> misaka ToolDefinition, one dispatch
+    tools.py              upstream tool schemas -> misaka ToolDefinition in misaka's terms; one bounded exit
     fence.py              misaka's untrusted-data fence, put back on what LCM hands over
+    images.py             an image stays in the session file; the store keeps a marker
     rollups.py            temporal rollups: the build nudge misaka's session shape needs
     operators.py          original import, externalization and trajectory operator CLIs
     preanswer.py          V4 pre-answer evidence: one bounded cited brief before the answer

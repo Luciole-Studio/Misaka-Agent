@@ -11,7 +11,8 @@ import re
 from typing import Any, NotRequired, TypedDict
 
 from misaka.ai.types import SystemMessage
-from misaka.ai.utils.text import get_system_message_text
+from misaka.ai.utils.text import getSystemMessageText
+from misaka.core.settings_manager import DEFAULT_TOOL_NAMES
 
 CURRENT_TOOLS_GUIDELINE = "Use only the tools offered in the current request; tool names in conversation history do not grant capabilities."
 
@@ -25,6 +26,9 @@ class BuildSystemPromptOptions(TypedDict):
     # without being recorded (a `before_agent_start` handler's `systemPrompt`).
     forceSystemPrompt: NotRequired[str]
     selectedTools: NotRequired[list[str]]
+    # Selected tools whose declarations requests leave out (`prepareLoadout` hidden declarations).
+    # They are reachable only through another tool, so the tool list and rules leave them out too.
+    hiddenTools: NotRequired[list[str]]
     toolSnippets: NotRequired[dict[str, str]]
     # Per-tool guidelines, keyed by tool name; only the selected tools' apply.
     toolGuidelines: NotRequired[dict[str, list[str]]]
@@ -35,16 +39,24 @@ class BuildSystemPromptOptions(TypedDict):
     contextFiles: NotRequired[list[dict[str, str]]]
 
 
-def normalize_build_system_prompt_options(input: BuildSystemPromptOptions | dict[str, Any]) -> dict[str, Any]:
+# MISAKA fork: `BuildSystemPromptOptions & { selectedTools: string[]; hiddenTools: string[]; ... }` is the same
+# mapping with every collection present.
+type NormalizedBuildSystemPromptOptions = dict[str, Any]
+
+type SystemPromptSections = dict[str, str]
+
+
+def normalizeBuildSystemPromptOptions(
+    input: BuildSystemPromptOptions | dict[str, Any],
+) -> NormalizedBuildSystemPromptOptions:
     """Normalize prompt input into the mutable, collection-complete shape exposed to extensions."""
     return {
         "customPrompt": input.get("customPrompt"),
         "forceSystemPrompt": input.get("forceSystemPrompt"),
-        # MISAKA fork: `office` is a built-in here, so it is in the default loadout.
+        # MISAKA fork: MISAKA's default tools (`DEFAULT_TOOL_NAMES`), where pi lists read/bash/edit/write here.
         # `??`, not `||`: an explicit empty list means no tools.
-        "selectedTools": [
-            *(["read", "bash", "edit", "write", "office"] if input.get("selectedTools") is None else input["selectedTools"])
-        ],
+        "selectedTools": [*(DEFAULT_TOOL_NAMES if input.get("selectedTools") is None else input["selectedTools"])],
+        "hiddenTools": [*(input.get("hiddenTools") or [])],
         "toolSnippets": {**(input.get("toolSnippets") or {})},
         "toolGuidelines": {name: [*guidelines] for name, guidelines in (input.get("toolGuidelines") or {}).items()},
         "promptGuidelines": [*(input.get("promptGuidelines") or [])],
@@ -55,7 +67,7 @@ def normalize_build_system_prompt_options(input: BuildSystemPromptOptions | dict
     }
 
 
-def _render_project_context(context_files: list[dict[str, str]]) -> str:
+def _renderProjectContext(context_files: list[dict[str, str]]) -> str:
     return "\n\n".join(
         [
             "Project-specific instructions and guidelines:",
@@ -67,7 +79,7 @@ def _render_project_context(context_files: list[dict[str, str]]) -> str:
     )
 
 
-def _build_rules(selected_tools: list[str], tool_guidelines: dict[str, list[str]], prompt_guidelines: list[str]) -> str:
+def _buildRules(selected_tools: list[str], tool_guidelines: dict[str, list[str]], prompt_guidelines: list[str]) -> str:
     rules: list[str] = []
     seen: set[str] = set()
 
@@ -102,11 +114,12 @@ def _build_rules(selected_tools: list[str], tool_guidelines: dict[str, list[str]
     return "\n".join(f"- {rule}" for rule in rules)
 
 
-def build_system_prompt_sections(input: BuildSystemPromptOptions | dict[str, Any]) -> dict[str, str]:
+def buildSystemPromptSections(input: BuildSystemPromptOptions | dict[str, Any]) -> SystemPromptSections:
     """Build the ordered, independently replaceable sections of the structured system prompt."""
-    options = normalize_build_system_prompt_options(input)
+    options = normalizeBuildSystemPromptOptions(input)
     custom_prompt = options["customPrompt"]
     selected_tools = options["selectedTools"]
+    hidden_tools = options["hiddenTools"]
     tool_snippets = options["toolSnippets"]
     tool_guidelines = options["toolGuidelines"]
     prompt_guidelines = options["promptGuidelines"]
@@ -118,6 +131,7 @@ def build_system_prompt_sections(input: BuildSystemPromptOptions | dict[str, Any
         if not SYSTEM_PROMPT_SECTION_NAME.match(name) or name == "preamble":
             raise ValueError(f"Invalid system prompt section name: {name}")
 
+    declared_tools = [name for name in selected_tools if name not in hidden_tools]
     prompt_sections: dict[str, str] = {}
     if custom_prompt:
         prompt_sections["preamble"] = custom_prompt
@@ -134,7 +148,7 @@ def build_system_prompt_sections(input: BuildSystemPromptOptions | dict[str, Any
         )
         if append_system_prompt:
             prompt_sections["addendum"] = append_system_prompt
-        visible_tools = [name for name in selected_tools if tool_snippets.get(name)]
+        visible_tools = [name for name in declared_tools if tool_snippets.get(name)]
         tools = (
             "\n".join(f"- {name}: {tool_snippets[name]}" for name in visible_tools) if visible_tools else "(none)"
         )
@@ -142,9 +156,9 @@ def build_system_prompt_sections(input: BuildSystemPromptOptions | dict[str, Any
             f"{tools}\n\nIn addition to the tools above, you may have access to other custom tools depending on the project."
             f"\n\n{CURRENT_TOOLS_GUIDELINE}"
         )
-        prompt_sections["rules"] = _build_rules(selected_tools, tool_guidelines, prompt_guidelines)
+        prompt_sections["rules"] = _buildRules(declared_tools, tool_guidelines, prompt_guidelines)
     if context_files:
-        prompt_sections["project_context"] = _render_project_context(context_files)
+        prompt_sections["project_context"] = _renderProjectContext(context_files)
     prompt_sections["cwd"] = cwd.replace("\\", "/")
     for name, content in custom_sections.items():
         if content:
@@ -156,20 +170,20 @@ def build_system_prompt_sections(input: BuildSystemPromptOptions | dict[str, Any
     return sections
 
 
-def build_system_prompt_state(input: BuildSystemPromptOptions | dict[str, Any]) -> dict[str, Any]:
+def buildSystemPromptState(input: BuildSystemPromptOptions | dict[str, Any]) -> dict[str, Any]:
     """The complete prompt state for `input`. A forced prompt is opaque and lives in `content`
     with no sections; otherwise `content` is empty and the structured sections carry the prompt."""
     if input.get("forceSystemPrompt") is not None:
         return {"content": input["forceSystemPrompt"]}
-    return {"content": "", "sections": build_system_prompt_sections(input)}
+    return {"content": "", "sections": buildSystemPromptSections(input)}
 
 
-def build_system_prompt(input: BuildSystemPromptOptions | dict[str, Any]) -> str:
+def buildSystemPrompt(input: BuildSystemPromptOptions | dict[str, Any]) -> str:
     """Build the system prompt text, rendered exactly as the transcript's system message replays it."""
-    return get_system_message_text(SystemMessage(**build_system_prompt_state(input), timestamp=0))
+    return getSystemMessageText(SystemMessage(**buildSystemPromptState(input), timestamp=0))
 
 
-def diff_system_prompt_sections(previous: dict[str, str], current: dict[str, str]) -> dict[str, str | None] | None:
+def diffSystemPromptSections(previous: dict[str, str], current: dict[str, str]) -> dict[str, str | None] | None:
     """Diff the sections the model currently has (replayed from the transcript, so never null)
     against the desired ones. Returns a `SystemMessage.sections` patch, or None when
     nothing changed."""
@@ -185,9 +199,11 @@ def diff_system_prompt_sections(previous: dict[str, str], current: dict[str, str
 
 __all__ = [
     "BuildSystemPromptOptions",
-    "build_system_prompt",
-    "build_system_prompt_sections",
-    "build_system_prompt_state",
-    "diff_system_prompt_sections",
-    "normalize_build_system_prompt_options",
+    "NormalizedBuildSystemPromptOptions",
+    "SystemPromptSections",
+    "buildSystemPrompt",
+    "buildSystemPromptSections",
+    "buildSystemPromptState",
+    "diffSystemPromptSections",
+    "normalizeBuildSystemPromptOptions",
 ]

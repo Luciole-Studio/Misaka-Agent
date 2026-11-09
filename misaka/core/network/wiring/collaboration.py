@@ -1,4 +1,5 @@
 """Explain collaboration surfaces from the current tool selection, without granting tools."""
+from misaka.core.platform import owners
 from misaka.core.wiring import KINDS
 
 SESSION_KINDS = KINDS
@@ -8,8 +9,8 @@ SISTER_TOOLS = {
                     "A name reaches the one session of that role in your space; with several there, address one "
                     "by its card or session id. To go back to the Sister who did a piece of work, address "
                     "her card or session id, never her name: a name may reach her contact session, which "
-                    "holds none of that work. A finished card or its closed session is woken in her own "
-                    "conversation by your message; a card that has not started gets it when it does. "
+                    "holds none of that work. A finished card answers your message in her own conversation "
+                    "and stays finished; a card that has not started gets it when it does. "
                     "Delivery is asynchronous and may wake a contact session. "
                     "Owned sub-agent IDs/names are resolved before those names. "
                     "Ordinary messages do not create, start, complete or park a card."),
@@ -33,23 +34,6 @@ SISTER_TOOLS = {
     "misaka_my_card": "Read your card's current contract, dependency and review state.",
     "misaka_card_note": "Keep findings, evidence and unresolved questions on the card, not only in messages.",
     "misaka_card_complete": "Declare the card finished only when its contract deliverable exists; a turn without it leaves the card running.",
-    "misaka_research_assign": ("Submit or revise this phase's research plan -- its cards and, in a node's first plan, "
-                               "its forks; recording it is not a launch receipt."),
-    "misaka_research_start": ("Record the user's explicit go-ahead for the pending research plan or reconciliation "
-                              "through its owning session."),
-    "misaka_research_dispose": ("Answer every material red-team issue of this node: revise, rebut, concede, covered, "
-                                "park or branch; corrections stay in the node."),
-    "misaka_research_decide": "Record the forks this node opens and why the alternatives not taken are not opened.",
-    "misaka_research_reconcile": ("Reconcile the research graph at a level: open options as nodes, join finished "
-                                  "nodes, record options not pursued and relations between nodes."),
-    "misaka_research_dissolve": ("Record that a conclusion dissolves a question rather than answering it; dissolving "
-                                 "the research question waits for the user's consent."),
-    "misaka_research_consent": ("Record the user's decision on dissolving the research question, once they have "
-                                "decided in conversation."),
-    "misaka_research_relate": "Record connections between research nodes that the survey brings to light.",
-    "misaka_research_withdraw": "Withdraw the pending research round when the user chooses to conclude without it.",
-    "misaka_research_skip": "Skip the current research node only when the user chooses that outcome.",
-    "misaka_research_retry": "Run a failed research node again without waiting for the level to end.",
 }
 
 SUBAGENT_TOOLS = {
@@ -63,18 +47,20 @@ def collaboration_sections(active):
     """Keep capability catalogs and parameter documentation in the tool definitions."""
     active = set(active)
     sections = []
-    sisters = [name for name in SISTER_TOOLS if name in active]
+    # The board's own coordination tools, then those of the workflows that own cards.
+    described = dict(SISTER_TOOLS)
+    for owner in owners.registered():
+        described.update(owner.tool_descriptions())
+    sisters = [name for name in described if name in active]
     if sisters:
         lines = [
             "## Last Order / Sister coordination",
             ("Use messages for consultation and coordination, and task contracts for formal assignments. "
              "A message, a recorded plan, a launch receipt and an accepted result are different events. "
              "Use only tools enabled in this session, following their current approval and completion contracts."),
-            *(f"- `{name}`: {SISTER_TOOLS[name]}" for name in sisters),
+            *(f"- `{name}`: {described[name]}" for name in sisters),
         ]
-        if any(name.startswith("misaka_research_") for name in sisters):
-            lines.append("In Research, the driver creates and launches the planned cards after the applicable phase gate. "
-                         "Do not duplicate those assignments through ordinary board tools or messages.")
+        lines += [note for owner in owners.registered() if (note := owner.coordination_note(sisters))]
         sections.append("\n".join(lines))
     subagents = [name for name in SUBAGENT_TOOLS if name in active]
     if subagents:
@@ -104,25 +90,18 @@ class CollaborationPart:
         self.tools = []
         self.commands = []
         self.session = None
-        self._published = ""
-        self._input = None
 
     def attach(self, session):
         self.session = session
 
     async def before_agent_start(self, event, _ctx):
-        original = event["systemPrompt"]
-        # A caller may pass our previous output, optionally followed by other parts.
-        # Verify its original prefix and owned position: identical text elsewhere
-        # may belong to a user's persona and must not be removed from a fresh base.
-        previous = self._input + self._published if self._input is not None and self._published else None
-        prompt = (self._input + original[len(previous):]
-                  if previous is not None and original.startswith(previous) else original)
-        self._input = prompt
-        sections = collaboration_sections(self.session.getActiveToolNames())
-        self._published = "\n\n" + "\n\n".join(sections) if sections else ""
-        prompt += self._published
-        return {"systemPrompt": prompt} if prompt != original else None
+        # A section of the run's prompt, as pi's extensions add theirs (see SisterCapabilitiesPart).
+        sections = event["systemPromptOptions"]["sections"]
+        text = "\n\n".join(collaboration_sections(self.session.getActiveToolNames()))
+        if text:
+            sections["collaboration"] = text
+        else:
+            sections.pop("collaboration", None)
 
 
 def part(_spec):

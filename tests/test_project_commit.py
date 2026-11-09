@@ -91,7 +91,7 @@ def test_only_the_user_s_own_windows_get_the_commit_tool(monkeypatch, tmp_path):
     spec = SessionSpec(profile_dir=str(tmp_path), role="last_order", workspace=str(tmp_path), kind="foreground",
                        sender="last-order")
     assert [tool.name for tool in project_commit.part(spec).tools] == ["project_commit"]
-    assert project_commit.part(dataclasses.replace(spec, research_context=True)) is None
+    assert project_commit.part(dataclasses.replace(spec, workflow_context=True)) is None
     monkeypatch.setenv("MISAKA_RESEARCH_NODE", "r_x b_y key")
     assert project_commit.part(spec) is None
     assert project_commit.SESSION_KINDS == {"foreground"}

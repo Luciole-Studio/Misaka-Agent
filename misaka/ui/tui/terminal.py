@@ -1,184 +1,231 @@
-"""Terminal lifecycle and ANSI control helpers for the TUI package.
+"""Translated from pi-tui's ``packages/tui/src/terminal.ts`` (v1.1.0).
 
-PORT-NOTE (audit fixes, checked section by section against pi terminal.ts@686f193e):
-- Kitty keyboard protocol negotiation rewritten to match the upstream state machine:
-  push flags, then query, then a trailing DA sentinel (no 150ms guess timer);
-  fragmented replies are reassembled with a 150ms flush; flags==0 falls back to
-  modifyOtherKeys; modifyOtherKeys is disabled while kitty is active; stop/drainInput
-  both clean up.
-- Apple Terminal Shift+Enter normalization (native-modifiers .node addon -> ctypes CoreGraphics).
-- Raw mode follows libuv UV_TTY_MODE_RAW semantics (keeps OPOST/ONLCR; TCSADRAIN on entry,
-  TCSAFLUSH on exit so unread input is discarded, equivalent to upstream stdin.pause()
-  preventing a stray Ctrl+D from leaking to the parent shell).
-- SIGWINCH and timer callbacks always go through call_soon_threadsafe back to the event
-  loop thread (Node single-thread semantics).
-- The reader is removed on stdin EOF (Node streams emit no data after 'end'), avoiding a
-  100% CPU spin.
-- COLUMNS/LINES fallback follows JS semantics: non-numeric and 0 both become 80/24.
+MISAKA forks, each marked where it happens:
+
+- Node's ``process.stdin``/``process.stdout`` are the ``stdin``/``stdout`` attributes; ``process.stdout.write`` is
+  ``write``, which flushes (Node writes a TTY synchronously, Python buffers).
+- Raw mode follows libuv's ``UV_TTY_MODE_RAW``: termios on POSIX (output post-processing kept, unread input
+  flushed on exit), the console modes on Windows (``misaka.utils.win_console``).
+- ``process.stdin.on("data")`` is a reader on the event loop (POSIX) or a console input thread whose input is routed
+  to the loop (Windows); the reader goes away at end of input. ``stdout.on("resize")`` is SIGWINCH on POSIX and the
+  console reader's resize event on Windows. Signal and thread callbacks run on the event loop thread, as Node's do.
+- ``setTimeout``/``setInterval`` are timers on the event loop.
+- The escape timeout comes from settings (``tui.esc_timeout_ms``), not an environment variable, and a pane of
+  MISAKA's panel gets the relayed-transport window ssh gets.
+- ``PI_PROGRAM_STATUS`` and ``PI_TUI_WRITE_LOG`` are ``MISAKA_PROGRAM_STATUS`` and ``MISAKA_TUI_WRITE_LOG``.
 """
 
 from __future__ import annotations
 
 import asyncio
-import ctypes
 import math
 import os
-import re
 import signal
 import sys
-import threading
 import time
-from typing import Any, Protocol
+from collections.abc import Callable
+from typing import Any, Literal, Protocol
 
 from misaka.ui.tui.keys import setKittyProtocolActive
+from misaka.ui.tui.native_modifiers import isNativeModifierPressed
+from misaka.ui.tui.native_platform import getNativePlatformHelper
+from misaka.ui.tui.program_status import (
+    PROGRAM_STATUS_QUERY,
+    ProgramStatus,
+    formatProgramStatus,
+    isProgramStatusReply,
+)
 from misaka.ui.tui.stdin_buffer import StdinBuffer
+from misaka.utils import js_regexp
+from misaka.utils.js import jsNumber
+from misaka.utils.js_regexp import RegExp
 
 try:
     import termios
-    import tty
 except ImportError:  # pragma: no cover - Windows import path.
     termios = None  # type: ignore[assignment]
-    tty = None  # type: ignore[assignment]
 
 TERMINAL_PROGRESS_KEEPALIVE_MS = 1000
 TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07"
 TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0\x07"
-APPLE_TERMINAL_SHIFT_ENTER_SEQUENCE = "\x1b[13;2u"
+NATIVE_SHIFT_ENTER_SEQUENCE = "\x1b[13;2u"
 DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS = 7
 KEYBOARD_PROTOCOL_RESPONSE_FRAGMENT_TIMEOUT_MS = 150
-KITTY_KEYBOARD_PROTOCOL_QUERY = f"\x1b[>{DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS}u\x1b[?u\x1b[c"
-DEFAULT_ESCAPE_TIMEOUT_MS = 10
-# The window a relayed transport needs to reassemble an escape sequence. ssh has always
-# had it; a panel pane needs it for the same reason and did not have it.
-DEFAULT_RELAYED_ESCAPE_TIMEOUT_MS = 100
-DEFAULT_SSH_ESCAPE_TIMEOUT_MS = DEFAULT_RELAYED_ESCAPE_TIMEOUT_MS   # the name the port arrived under
+KITTY_KEYBOARD_PROTOCOL_QUERY = f"\x1b[>{DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS}u\x1b[?u"
+DEVICE_ATTRIBUTES_QUERY = "\x1b[c"
 
-_KITTY_FLAGS_RE = re.compile(r"^\x1b\[\?(\d+)u$")
-_DEVICE_ATTRS_RE = re.compile(r"^\x1b\[\?[\d;]*c$")
-_NEGOTIATION_PREFIX_RE = re.compile(r"^\x1b\[\?[\d;]*$")
+# `{ type: "kitty-flags"; flags: number } | { type: "device-attributes" }`
+type KeyboardProtocolNegotiationSequence = dict[str, Any]
 
 
-def resolve_escape_timeout_ms(env: Any = None) -> float:
-    """How long to wait after a lone ESC before dispatching it as the Escape key.
-
-    Legacy Alt+key input is ESC plus another byte, so a high-latency transport needs a
-    longer reassembly window; ssh gets 100ms unless the variable names something else.
-    Only ESC uses this: every other partial sequence waits the full sequence timeout.
-
-    A pane inside misaka's panel is the same transport and was getting the bare 10ms. Its
-    keystrokes travel host terminal -> panel -> unix socket -> daemon -> pty, which splits
-    reads and adds a round trip, so a bracketed paste whose opener arrives as a lone ESC
-    (`stdin_buffer`'s documented residual) shattered into per-character key events. The
-    leading ESC then landed as the Escape key: pasting a redirect URL into the OAuth login
-    box cancelled the login, and the box stopped answering anything. Only OpenAI Codex
-    showed it, because it is the one provider whose browser callback often does not come
-    back and so the one that asks for a paste at all. Upstream pi has no panel -- its TUI
-    owns the host terminal, the paste arrives in one read, and the residual never fires.
-    """
-    from misaka.config.product import setting
-
-    environ = os.environ if env is None else env
-    configured = float(setting("tui", "esc_timeout_ms", 0, float))
-    if math.isfinite(configured) and configured > 0:
-        return configured
-    if (
-        environ.get("SSH_CONNECTION")
-        or environ.get("SSH_TTY")
-        or environ.get("MISAKA_NET_PANE")   # the daemon stamps this on every pane it spawns
-    ):
-        return DEFAULT_RELAYED_ESCAPE_TIMEOUT_MS
-    return DEFAULT_ESCAPE_TIMEOUT_MS
-
-
-def parse_keyboard_protocol_negotiation_sequence(sequence: str):
-    """Returns {"type": "kitty-flags", "flags": n} | {"type": "device-attributes"} | None."""
-    m = _KITTY_FLAGS_RE.match(sequence)
-    if m:
-        return {"type": "kitty-flags", "flags": int(m.group(1))}
-    if _DEVICE_ATTRS_RE.match(sequence):
+def parseKeyboardProtocolNegotiationSequence(sequence: str) -> KeyboardProtocolNegotiationSequence | None:
+    kittyFlags = js_regexp.match(sequence, RegExp(r"^\x1b\[\?(\d+)u$"))
+    if kittyFlags:
+        return {"type": "kitty-flags", "flags": int(kittyFlags[1], 10)}
+    if RegExp(r"^\x1b\[\?[\d;]*c$").test(sequence):
         return {"type": "device-attributes"}
     return None
 
 
-def is_keyboard_protocol_negotiation_sequence_prefix(sequence: str) -> bool:
-    return sequence == "\x1b[" or _NEGOTIATION_PREFIX_RE.match(sequence) is not None
+def isKeyboardProtocolNegotiationSequencePrefix(sequence: str) -> bool:
+    return sequence == "\x1b[" or RegExp(r"^\x1b\[\?[\d;]*$").test(sequence)
 
 
-def is_apple_terminal_session() -> bool:
+def isAppleTerminalSession() -> bool:
     return sys.platform == "darwin" and os.environ.get("TERM_PROGRAM") == "Apple_Terminal"
 
 
-def normalize_apple_terminal_input(data: str, is_apple_terminal: bool, is_shift_pressed: bool) -> str:
-    if is_apple_terminal and data == "\r" and is_shift_pressed:
-        return APPLE_TERMINAL_SHIFT_ENTER_SEQUENCE
+def refreshTerminalDimensions() -> None:
+    """Refresh terminal dimensions on POSIX platforms by sending SIGWINCH to this process.
+    Best-effort: some environments (restricted seccomp or LSM policies) return EACCES
+    for `kill(2)`; in that case the dimensions refresh is skipped rather than crashing.
+    """
+    if sys.platform == "win32" or os.getpid() <= 0:
+        return
+    try:
+        os.kill(os.getpid(), signal.SIGWINCH)
+    except Exception:  # noqa: BLE001, S110 - signal delivery not permitted in this environment; ignore.
+        pass
+
+
+def normalizeNativeShiftEnterInput(data: str, shouldDetectNativeShiftEnter: bool, isShiftPressed: bool) -> str:
+    if shouldDetectNativeShiftEnter and data == "\r" and isShiftPressed:
+        return NATIVE_SHIFT_ENTER_SEQUENCE
     return data
 
 
-# PORT-NOTE: upstream reads live modifier state via the darwin-modifiers.node addon; the Python
-# equivalent is calling CoreGraphics CGEventSourceFlagsState through ctypes
-# (0 = kCGEventSourceStateCombinedSessionState).
-_MODIFIER_MASKS = {"shift": 0x20000, "control": 0x40000, "option": 0x80000, "command": 0x100000}
-_cg_lib: Any = None
-_cg_failed = False
-
-
-def is_native_modifier_pressed(key: str) -> bool:
-    global _cg_lib, _cg_failed
-    if sys.platform != "darwin" or _cg_failed:
-        return False
-    mask = _MODIFIER_MASKS.get(key)
-    if not mask:
-        return False
-    try:
-        if _cg_lib is None:
-            _cg_lib = ctypes.CDLL(
-                "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
-            _cg_lib.CGEventSourceFlagsState.restype = ctypes.c_uint64
-            _cg_lib.CGEventSourceFlagsState.argtypes = [ctypes.c_int]
-        return bool(_cg_lib.CGEventSourceFlagsState(0) & mask)
-    except Exception:  # noqa: BLE001 - native layer unavailable: always False, as upstream on addon load failure
-        _cg_failed = True
-        return False
+def normalizeAppleTerminalInput(data: str, isAppleTerminal: bool, isShiftPressed: bool) -> str:
+    return normalizeNativeShiftEnterInput(data, isAppleTerminal, isShiftPressed)
 
 
 class Terminal(Protocol):
-    def start(self, onInput: Any, onResize: Any) -> None: ...
+    """Minimal terminal interface for TUI"""
+
+    # Start the terminal with input and resize handlers
+    def start(self, onInput: Callable[[str], None], onResize: Callable[[], None]) -> None: ...
+
+    # Stop the terminal and restore state
     def stop(self) -> None: ...
-    async def drainInput(self, maxMs: int = 1000, idleMs: int = 50) -> None: ...
+
+    async def drainInput(self, maxMs: int = 1000, idleMs: int = 50) -> None:
+        """Drain stdin before exiting to prevent Kitty key release events from
+        leaking to the parent shell over slow SSH connections.
+        @param maxMs - Maximum time to drain (default: 1000ms)
+        @param idleMs - Exit early if no input arrives within this time (default: 50ms)
+        """
+        ...
+
+    # Write output to terminal
     def write(self, data: str) -> None: ...
+
+    # Get terminal dimensions
     @property
     def columns(self) -> int: ...
     @property
     def rows(self) -> int: ...
+
+    # Whether Kitty keyboard protocol is active
     @property
     def kittyProtocolActive(self) -> bool: ...
-    def moveBy(self, lines: int) -> None: ...
-    def hideCursor(self) -> None: ...
-    def showCursor(self) -> None: ...
-    def clearLine(self) -> None: ...
-    def clearFromCursor(self) -> None: ...
-    def clearScreen(self) -> None: ...
-    def setTitle(self, title: str) -> None: ...
+
+    # Cursor positioning (relative to current position)
+    def moveBy(self, lines: int) -> None: ...  # Move cursor up (negative) or down (positive) by N lines
+
+    # Cursor visibility
+    def hideCursor(self) -> None: ...  # Hide the cursor
+    def showCursor(self) -> None: ...  # Show the cursor
+
+    # Clear operations
+    def clearLine(self) -> None: ...  # Clear current line
+    def clearFromCursor(self) -> None: ...  # Clear from cursor to end of screen
+    def clearScreen(self) -> None: ...  # Clear entire screen and move cursor to (0,0)
+
+    # Title operations
+    def setTitle(self, title: str) -> None: ...  # Set terminal window title
+
+    # Progress indicator (OSC 9;4)
     def setProgress(self, active: bool) -> None: ...
+
+    def setProgramStatus(self, status: ProgramStatus) -> None:
+        """Report what the program is doing (OSC 7501). Sent only to terminals that support it; the latest
+        status is re-sent when support is confirmed or the terminal restarts.
+        """
+        ...
+
+
+DEFAULT_ESCAPE_TIMEOUT_MS = 10
+DEFAULT_SSH_ESCAPE_TIMEOUT_MS = 100
+
+
+def resolveEscapeTimeoutMs(env: Any = None) -> float:
+    """Resolve how long to wait for the rest of an escape sequence before
+    dispatching a lone ESC as the Escape key. Legacy Alt+key input is ESC plus
+    another byte, so high-latency transports need a longer reassembly window.
+
+    MISAKA fork: the configured window is the ``tui.esc_timeout_ms`` setting (pi: ``PI_TUI_ESC_TIMEOUT``), and a
+    pane of MISAKA's panel (``MISAKA_NET_PANE``, stamped on every pane the daemon spawns) gets the ssh window: its
+    keystrokes travel host terminal -> panel -> socket -> daemon -> pty, which splits reads and adds a round trip.
+    With the bare 10 ms a bracketed paste whose opener arrived as a lone ESC turned into the Escape key (a pasted
+    OAuth redirect URL cancelled the login).
+    """
+    from misaka.config.product import setting
+
+    if env is None:
+        env = os.environ
+    configured = jsNumber(setting("tui", "esc_timeout_ms", 0, float))
+    if math.isfinite(configured) and configured > 0:
+        return configured
+    if env.get("SSH_CONNECTION") or env.get("SSH_TTY") or env.get("MISAKA_NET_PANE"):
+        return DEFAULT_SSH_ESCAPE_TIMEOUT_MS
+    return DEFAULT_ESCAPE_TIMEOUT_MS
+
+
+def jsTruthyNumber(value: float) -> bool:
+    """MISAKA fork: a JavaScript number's truthiness (``NaN`` and 0 are false; Python's ``NaN`` is true)."""
+    return bool(value) and not math.isnan(value)
+
+
+def _writeLogPath() -> str:
+    """``writeLogPath``: ``MISAKA_TUI_WRITE_LOG`` names a file, or a directory that gets a file per process."""
+    env = os.environ.get("MISAKA_TUI_WRITE_LOG") or ""
+    if not env:
+        return ""
+    # `fs.statSync(env).isDirectory()`: anything that is not an existing directory is used as-is (file path).
+    if os.path.isdir(env):
+        ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+        return os.path.join(env, f"tui-{ts}-{os.getpid()}.log")
+    return env
 
 
 class ProcessTerminal:
+    """Real terminal using process.stdin/stdout"""
+
     def __init__(self) -> None:
-        self.stdin = sys.stdin
-        self.stdout = sys.stdout
-        self.loop: asyncio.AbstractEventLoop | None = None
         self.wasRaw = False
-        self.inputHandler: Any | None = None
-        self.resizeHandler: Any | None = None
+        self.inputHandler: Callable[[str], None] | None = None
+        self.resizeHandler: Callable[[], None] | None = None
         self._kittyProtocolActive = False
         self._modifyOtherKeysActive = False
         self.keyboardProtocolPushed = False
+        # DA1 replies owed to keyboard protocol queries. Later DA1 replies answer other queries and are forwarded.
+        self.pendingKeyboardProtocolDeviceAttributes = 0
         self.keyboardProtocolNegotiationBuffer = ""
-        self.keyboardProtocolBufferFlushTimer: threading.Timer | None = None
+        self.keyboardProtocolBufferFlushTimer: asyncio.TimerHandle | None = None
         self.stdinBuffer: StdinBuffer | None = None
-        self.stdinDataHandler: Any | None = None
-        self.progressTimer: threading.Timer | None = None
-        self._progressActive = False
+        self.stdinDataHandler: Callable[[str | bytes], None] | None = None
+        self.progressInterval: asyncio.TimerHandle | None = None
+        # Latest program status, kept across stop() so start() can report it again.
+        self.programStatus: ProgramStatus | None = None
+        # Whether the terminal confirmed OSC 7501 support since the last start(), or `PI_PROGRAM_STATUS=1`.
+        self.programStatusSupported = False
+        # The support query was sent and its DA1 sentinel has not arrived yet.
+        self.programStatusQueryPending = False
+        self.writeLogPath = _writeLogPath()
+
+        # MISAKA fork: the Node runtime pieces (see the module docstring).
+        self.stdin: Any = sys.stdin
+        self.stdout: Any = sys.stdout
+        self.loop: asyncio.AbstractEventLoop | None = None
         self._previousSigwinchHandler: Any | None = None
         self._previousTermiosSettings: list[Any] | None = None
         self._previousConsoleModes: Any | None = None
@@ -194,274 +241,343 @@ class ProcessTerminal:
     def modifyOtherKeysActive(self) -> bool:
         return self._modifyOtherKeysActive
 
-    def start(self, onInput: Any, onResize: Any) -> None:
+    def start(self, onInput: Callable[[str], None], onResize: Callable[[], None]) -> None:
         self.inputHandler = onInput
         self.resizeHandler = onResize
+        # MISAKA fork: capture the loop that timer, signal and reader callbacks run on.
+        self._event_loop()
         self._lastStdinActivityMs = self._now_ms()
-        self._event_loop()  # capture the event loop so timer/signal callbacks can be routed back to the main thread
 
-        self.wasRaw = bool(getattr(self.stdin, "isRaw", False))
-        if hasattr(self.stdin, "setRawMode"):
-            self.stdin.setRawMode(True)
-        else:
-            self._enter_raw_mode()
+        # Save previous state and enable raw mode
+        # MISAKA fork: `stdin.isRaw`/`setRawMode(true)`/`setEncoding("utf8")`/`resume()`.
+        self.wasRaw = False
+        self._enter_raw_mode()
 
-        set_encoding = getattr(self.stdin, "setEncoding", None)
-        if callable(set_encoding):
-            set_encoding("utf8")
-
-        if hasattr(self.stdin, "resume"):
-            self.stdin.resume()
-
+        # Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
         self.write("\x1b[?2004h")
+
+        # Set up resize handler immediately
         self._install_resize_handler()
-        self._refresh_dimensions()
+
+        # Refresh terminal dimensions - they may be stale after suspend/resume
+        # (SIGWINCH is lost while process is stopped). Unix only, best-effort.
+        refreshTerminalDimensions()
+
+        # On Windows, enable ENABLE_VIRTUAL_TERMINAL_INPUT so the console sends
+        # VT escape sequences (e.g. \x1b[Z for Shift+Tab) instead of raw console
+        # events that lose modifier information. Must run AFTER setRawMode(true)
+        # since that resets console mode flags.
         self.enableWindowsVTInput()
+
+        # Query Kitty keyboard protocol and fall back to modifyOtherKeys when DA confirms no Kitty response.
+        # See: https://sw.kovidgoyal.net/kitty/keyboard-protocol/
         self.queryAndEnableKittyProtocol()
 
-    def queryAndEnableKittyProtocol(self) -> None:
-        """Upstream semantics: push flags, query, then a trailing DA sentinel. A terminal that
-        does not know the kitty protocol answers the DA first, and we switch to
-        modifyOtherKeys without any guessing timer."""
-        self.setupStdinBuffer()
-        self._install_reader()
-        self.keyboardProtocolPushed = True
-        self.clear_keyboard_protocol_negotiation_buffer()
-        self.write(KITTY_KEYBOARD_PROTOCOL_QUERY)
-
     def setupStdinBuffer(self) -> None:
-        self.stdinBuffer = StdinBuffer({"escapeTimeout": resolve_escape_timeout_ms()}, loop=self.loop)
+        """Set up StdinBuffer to split batched input into individual sequences.
+        This ensures components receive single events, making matchesKey/isKeyRelease work correctly.
 
-        def on_data(sequence: str) -> None:
-            negotiation = self.read_keyboard_protocol_negotiation_sequence(sequence)
-            if negotiation == "pending":
-                self.schedule_keyboard_protocol_negotiation_buffer_flush()
-                return  # wait briefly so a fragmented kitty reply can be reassembled
-            if self.handle_keyboard_protocol_negotiation_sequence(negotiation):
+        Also watches for Kitty protocol response and enables it when detected.
+        This is done here (after stdinBuffer parsing) rather than on raw stdin
+        to handle the case where the response arrives split across multiple events.
+        """
+        self.stdinBuffer = StdinBuffer({"escapeTimeout": resolveEscapeTimeoutMs()}, loop=self.loop)
+
+        # Forward individual sequences to the input handler
+        def onData(sequence: str) -> None:
+            if isProgramStatusReply(sequence):
+                if self.programStatusQueryPending:
+                    self.programStatusQueryPending = False
+                    self.programStatusSupported = True
+                    self.writeProgramStatus()
                 return
-            self.forward_input_sequence(sequence)
+            negotiation = self.readKeyboardProtocolNegotiationSequence(sequence)
+            if negotiation == "pending":
+                self.scheduleKeyboardProtocolNegotiationBufferFlush()
+                return  # Wait briefly for the rest of a split Kitty response.
+            if negotiation and self.handleKeyboardProtocolNegotiationSequence(negotiation["parsed"]):
+                return
 
-        def on_paste(content: str) -> None:
-            if self.inputHandler is not None:
+            self.forwardInputSequence(negotiation["sequence"] if negotiation else sequence)
+
+        self.stdinBuffer.on("data", onData)
+
+        # Re-wrap paste content with bracketed paste markers for existing editor handling
+        def onPaste(content: str) -> None:
+            if self.inputHandler:
                 self.inputHandler(f"\x1b[200~{content}\x1b[201~")
 
-        self.stdinBuffer.on("data", on_data)
-        self.stdinBuffer.on("paste", on_paste)
-        self.stdinDataHandler = lambda data: self.stdinBuffer.process(data)
+        self.stdinBuffer.on("paste", onPaste)
 
-    # ── kitty negotiation state machine (mirrors terminal.ts:228-306 one to one) ──────────────────
+        # Handler that pipes stdin data through the buffer
+        def stdinDataHandler(data: str | bytes) -> None:
+            assert self.stdinBuffer is not None
+            self.stdinBuffer.process(data)
 
-    def handle_keyboard_protocol_negotiation_sequence(self, negotiation) -> bool:
-        if not negotiation:
-            return False
-        self.clear_keyboard_protocol_negotiation_buffer()
-        if negotiation["type"] == "kitty-flags":
-            if negotiation["flags"] != 0:
-                self.disable_modify_other_keys()
+        self.stdinDataHandler = stdinDataHandler
+
+    def queryAndEnableKittyProtocol(self) -> None:
+        """Query terminal for Kitty keyboard protocol support and enable it if available.
+
+        Kitty's progressive enhancement detection requires requesting the desired
+        flags before querying them. The trailing DA query is a sentinel supported by
+        terminals that do not know Kitty keyboard protocol; receiving DA before a
+        Kitty response enables modifyOtherKeys fallback without a startup timeout.
+
+        The requested flags are:
+        - 1 = disambiguate escape codes
+        - 2 = report event types (press/repeat/release)
+        - 4 = report alternate keys (shifted key, base layout key)
+
+        The OSC 7501 program status query shares the DA sentinel: a terminal that supports it replies
+        before DA. `PI_PROGRAM_STATUS=1` or `0` skips the query.
+        """
+        self.setupStdinBuffer()
+        # MISAKA fork: `process.stdin.on("data", this.stdinDataHandler)`.
+        self._install_reader()
+        self.keyboardProtocolPushed = True
+        self.pendingKeyboardProtocolDeviceAttributes += 1
+        self.clearKeyboardProtocolNegotiationBuffer()
+        programStatusOverride = os.environ.get("MISAKA_PROGRAM_STATUS")
+        self.programStatusSupported = programStatusOverride == "1"
+        self.programStatusQueryPending = programStatusOverride != "1" and programStatusOverride != "0"
+        programStatusQuery = PROGRAM_STATUS_QUERY if self.programStatusQueryPending else ""
+        self.write(f"{KITTY_KEYBOARD_PROTOCOL_QUERY}{programStatusQuery}{DEVICE_ATTRIBUTES_QUERY}")
+        self.writeProgramStatus()
+
+    def handleKeyboardProtocolNegotiationSequence(
+        self, negotiationSequence: KeyboardProtocolNegotiationSequence
+    ) -> bool:
+        self.clearKeyboardProtocolNegotiationBuffer()
+        if negotiationSequence["type"] == "device-attributes":
+            if self.pendingKeyboardProtocolDeviceAttributes == 0:
+                return False
+            self.pendingKeyboardProtocolDeviceAttributes -= 1
+            # The last owed DA answers the latest query, which got no program status reply first. Earlier DA
+            # replies belong to queries from before a restart.
+            if self.pendingKeyboardProtocolDeviceAttributes == 0:
+                self.programStatusQueryPending = False
+        if negotiationSequence["type"] == "kitty-flags":
+            if negotiationSequence["flags"] != 0:
+                self.disableModifyOtherKeys()
                 if not self._kittyProtocolActive:
                     self._kittyProtocolActive = True
                     setKittyProtocolActive(True)
             else:
-                self.enable_modify_other_keys()
+                self.enableModifyOtherKeys()
             return True
-        if not self._kittyProtocolActive:  # device-attributes arrived first: terminal does not support kitty
-            self.enable_modify_other_keys()
+
+        if not self._kittyProtocolActive:
+            self.enableModifyOtherKeys()
         return True
 
-    def read_keyboard_protocol_negotiation_sequence(self, sequence: str):
+    def readKeyboardProtocolNegotiationSequence(
+        self, sequence: str
+    ) -> dict[str, Any] | Literal["pending"] | None:
+        """Returns the parsed negotiation reply with its full (possibly reassembled) sequence."""
         if self.keyboardProtocolNegotiationBuffer:
-            buffered = self.keyboardProtocolNegotiationBuffer + sequence
-            negotiation = parse_keyboard_protocol_negotiation_sequence(buffered)
-            if negotiation:
-                self.clear_keyboard_protocol_negotiation_buffer()
-                return negotiation
-            if is_keyboard_protocol_negotiation_sequence_prefix(buffered):
-                self.set_keyboard_protocol_negotiation_buffer(buffered)
+            bufferedSequence = self.keyboardProtocolNegotiationBuffer + sequence
+            negotiationSequence = parseKeyboardProtocolNegotiationSequence(bufferedSequence)
+            if negotiationSequence:
+                self.clearKeyboardProtocolNegotiationBuffer()
+                return {"parsed": negotiationSequence, "sequence": bufferedSequence}
+            if isKeyboardProtocolNegotiationSequencePrefix(bufferedSequence):
+                self.setKeyboardProtocolNegotiationBuffer(bufferedSequence)
                 return "pending"
-            self.flush_keyboard_protocol_negotiation_buffer_as_input()
+            self.flushKeyboardProtocolNegotiationBufferAsInput()
 
-        negotiation = parse_keyboard_protocol_negotiation_sequence(sequence)
-        if negotiation:
-            return negotiation
-        if is_keyboard_protocol_negotiation_sequence_prefix(sequence):
-            self.set_keyboard_protocol_negotiation_buffer(sequence)
+        negotiationSequence = parseKeyboardProtocolNegotiationSequence(sequence)
+        if negotiationSequence:
+            return {"parsed": negotiationSequence, "sequence": sequence}
+        if isKeyboardProtocolNegotiationSequencePrefix(sequence):
+            self.setKeyboardProtocolNegotiationBuffer(sequence)
             return "pending"
         return None
 
-    def set_keyboard_protocol_negotiation_buffer(self, sequence: str) -> None:
-        self.clear_keyboard_protocol_negotiation_buffer_flush_timer()
+    def setKeyboardProtocolNegotiationBuffer(self, sequence: str) -> None:
+        self.clearKeyboardProtocolNegotiationBufferFlushTimer()
         self.keyboardProtocolNegotiationBuffer = sequence
 
-    def clear_keyboard_protocol_negotiation_buffer(self) -> None:
-        self.clear_keyboard_protocol_negotiation_buffer_flush_timer()
+    def clearKeyboardProtocolNegotiationBuffer(self) -> None:
+        self.clearKeyboardProtocolNegotiationBufferFlushTimer()
         self.keyboardProtocolNegotiationBuffer = ""
 
-    def flush_keyboard_protocol_negotiation_buffer_as_input(self) -> None:
+    def flushKeyboardProtocolNegotiationBufferAsInput(self) -> None:
         if not self.keyboardProtocolNegotiationBuffer:
             return
         sequence = self.keyboardProtocolNegotiationBuffer
-        self.clear_keyboard_protocol_negotiation_buffer()
-        self.forward_input_sequence(sequence)
+        self.clearKeyboardProtocolNegotiationBuffer()
+        self.forwardInputSequence(sequence)
 
-    def schedule_keyboard_protocol_negotiation_buffer_flush(self) -> None:
+    def scheduleKeyboardProtocolNegotiationBufferFlush(self) -> None:
         if not self.keyboardProtocolNegotiationBuffer or self.keyboardProtocolBufferFlushTimer:
             return
 
-        def fire() -> None:
+        def onTimeout() -> None:
             self.keyboardProtocolBufferFlushTimer = None
-            self.flush_keyboard_protocol_negotiation_buffer_as_input()
+            self.flushKeyboardProtocolNegotiationBufferAsInput()
 
-        timer = threading.Timer(
-            KEYBOARD_PROTOCOL_RESPONSE_FRAGMENT_TIMEOUT_MS / 1000.0,
-            lambda: self._on_loop(fire))
-        timer.daemon = True
-        self.keyboardProtocolBufferFlushTimer = timer
-        timer.start()
+        self.keyboardProtocolBufferFlushTimer = self._setTimeout(onTimeout, KEYBOARD_PROTOCOL_RESPONSE_FRAGMENT_TIMEOUT_MS)
 
-    def clear_keyboard_protocol_negotiation_buffer_flush_timer(self) -> None:
-        if self.keyboardProtocolBufferFlushTimer is None:
+    def clearKeyboardProtocolNegotiationBufferFlushTimer(self) -> None:
+        if not self.keyboardProtocolBufferFlushTimer:
             return
         self.keyboardProtocolBufferFlushTimer.cancel()
         self.keyboardProtocolBufferFlushTimer = None
 
-    def forward_input_sequence(self, sequence: str) -> None:
-        if self.inputHandler is None:
+    def forwardInputSequence(self, sequence: str) -> None:
+        if not self.inputHandler:
             return
-        is_apple = sequence == "\r" and is_apple_terminal_session()
-        self.inputHandler(normalize_apple_terminal_input(
-            sequence, is_apple, is_apple and is_native_modifier_pressed("shift")))
+        shouldDetectNativeShiftEnter = sequence == "\r" and (isAppleTerminalSession() or sys.platform == "win32")
+        input_ = normalizeNativeShiftEnterInput(
+            sequence,
+            shouldDetectNativeShiftEnter,
+            shouldDetectNativeShiftEnter and isNativeModifierPressed("shift"),
+        )
+        self.inputHandler(input_)
 
-    def enable_modify_other_keys(self) -> None:
+    def enableModifyOtherKeys(self) -> None:
         if self._kittyProtocolActive or self._modifyOtherKeysActive:
             return
         self.write("\x1b[>4;2m")
         self._modifyOtherKeysActive = True
 
-    def disable_modify_other_keys(self) -> None:
+    def disableModifyOtherKeys(self) -> None:
         if not self._modifyOtherKeysActive:
             return
         self.write("\x1b[>4;0m")
         self._modifyOtherKeysActive = False
 
-    # ────────────────────────────────────────────────────────────────────────
-
     def enableWindowsVTInput(self) -> None:
+        """On Windows, add ENABLE_VIRTUAL_TERMINAL_INPUT (0x0200) to the stdin
+        console handle so the terminal sends VT sequences for modified keys
+        (e.g. \\x1b[Z for Shift+Tab). Without this, libuv's ReadConsoleInputW
+        discards modifier state and Shift+Tab arrives as plain \\t.
+        """
         if sys.platform != "win32":
             return
         try:
-            ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
-            STD_INPUT_HANDLE = -10
-            kernel32 = ctypes.windll.kernel32
-            handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
-            if handle in {0, -1}:
-                return
-            mode = ctypes.c_uint()
-            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-                return
-            kernel32.SetConsoleMode(handle, mode.value | ENABLE_VIRTUAL_TERMINAL_INPUT)
-        except Exception:  # noqa: BLE001 - console mode setup on Windows is best-effort
-            return
+            helper = getNativePlatformHelper()
+            enableVirtualTerminalInput = getattr(helper, "enableVirtualTerminalInput", None)
+            if enableVirtualTerminalInput:
+                enableVirtualTerminalInput()
+        except Exception:  # noqa: BLE001, S110 - native helper not available: Shift+Tab won't be distinguishable from Tab.
+            pass
 
     async def drainInput(self, maxMs: int = 1000, idleMs: int = 50) -> None:
-        should_disable_kitty = self.keyboardProtocolPushed or self._kittyProtocolActive
-        self.clear_keyboard_protocol_negotiation_buffer()
-        if should_disable_kitty:
-            # pop the kitty flags first so late release events no longer produce kitty escape sequences
+        shouldDisableKittyProtocol = self.keyboardProtocolPushed or self._kittyProtocolActive
+        self.clearKeyboardProtocolNegotiationBuffer()
+        if shouldDisableKittyProtocol:
+            # Disable Kitty keyboard protocol first so any late key releases
+            # do not generate new Kitty escape sequences.
             self.write("\x1b[<u")
             self.keyboardProtocolPushed = False
             self._kittyProtocolActive = False
             setKittyProtocolActive(False)
-        self.disable_modify_other_keys()
+        self.disableModifyOtherKeys()
 
-        previous_handler = self.inputHandler
+        previousHandler = self.inputHandler
         self.inputHandler = None
-        self._lastStdinActivityMs = self._now_ms()  # upstream resets the clock on entry: drain for at least idleMs
-        end_time = self._now_ms() + maxMs
+
+        # MISAKA fork: every read stamps `_lastStdinActivityMs` (upstream adds a temporary "data" listener).
+        self._lastStdinActivityMs = self._now_ms()
+        endTime = self._now_ms() + maxMs
 
         try:
             while True:
                 now = self._now_ms()
-                time_left = end_time - now
-                if time_left <= 0:
+                timeLeft = endTime - now
+                if timeLeft <= 0:
                     break
                 if now - self._lastStdinActivityMs >= idleMs:
                     break
-                await asyncio.sleep(min(idleMs, time_left) / 1000.0)
+                await asyncio.sleep(min(idleMs, timeLeft) / 1000)
         finally:
-            self.inputHandler = previous_handler
+            self.inputHandler = previousHandler
 
     def stop(self) -> None:
         if self.clearProgressInterval():
             self.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE)
+        # Remove the status while stopped, for example after exit or while suspended. start() reports it again.
+        if self.programStatusSupported and self.programStatus:
+            self.write(formatProgramStatus({"state": "clear"}))
+        self.programStatusSupported = False
+        self.programStatusQueryPending = False
 
+        # Disable bracketed paste mode
         self.write("\x1b[?2004l")
 
-        should_disable_kitty = self.keyboardProtocolPushed or self._kittyProtocolActive
-        self.clear_keyboard_protocol_negotiation_buffer()
-        if should_disable_kitty:  # fallback pop in case drainInput never ran
+        shouldDisableKittyProtocol = self.keyboardProtocolPushed or self._kittyProtocolActive
+        self.clearKeyboardProtocolNegotiationBuffer()
+
+        # Disable Kitty keyboard protocol if not already done by drainInput()
+        if shouldDisableKittyProtocol:
             self.write("\x1b[<u")
             self.keyboardProtocolPushed = False
             self._kittyProtocolActive = False
             setKittyProtocolActive(False)
-        self.disable_modify_other_keys()
+        self.disableModifyOtherKeys()
 
-        if self.stdinBuffer is not None:
+        # Clean up StdinBuffer
+        if self.stdinBuffer:
             self.stdinBuffer.destroy()
             self.stdinBuffer = None
 
-        self._remove_reader()
-        self.stdinDataHandler = None
+        # Remove event handlers
+        if self.stdinDataHandler:
+            # MISAKA fork: `process.stdin.removeListener("data", this.stdinDataHandler)`.
+            self._remove_reader()
+            self.stdinDataHandler = None
         self.inputHandler = None
-        self._restore_resize_handler()
+        if self.resizeHandler:
+            self._restore_resize_handler()
+            self.resizeHandler = None
 
-        if hasattr(self.stdin, "pause"):
-            self.stdin.pause()
-
-        if hasattr(self.stdin, "setRawMode"):
-            self.stdin.setRawMode(self.wasRaw)
-        else:
-            self._restore_raw_mode()
+        # Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
+        # re-interpreted after raw mode is disabled. This fixes a race condition
+        # where Ctrl+D could close the parent shell over SSH.
+        # Restore raw mode state
+        # MISAKA fork: `stdin.pause()` + `setRawMode(this.wasRaw)`; restoring the terminal discards unread input.
+        self._restore_raw_mode()
 
     def write(self, data: str) -> None:
         self.stdout.write(data)
+        # MISAKA fork: Node writes a TTY synchronously; Python's stdout buffers.
         flush = getattr(self.stdout, "flush", None)
         if callable(flush):
             flush()
-
-    # PORT-NOTE: pi's process.stdout.columns/rows are the live tty size maintained by Node; the
-    # Python equivalent is an ioctl on the stdout fd. The env fallback follows JS semantics:
-    # Number("abc") is NaN, and both NaN and 0 are falsy, so they become 80/24.
-    def _tty_size(self):
-        try:
-            return os.get_terminal_size(self.stdout.fileno())
-        except (OSError, ValueError, AttributeError):
-            return None
-
-    @staticmethod
-    def _env_dim(name: str, default: int) -> int:
-        try:
-            value = int(os.environ.get(name) or 0)
-        except ValueError:
-            value = 0
-        return value or default
+        if self.writeLogPath:
+            try:
+                with open(self.writeLogPath, "a", encoding="utf-8", newline="") as handle:
+                    handle.write(data)
+            except Exception:  # noqa: BLE001, S110
+                # Ignore logging errors
+                pass
 
     @property
     def columns(self) -> int:
         size = self._tty_size()
-        # 0 columns falls back too (JS || semantics): when a pty has no winsize set, ioctl returns
-        # 0x0, which in practice rendered the whole screen one character per line
-        return size.columns if size and size.columns > 0 else self._env_dim("COLUMNS", 80)
+        if size and size.columns:
+            return size.columns
+        configured = jsNumber(os.environ.get("COLUMNS", ""))
+        return int(configured) if jsTruthyNumber(configured) else 80
 
     @property
     def rows(self) -> int:
         size = self._tty_size()
-        return size.lines if size and size.lines > 0 else self._env_dim("LINES", 24)
+        if size and size.lines:
+            return size.lines
+        configured = jsNumber(os.environ.get("LINES", ""))
+        return int(configured) if jsTruthyNumber(configured) else 24
 
     def moveBy(self, lines: int) -> None:
         if lines > 0:
+            # Move down
             self.write(f"\x1b[{lines}B")
         elif lines < 0:
+            # Move up
             self.write(f"\x1b[{-lines}A")
+        # lines === 0: no movement
 
     def hideCursor(self) -> None:
         self.write("\x1b[?25l")
@@ -476,47 +592,52 @@ class ProcessTerminal:
         self.write("\x1b[J")
 
     def clearScreen(self) -> None:
-        self.write("\x1b[2J\x1b[H")
+        self.write("\x1b[2J\x1b[H")  # Clear screen and move to home (1,1)
 
     def setTitle(self, title: str) -> None:
+        # OSC 0;title BEL - set terminal window title
         self.write(f"\x1b]0;{title}\x07")
+
+    def setProgramStatus(self, status: ProgramStatus) -> None:
+        self.programStatus = None if status["state"] == "clear" else status
+        if self.programStatusSupported:
+            self.write(formatProgramStatus(status))
+
+    def writeProgramStatus(self) -> None:
+        if self.programStatusSupported and self.programStatus:
+            self.write(formatProgramStatus(self.programStatus))
 
     def setProgress(self, active: bool) -> None:
         if active:
-            self._progressActive = True
+            # OSC 9;4;3 - indeterminate progress
             self.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE)
-            if self.progressTimer is None:
-                self._schedule_progress_keepalive()
-            return
-
-        self._progressActive = False
-        self.clearProgressInterval()
-        self.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE)
+            if not self.progressInterval:
+                self._scheduleProgressKeepalive()
+        else:
+            self.clearProgressInterval()
+            # OSC 9;4;0 - clear progress
+            self.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE)
 
     def clearProgressInterval(self) -> bool:
-        if self.progressTimer is None:
+        if not self.progressInterval:
             return False
-        self.progressTimer.cancel()
-        self.progressTimer = None
+        self.progressInterval.cancel()
+        self.progressInterval = None
         return True
 
-    def _schedule_progress_keepalive(self) -> None:
-        if not self._progressActive:
-            return
+    # --- MISAKA fork: the Node runtime pieces ---------------------------------------------------------------------
+
+    def _scheduleProgressKeepalive(self) -> None:
+        """``setInterval``: one loop timer after another."""
 
         def tick() -> None:
-            if not self._progressActive:
-                self.progressTimer = None
-                return
             self.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE)
-            self._schedule_progress_keepalive()
+            self._scheduleProgressKeepalive()
 
-        # The keepalive write runs on the event loop thread: Node's setInterval is single-threaded,
-        # and writing from the timer thread would interleave with render bytes (audit C8).
-        self.progressTimer = threading.Timer(
-            TERMINAL_PROGRESS_KEEPALIVE_MS / 1000.0, lambda: self._on_loop(tick))
-        self.progressTimer.daemon = True
-        self.progressTimer.start()
+        self.progressInterval = self._setTimeout(tick, TERMINAL_PROGRESS_KEEPALIVE_MS)
+
+    def _setTimeout(self, callback: Callable[[], None], ms: float) -> asyncio.TimerHandle:
+        return self._event_loop().call_later(ms / 1000, callback)
 
     def _install_resize_handler(self) -> None:
         if not hasattr(signal, "SIGWINCH") or self.resizeHandler is None:
@@ -524,9 +645,8 @@ class ProcessTerminal:
         self._previousSigwinchHandler = signal.getsignal(signal.SIGWINCH)
 
         def handler(_signum: int, _frame: Any) -> None:
-            # A signal handler can interrupt the main thread between any two bytecodes; re-rendering
-            # in place would interleave with an in-progress write and garble the screen (audit C7).
-            # Queue it on the event loop instead.
+            # A signal handler can interrupt the main thread between any two bytecodes; re-rendering in place would
+            # interleave with an in-progress write and garble the screen. Queue it on the event loop instead.
             self._on_loop(lambda: self.resizeHandler() if self.resizeHandler else None)
 
         signal.signal(signal.SIGWINCH, handler)
@@ -537,15 +657,6 @@ class ProcessTerminal:
         if self._previousSigwinchHandler is not None:
             signal.signal(signal.SIGWINCH, self._previousSigwinchHandler)
             self._previousSigwinchHandler = None
-        self.resizeHandler = None
-
-    def _refresh_dimensions(self) -> None:
-        if sys.platform == "win32" or not hasattr(signal, "SIGWINCH"):
-            return
-        try:
-            os.kill(os.getpid(), signal.SIGWINCH)
-        except OSError:
-            return
 
     def _install_reader(self) -> None:
         if self._readerInstalled:
@@ -563,9 +674,8 @@ class ProcessTerminal:
             self._readerInstalled = True
 
     def _install_console_reader(self, fd: int) -> None:
-        # MISAKA: Windows. A console handle cannot be selected on, so libuv reads its input
-        # records on a thread and emits 'data' and the stdout 'resize' from them; the
-        # console reader does the same and routes both back to the event loop.
+        # Windows: a console handle cannot be selected on, so libuv reads its input records on a thread and emits
+        # 'data' and the stdout 'resize' from them; the console reader does the same and routes both to the loop.
         from misaka.utils import win_console
 
         def on_text(text: str) -> None:
@@ -605,7 +715,7 @@ class ProcessTerminal:
             except OSError:
                 data = b""
             if data == b"":
-                # EOF: Node streams emit no data after 'end'. Without removing the reader we spin at 100% CPU (audit C4).
+                # End of input: Node streams emit no data after 'end'; a reader left in place would spin.
                 self._remove_reader()
                 return
         else:
@@ -629,7 +739,7 @@ class ProcessTerminal:
 
     def _enter_raw_mode(self) -> None:
         if sys.platform == "win32":
-            # MISAKA: libuv's UV_TTY_MODE_RAW on a Windows console is a console mode, not termios.
+            # libuv's UV_TTY_MODE_RAW on a Windows console is a console mode, not termios.
             fd = self._stdin_fileno()
             if fd is not None:
                 from misaka.utils import win_console
@@ -643,13 +753,11 @@ class ProcessTerminal:
         if fd is None or (callable(is_tty) and not is_tty()):
             return
         self._previousTermiosSettings = termios.tcgetattr(fd)
-        # PORT-NOTE: not tty.setraw: it clears OPOST (bare \n output staircases) and TCSAFLUSH
-        # discards input typed during startup. Node/libuv UV_TTY_MODE_RAW keeps output
-        # post-processing, so mirror that here.
+        # Not tty.setraw: it clears OPOST (bare \n output staircases) and TCSAFLUSH discards input typed during
+        # startup. libuv's UV_TTY_MODE_RAW keeps output post-processing.
         mode = termios.tcgetattr(fd)
-        mode[0] &= ~(termios.BRKINT | termios.ICRNL | termios.INPCK
-                     | termios.ISTRIP | termios.IXON)          # iflag
-        mode[2] |= termios.CS8                                  # cflag
+        mode[0] &= ~(termios.BRKINT | termios.ICRNL | termios.INPCK | termios.ISTRIP | termios.IXON)  # iflag
+        mode[2] |= termios.CS8  # cflag
         mode[3] &= ~(termios.ECHO | termios.ICANON | termios.IEXTEN | termios.ISIG)  # lflag
         mode[6][termios.VMIN] = 1
         mode[6][termios.VTIME] = 0
@@ -667,11 +775,9 @@ class ProcessTerminal:
         fd = self._stdin_fileno()
         if fd is None:
             return
-        # MISAKA: TCSAFLUSH could hang forever on a macOS pty (the drain wake-up edge is lost and
-        # the call never returns even after the peer read the output; double Ctrl+C/Ctrl+D exit
-        # reproducibly stuck on this line). Use TCSANOW (never blocks) plus an explicit tcflush of
-        # unread input, which keeps the intent of audit C9: a leftover Ctrl+D must not leak to the
-        # parent shell.
+        # TCSAFLUSH can hang forever on a macOS pty (the drain wake-up is lost; double Ctrl+C/Ctrl+D exit stuck on
+        # this line). TCSANOW never blocks, and the explicit flush of unread input keeps a leftover Ctrl+D from
+        # leaking to the parent shell.
         termios.tcsetattr(fd, termios.TCSANOW, self._previousTermiosSettings)
         try:
             termios.tcflush(fd, termios.TCIFLUSH)
@@ -679,8 +785,15 @@ class ProcessTerminal:
             pass
         self._previousTermiosSettings = None
 
-    def _on_loop(self, cb) -> None:
-        """Route a callback back to the event loop thread (Node single-thread semantics); run it inline when there is no loop."""
+    def _tty_size(self) -> os.terminal_size | None:
+        """``process.stdout.columns``/``rows``: the live size of the stdout terminal."""
+        try:
+            return os.get_terminal_size(self.stdout.fileno())
+        except (OSError, ValueError, AttributeError):
+            return None
+
+    def _on_loop(self, cb: Callable[[], Any]) -> None:
+        """Route a callback to the event loop thread; run it inline when there is no loop."""
         loop = self.loop
         if loop is not None and not loop.is_closed():
             try:
@@ -705,10 +818,13 @@ class ProcessTerminal:
 
 
 __all__ = [
+    "KeyboardProtocolNegotiationSequence",
     "ProcessTerminal",
     "Terminal",
-    "is_apple_terminal_session",
-    "is_native_modifier_pressed",
-    "normalize_apple_terminal_input",
-    "parse_keyboard_protocol_negotiation_sequence",
+    "isAppleTerminalSession",
+    "normalizeAppleTerminalInput",
+    "normalizeNativeShiftEnterInput",
+    "parseKeyboardProtocolNegotiationSequence",
+    "refreshTerminalDimensions",
+    "resolveEscapeTimeoutMs",
 ]

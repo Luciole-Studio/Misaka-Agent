@@ -1,0 +1,885 @@
+"""``misaka setup``: the first-run wizard, section by section.
+
+MISAKA's own module, not a port (pi's ``cli/setup.ts`` is ``misaka/cli/setup.py``).
+
+Modelled on Hermes's setup wizard: one command, the logo, a fixed list of sections that can
+also be run one at a time (``misaka setup model``), a ✓/✗ summary at the end that says what
+works and what to run next. Every prompt shows the current value and Enter keeps it, so
+running it again on a configured install is a review, not a reset.
+
+What each section touches, and nothing else:
+
+- environment: reads the system (python, git, ripgrep, fd, pdftotext, ocrmypdf, the panel's
+  terminal library) and prints what is missing, with the install command for this OS.
+- model: ``credentials/auth.json`` in the home (the credential) and either the global
+  ``settings.json`` or the selected role's, through the same registry every session uses;
+  then one tiny real request, because a stored key that does not work is the failure that
+  otherwise shows up an hour later inside a research run.
+- sisters: ``~/.misaka/profiles/sisters/<id>/`` through ``roster.create_sister``. Without at
+  least one Sister a research run has nobody to hand cards to.
+- skills: nothing; it shows the three skill layers and the optional catalog. The one skill a
+  research install needs, ``coverage-maps``, ships with the coverage extension.
+- documents: the optional PDF outline extra and the office libraries, checked by import; what reads a
+  scan (``documents.ocr_engine``) and how hard MinerU reads (``documents.mineru_tier``) in the global
+  ``settings.json``, with MinerU installed by ``uv tool install`` when wanted.
+- web: the same complete settings menu as ``misaka web`` (search, extraction, browser, accounts and policy).
+- research: nothing; it explains the shape of a run and the approval gate, which is the one
+  behaviour a first run meets without warning.
+- project: ``misaka init`` on a folder, and optionally a first pass of ``misaka doc`` over a
+  folder of sources.
+
+Bare ``misaka`` runs the wizard by itself when no credential is configured anywhere.
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import os
+import platform
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from types import SimpleNamespace
+
+from misaka.cli import setup_ui as ui
+from misaka.cli.setup_ui import (
+    SetupCancelled,
+    SetupGoBack,
+    prompt,
+    prompt_choice,
+    prompt_yes_no,
+)
+from misaka.config import home
+from misaka.core.provider_attribution import CLIENT_NAME
+from misaka.utils.open_browser import openBrowser
+from misaka.utils.tools_manager import find_tool
+
+OPENALEX_KEY_URL = "https://openalex.org/rest-api"
+SECTIONS = ("environment", "model", "sisters", "skills", "documents", "web", "research", "project")
+
+# The providers a fresh install is most likely to want, in the order they are offered; every
+# other provider the registry knows is one menu entry further ("Another provider...").
+#
+# Ordered so the ones that sign in through a browser come first. A subscription is the path
+# that needs no API key at all. A ChatGPT subscription signs in to `openai` itself ("Sign in
+# with ChatGPT"); `openai-codex` is the legacy route to it and stays one menu further.
+SCAN_READERS = {"auto": "auto: MinerU where it is installed, ocrmypdf otherwise",
+                "mineru": "mineru: MinerU only",
+                "ocrmypdf": "ocrmypdf: ocrmypdf only"}
+MINERU_TIERS = {"advanced": "advanced: its strongest, handwriting too; about 12 to 19 s a page",
+                "standard": "standard: about as slow; read a Japanese manuscript best",
+                "basic": "basic: about a tenth of the time; handwriting and old Japanese much worse"}
+
+FEATURED_PROVIDERS = ("anthropic", "openai", "github-copilot", "xai", "openrouter",
+                      "google", "mistral", "amazon-bedrock", "ollama")
+
+
+def _install_command(binary: str) -> str:
+    """The package manager line for a missing binary on this OS."""
+    brew = {"git": "xcode-select --install", "rg": "brew install ripgrep", "fd": "brew install fd",
+            "pdftotext": "brew install poppler", "ocrmypdf": "brew install ocrmypdf tesseract-lang",
+            "tesseract": "brew install tesseract"}
+    apt = {"git": "sudo apt install git", "rg": "sudo apt install ripgrep", "fd": "sudo apt install fd-find",
+           "pdftotext": "sudo apt install poppler-utils",
+           # The chi_sim and jpn packs: documents.ocr_langs defaults to eng+chi_sim+jpn.
+           "ocrmypdf": "sudo apt install ocrmypdf tesseract-ocr-chi-sim tesseract-ocr-jpn",
+           "tesseract": "sudo apt install tesseract-ocr"}
+    # OCRmyPDF has no Windows package: it needs Tesseract and Ghostscript first, then pip.
+    winget = {"git": "winget install Git.Git", "rg": "winget install BurntSushi.ripgrep.MSVC",
+              "fd": "winget install sharkdp.fd", "pdftotext": "winget install oschwartz10612.Poppler",
+              "ocrmypdf": "see https://ocrmypdf.readthedocs.io/en/latest/installation.html#installing-on-windows",
+              "tesseract": "winget install UB-Mannheim.TesseractOCR"}
+    table = brew if sys.platform == "darwin" else winget if sys.platform == "win32" else apt
+    return {**table, "mineru-kit": "uv tool install mineru"}.get(binary, f"install {binary}")
+
+
+class Wizard:
+    def __init__(self):
+        self.state: dict = {"missing": []}
+
+    # -- 1. environment -----------------------------------------------------------------------
+
+    def environment(self) -> None:
+        ui.print_header("Environment")
+        version = platform.python_version()
+        ui.print_check(sys.version_info >= (3, 12), "Python", f"{version}" + ("" if sys.version_info >= (3, 12) else "  (3.12 or newer needed)"))
+        required = {"git": "projects are git repositories; /commit records results once you confirm",
+                    "rg": "the grep tool (ripgrep)", "fd": "the find tool",
+                    "pdftotext": "reads the text of PDFs (poppler)"}
+        optional = {"mineru-kit": "scanned PDFs (OCR), vertical Chinese, Japanese and handwriting above all; fetches its models on first use",
+                    "ocrmypdf": "scanned PDFs (OCR); only needed for image-only documents",
+                    "tesseract": "lets MinerU read scanned pages lying on their side"}
+        missing = []
+        for binary, purpose in required.items():
+            present = find_tool(binary) is not None
+            ui.print_check(present, binary, purpose if present else f"{purpose}  →  {_install_command(binary)}")
+            if not present:
+                missing.append(binary)
+        for binary, purpose in optional.items():
+            present = find_tool(binary) is not None
+            ui.print_check(True if present else None, binary, purpose if present else f"{purpose}  →  {_install_command(binary)}")
+        from misaka.ui.panel import ghostty
+        library = ghostty.library_path()
+        has_panel = ghostty.unavailable() is None
+        ui.print_check(has_panel, "panel terminal",
+                       "libghostty-vt: the panel's terminal emulator" if has_panel else
+                       "no build this system can load; `misaka` opens plain chat, everything else works")
+        if not has_panel:
+            ui.print_info(f"    looked in {library}",
+                          "    macOS and Linux on x86_64 and arm64 ship a build; point MISAKA_GHOSTTY_VT",
+                          "    at your own build of ghostty's libghostty-vt to use the panel elsewhere.")
+        self.state["missing"] = missing
+        self.state["panel"] = has_panel
+        if "git" in missing:
+            ui.print_warning("Without git the project step below cannot create a repository. Install it and run "
+                             "`misaka setup project` afterwards.")
+        if missing:
+            ui.print_info("", "Install what is missing in another terminal; the wizard goes on regardless.")
+        # Named, not checked: a network call here would make the wizard hang on a bad
+        # connection, and nothing about MISAKA polls for updates on its own.
+        ui.print_info("", ui.color("  `misaka update` says whether this install is behind the repository.", ui.DIM))
+
+    # -- 2. model & provider ------------------------------------------------------------------
+
+    def model(self) -> None:
+        from misaka.cli.auth_overview import create_auth_runtime, missing_sdk_extras
+        from misaka.config import current_config, profiles
+        from misaka.core.model_resolver import findExactModelReferenceMatch
+        from misaka.core.network import roster
+        ui.print_header("Model & Provider")
+        for key in ("credential", "sdk", "verified"):
+            self.state.pop(key, None)       # ← back into this section starts it over
+        cfg = current_config()
+        auth_runtime = asyncio.run(create_auth_runtime(read_only=False, refresh=True))
+        runtime = auth_runtime.runtime
+        targets = [("Global default (roles without their own default)", None),
+                   ("Last Order", os.path.join(cfg["roles_root"], "last_order")),
+                   *[(f"Sister {sid}", os.path.join(cfg["profiles_root"], sid))
+                     for sid in roster.roster_names(root=cfg["profiles_root"])]]
+        target, profile = targets[prompt_choice("Whose default model should change?",
+                                               [label for label, _ in targets], 0,
+                                               "A role's saved default does not change other roles or the global default.")]
+        pinned = profiles.pinned_model(profile) if profile else ""
+        if pinned:
+            selected = findExactModelReferenceMatch(pinned, runtime.getModels())
+            if selected is not None:
+                cfg = {**cfg, "provider": selected.provider, "default_model": selected.id}
+            else:
+                from misaka.core.model_runtime import personalizedCatalogHint
+
+                # A pin the user's OpenRouter key no longer lists has left the catalog, not become ambiguous.
+                hint = personalizedCatalogHint(pinned.partition("/")[0] if "/" in pinned else None)
+                ui.print_warning(f"Saved role default {pinned!r} is not uniquely identified in the catalog; choose it below."
+                                 + hint)
+        known = sorted({model.provider for model in runtime.getModels()})
+        current = cfg["provider"] if cfg["provider"] in known else None
+        ui.print_info(f"{target}: {pinned or cfg['provider'] + '/' + cfg['default_model']}"
+                      + (" (following global default)" if profile and not pinned else "")
+                      + ("" if current else "  (provider unknown to this install)"))
+        featured = [p for p in FEATURED_PROVIDERS if p in known]
+        if current and current not in featured:
+            featured.insert(0, current)
+        oauth_ids = {p.id for p in runtime.getProviders() if p.auth.oauth is not None}
+        labels = [*self._provider_labels(runtime, featured, oauth_ids), "Another provider..."]
+        default = featured.index(current) if current in featured else 0
+        picked = prompt_choice(f"Default provider for {target}", labels, default,
+                               "A browser sign-in uses a subscription you already pay for; an API key is billed per token.")
+        if picked == len(featured):
+            others = [p for p in known if p not in featured]
+            provider = others[prompt_choice("Provider", self._provider_labels(runtime, others, oauth_ids))]
+        else:
+            provider = featured[picked]
+        # The SDK is installed per provider; a missing one is the most common first-run failure.
+        extras = missing_sdk_extras(runtime, provider)
+        if extras:
+            ui.print_warning(f"The SDK for {provider} is not installed (misaka's {', '.join(extras)} extra).")
+            self._add_extras(extras)
+        self._credential(runtime, auth_runtime.credentials, provider)
+        # A failed or skipped sign-in only prints a line; the summary reads this, not the choice.
+        with contextlib.suppress(Exception):     # unknown is left out of the summary, as before
+            self.state["credential"] = has_credential(provider)
+        model_id = self._pick_model(runtime, provider, cfg)
+        from misaka.core.settings_manager import SettingsManager
+        try:
+            if profile:
+                profiles.persist_role_default_model(profile, f"{provider}/{model_id}", strict=True)
+            else:
+                SettingsManager.create(os.getcwd()).setDefaultModelAndProvider(provider, model_id)
+        except (OSError, ValueError) as error:
+            ui.print_error(f"Default model was not saved: {error}")
+            return
+        ui.print_success(f"Default model saved for {target}: {provider} / {model_id}")
+        self.state["provider"], self.state["model"] = provider, model_id
+        self._verify(runtime, provider, model_id)
+
+    @staticmethod
+    def _provider_labels(runtime, providers: list[str], oauth_ids: set[str]) -> list[str]:
+        """The menu rows: who they are, how you sign in, and whether you already have.
+
+        The name column is measured, not guessed: "Cloudflare Workers AI" is three times as
+        long as "OpenAI", and a fixed width either wraps it or wastes a third of the row on
+        everything else.
+        """
+        names = {p: getattr(runtime.getProvider(p), "name", None) or p for p in providers}
+        width = max((len(name) for name in names.values()), default=0)
+        rows = []
+        for provider in providers:
+            status = runtime.getProviderAuthStatus(provider)
+            how = "browser sign-in" if provider in oauth_ids else "API key"
+            where = status.source or ("configured" if status.configured else "")
+            rows.append(f"{names[provider]:<{width}}  {how:<16}"
+                        + (f"({where})" if where else "(not set up yet)"))
+        return rows
+
+    def _credential(self, runtime, storage, provider: str) -> None:
+        status = runtime.getProviderAuthStatus(provider)
+        if status.configured or status.source:
+            ui.print_success(f"{provider}: credential found ({status.source or 'configured'})")
+            if not prompt_yes_no("Keep it?", True):
+                self._enter_credential(runtime, storage, provider)
+            return
+        self._enter_credential(runtime, storage, provider)
+
+    def _enter_credential(self, runtime, storage, provider: str) -> None:
+        if provider == "amazon-bedrock":
+            ui.print_info("Bedrock uses your AWS credentials: an AWS profile, or AWS_ACCESS_KEY_ID / "
+                          "AWS_SECRET_ACCESS_KEY / AWS_REGION in the environment. Set those, then run "
+                          "`misaka auth check amazon-bedrock`.")
+            return
+        oauth = next((p.auth.oauth for p in runtime.getProviders() if p.id == provider), None)
+        # The method's own label ("Sign in with ChatGPT") names the subscription it uses.
+        kinds = ["API key"] + ([oauth.loginLabel or "Subscription login in the browser (OAuth)"] if oauth else [])
+        kind = prompt_choice(f"How do you want to sign in to {provider}?", kinds, 0)
+        if kind == 1:
+            self._oauth(runtime, provider)
+            return
+        key = prompt("API key", password=True)
+        if not key:
+            ui.print_warning("No key entered; you can add one later with /login inside the chat.")
+            return
+        from misaka.ai.auth.types import ApiKeyCredential
+        from misaka.config import get_auth_path
+
+        async def store(_current):
+            return ApiKeyCredential(key=key)
+
+        asyncio.run(storage.modify(provider, store))
+        ui.print_success(f"Key stored in {home.display(get_auth_path())}")
+
+    def _oauth(self, runtime, provider: str) -> None:
+        """The same login the chat's /login runs, drawn as terminal lines.
+
+        Every prompt runs on a worker thread. Browser logins (Anthropic, ChatGPT,
+        OpenRouter) start a local callback server and race it against a paste-the-code
+        prompt, both on the event loop; a prompt that reads the terminal directly blocks that
+        loop, so the redirect the browser sends can never be accepted and the login hangs
+        with the URL on screen. The chat does not hit this because its dialogs are already
+        asynchronous.
+
+        When the server wins, the paste prompt is still waiting on a keystroke, so it has to
+        be cancellable -- otherwise the thread holds stdin and answers the wizard's next
+        question. Releasing it has to happen *inside* the coroutine: ``asyncio.run`` joins
+        the default executor on the way out, and a worker still polling stdin is never
+        joined, so releasing it after the call is a release that never arrives. Cancelling
+        the task does not help -- ``to_thread`` cannot interrupt the thread it started.
+        The login then finished, the credential was stored, and the wizard froze anyway.
+        """
+        import threading
+        cancel = threading.Event()
+
+        async def ask(request) -> str:
+            kind = getattr(request, "type", "text")
+            message = str(getattr(request, "message", ""))
+            if kind == "select":
+                options = list(getattr(request, "options", []) or [])
+                chosen = await asyncio.to_thread(prompt_choice, message, [o.label for o in options])
+                return options[chosen].id
+            if kind == "manual_code":
+                return await asyncio.to_thread(ui.prompt_cancellable, message, cancel)
+            return await asyncio.to_thread(prompt, message, None, password=(kind == "secret"))
+
+        def notify(event) -> None:
+            kind = getattr(event, "type", "")
+            if kind == "auth_url":
+                # Hand the URL to the desktop, the way the chat's login dialog does: printing it and waiting is what
+                # made the browser logins look like a hang. Opening is best-effort; the URL is printed either way.
+                ui.print_info(f"Opening your browser: {event.url}")
+                if getattr(event, "instructions", None):
+                    ui.print_info(str(event.instructions))
+                openBrowser(str(event.url))
+            elif kind == "device_code":
+                ui.print_info(f"Go to {event.verificationUri} and enter the code {event.userCode}")
+            else:
+                ui.print_info(str(getattr(event, "message", "")))
+
+        # One door, as in the chat's own login dialog: every provider's OAuth method, built-in
+        # or from models.json or an extension, runs through the model runtime.
+        interaction = SimpleNamespace(signal=None, prompt=ask, notify=notify)
+
+        from misaka.ai.auth.types import LoginOptions
+        from misaka.core.settings_manager import SettingsManager
+
+        async def run_login() -> None:
+            try:
+                await runtime.login(
+                    provider,
+                    "oauth",
+                    interaction,
+                    # MISAKA fork: misaka introduces itself by its own name.
+                    LoginOptions(
+                        getDeviceId=lambda: SettingsManager.create(os.getcwd()).getOrCreateDeviceId(),
+                        agentName=CLIENT_NAME,
+                    ),
+                )
+            finally:
+                # Inside the coroutine, so the paste worker is already on its way out when
+                # the runner goes to join the executor. See the docstring.
+                cancel.set()
+
+        try:
+            asyncio.run(run_login())
+            ui.print_success(f"{provider}: signed in")
+        except (SetupCancelled, SetupGoBack):
+            raise
+        except Exception as error:  # noqa: BLE001 - a failed login is reported, the wizard goes on
+            ui.print_error(f"Login failed: {error}")
+        finally:
+            # Give the released worker the moment it needs to restore the terminal before
+            # the next question is asked.
+            cancel.set()
+            time.sleep(0.25)
+
+    def _pick_model(self, runtime, provider: str, cfg: dict) -> str:
+        models = self._model_choices([m for m in runtime.getModels() if m.provider == provider],
+                                     cfg["default_model"] if cfg["provider"] == provider else None)
+        ids = [model.id for model in models]
+        if not ids:
+            return prompt("Model id", cfg["default_model"])
+        current = cfg["default_model"] if cfg["provider"] == provider else None
+        default = ids.index(current) if current in ids else 0
+        labels = []
+        for model in models:
+            name = f"  — {model.name}" if model.name and model.name != model.id else ""
+            labels.append(model.id + name + ("   (current default)" if model.id == current else ""))
+        return ids[prompt_choice(
+            f"Default model for {provider}", labels, default,
+            "Only the selected default-model scope will be updated.")]
+
+    @staticmethod
+    def _model_choices(models: list, current: str | None) -> list:
+        """The catalog with dated aliases folded away. Anthropic alone lists both
+        ``claude-sonnet-4-5`` and ``claude-sonnet-4-5-20250929``; a first run should not have to
+        work out that those are one model. A dated id survives only when its undated form is
+        absent from the catalog, or when it is the one already configured."""
+        known = {(model.provider, model.id) for model in models}
+
+        def dated_alias(model) -> bool:
+            head, _, tail = model.id.rpartition("-")
+            return len(tail) == 8 and tail.isdigit() and (model.provider, head) in known
+
+        kept = [model for model in models if model.id == current or not dated_alias(model)]
+        return kept or list(models)
+
+    def _verify(self, runtime, provider: str, model_id: str) -> None:
+        if self.state.get("credential") is False:
+            ui.print_warning(f"No credential for {provider} was stored, so there is nothing to test.")
+            ui.print_info("Run `misaka setup model` to sign in again.")
+            return
+        if self.state.get("sdk"):
+            ui.print_info("The test request is skipped: it needs the SDK named above.")
+            return
+        if not prompt_yes_no("Send one tiny request now to confirm the credential works?", True):
+            return
+        from misaka.ai.types import Context, SimpleStreamOptions, UserMessage
+
+        async def ping() -> str:
+            model = runtime.getModel(provider, model_id)
+            if model is None:
+                raise RuntimeError(f"{provider}/{model_id} is not in the model catalog")
+            reply = await runtime.completeSimple(
+                model, Context(messages=[UserMessage(content="Reply with the single word OK.", timestamp=0)]),
+                SimpleStreamOptions(maxTokens=16))
+            if reply.stopReason == "error":
+                raise RuntimeError(reply.errorMessage or "request failed")
+            return "".join(getattr(part, "text", "") for part in reply.content)
+        try:
+            text = asyncio.run(ping())
+            ui.print_success(f"{provider} answered: {text.strip()[:40] or '(empty reply)'}")
+            self.state["verified"] = True
+        except Exception as error:  # noqa: BLE001 - the wizard reports and continues
+            ui.print_error(f"The request failed: {error}")
+            ui.print_info("Check the credential (or `misaka auth check`) and run `misaka setup model` again.")
+            self.state["verified"] = False
+
+    # -- 3. sisters ---------------------------------------------------------------------------
+
+    def sisters(self) -> None:
+        from misaka.config import CFG, profiles
+        from misaka.core.network import roster
+        ui.print_header("Roles")
+        roles_root = os.path.expanduser(CFG["roles_root"])
+        # The identity files shape every run and are seeded silently on first start, so a
+        # wizard that never names them leaves the most useful edit undiscoverable.
+        ui.print_info("Two roles do the work, and both read plain files you can edit:",
+                      f"  {ui.tilde(profiles.shared_soul())}",
+                      "      the shared identity every role loads first",
+                      f"  {ui.tilde(os.path.join(roles_root, 'last_order'))}/",
+                      "      Last Order, the coordinator: SOUL.md is her voice, settings.json her model, mcp.json her MCP servers, skills/ her skills",
+                      f"  {ui.tilde(os.path.join(roles_root, 'sisters'))}/<id>/",
+                      "      one folder per Sister: DESCRIBE.md routes work to her, SOUL.md is her voice", "")
+        existing = roster.roster_names()
+        if existing:
+            ui.print_success(f"Registered Sisters: {', '.join(existing)}")
+        else:
+            ui.print_info("No Sister yet. Last Order hands research cards to Sisters; without at least one,",
+                          "a research run has nobody to send out. Two is a good start (one can red-team the other).")
+        if existing and not prompt_yes_no("Add another Sister?", False):
+            return
+        model = self._sister_model()
+        next_id = 10032
+        while any(str(next_id) == name for name in existing):
+            next_id += 1
+        while True:
+            sid = prompt("Sister ID", str(next_id))
+            specialty = prompt("Her specialty, for Last Order's routing (optional)", "")
+            ok, message = roster.create_sister(sid, specialty=specialty or None, model=model)
+            (ui.print_success if ok else ui.print_error)(message)
+            if ok:
+                existing.append(sid)
+                next_id = int(sid) + 1 if sid.isdigit() else next_id + 1
+            if not prompt_yes_no("Add another?", len(existing) < 2):
+                break
+        self.state["sisters"] = existing
+
+    def _sister_model(self) -> str | None:
+        """A model pinned into each new Sister's ``settings.json``, or None to follow the default.
+
+        Sisters do the reading and the legwork while Last Order plans and writes the
+        conclusion, so running them on a cheaper model is the common shape of a real install;
+        ``create_sister`` has always taken the argument, and nothing offered it."""
+        from misaka.cli.auth_overview import create_auth_runtime
+        from misaka.config import current_config
+        cfg = current_config()
+        default_label = f"Follow the global default ({cfg['provider']} / {cfg['default_model']})"
+        if prompt_choice("Which model should the Sisters run?", [default_label, "Pin a different one"], 0,
+                         "Sisters read and gather; Last Order plans and writes. A cheaper model here is normal.") == 0:
+            return None
+        try:
+            runtime = asyncio.run(create_auth_runtime(read_only=True, refresh=True)).runtime
+        except Exception as error:  # noqa: BLE001 - a catalog that will not open is not worth failing the section for
+            ui.print_warning(f"The model catalog could not be read ({error}); the Sisters follow the default.")
+            return None
+        models = self._model_choices([m for m in runtime.getModels() if runtime.hasConfiguredAuth(m.provider)], None)
+        if not models:
+            ui.print_warning("No configured models are available; run `misaka setup model` to configure a provider. "
+                             "The Sisters follow the global default for now.")
+            return None
+        labels = [f"{m.provider}/{m.id}" + (f"  — {m.name}" if m.name and m.name != m.id else "") for m in models]
+        selected = models[prompt_choice("Model for the Sisters (all configured providers)", labels, 0)]
+        return f"{selected.provider}/{selected.id}"
+
+    # -- 4. skills ----------------------------------------------------------------------------
+
+    def skills(self) -> None:
+        from misaka.config import CFG
+        from misaka.core.skills import layers as skill_layers
+        ui.print_header("Skills")
+        roles_root = os.path.expanduser(CFG["roles_root"])
+        shared = skill_layers.shared_skills_dir()
+        shown = ((f"{ui.tilde(roles_root)}/<role>/skills/", "that role alone"),
+                 (ui.tilde(shared), "every role"),
+                 ("~/.agents/skills", "shared with your other agent tools; an approved edit is written back here when the skill was loaded from here"))
+        column = max(len(path) for path, _purpose in shown)
+        ui.print_info("A skill is a folder with a SKILL.md a role reads when the work calls for it.",
+                      "Three layers, in the order a role sees them:",
+                      *[f"  {path:<{column}}   {purpose}" for path, purpose in shown], "")
+        external = os.path.expanduser("~/.agents/skills")
+        if os.path.isdir(external):
+            names = sorted(entry.name for entry in os.scandir(external)
+                           if entry.is_dir() and not entry.name.startswith("."))
+            ui.print_success(f"~/.agents/skills is mounted: {', '.join(names) if names else 'empty'}")
+        else:
+            ui.print_info(ui.color("  ~/.agents/skills is absent; it appears by itself once another "
+                                   "agent tool creates it.", ui.DIM))
+        ui.print_success("coverage-maps ships with the coverage extension, beside coverage_scan: "
+                         "maps of a field, read before planning and again when red-teaming.")
+        ui.print_info("", "The package also carries an optional catalog nothing installs by itself:",
+                      "  misaka skills optional-list                 what ships, by category",
+                      "  misaka skills hub-install <name>            install one",
+                      "  misaka skills pending / approve <id>        the review step each install goes through")
+
+    # -- 5. documents -------------------------------------------------------------------------
+
+    def documents(self) -> None:
+        from misaka.core.documents.pageindex import available as pageindex_available
+        ui.print_header("Documents")
+        office = self._importable("docx", "openpyxl", "pptx")
+        ui.print_check(office, "office documents", "python-docx / openpyxl / python-pptx" if office else
+                       "python-docx, openpyxl, python-pptx missing: reinstall misaka (they are dependencies)")
+        has_outline = pageindex_available()
+        ui.print_check(has_outline, "PDF outlines", "PageIndex" if has_outline else
+                       "PyPDF2 or sortedcontainers missing, so PDFs have no outline: reinstall misaka "
+                       "(they are dependencies)")
+        self.state["office"], self.state["pageindex"] = office, has_outline
+        self._scans()
+
+    def _scans(self) -> None:
+        """What reads a scanned PDF or DjVu, and how hard. MinerU lives in a uv tool environment of
+        its own, so installing it here does not touch the one this wizard runs in. Its models are
+        offered right after an install only: ``models verify`` reports missing files on a home
+        that reads fine, and the first scan fetches what it needs anyway."""
+        from misaka.config.product import setting
+        from misaka.core.documents import mineru
+
+        ui.print_info("", "A scanned PDF or DjVu is read by OCR when it is indexed. MinerU reads vertical Chinese and",
+                      "Japanese, and handwriting on its strongest setting, where ocrmypdf reads most of them as noise.")
+        installed_now = False if shutil.which(mineru.BINARY) else self._install_mineru()
+        reader = shutil.which(mineru.BINARY)
+        off_path = installed_now and not reader
+        ui.print_check(False if off_path else True if reader else None, "MinerU", reader or (
+            "installed, not on PATH: see above, then run `misaka setup documents` again" if off_path
+            else f"not installed  →  {_install_command(mineru.BINARY)}"))
+        tesseract = find_tool("tesseract")
+        ui.print_check(True if tesseract else None, "tesseract", "stands sideways pages up for MinerU" if tesseract else
+                       f"without it MinerU reads sideways pages as they lie  →  {_install_command('tesseract')}")
+        engine = self._pick_setting("ocr_engine", "Read scans with", SCAN_READERS)
+        tier = setting("documents", "mineru_tier", mineru.ADVANCED, str)
+        if engine != "ocrmypdf":
+            tier = self._pick_setting("mineru_tier", "How hard MinerU reads", MINERU_TIERS)
+        if reader and installed_now and engine != "ocrmypdf" and prompt_yes_no(
+                "Fetch MinerU's models now (about 2 GB)? Otherwise the first scan fetches them", True):
+            self._run([reader, "models", "download", "--tier", "basic" if tier == mineru.BASIC else "standard"])
+        uses_mineru = engine == "mineru" or (engine == "auto" and reader)
+        if off_path and engine != "ocrmypdf":
+            self.state["scans"], self.state["scans_ok"] = "MinerU installed, not on PATH: `uv tool update-shell`", False
+        elif uses_mineru:
+            self.state["scans"], self.state["scans_ok"] = ((f"MinerU, {tier}", True) if reader else
+                                                           ("MinerU chosen but not installed", False))
+        else:
+            ocrmypdf = shutil.which("ocrmypdf")
+            self.state["scans"] = "ocrmypdf" if ocrmypdf else "nothing installed reads them"
+            self.state["scans_ok"] = True if ocrmypdf else None
+
+    def _install_mineru(self) -> bool:
+        uv = find_tool("uv")
+        if not uv:
+            ui.print_info("MinerU installs with uv, which this machine does not have:", "  uv tool install mineru")
+            return False
+        if not prompt_yes_no("Install MinerU now? (uv tool install mineru, about 1.2 GB)", True):
+            return False
+        if not self._run([uv, "tool", "install", "mineru"]):
+            return False
+        from misaka.core.documents import mineru
+        if not shutil.which(mineru.BINARY):
+            where = subprocess.run([uv, "tool", "dir", "--bin"], capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", check=False).stdout.strip()
+            ui.print_warning(f"{mineru.BINARY} is in {where or 'uv tool dir --bin'}, which is not on PATH, so MISAKA "
+                             "would not find it. Run `uv tool update-shell` and open a new terminal.")
+        return True
+
+    @staticmethod
+    def _pick_setting(key: str, question: str, labels: dict[str, str]) -> str:
+        """One ``documents`` knob from a menu that opens on its current value; only a change is written."""
+        from misaka.config.product import setting
+        from misaka.core.settings_manager import SettingsManager
+
+        keys = list(labels)
+        current = setting("documents", key, keys[0], str)
+        chosen = keys[prompt_choice(question, list(labels.values()), keys.index(current) if current in keys else 0)]
+        if chosen != current:
+            SettingsManager.create(os.getcwd()).updateSection("documents", lambda section: section.__setitem__(key, chosen))
+        return chosen
+
+    # -- 6. web -------------------------------------------------------------------------------
+
+    def web(self) -> None:
+        from misaka.cli.web import run
+
+        run(SimpleNamespace(op="configure", profile=None, extension=[], key=None, value=None,
+                            capability=None, tier=None, install=False, login=False, yes=False), from_setup=True)
+        self.state["web"] = "Settings reviewed; use misaka web status for local readiness (not a network test)"
+
+    # -- 7. research --------------------------------------------------------------------------
+
+    def research(self) -> None:
+        """Report the run defaults without changing them (the /research picker saves a per-run
+        choice) and explain the wait before a first run; then the one thing this section stores:
+        the literature scan's optional OpenAlex key."""
+        from misaka.config import CFG
+        from misaka.core.research import runs
+        ui.print_header("How a research run behaves")
+        limits = runs.DEFAULT_LIMITS
+        ui.print_info("Last Order turns your question into a plan, the plan into cards, and hands the",
+                      "cards to the Sisters. Per run, unless you pass the flags:", "")
+        ui.print_check(True, "parallel LO nodes", f"{limits['parallel']}    (`--parallel`)")
+        ui.print_check(True, "Sister cards per LO", f"{limits['sister_parallel']}    (`--sister-parallel`; global admission limits still apply)")
+        ui.print_check(True, "follow-up rounds", f"{limits['max_followups']}    extra rounds of cards a node may send out (`--followups`)")
+        ui.print_check(True, "revisions", f"{limits['max_revisions']}    times a node may rework its conclusion after review (`--revisions`)")
+        ui.print_check(True, "branch depth", f"{limits['max_depth']}    (`--depth`)")
+        ui.print_check(True, "graph size", f"{limits['max_nodes']}    nodes at most, the root included (`--max-nodes`)")
+        gate = bool(CFG["research_plan_approval"])
+        ui.print_check(gate, "plan approval",
+                       "every node's plan and every reconciliation of the graph waits for you, in a conversation "
+                       "with Last Order; she starts it herself once you agree" if gate else
+                       "off (settings.json research.plan_approval = false): accepted plans proceed without an approval wait")
+        if gate:
+            ui.print_info("", "So each plan waits for your go-ahead before its Sisters execute it. There is no approve",
+                          "command and no keyword: you discuss the plan and she goes when you are satisfied.",
+                          "Set research.plan_approval to false in settings.json to make automatic plan execution the default.")
+        ui.print_info("Use bare /research to choose Require approval or Automatic after the other run settings.",
+                      "That choice is saved for this run and all its nodes, including resume; clarification, and a",
+                      "plan that reframes the question, still wait for you.")
+        self.state["approval"] = gate
+        self._openalex_key()
+
+    def _openalex_key(self) -> None:
+        """``coverage_scan`` asks OpenAlex where a question lives in the literature. Without a key
+        it shares the anonymous allowance, which OpenAlex pauses under load (2026-09-27: every
+        scan of a run failed). The key is a credential, so it goes to the home's ``.env`` beside
+        the web vendors' keys, never to settings.json."""
+        from misaka.config import env as env_file
+        from misaka.extensions import coverage
+
+        name = coverage.KEY_ENV
+        stored = bool(env_file.read().get(name))
+        ui.print_info("", "Last Order checks a plan against the literature with coverage_scan (OpenAlex). A free",
+                      f"OpenAlex API key keeps it working when OpenAlex pauses anonymous access: {OPENALEX_KEY_URL}")
+        ui.print_check(True if stored else None, "OpenAlex key",
+                       f"{name} in {ui.tilde(str(env_file.path()))}" if stored else
+                       f"{name} set in the shell" if os.environ.get(name) else "none: anonymous access")
+        value = ui.prompt(f"{name} (Enter keeps {'the current one' if stored else 'none'})", password=True)
+        if value:
+            env_file.write({name: value})
+            stored = True
+            ui.print_success(f"Saved to {ui.tilde(str(env_file.path()))}; MISAKA processes read it when they start.")
+        self.state["openalex"] = stored or bool(os.environ.get(name))
+
+    # -- 8. project ---------------------------------------------------------------------------
+
+    def project(self) -> None:
+        from misaka.core.platform import cards
+        ui.print_header("Project folder")
+        ui.print_info("A project is a folder MISAKA works in: a git repository with PROJECT.md and cards/.",
+                      "Research products land in it, and accepted results are committed there.")
+        folder = os.path.expanduser(prompt("Folder to initialize (Enter for the current one)", os.getcwd()))
+        if not os.path.isdir(folder):
+            if not prompt_yes_no(f"{folder} does not exist. Create it?", True):
+                return
+            os.makedirs(folder, exist_ok=True)
+        try:
+            for line in cards.init_project(folder):
+                ui.print_info(line)
+            ui.print_success(f"Project ready: {folder}")
+            self.state["project"] = folder
+        except RuntimeError as error:
+            ui.print_error(str(error))
+            return
+        self._index_sources(folder)
+
+    def _index_sources(self, folder: str) -> None:
+        """`misaka doc add` is step two of the quickstart and the whole point of the document
+        stack; the wizard used to check that the libraries imported and stop there."""
+        ui.print_info("", "Research reads an indexed corpus: PDFs, Office files and text you have already",
+                      "collected. Indexing extracts their text (and, with the PageIndex extra, an outline)",
+                      "so a Sister can cite a page instead of guessing.")
+        if not prompt_yes_no("Index a folder of sources into this project now?", False):
+            ui.print_info(f"Later: cd {folder} && misaka doc scan <folder>")
+            return
+        source = os.path.expanduser(prompt("Folder to index", os.path.join(folder, "sources")))
+        if not os.path.isdir(source):
+            ui.print_error(f"{source} is not a folder; skipping. Run `misaka doc scan <folder>` when it exists.")
+            return
+        from misaka.core.documents import index as corpus
+        ui.print_info(f"Indexing {source}... (this reads every file; large corpora take a while)")
+        try:
+            ingested, skipped = corpus.scan(source, workspace=folder)
+        except Exception as error:  # noqa: BLE001 - one unreadable corpus does not fail the wizard
+            ui.print_error(f"Indexing failed: {error}")
+            return
+        for path, reason in skipped[:5]:
+            ui.print_info(ui.color(f"    skipped {os.path.basename(path)}: {reason}", ui.DIM))
+        if len(skipped) > 5:
+            ui.print_info(ui.color(f"    ... and {len(skipped) - 5} more skipped", ui.DIM))
+        (ui.print_success if ingested else ui.print_warning)(
+            f"{len(ingested)} document(s) indexed, {len(skipped)} skipped."
+            if ingested else f"Nothing was indexed; all {len(skipped)} candidate(s) were skipped.")
+        self.state["documents"] = len(ingested)
+
+    # -- summary ------------------------------------------------------------------------------
+
+    def summary(self) -> None:
+        from misaka.core.network import roster
+        state = self.state
+        ui.print_banner("✓ Setup complete")
+        self._model_check()
+        names = roster.roster_names()
+        ui.print_check(bool(names), "sisters", ", ".join(names) if names else "none: run `misaka setup sisters`")
+        for binary in ("git", "rg", "fd", "pdftotext"):
+            present = find_tool(binary) is not None
+            ui.print_check(present, binary, "" if present else _install_command(binary))
+        ui.print_check(state.get("pageindex", None), "PDF outlines", "" if state.get("pageindex") else "missing: reinstall misaka")
+        ui.print_check(state.get("scans_ok"), "scanned documents",
+                       state.get("scans") or "not checked: `misaka setup documents`")
+        ui.print_check(None, "web tools", str(state.get("web") or "not checked: misaka web status"))
+        ui.print_check(None, "skills", "coverage-maps built in; more: `misaka skills optional-list`")
+        ui.print_check(True if state.get("openalex") else None, "literature scan",
+                       "OpenAlex key set" if state.get("openalex") else
+                       "anonymous OpenAlex: a free key via `misaka setup research`")
+        indexed = state.get("documents")
+        ui.print_check(bool(indexed) if indexed is not None else None, "documents",
+                       f"{indexed} indexed" if indexed else "none indexed yet: `misaka doc scan <folder>`")
+        ui.print_check(bool(state.get("project")), "project", state.get("project") or "run `misaka init` in a folder")
+        project = state.get("project") or "<project>"
+        ui.print_info("", "Next:",
+                      f"  cd {project} && misaka                       the panel (Last Order, the Sisters, the board)",
+                      "  misaka doc scan <folder>                     index sources; research reads what is indexed",
+                      '  misaka research "your question"              a run: plan, your go-ahead, cards, red team',
+                      "  misaka chat                                  plain chat with Last Order",
+                      "  misaka setup <section>                       revisit one section: " + " | ".join(SECTIONS),
+                      "  misaka auth check                            credentials, per provider", "")
+
+    def _model_check(self) -> None:
+        """The summary's model row. Ticking on "a provider was chosen" reported a failed sign-in, a
+        skipped key and a broken key as a finished step, and this is the one row people read."""
+        state = self.state
+        if not state.get("provider"):
+            ui.print_check(False, "model", "run `misaka setup model`")
+            return
+        chosen = f"{state['provider']} / {state['model']}"
+        verified = state.get("verified")    # None: not tested; False: the request failed
+        if state.get("credential") is False:
+            ui.print_check(False, "model", f"{chosen}  (no credential stored: the sign-in failed or was skipped;"
+                                           " run `misaka setup model`)")
+        elif state.get("sdk"):
+            ui.print_check(False, "model", f"{chosen}  (its SDK is not installed: {state['sdk']})")
+        elif verified is False:
+            ui.print_check(False, "model", f"{chosen}  (the test request failed; the stored credential does not work)")
+        else:
+            ui.print_check(True, "model", chosen + ("  (not tested)" if verified is None else ""))
+
+    # -- helpers ------------------------------------------------------------------------------
+
+    @staticmethod
+    def _importable(*modules: str) -> bool:
+        import importlib.util
+        try:
+            return all(importlib.util.find_spec(module) is not None for module in modules)
+        except (ImportError, ValueError):
+            return False
+
+    def _add_extras(self, extras: list[str]) -> None:
+        """Install ``extras`` the way this install was made, keeping every extra it already has.
+
+        uv and pipx own the environment this wizard runs in: replacing it underneath a running
+        process is theirs to do after it exits, so their command is printed, not run, and no
+        "Install it now?" is asked that a Yes could not keep. Whatever is left to run is kept in
+        ``state["sdk"]`` for the summary, since the line here scrolls away."""
+        from misaka.cli import update
+        install = update.describe()
+        if install.kind == "bundle":
+            # A release archive carries what it was built with (misaka[providers]) and no pip.
+            ui.print_info(f"This MISAKA is a release archive, built without {', '.join(extras)}. To add it,",
+                          "install MISAKA from the repository instead (README: Install).")
+            self.state["sdk"] = "install MISAKA from the repository (README: Install)"
+            return
+        command = update.adding_extras(install, extras)
+        if command is None:
+            hint = f"pip install 'misaka[{','.join(extras)}] @ git+{update.REPO_URL}'"
+            ui.print_info("Install it with:", f"  {hint}")
+            self.state["sdk"] = hint
+            return
+        if install.installer in ("uv tool", "pipx"):
+            ui.print_info("It cannot be installed while setup is running. Once setup is done, run this and",
+                          "start MISAKA again (signing in below works without it):", f"  {shlex.join(command)}")
+            self.state["sdk"] = shlex.join(command)
+            return
+        if not prompt_yes_no("Install it now?", True) or not self._run(command):
+            self.state["sdk"] = shlex.join(command)
+
+    @staticmethod
+    def _run(command: list[str]) -> bool:
+        """Run ``command`` in this terminal, its output shown as it goes; whether it worked."""
+        ui.print_info(color_dim(shlex.join(command)))
+        try:
+            result = subprocess.run(command, check=False)
+        except OSError as error:
+            ui.print_error(f"{command[0]} could not start: {error}")
+            return False
+        (ui.print_success if result.returncode == 0 else ui.print_error)(
+            "done" if result.returncode == 0 else f"{command[0]} exited with {result.returncode}")
+        return result.returncode == 0
+
+
+def color_dim(text: str) -> str:
+    return ui.color(text, ui.DIM)
+
+
+def has_credential(provider: str) -> bool:
+    """Whether ``provider`` has a credential, read as a new process reads it. A runtime made
+    before a sign-in keeps the status it read then, and would call a stored key missing."""
+    from misaka.cli.auth_overview import create_auth_runtime
+    runtime = asyncio.run(create_auth_runtime(read_only=True, refresh=True)).runtime
+    status = runtime.getProviderAuthStatus(provider)
+    return bool(status.configured or status.source)
+
+
+def configured_anywhere() -> bool:
+    """Whether the default provider has a credential: the test bare ``misaka`` runs to decide
+    whether to open the wizard first."""
+    try:
+        from misaka.config import current_config
+        return has_credential(current_config()["provider"])
+    except Exception:  # noqa: BLE001 - an unreadable store is not a reason to force the wizard
+        return True
+
+
+def model_saved() -> bool:
+    """Whether the model section has saved a default before. A credential missing then is that
+    section left unfinished (a failed sign-in, a skipped key), not a first run of the wizard."""
+    from misaka.config.product import settings_document
+    try:
+        return bool(settings_document().get("defaultProvider"))
+    except Exception:  # noqa: BLE001 - an unreadable file falls back to the whole wizard
+        return False
+
+
+def run(section: str | None = None) -> int:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("misaka setup needs a terminal. Without one, configure by hand:\n"
+              "  export ANTHROPIC_API_KEY=...   (or another provider's key)\n"
+              "  misaka create 10032           (a Sister)\n"
+              "  misaka init                   (inside the project folder)\n"
+              "  misaka auth check", file=sys.stderr)
+        return 1
+    wizard = Wizard()
+    steps = [("Environment", wizard.environment), ("Model & Provider", wizard.model), ("Roles", wizard.sisters),
+             ("Skills", wizard.skills), ("Documents", wizard.documents), ("Web search", wizard.web),
+             ("Research", wizard.research), ("Project", wizard.project)]
+    by_key = dict(zip(SECTIONS, steps, strict=True))
+    try:
+        if section:
+            if section not in by_key:
+                ui.print_error(f"Unknown section {section!r}; one of: {', '.join(SECTIONS)}")
+                return 2
+            label, action = by_key[section]
+            ui.print_logo(f"Setup · {label}")
+            ui.run_steps([(label, action)])
+            if section == "model":
+                ui.print_info("")
+                wizard._model_check()   # "done." stood under a sign-in that had just failed
+            else:
+                ui.print_success(f"{label} done.")
+            return 0
+        ui.print_logo("Setup", "Configure this install: model, roles, documents, web, project.",
+                      "Enter keeps a current value · ← previous section · Esc or Ctrl+C exits.")
+        if configured_anywhere():
+            ui.print_info("", "A provider is already configured: each prompt shows the current value.")
+        ui.run_steps(steps)
+        wizard.summary()
+        return 0
+    except SetupCancelled:
+        print()
+        ui.print_info("Setup cancelled. Sections already completed were saved; the rest were not changed.")
+        return 130

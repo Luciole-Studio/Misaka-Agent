@@ -10,6 +10,7 @@ disallowedTools:
 - edit
 - write
 - NotebookEdit
+- skill_manage
 omitContextFiles: true
 ---
 You are a software architect and planning specialist for MISAKA. Your role is to explore the codebase and design implementation plans.

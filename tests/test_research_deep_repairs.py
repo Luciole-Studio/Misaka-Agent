@@ -34,7 +34,7 @@ def test_stale_driver_epoch_must_not_accept_phase_commands(state, takeover, writ
     old = runs.get(con, run["id"])
     if takeover:
         con.execute(
-            "UPDATE research_runs SET driver_expires=0 WHERE id=?", (run["id"],)
+            "UPDATE graphs SET lease_expires=0 WHERE id=?", (run["id"],)
         )
         assert runs.acquire_driver(con, run["id"], "new")
         with pytest.raises(ValueError):
@@ -90,10 +90,10 @@ async def test_approval_wait_checks_ownership_and_preserves_new_owner_state(
             await asyncio.sleep(0.002)
         if replacement:
             con.execute(
-                "UPDATE research_runs SET driver_lock=? WHERE id=?", ("new", run["id"])
+                "UPDATE graphs SET lease_token=? WHERE id=?", ("new", run["id"])
             )
             con.execute(
-                "UPDATE research_branches SET runner_key='new-node',status='executing' WHERE id=?",
+                "UPDATE research_execution SET runner_key='new-node',status='executing' WHERE id=?",
                 (root["id"],),
             )
             await asyncio.sleep(0.04)
@@ -132,7 +132,7 @@ async def test_cancelled_old_approval_wait_cannot_overwrite_successor(
     )
     await asyncio.sleep(0.01)
     con.execute(
-        "UPDATE research_branches SET runner_key='new',status='executing' WHERE id=?",
+        "UPDATE research_execution SET runner_key='new',status='executing' WHERE id=?",
         (root["id"],),
     )
     waiter.cancel()

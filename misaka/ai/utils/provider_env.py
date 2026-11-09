@@ -1,32 +1,21 @@
-"""Provider-scoped environment lookup, translated from pi's ``utils/provider-env.ts``.
+"""Translated from pi's ``packages/ai/src/utils/provider-env.ts`` (v1.1.0).
 
-The order is the point: a value the caller scoped to this request wins over the ambient
-environment, so a per-request ``env`` override is not silently ignored on a machine that
-happens to export the same variable.
-
-Upstream's third source -- reading ``/proc/self/environ`` because Bun compiled binaries
-can hand back an empty ``process.env`` inside Linux sandboxes -- has no counterpart here.
-It is a workaround for a Bun bug, not a behaviour.
+MISAKA fork: no ``getBunSandboxEnvValue``; it reads ``/proc/self/environ`` because Bun compiled binaries can hand back
+an empty ``process.env`` inside Linux sandboxes (https://github.com/oven-sh/bun/issues/27802), a workaround for a Bun
+bug with no counterpart here.
 """
 
 from __future__ import annotations
 
 import os
 
-from misaka.ai.auth.types import ProviderEnv
+from misaka.ai.types import ProviderEnv
 
 
-def get_provider_env_value(name: str, env: ProviderEnv | None = None) -> str | None:
-    """The scoped override, else the process environment, else ``None``.
-
-    An empty string falls through rather than counting as a value, matching upstream's
-    ``||`` chain: a variable exported as empty is not configuration.
-    """
-    if env:
-        scoped = env.get(name)
-        if scoped:
-            return scoped
-    return os.environ.get(name) or None
+def getProviderEnvValue(name: str, env: ProviderEnv | None = None) -> str | None:
+    """Resolve a provider env value from scoped overrides, normal process.env, then
+    the duplicated Bun sandbox fallback for direct pi-ai consumers."""
+    return (env.get(name) if env else None) or os.environ.get(name) or None
 
 
-__all__ = ["get_provider_env_value"]
+__all__ = ["getProviderEnvValue"]

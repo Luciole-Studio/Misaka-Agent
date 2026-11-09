@@ -23,6 +23,7 @@ from misaka.core.platform import processes
 from misaka.core.platform import tasks as task_store
 from misaka.core.research import runs
 from misaka.utils import loop_watchdog
+from misaka.utils.prompt_file import removePromptFile, writePromptToTempFile
 
 
 class ProcessSpawner:
@@ -202,6 +203,12 @@ class PaneRunner:
 
 CARD_ARGV = [sys.executable, "-m", "misaka.cli.research_node", "--run-card"]   # + the card's id
 
+
+class CardNotStarted(Exception):
+    """A card's child process failed to start ``FAILURE_LIMIT`` times in a row. Deliberately
+    not an ``OSError``: the drive loop retries those, and this one ends the node with its cause."""
+
+
 class HeadlessRunner:
     """No panel: every ready card becomes a child process of its own, so a node's batch runs at
     the width the run asked for and the drive loop keeps watching stop and budget while the
@@ -221,6 +228,8 @@ class HeadlessRunner:
         self.con, self.cfg = con, cfg
         self.flying = {}                     # task_id -> Popen: the cards this node started
         self._processes = ProcessSpawner()   # one place decides how a child of ours starts and dies
+        self._prompt_files = {}              # task_id -> the message file a flying continuation was given
+        self._spawn_failures = {}            # task_id -> continuations in a row whose child did not start
 
     async def launch_ready(self, *, task_ids, **_kwargs):
         from misaka.core.network import dispatch
@@ -269,7 +278,29 @@ class HeadlessRunner:
         self._reap()
         if task_id in self.flying:
             return
-        self.flying[task_id] = self._processes.spawn([*CARD_ARGV, task_id, "--say", say], cwd=None, new_session=True)
+        # The message goes in a file (pi's subagent prompt file): a review brief carries the
+        # node's whole evidence ledger, far past what a command line holds (issue #13).
+        written = writePromptToTempFile(task_id, say)
+        try:
+            proc = self._processes.spawn([*CARD_ARGV, task_id, "--say-file", written[1]],
+                                         cwd=None, new_session=True)
+        except OSError as error:
+            removePromptFile(written)
+            # Hermes' dispatcher counts a worker that will not start against the card's failure
+            # limit and parks it there (kanban_db_dispatch, outcome "spawn_failed"); the drive
+            # loop's own retry would otherwise ask again every poll, forever.
+            failures = self._spawn_failures.get(task_id, 0) + 1
+            self._spawn_failures[task_id] = failures
+            if failures >= task_store.FAILURE_LIMIT:
+                raise CardNotStarted(f"Card {task_id}'s process could not be started {failures} times "
+                                     f"in a row: {error}") from error
+            raise
+        except BaseException:
+            removePromptFile(written)
+            raise
+        self._spawn_failures.pop(task_id, None)
+        self.flying[task_id] = proc
+        self._prompt_files[task_id] = written
 
     async def stop(self, task_id, **_kwargs):
         """A halt: this card's process and everything it started go now. The claim it dies
@@ -278,6 +309,7 @@ class HeadlessRunner:
         proc = self.flying.pop(task_id, None)
         if proc is not None:
             await asyncio.to_thread(self._processes.stop, proc)
+        removePromptFile(self._prompt_files.pop(task_id, None))
 
     async def pending(self, task_ids):
         """Database acceptance precedes Git/PageIndex; retain and reap the whole worker."""
@@ -302,6 +334,7 @@ class HeadlessRunner:
                 proc.wait()                  # active work has no elapsed-time kill switch
             self.flying.pop(task_id, None)
             self._processes.stop(proc)
+            removePromptFile(self._prompt_files.pop(task_id, None))
 
     def _slots_taken(self, rows):
         """The admission slots a new child would have to fit into: every claimed card on the
@@ -325,6 +358,7 @@ class HeadlessRunner:
         for task_id, proc in list(self.flying.items()):
             if proc.poll() is not None:      # poll() reaps: the pid is free before reconcile looks
                 self.flying.pop(task_id)
+                removePromptFile(self._prompt_files.pop(task_id, None))
 
 
 def _run(label, routine, *, row_id, runner_key):
@@ -346,16 +380,16 @@ def _run(label, routine, *, row_id, runner_key):
         text = f"{type(error).__name__}: {error}"
         print(f"{label} failed: {text}", flush=True)
         try:
-            con.execute('UPDATE research_branches SET last_error=COALESCE(last_error,?) WHERE id=? AND runner_key=?',
+            con.execute('UPDATE research_execution SET last_error=COALESCE(last_error,?) WHERE id=? AND runner_key=?',
                         (text, row_id, runner_key))
         except Exception:  # noqa: BLE001 - keep the original traceback even when recording it also fails
             traceback.print_exc()
 
     try:
         runs.init(con)
-        if not runs.claim_runner(con, "research_branches", row_id, runner_key):
+        if not runs.claim_runner(con, "research_execution", row_id, runner_key):
             print(f"{label}: superseded execution: "
-                  f"{runs.note_claim_failure(con, 'research_branches', row_id, runner_key)}", flush=True)
+                  f"{runs.note_claim_failure(con, 'research_execution', row_id, runner_key)}", flush=True)
             return 1
         cfg = current_config()
         runner = HeadlessRunner(con, cfg)
@@ -426,9 +460,9 @@ def run_interactive(run_id, node_id, *, runner_key):
     con = task_store.connect(os.path.expanduser(CFG["db"]))
     try:
         runs.init(con)
-        if not runs.claim_runner(con, "research_branches", node_id, runner_key):
+        if not runs.claim_runner(con, "research_execution", node_id, runner_key):
             print(f"node {node_id}: superseded execution: "
-                  f"{runs.note_claim_failure(con, 'research_branches', node_id, runner_key)}", flush=True)
+                  f"{runs.note_claim_failure(con, 'research_execution', node_id, runner_key)}", flush=True)
             return 1
         run, node = runs.get(con, run_id), runs.node(con, node_id)
     finally:
@@ -439,9 +473,9 @@ def run_interactive(run_id, node_id, *, runner_key):
 
     # Her Sisters write to her (their card names her session): she reads the mail pinned to her,
     # and leaves the card notifications to the root's window, which reads them for the run (B123).
-    flags, assembly, env = role_session_setup(profile, run["workspace"], research_context=True,
+    flags, assembly, env = role_session_setup(profile, run["workspace"], workflow_context=True,
                                               receive_messages=True, receive_notifications=False,
-                                              overrides=runs.session_overrides(run))
+                                              overrides=runs.session_overrides(run), node=node["id"])
     flags += ["--session-dir", planner._lo_session(run, node)]
     if node["session_file"] and os.path.exists(node["session_file"]):
         flags += ["--session", node["session_file"]]    # a resumed node goes on in its own conversation
@@ -454,7 +488,6 @@ def run_interactive(run_id, node_id, *, runner_key):
                            "execution. Her Sisters open beside this window."),
         **env,
         "MISAKA_INPUT_HISTORY": str(home.path("input_history") / "last-order.json"),
-        "MISAKA_CODING_AGENT": "true",
         # Her tools' spending counts against the run, as a card's counts against its card.
         "MISAKA_USAGE_DB": str(cfg["db"]), "MISAKA_USAGE_TASK_ID": run_id,
         "MISAKA_USAGE_GENERATION": "1", "MISAKA_USAGE_TOKEN_CAP": ""})
@@ -465,7 +498,7 @@ def run_interactive(run_id, node_id, *, runner_key):
         traceback.print_exc()
         con = task_store.connect(os.path.expanduser(CFG["db"]))
         try:
-            con.execute('UPDATE research_branches SET last_error=COALESCE(last_error,?) WHERE id=? AND runner_key=?',
+            con.execute('UPDATE research_execution SET last_error=COALESCE(last_error,?) WHERE id=? AND runner_key=?',
                         (f"{type(error).__name__}: {error}", node_id, runner_key))
         finally:
             con.close()

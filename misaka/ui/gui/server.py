@@ -194,7 +194,7 @@ class Bridge:
             raise ValueError("会话文件不存在，请刷新历史列表")
         if path in self._live_pane_session_paths():
             raise ValueError("该会话正在终端窗格中运行；请先在那个窗格中继续，或关闭它")
-        from misaka.core.session_manager import read_session_header
+        from misaka.core.session_manager import readSessionHeader as read_session_header
         header = read_session_header(path)
         if not header.get("cwd") or os.path.normcase(workspace_path(header["cwd"])) != os.path.normcase(workspace):
             raise ValueError("该会话属于其他项目，请先切换到它的项目文件夹")
@@ -270,10 +270,10 @@ class Bridge:
         """
         from misaka.core.session_manager import (
             _parse_jsonl_entries,
-            build_context_entries,
-            session_entry_to_context_messages,
+            buildContextEntries as build_context_entries,
+            sessionEntryToContextMessages as session_entry_to_context_messages,
         )
-        from misaka.modes.jsonl import to_jsonable
+        from misaka.modes.json_event import to_jsonable
         path = os.path.abspath(required_text(data, "path", 1024))
         if not path.endswith(".jsonl") or not Path(path).is_file():
             raise ValueError("会话文件不存在")
@@ -487,8 +487,8 @@ class Bridge:
             import asyncio
             from misaka.core.session_catalog import owner_record, _object
             from misaka.core.session_control import request
-            from misaka.core.session_manager import session_entry_to_context_messages
-            from misaka.modes.jsonl import to_jsonable
+            from misaka.core.session_manager import sessionEntryToContextMessages as session_entry_to_context_messages
+            from misaka.modes.json_event import to_jsonable
             cwd = workspace_path(data.get("workspace", self.workspace))
             listing = self.request("cards.list", {"workspace": cwd})["sessions"]
             entry = next((s for s in listing if s["id"] == data.get("session_id")), None)

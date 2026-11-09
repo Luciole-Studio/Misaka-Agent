@@ -16,13 +16,10 @@ from types import SimpleNamespace
 
 import httpx
 
-from misaka.ai.utils.abort import race_with_abort_signal
-from misaka.ai.utils.oauth.device_code import poll_oauth_device_code_flow
-from misaka.ai.utils.oauth.types import (
-    OAuthAuthInfo,
-    OAuthCredentials,
-    OAuthDeviceCodeInfo,
-)
+from misaka.ai.auth.oauth.device_code import pollOAuthDeviceCodeFlow
+from misaka.ai.auth.types import OAuthCredentials
+from misaka.ai.compat.extension_oauth_types import OAuthAuthInfo, OAuthDeviceCodeInfo
+from misaka.utils.abort import raceWithAbortSignal
 
 from ..native import nous_auth as policy
 from . import catalog, llm
@@ -44,7 +41,7 @@ def credential_state(credential=None):
         credential = _ACCOUNT.get()
     if credential is None:
         registry = llm._REGISTRY.get()
-        credential = registry.authStorage.get('nous') if registry and hasattr(registry, 'authStorage') else None
+        credential = llm._stored(registry, 'nous') if registry and hasattr(registry, 'authStorage') else None
     raw = credential.model_dump() if hasattr(credential, 'model_dump') else dict(credential or {})
     return {**raw, 'access_token': raw.get('access', ''), 'refresh_token': raw.get('refresh', ''),
             'expires_at': datetime.fromtimestamp(raw['expires'] / 1000, UTC).isoformat() if raw.get('expires') else None,
@@ -63,7 +60,7 @@ def _credentials(state):
 
 async def _post(path, state, signal, **kwargs):
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=False, verify=policy._resolve_verify(auth_state=state)) as client:
-        return await race_with_abort_signal(client.post(state['portal_base_url'].rstrip('/') + path, **kwargs), signal)
+        return await raceWithAbortSignal(client.post(state['portal_base_url'].rstrip('/') + path, **kwargs), signal)
 
 
 async def refresh_token(credential, signal=None):
@@ -140,8 +137,8 @@ async def login(callbacks):
             return {'status': 'slow_down', 'intervalSeconds': interval}
         return {'status': 'failed', 'message': f"{data.get('error')}: {data.get('error_description', '')}"}
 
-    token = await poll_oauth_device_code_flow(poll=poll, intervalSeconds=1,
-        expiresInSeconds=device['expires_in'], signal=signal)
+    token = await pollOAuthDeviceCodeFlow({'poll': poll, 'intervalSeconds': 1,
+        'expiresInSeconds': device['expires_in'], 'signal': signal})
     policy._apply_nous_refreshed_tokens(state, token, token.get('refresh_token') or '',
         inference_base_url=policy._healed_nous_inference_url(token))
     return _credentials(state)

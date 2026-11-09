@@ -11,7 +11,7 @@ import pytest
 from misaka.core.agent_session import AgentSession
 from misaka.core.compaction.compaction import CompactionResult
 from misaka.core.session_manager import SessionManager
-from misaka.core.system_prompt import normalize_build_system_prompt_options
+from misaka.core.system_prompt import normalizeBuildSystemPromptOptions
 
 
 def _user(text):
@@ -31,9 +31,9 @@ def _session(manager=None):
     )
     settings = {"enabled": True, "reserveTokens": 100, "keepRecentTokens": 1}
     session.settingsManager = SimpleNamespace(getCompactionSettings=lambda model=None: settings)
-    session._baseSystemPromptOptions = normalize_build_system_prompt_options({"cwd": "/tmp", "customPrompt": "fixture"})
+    session._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({"cwd": "/tmp", "customPrompt": "fixture"})
     session._runSystemPromptOptions = None
-    session._extensionRunner = SimpleNamespace(has_handlers=lambda _: False, emit=AsyncMock())
+    session._extensionRunner = SimpleNamespace(hasHandlers=lambda _: False, emit=AsyncMock())
     session.moments = SimpleNamespace(session_context_prepare=AsyncMock(),
                                       session_compact=AsyncMock(),
                                       session_compact_failed=AsyncMock())
@@ -54,14 +54,14 @@ def test_appended_bookkeeping_is_preserved_in_archive_and_branch(tmp_path, engin
     session = _session(manager)
     manager.appendCustomMessageEntry("fixture", "persisted context", False)
     session.agent.state.messages = manager.buildSessionContext().messages
-    result, source = _result(session, engine), session._compaction_source()
+    result, source = _result(session, engine), session._compactionSource()
     previous_messages = copy.deepcopy(manager.buildSessionContext().messages)
     appended = [manager.appendCustomEntry("progress", {"state": "waiting"}),
                 manager.appendSessionInfo("renamed during compaction"),
                 manager.appendLabelChange(manager.getLeafId(), "checkpoint")]
     assert manager.buildSessionContext().messages == previous_messages
 
-    saved = session._publish_compaction(result, engine, source)
+    saved = session._publishCompaction(result, engine, source)
 
     assert saved["parentId"] == appended[-1]
     assert [entry["id"] for entry in manager.getBranch()][-4:] == [*appended, saved["id"]]
@@ -120,6 +120,18 @@ def _change(session, kind):
         raise AssertionError(kind)
 
 
+def test_a_cache_warm_during_a_slow_summary_does_not_void_it():
+    """pi 1.3.0's cache warmer appends a ``usage`` entry on its interval; a summary that outlasts it
+    used to be thrown away as "branch, entries" changed (R10, 2026-10-26)."""
+    session = _session()
+    manager = session.sessionManager
+    result, source = _result(session), session._compactionSource()
+    warmed = manager.appendUsage("cache_warm", "fixture", "fixture",
+                                 {"input": 1, "output": 1, "cacheRead": 10, "cacheWrite": 0, "totalTokens": 12})
+    saved = session._publishCompaction(result, False, source)
+    assert saved["parentId"] == warmed["id"]
+
+
 @pytest.mark.parametrize("kind", [
     "message", "custom message", "thinking", "model entry", "model", "model in place", "settings",
     "branch", "branch metadata", "branch away and back", "new session", "fork", "session file",
@@ -127,22 +139,22 @@ def _change(session, kind):
 ])
 def test_real_changes_never_publish_a_stale_summary(kind):
     session = _session()
-    result, source = _result(session), session._compaction_source()
+    result, source = _result(session), session._compactionSource()
     _change(session, kind)
     entries = copy.deepcopy(session.sessionManager.getEntries())
     messages = copy.deepcopy(session.messages)
     with pytest.raises(RuntimeError, match="Session, branch, model or settings changed during compaction"):
-        session._publish_compaction(result, False, source)
+        session._publishCompaction(result, False, source)
     assert session.sessionManager.getEntries() == entries
     assert session.messages == messages
 
 
 def test_error_identifies_changed_fields():
     session = _session()
-    result, source = _result(session), session._compaction_source()
+    result, source = _result(session), session._compactionSource()
     _change(session, "settings")
     with pytest.raises(RuntimeError, match=r"changed during compaction \(settings\)"):
-        session._publish_compaction(result, False, source)
+        session._publishCompaction(result, False, source)
 
 
 @pytest.mark.parametrize("mode", ["manual", "threshold", "overflow"])
@@ -176,7 +188,7 @@ async def test_both_await_boundaries_use_the_same_guard(mode, stage, metadata):
             with pytest.raises(RuntimeError, match="changed during compaction"):
                 await session.compact()
     else:
-        await session._run_auto_compaction(mode, mode == "overflow")
+        await session._runAutoCompaction(mode, mode == "overflow")
 
     entries = session.sessionManager.getEntries()
     compacted = [entry for entry in entries if entry["type"] == "compaction"]
@@ -197,10 +209,10 @@ async def test_native_preparation_and_summary_hooks_tolerate_bookkeeping(monkeyp
     session = _session()
     result = _result(session)
     session.moments.session_context_prepare.return_value = None
-    session._get_compaction_request_auth = AsyncMock(return_value={})
-    session.agent.streamFn = None
-    session._summarization_retry_policy = lambda: None
-    session._summarization_retry_callbacks = lambda _: None
+    session._getSummarizationRequestAuth = AsyncMock(return_value={"model": session.model, "thinkingLevel": "off"})
+    session.agent.streamFunction = None
+    session._summarizationRetryPolicy = lambda: None
+    session._summarizationRetryCallbacks = lambda _: None
 
     async def hook(_event):
         session.sessionManager.appendCustomEntry("hook-progress", {"phase": "summary"})
@@ -212,11 +224,11 @@ async def test_native_preparation_and_summary_hooks_tolerate_bookkeeping(monkeyp
 
     session.moments.session_before_compact = AsyncMock(side_effect=hook)
     summary = AsyncMock(side_effect=summarize)
-    monkeypatch.setattr("misaka.core.agent_session.run_compaction", summary)
+    monkeypatch.setattr("misaka.core.agent_session.compact", summary)
     if mode == "manual":
         await session.compact()
     else:
-        await session._run_auto_compaction(mode, False)
+        await session._runAutoCompaction(mode, False)
 
     entry = session.sessionManager.getLeafEntry()
     assert entry["type"] == "compaction"
@@ -228,7 +240,7 @@ async def test_native_preparation_and_summary_hooks_tolerate_bookkeeping(monkeyp
 def test_failed_write_keeps_the_metadata_and_old_live_view(monkeypatch):
     session = _session()
     manager = session.sessionManager
-    result, source = _result(session), session._compaction_source()
+    result, source = _result(session), session._compactionSource()
     manager.appendCustomEntry("progress", {"phase": "execute"})
     entries, messages = copy.deepcopy(manager.getEntries()), copy.deepcopy(session.messages)
 
@@ -237,6 +249,6 @@ def test_failed_write_keeps_the_metadata_and_old_live_view(monkeypatch):
 
     monkeypatch.setattr(manager, "_persist", fail)
     with pytest.raises(OSError, match="fixture disk full"):
-        session._publish_compaction(result, False, source)
+        session._publishCompaction(result, False, source)
     assert manager.getEntries() == entries
     assert session.messages == messages

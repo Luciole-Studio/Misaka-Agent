@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import sys
+from typing import Any
 
-from misaka.core.auth_guidance import format_no_models_available_message
+from misaka.ai.auth.types import AuthOperationOptions
+from misaka.core.auth_guidance import formatNoModelsAvailableMessage
 from misaka.ui.tui import fuzzyFilter
 
 _YELLOW = "\x1b[33m"
 _RESET = "\x1b[0m"
 
 
-def format_token_count(count: int) -> str:
+def formatTokenCount(count: int) -> str:
     if count >= 1_000_000:
         millions = count / 1_000_000
         return f"{millions:.1f}M" if millions % 1 else f"{int(millions)}M"
@@ -21,17 +23,18 @@ def format_token_count(count: int) -> str:
     return str(count)
 
 
-async def list_models(
-    model_registry: object,
+async def listModels(
+    model_runtime: Any,
     search_pattern: str | None = None,
+    signal: Any = None,
 ) -> None:
-    load_error = getattr(model_registry, "getError", lambda: None)()
+    load_error = model_runtime.getError()
     if load_error:
         print(f"{_YELLOW}Warning: errors loading models.json:\n{load_error}{_RESET}", file=sys.stderr)
 
-    models = list(model_registry.getAvailable())
+    models = list(await model_runtime.getAvailable(None, AuthOperationOptions(signal=signal)))
     if not models:
-        print(format_no_models_available_message())
+        print(formatNoModelsAvailableMessage())
         return
 
     filtered_models = (
@@ -46,8 +49,8 @@ async def list_models(
         {
             "provider": model.provider,
             "model": model.id,
-            "context": format_token_count(model.contextWindow),
-            "maxOut": format_token_count(model.maxTokens),
+            "context": formatTokenCount(model.contextWindow),
+            "maxOut": formatTokenCount(model.maxTokens),
             "thinking": "yes" if model.reasoning else "no",
             "images": "yes" if "image" in model.input else "no",
         }
@@ -91,6 +94,5 @@ async def list_models(
             )
         )
 
-listModels = list_models
 
 __all__ = ["listModels"]

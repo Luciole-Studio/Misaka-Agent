@@ -11,10 +11,10 @@ def Finding(rule, severity, message):
 
 
 def lint_content(content, skill_dir=None):
-    from misaka.utils.frontmatter import FrontmatterError, parse_frontmatter
+    from misaka.utils.frontmatter import FrontmatterError, parseFrontmatter
 
     try:
-        fm = parse_frontmatter(content).frontmatter or {}
+        fm = parseFrontmatter(content).frontmatter or {}
     except FrontmatterError as error:
         return [
             Finding(

@@ -1,33 +1,26 @@
-"""Process-wide fallback stream function for Agent and the low-level loops."""
+"""Translated from pi's ``packages/agent/src/stream-fn.ts`` (v1.1.0)."""
 
 from __future__ import annotations
 
 from misaka.agent.types import StreamFn
-from misaka.ai.stream import stream_simple
 
-_default_stream_fn: StreamFn | None = stream_simple
-
-
-def set_default_stream_fn(stream_fn: StreamFn | None) -> None:
-    global _default_stream_fn
-    _default_stream_fn = stream_fn
+_defaultStreamFn: StreamFn | None = None
 
 
-def get_default_stream_fn() -> StreamFn:
-    if _default_stream_fn is None:
-        raise RuntimeError(
-            "No default stream function configured. Pass streamFn explicitly or call "
-            "set_default_stream_fn()."
-        )
-    return _default_stream_fn
+def setDefaultStreamFn(streamFn: StreamFn | None) -> None:
+    """Configure the fallback used by Agent and low-level loops when callers omit streamFn.
+
+    Hosts that provide a default model runtime can install its stream function here
+    without making pi-agent-core depend on a provider catalog or compatibility layer.
+    """
+    global _defaultStreamFn
+    _defaultStreamFn = streamFn
 
 
-setDefaultStreamFn = set_default_stream_fn
-getDefaultStreamFn = get_default_stream_fn
+def getDefaultStreamFn() -> StreamFn:
+    if not _defaultStreamFn:
+        raise RuntimeError("No default stream function configured. Pass streamFn explicitly or call setDefaultStreamFn().")
+    return _defaultStreamFn
 
-__all__ = [
-    "getDefaultStreamFn",
-    "get_default_stream_fn",
-    "setDefaultStreamFn",
-    "set_default_stream_fn",
-]
+
+__all__ = ["getDefaultStreamFn", "setDefaultStreamFn"]

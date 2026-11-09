@@ -1,19 +1,12 @@
-"""Assistant-level retry classification and policy, translated from pi's ``utils/retry.ts``.
+"""Translated from pi's ``packages/ai/src/utils/retry.ts`` (v1.3.0).
 
-This is a *text* classifier over a failed ``AssistantMessage``: providers report transient
-trouble as prose ("terminated", "socket hang up", "Provider returned error"), and by the
-time a stream has failed the HTTP status is long gone. ``ai/utils/provider_retry.py`` is
-the other half -- an SDK-level policy reading an exception's status and headers -- and the
-two do not replace each other.
-
-The exclusion table is the part worth being loud about: a provider that is out of quota
-answers with a 429 whose body says ``insufficient_quota``. Matching only the retry table
-made that look like throttling, so an exhausted account paid three more doomed requests
-and ~14s of backoff before failing. Excluded patterns are checked first and win.
+MISAKA fork: a few more patterns (marked where they stand), and callbacks are called the way JavaScript calls them:
+the optional trailing ``finalError`` only reaches a callback that accepts it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import re
 from collections.abc import Awaitable, Callable
@@ -21,18 +14,17 @@ from dataclasses import dataclass
 from typing import Any
 
 from misaka.ai.types import AssistantMessage
-from misaka.ai.utils.abort import sleep
+from misaka.utils.js import addAbortListener, jsIsSafeInteger
 from misaka.utils.values import maybe_await, signal_aborted
 
 
-def _build_provider_error_pattern(patterns: tuple[str, ...]) -> re.Pattern[str]:
-    # pi builds `new RegExp(patterns.join("|"), "i")` and calls `.test`; the Python
-    # equivalent of `test` on an unanchored pattern is `search`, not `match`.
+def _buildProviderErrorPattern(patterns: list[str]) -> re.Pattern[str]:
+    # `new RegExp(patterns.join("|"), "i")`; `.test` on an unanchored pattern is `search`.
     return re.compile("|".join(patterns), re.IGNORECASE)
 
 
-NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = _build_provider_error_pattern(
-    (
+_NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = _buildProviderErrorPattern(
+    [
         # OpenCode Go/free-tier limits returned as 429 JSON error types by OpenCode's
         # Zen API. These are subscription/account limits, not transient throttles.
         "GoUsageLimitError",
@@ -47,17 +39,23 @@ NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = _build_provider_error_pattern(
         "out of budget",
         "quota exceeded",
         "billing",
-        # MISAKA fork: a research run's own token cap. Its message carries numbers ("has 429,000
+        # Sign in with ChatGPT: the subscription's shared usage limit, which resets
+        # after hours rather than seconds.
+        "subscription_sharing_usage_limit_exceeded",
+        # MISAKA fork: a workflow run's own token cap. Its message carries numbers ("has 429,000
         # of its 5,000,000 left") that the status codes below would otherwise read as a 429.
         "token_cap reached",
-    )
+    ]
 )
 
-RETRYABLE_PROVIDER_ERROR_PATTERN = _build_provider_error_pattern(
-    (
+_RETRYABLE_PROVIDER_ERROR_PATTERN = _buildProviderErrorPattern(
+    [
         # Generic provider load, HTTP status, and server-side transient failures.
         "overloaded",
+        "server_busy",
+        "servers are currently busy",
         "currently experiencing high demand",
+        "model is at capacity",
         "rate.?limit",
         "too many requests",
         "429",
@@ -67,13 +65,18 @@ RETRYABLE_PROVIDER_ERROR_PATTERN = _build_provider_error_pattern(
         "504",
         "520",
         "524",
-        "service.?unavailable",
+        # Also matches "The service is temporarily unavailable" (#10965).
+        "service.?(?:is.?)?(?:temporarily.?)?unavailable",
         "server.?error",
         "internal.?error",
         # Wrapper/provider text for transient upstream failures, including OpenRouter
-        # "Provider returned error" responses (#2264).
-        "provider.?returned.?error",
+        # "Provider returned error" responses (#2264) and gateway wording such as
+        # "The upstream provider returned an error" (#10842).
+        "provider.?returned.?(?:an.?)?error",
         "exceeded request buffer limit while retrying upstream",
+        # Gateway failure relaying the upstream response stream, sent as an OpenAI
+        # Responses `response.failed` event without an error code (#10920).
+        "unable to forward upstream",
         # Network, proxy, and fetch transport failures. This includes OpenAI Codex
         # raw-fetch failures such as "upstream connect", "connection refused", and
         # "reset before headers" (#733), plus OpenRouter connection drops (#3317).
@@ -103,6 +106,9 @@ RETRYABLE_PROVIDER_ERROR_PATTERN = _build_provider_error_pattern(
         "stream ended before message_stop",
         "stream ended before a terminal response event",
         "http2 request did not get a response",
+        # Node ERR_HTTP2_STREAM_CANCEL: the HTTP/2 session died before the request was
+        # sent, e.g. after the Bedrock SDK's 5-minute session timeout (#10379).
+        "pending stream has been canceled",
         # MISAKA fork: a relaying gateway (sub2api) reports its own upstream drop as
         # `{"type":"stream_read_error","message":"upstream stream disconnected: unexpected
         # EOF"}`, wording none of pi's entries cover; a Sister on it then sat idle on the
@@ -128,25 +134,28 @@ RETRYABLE_PROVIDER_ERROR_PATTERN = _build_provider_error_pattern(
         "please retry your request",
         # gRPC based providers (e.g. NVIDIA NIM)
         "ResourceExhausted",
-    )
+        # Sign in with ChatGPT: usage or user data temporarily unavailable. Usage
+        # failures can arrive mid-stream without an HTTP 503 in the message.
+        "subscription_sharing_usage_unavailable",
+        "subscription_sharing_user_unavailable",
+    ]
 )
 
 
 @dataclass(slots=True)
 class RetryPolicy:
-    """Bounded attempts with exponential backoff (``baseDelayMs * 2**(attempt-1)``).
-
-    Mirrors ``settings.retry`` (``enabled`` / ``maxRetries`` / ``baseDelayMs``), so the
-    classifier and the policy-driven loop stay together and stay reusable.
-    """
+    """Retry policy: bounded attempts with exponential backoff (`baseDelayMs * 2^(attempt-1)`).
+    `maxAgentDelayMs` caps each computed delay and defaults to 60 seconds.
+    Matches `settings.retry` (`enabled`, `maxRetries`, `baseDelayMs`, `maxAgentDelayMs`) in coding-agent; kept
+    here so the classifier and the policy-driven retry loop live together and stay reusable
+    by the SDK and other callers."""
 
     enabled: bool
-    #: Max retry attempts (0 = no retries). The initial call never counts as a retry.
+    # Max retry attempts (0 = no retries). The initial call never counts as a retry.
     maxRetries: int
-    #: Base delay in ms. Per-attempt delay is ``baseDelayMs * 2**(attempt-1)``.
+    # Base delay in ms. Per-attempt delay is `baseDelayMs * 2^(attempt-1)` before jitter.
     baseDelayMs: int
-    #: Cap on the per-attempt delay so long retry runs stay responsive during prolonged
-    #: transient outages (pi #8826). ``None`` means :data:`DEFAULT_MAX_AGENT_RETRY_DELAY_MS`.
+    # Optional cap for agent-level retry delays in ms. Defaults to 60 seconds.
     maxAgentDelayMs: int | None = None
 
 
@@ -154,30 +163,56 @@ DEFAULT_MAX_AGENT_RETRY_DELAY_MS = 60_000
 _MAX_SAFE_INTEGER = 2**53 - 1
 
 
-def retry_delay_ms(policy: RetryPolicy, attempt: int) -> int:
+def retryDelayMs(policy: Any, attempt: int) -> int:
     delay = policy.baseDelayMs * 2 ** max(0, attempt - 1)
-    # `Number.isSafeInteger` upstream: Python ints do not overflow, so the cap is explicit.
-    safe_delay = min(delay, _MAX_SAFE_INTEGER)
+    safeDelay = delay if jsIsSafeInteger(delay) else _MAX_SAFE_INTEGER
     return min(
-        safe_delay,
+        safeDelay,
         policy.maxAgentDelayMs if policy.maxAgentDelayMs is not None else DEFAULT_MAX_AGENT_RETRY_DELAY_MS,
     )
 
 
 @dataclass(slots=True)
 class RetryCallbacks:
-    """Optional lifecycle callbacks around assistant retry attempts."""
+    """Optional callbacks emitted by `retryAssistantCall` around each retry."""
 
+    # Emitted before the backoff sleep of each retry attempt (1-indexed).
     onRetryScheduled: Callable[[int, int, int, str], Awaitable[None] | None] | None = None
+    # Emitted after the backoff sleep, immediately before the retried call starts.
     onRetryAttemptStart: Callable[[], Awaitable[None] | None] | None = None
+    # Emitted once when the loop ends: success if a later call completed normally.
     onRetryFinished: (
-        Callable[[bool, int], Awaitable[None] | None]
-        | Callable[[bool, int, str | None], Awaitable[None] | None]
-        | None
+        Callable[[bool, int], Awaitable[None] | None] | Callable[[bool, int, str | None], Awaitable[None] | None] | None
     ) = None
 
 
+class _RetrySleepAbortError(Exception):
+    def __init__(self) -> None:
+        super().__init__("Aborted")
+
+
+async def _sleep(ms: float, signal: Any = None) -> None:
+    if signal_aborted(signal):
+        raise _RetrySleepAbortError()
+    loop = asyncio.get_running_loop()
+    done: asyncio.Future[None] = loop.create_future()
+    timeout = loop.call_later(max(0.0, ms) / 1000, lambda: None if done.done() else done.set_result(None))
+
+    def onAbort() -> None:
+        timeout.cancel()
+        if not done.done():
+            done.set_exception(_RetrySleepAbortError())
+
+    remove = addAbortListener(signal, onAbort) if signal is not None else (lambda: None)
+    try:
+        await done
+    finally:
+        timeout.cancel()
+        remove()
+
+
 async def _invoke_callback(callback: Callable[..., Any] | None, *args: Any) -> None:
+    """MISAKA fork: ``await callbacks?.x?.(...)``."""
     if callback is None:
         return
     await maybe_await(callback(*args))
@@ -187,131 +222,127 @@ async def _invoke_finished_callback(
     callback: Callable[..., Any] | None,
     success: bool,
     attempt: int,
-    final_error: str | None = None,
+    *finalError: str | None,
 ) -> None:
-    """Preserve JavaScript's optional trailing ``finalError`` callback argument."""
+    """MISAKA fork: ``callbacks?.onRetryFinished?.(success, attempt[, finalError])``. JavaScript passes the call's
+    arguments, drops those a callback does not declare, and reads a declared one left out as ``undefined``."""
     if callback is None:
         return
+    arguments = (success, attempt, *finalError)
     try:
-        parameters = inspect.signature(callback).parameters.values()
+        parameters = list(inspect.signature(callback).parameters.values())
     except (TypeError, ValueError):
-        result = callback(success, attempt, final_error)
+        result = callback(*arguments)
     else:
-        accepts_varargs = any(
-            parameter.kind == inspect.Parameter.VAR_POSITIONAL
-            for parameter in parameters
-        )
+        acceptsVarargs = any(parameter.kind == inspect.Parameter.VAR_POSITIONAL for parameter in parameters)
         positional = [
             parameter
             for parameter in parameters
-            if parameter.kind
-            in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            )
+            if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
         ]
-        result = (
-            callback(success, attempt, final_error)
-            if accepts_varargs or len(positional) >= 3
-            else callback(success, attempt)
-        )
+        if acceptsVarargs or (len(positional) >= 3 and finalError):
+            result = callback(*arguments)
+        elif len(positional) >= 3 and positional[2].default is inspect.Parameter.empty:
+            result = callback(success, attempt, None)
+        else:
+            result = callback(success, attempt)
     await maybe_await(result)
 
 
-async def retry_assistant_call(
+async def retryAssistantCall(
     produce: Callable[[], Awaitable[AssistantMessage]],
     policy: RetryPolicy | None,
-    signal: Any | None = None,
+    signal: Any | None,
     callbacks: RetryCallbacks | None = None,
 ) -> AssistantMessage:
-    """Run one assistant-producing call with bounded retry on transient errors.
+    """Run a single assistant-producing call with bounded retry on transient errors.
 
-    - A successful response returns immediately. Aborts are terminal and never retried.
-      An abort *during* the backoff sleep is normalized to an aborted ``AssistantMessage``
+    Behavior:
+    - A successful response is returned immediately. Aborts are terminal and never
+      retried, but reported as unsuccessful if they happen after a retry was scheduled.
+      Aborts during the backoff sleep are normalized to an aborted `AssistantMessage`
       too, so callers do not need to care when cancellation happened.
-    - A non-retryable error (per :func:`is_retryable_assistant_error`, quota/billing
-      exhaustion included) returns immediately so deterministic errors fail fast.
-    - Otherwise retries up to ``maxRetries`` times with exponential backoff.
+    - A non-retryable error (per `isRetryableAssistantError`, including quota/
+      billing exhaustion) is returned immediately so deterministic errors fail fast.
+    - Otherwise retries up to `maxRetries` times with exponential backoff, emitting
+      `onRetryScheduled` before each sleep, `onRetryAttemptStart` after each sleep before
+      the retried call starts, and `onRetryFinished` once at the end (whether the loop
+      ends in success, exhausted retries, or an aborted backoff).
 
-    With ``policy`` ``None`` or disabled this is equivalent to awaiting ``produce()``.
-
-    Optional callbacks mirror pi's retry lifecycle: scheduled before backoff, attempt-start
-    after backoff, and one finished notification once a scheduled retry loop terminates.
+    When `policy` is undefined or disabled, the first response is returned unchanged
+    (equivalent to calling `produce()` directly).
     """
-    max_attempts = policy.maxRetries if policy is not None and policy.enabled else 0
+    maxAttempts = policy.maxRetries if policy is not None and policy.enabled else 0
 
     attempt = 0
-    last_retry: tuple[int, str] | None = None
+    lastRetry: dict[str, Any] | None = None
     while True:
         response = await produce()
 
+        # Abort: terminal but not successful. Never retry an aborted message.
         if response.stopReason == "aborted":
-            if last_retry is not None:
-                await _invoke_finished_callback(
-                    callbacks.onRetryFinished if callbacks else None,
-                    False,
-                    last_retry[0],
-                )
+            if lastRetry is not None:
+                await _invoke_finished_callback(callbacks.onRetryFinished if callbacks else None, False, lastRetry["attempt"])
             return response
 
+        # Success: non-error, non-abort responses return as-is.
         if response.stopReason != "error":
-            if last_retry is not None:
-                await _invoke_finished_callback(
-                    callbacks.onRetryFinished if callbacks else None,
-                    True,
-                    last_retry[0],
-                )
+            if lastRetry is not None:
+                await _invoke_finished_callback(callbacks.onRetryFinished if callbacks else None, True, lastRetry["attempt"])
             return response
 
-        if attempt >= max_attempts or not is_retryable_assistant_error(response):
-            if last_retry is not None:
+        # Non-retryable, or budget exhausted: return the final error message.
+        if attempt >= maxAttempts or not isRetryableAssistantError(response):
+            if lastRetry is not None:
                 await _invoke_finished_callback(
-                    callbacks.onRetryFinished if callbacks else None,
-                    False,
-                    last_retry[0],
-                    response.errorMessage,
+                    callbacks.onRetryFinished if callbacks else None, False, lastRetry["attempt"], response.errorMessage
                 )
             return response
 
         attempt += 1
-        delay_ms = retry_delay_ms(policy, attempt) if policy is not None else 0
-        error_message = response.errorMessage or "Unknown error"
-        last_retry = (attempt, error_message)
+        lastRetry = {"attempt": attempt, "errorMessage": response.errorMessage or "Unknown error"}
+        delayMs = retryDelayMs(policy, attempt)
         await _invoke_callback(
-            callbacks.onRetryScheduled if callbacks else None,
-            attempt,
-            max_attempts,
-            delay_ms,
-            error_message,
+            callbacks.onRetryScheduled if callbacks else None, attempt, maxAttempts, delayMs, lastRetry["errorMessage"]
         )
 
+        # Normalize aborts during retry backoff to the same AssistantMessage shape as
+        # provider stream aborts, so callers do not need to care when cancellation happened.
         try:
-            await sleep(delay_ms, signal)
-        except RuntimeError:
-            # misaka's `abort.sleep` reports cancellation by raising
-            # RuntimeError("Request was aborted") where pi throws a private
-            # RetrySleepAbortError. Only a real abort is normalized to an aborted
-            # message; anything else propagates, matching pi's `throw error`.
+            await _sleep(delayMs, signal)
+        except Exception as error:
             await _invoke_finished_callback(
-                callbacks.onRetryFinished if callbacks else None,
-                False,
-                attempt,
-                error_message,
+                callbacks.onRetryFinished if callbacks else None, False, attempt, lastRetry["errorMessage"]
             )
-            if not signal_aborted(signal):
-                raise
-            return response.model_copy(update={"stopReason": "aborted", "errorMessage": None})
+            if isinstance(error, _RetrySleepAbortError):
+                # MISAKA fork: a pydantic copy cannot drop a field; `errorMessage` is cleared instead.
+                return response.model_copy(update={"stopReason": "aborted", "errorMessage": None})
+            raise
         await _invoke_callback(callbacks.onRetryAttemptStart if callbacks else None)
 
 
-def is_retryable_assistant_error(message: AssistantMessage) -> bool:
-    """Whether a failed assistant message looks like a transient provider/transport error.
+def isRetryableAssistantError(message: AssistantMessage) -> bool:
+    """Classifies whether a failed assistant message looks like a transient provider
+    or transport error, so callers can decide if the last assistant turn should be
+    restarted.
 
-    This is not a retry policy. Callers handle context overflow separately first, then
-    apply their own budget, backoff, and reporting before restarting the assistant turn.
+    This does not implement retry policy. Callers should first handle context
+    overflow separately, then apply their own retry budget, backoff, and reporting
+    before restarting the assistant turn.
     """
     if message.stopReason != "error" or not message.errorMessage:
         return False
-    if NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.search(message.errorMessage):
+    errorMessage = message.errorMessage
+    if _NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.search(errorMessage):
         return False
-    return bool(RETRYABLE_PROVIDER_ERROR_PATTERN.search(message.errorMessage))
+    return bool(_RETRYABLE_PROVIDER_ERROR_PATTERN.search(errorMessage))
+
+
+__all__ = [
+    "DEFAULT_MAX_AGENT_RETRY_DELAY_MS",
+    "RetryCallbacks",
+    "RetryPolicy",
+    "isRetryableAssistantError",
+    "retryAssistantCall",
+    "retryDelayMs",
+]

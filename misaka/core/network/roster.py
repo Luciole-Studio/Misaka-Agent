@@ -16,21 +16,23 @@ CUSTOM_CHOICE = "Custom…"
 PIN_EXAMPLE = "anthropic/claude-opus-5"
 
 
-def _registry():
-    from misaka.core.auth_storage import AuthStorage
-    from misaka.core.model_registry import ModelRegistry
-    return ModelRegistry.create(AuthStorage.create())
+def _runtime():
+    """The home's models and credentials, for the CLI, which has no session to borrow them from."""
+    import asyncio
+
+    from misaka.core.model_runtime import ModelRuntime
+    return asyncio.run(ModelRuntime.create())
 
 
-def model_choices():
-    """The pinning menu: the global default, then what the sessions' own registry can run on the
+def model_choices(runtime):
+    """The pinning menu: the global default, then what the sessions' own runtime can run on the
     configured providers (builtin catalog plus models.json) as ``provider/id`` references -- the
     shape a pin is stored in -- then a free-form reference."""
-    mine = sorted({f"{m.provider}/{m.id}" for m in _registry().getAvailable()})
+    mine = sorted({f"{m.provider}/{m.id}" for m in runtime.getAvailableSnapshot()})
     return [DEFAULT_CHOICE, *mine, CUSTOM_CHOICE]
 
 
-def resolve_pin(model):
+def resolve_pin(model, runtime):
     """The canonical ``provider/id`` for a pin the user typed or picked.
 
     A bare ID resolves on the product provider. A raw ID that itself contains slashes
@@ -40,11 +42,11 @@ def resolve_pin(model):
     account. Raises ``ValueError`` naming the candidates when the reference is ambiguous,
     or when it is unknown.
     """
-    return profiles.resolve_model_reference(model, _registry(), fallback_provider=current_config()["provider"])
+    return profiles.resolve_model_reference(model, runtime, fallback_provider=current_config()["provider"])
 
 SOUL_TEMPLATE = """# Misaka {sid}
 
-You are Sister {sid} of the MISAKA Network. Describe her personality and voice here.
+You are Sister {sid} of the MISAKA Network.
 """
 
 DESCRIBE_TEMPLATE = """---
@@ -64,6 +66,12 @@ Last Order reads this file to decide which tasks fit this Sister. Put personalit
 
 def _valid(sid):
     return bool(re.fullmatch(r"[\w][\w.-]*", sid or "")) and sid not in {"last-order", "last_order"}
+
+
+def _valid_new(sid):
+    # ``\w`` also matches Chinese, so text pasted into the ID prompt became a Sister. Existing
+    # IDs still pass ``_valid``; only a new one is held to the ASCII the message promises.
+    return _valid(sid) and sid.isascii()
 
 
 def roster_names(root=None):
@@ -91,10 +99,10 @@ def card_counts(sid, db_path=None):
         con.close()
 
 
-def create_sister(sid, root=None, specialty=None, model=None, thinking=None):
+def create_sister(sid, root=None, specialty=None, model=None, thinking=None, runtime=None):
     """Create a Sister profile and return ``(success, message)``."""
     root = root or ROOT
-    if not _valid(sid):
+    if not _valid_new(sid):
         return False, f"Invalid Sister ID '{sid}'; use letters, numbers, '.', '_', or '-', but not last-order."
     prof = os.path.join(root, sid)
     if os.path.exists(prof):
@@ -104,7 +112,7 @@ def create_sister(sid, root=None, specialty=None, model=None, thinking=None):
         # Resolve before anything is written: a bad reference must not leave a half-made
         # profile behind that then reports the ID as already registered.
         try:
-            pin = resolve_pin(model)
+            pin = resolve_pin(model, runtime if runtime is not None else _runtime())
         except ValueError as error:
             return False, f"Sister {sid} was not created: {error}"
     if thinking:
@@ -138,8 +146,8 @@ def create_sister(sid, root=None, specialty=None, model=None, thinking=None):
     return True, (
         f"Sister {sid} was added to the roster. {pinned}Profile: {prof} -- "
         f"DESCRIBE.md (what Last Order routes to her), SOUL.md (her voice), "
-        f"settings.json (her pinned model, her default thinking level, \"mcpServers\"; /model and "
-        f"/thinking with Ctrl+S in her window write them), "
+        f"settings.json (her pinned model, her default thinking level; /model and "
+        f"/thinking with Ctrl+S in her window write them), mcp.json (her MCP servers), "
         f"skills/ (link skills here). Use /sister {sid} to switch to this Sister."
     )
 
@@ -169,15 +177,15 @@ def _read_by_hand(path):
 
 def describe(sid, root=None):
     """Return the short description and body from DESCRIBE.md."""
-    from misaka.utils.frontmatter import parse_frontmatter
+    from misaka.utils.frontmatter import parseFrontmatter
     path = os.path.join(root or ROOT, sid, "DESCRIBE.md")
     try:
         with open(path, encoding="utf-8-sig") as f:
-            parsed = parse_frontmatter(f.read())
+            parsed = parseFrontmatter(f.read())
     except OSError:
         return None, None
     except ValueError as error:
-        # DESCRIBE.md is a file people are told to edit by hand, and parse_frontmatter raises
+        # DESCRIBE.md is a file people are told to edit by hand, and parseFrontmatter raises
         # FrontmatterError (a ValueError) on malformed YAML. Every caller here walks the *whole*
         # roster -- the /sister menu, misaka_board's roster line, the chat banner -- so letting
         # one member's typo out would take down the entire list. The description line alone is
@@ -287,7 +295,7 @@ def commands():
             if not sid:
                 ctx.ui.notify("Creation cancelled: no Sister ID was entered.", "info")
                 return
-        if not _valid(sid) or os.path.exists(os.path.join(ROOT, sid)):
+        if not _valid_new(sid) or os.path.exists(os.path.join(ROOT, sid)):
             ok, msg = create_sister(sid)
             ctx.ui.notify(msg, "error")
             return
@@ -297,7 +305,8 @@ def commands():
         if specialty is None:
             ctx.ui.notify("Creation cancelled.", "info")
             return
-        model_pick = await ctx.ui.select(f"Choose a model for Sister {sid}", model_choices())
+        runtime = ctx.modelRegistry.modelRuntime
+        model_pick = await ctx.ui.select(f"Choose a model for Sister {sid}", model_choices(runtime))
         if model_pick is None:
             ctx.ui.notify("Creation cancelled.", "info")
             return
@@ -313,7 +322,7 @@ def commands():
         if model:
             # Resolve now so the confirmation shows the provider the pin actually lands on.
             try:
-                model = resolve_pin(model)
+                model = resolve_pin(model, runtime)
             except ValueError as error:
                 ctx.ui.notify(f"Sister {sid} was not created: {error}", "error")
                 return
@@ -329,7 +338,7 @@ def commands():
         if not await ctx.ui.confirm(f"Create Sister {sid}?", summary):
             ctx.ui.notify("Creation cancelled.", "info")
             return
-        ok, msg = create_sister(sid, specialty=specialty, model=model, thinking=thinking)
+        ok, msg = create_sister(sid, specialty=specialty, model=model, thinking=thinking, runtime=runtime)
         ctx.ui.notify(msg, "info" if ok else "error")
 
     async def remove_cmd(args, ctx):

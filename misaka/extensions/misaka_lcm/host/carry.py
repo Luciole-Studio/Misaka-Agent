@@ -78,7 +78,7 @@ def sources(built, transcript):
             importer._lifecycle = type(importer._lifecycle)(':memory:')
             prior = receipt(original)
             conversation = prior['details']['lcm']['carry']['conversation'] if prior else manager.getSessionId()
-            importer.on_session_start(manager.getSessionId(), platform='misaka', conversation_id=conversation)
+            importer.on_session_start(manager.getSessionId(), platform=built._misaka_source, conversation_id=conversation)
             originals = [message for group in ce._session_originals(original).values() for message in group]
             importer._ingest_cursor = 0
             importer._schedule_ingest_cursor_reconciliation()
@@ -166,7 +166,7 @@ def rollover(target, transcript, ctx):
     old._schedule_ingest_cursor_reconciliation()
     try:
         old.rollover_session(old_id, new_id, previous_messages=originals,
-                             carry_over_context=True, platform='misaka')
+                             carry_over_context=True, platform=old._misaka_source)
     except BaseException as error:
         # No native replacement has happened. Retire the partially rebound
         # engine so the old owner reopens from its last published checkpoint.

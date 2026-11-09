@@ -9,11 +9,39 @@ import pytest
 
 from misaka.config import profiles
 from misaka.core.agent_session import AgentSession
+from misaka.core.model_registry import ModelRegistry
 from misaka.core.settings_manager import InMemorySettingsStorage, SettingsManager
+
+
+class _Runtime:
+    """The model runtime, as much of it as model selection reads; ``configured`` decides auth."""
+
+    def __init__(self, models):
+        self.models = models
+        self.configured = lambda _provider: True
+
+    def getModels(self, providerId=None):
+        return [model for model in self.models if providerId is None or model.provider == providerId]
+
+    def getModel(self, provider, model_id):
+        return next((model for model in self.models if (model.provider, model.id) == (provider, model_id)), None)
+
+    def hasConfiguredAuth(self, provider):
+        return self.configured(provider)
+
+    async def checkAuth(self, provider):
+        return SimpleNamespace(type="api_key") if self.configured(provider) else None
+
+    def getAvailableSnapshot(self):
+        return [model for model in self.models if self.configured(model.provider)]
+
+    async def getAvailable(self, providerId=None, options=None):
+        return self.getAvailableSnapshot()
 
 
 @pytest.fixture
 def registry():
+    """The extension-facing facade over a fake runtime (``registry.modelRuntime``)."""
     models = [
         SimpleNamespace(provider=provider, id=model_id, reasoning=False)
         for provider, model_id in [
@@ -24,16 +52,7 @@ def registry():
             ("vendor-b", "org/nested"),
         ]
     ]
-    return SimpleNamespace(
-        getAll=lambda: list(models),
-        getAvailable=lambda: list(models),
-        find=lambda provider, model_id: next(
-            (model for model in models if (model.provider, model.id) == (provider, model_id)),
-            None,
-        ),
-        hasConfiguredAuth=lambda _model: True,
-        checkConfiguredAuth=AsyncMock(return_value=True),
-    )
+    return ModelRegistry(_Runtime(models))
 
 
 @pytest.fixture
@@ -64,7 +83,7 @@ def pin_of(role):
 
 def bind(storage, role, registry):
     settings = SettingsManager.fromStorage(storage)
-    settings.bindModelProfile(str(role), registry)
+    settings.bindModelProfile(str(role), registry.modelRuntime)
     return settings
 
 
@@ -152,7 +171,7 @@ async def test_child_can_still_change_session_model_without_saving(registry, sha
     global_before = shared_storage.global_value
     session = session_stub(settings, registry)
     target = registry.find("vendor-b", "shared")
-    await session.setModel(target, persist=False)
+    await session.setModel(target, {"persist": False})
     assert session.model is target
     assert shared_storage.global_value == global_before
 
@@ -196,13 +215,13 @@ def test_invalid_role_pin_does_not_silently_become_global_default(tmp_path, regi
     ("shared", "vendor-b", "vendor-b/shared"),
 ])
 def test_model_reference_resolution_is_exact(registry, reference, provider, expected):
-    assert profiles.resolve_model_reference(reference, registry, fallback_provider=provider) == expected
+    assert profiles.resolve_model_reference(reference, registry.modelRuntime, fallback_provider=provider) == expected
 
 
 @pytest.mark.parametrize("reference", ["shared", "unknown/model", "unknowable", ""])
 def test_model_reference_rejects_ambiguous_or_unknown_names(registry, reference):
     with pytest.raises(ValueError):
-        profiles.resolve_model_reference(reference, registry)
+        profiles.resolve_model_reference(reference, registry.modelRuntime)
 
 
 @pytest.mark.parametrize("method,argument,expected", [
@@ -274,9 +293,9 @@ def session_stub(settings, registry):
         model=registry.find("vendor-a", "shared"), thinkingLevel="off",
     ))
     session.sessionManager = SimpleNamespace(appendModelChange=Mock())
-    session._modelRegistry = registry
+    session._modelRuntime = registry.modelRuntime
     session._scopedModels = []
-    session._get_thinking_level_for_model_switch = lambda *_args: "off"
+    session._getThinkingLevelForModelSwitch = lambda *_args: "off"
     session.setThinkingLevel = Mock()
     session._extensionRunner = SimpleNamespace(emit=AsyncMock())
     return session
@@ -292,11 +311,11 @@ async def test_session_model_operations_respect_persistence_scope(tmp_path, regi
     session = session_stub(settings, registry)
     target = registry.find("vendor-b", "shared")
     if operation == "set":
-        await session.setModel(target, persist=persist)
+        await session.setModel(target, {"persist": persist})
     else:
         if operation == "cycle-scoped":
             session._scopedModels = [{"model": session.model}, {"model": target}]
-        await session.cycleModel(persist=persist)
+        await session.cycleModel("forward", {"persist": persist})
     await settings.flush()
     assert session.model is target
     assert shared_storage.global_value == global_before
@@ -318,7 +337,7 @@ async def test_saving_new_role_default_does_not_expand_global_enabled_models(tmp
     session = session_stub(settings, registry)
     session._scopedModels = [{"model": session.model}]
     target = registry.find("vendor-b", "shared")
-    await session.setModel(target, persist=True)
+    await session.setModel(target, {"persist": True})
     await settings.flush()
     assert shared_storage.global_value == global_before
     assert target in [item["model"] for item in session._scopedModels]
@@ -327,7 +346,7 @@ async def test_saving_new_role_default_does_not_expand_global_enabled_models(tmp
 @pytest.mark.parametrize("explicit_scope", [False, True])
 def test_shared_enabled_models_do_not_override_role_pin_but_explicit_scope_can(tmp_path, registry, shared_storage, explicit_scope):
     from misaka.cli.args import Args
-    from misaka.cli.engine import build_session_options
+    from misaka.cli.engine import buildSessionOptions
     from misaka.core.model_resolver import ScopedModel
 
     role = make_role(tmp_path, "10032", "vendor-a/shared")
@@ -335,12 +354,26 @@ def test_shared_enabled_models_do_not_override_role_pin_but_explicit_scope_can(t
     pinned = registry.find("vendor-a", "shared")
     scoped = registry.find("vendor-b", "shared")
     args = Args(models=["vendor-b/shared"] if explicit_scope else None)
-    result = build_session_options(args, [ScopedModel(scoped)], False, registry, settings)
+    result = buildSessionOptions(args, [ScopedModel(scoped)], False, registry.modelRuntime, settings)
     if explicit_scope:
         assert result.options["model"] is scoped
     else:
         # Leaving model unset is also correct: the SDK then applies the role pin.
         assert result.options.get("model", pinned) is pinned
+
+
+def test_provider_without_model_is_reported_as_an_error(tmp_path, registry, shared_storage):
+    from misaka.cli.args import Args
+    from misaka.cli.engine import buildSessionOptions
+
+    settings = bind(shared_storage, make_role(tmp_path, "10033", "vendor-a/shared"), registry)
+
+    result = buildSessionOptions(Args(provider="vendor-a"), [], False, registry.modelRuntime, settings)
+
+    assert [(diagnostic.type, diagnostic.message) for diagnostic in result.diagnostics] == [
+        ("error", "--provider requires --model (for example: --provider vendor-a --model <pattern>)")
+    ]
+    assert "model" not in result.options
 
 
 @pytest.fixture
@@ -355,22 +388,20 @@ def sdk_host(tmp_path, monkeypatch, registry, shared_storage):
     monkeypatch.setattr(sdk, "AgentSession", lambda config: SimpleNamespace(
         model=config["agent"].state.model, settingsManager=config["settingsManager"],
     ))
-    monkeypatch.setattr(sdk, "applyHttpProxySettings", lambda _settings: None)
     return {
         "cwd": str(tmp_path),
         "agentDir": str(tmp_path / "engine"),
-        "authStorage": object(),
         "resourceLoader": SimpleNamespace(getExtensions=lambda: None),
         "settingsManager": SettingsManager.fromStorage(shared_storage),
         "sessionManager": SessionManager.inMemory(str(tmp_path)),
-        "modelRegistry": registry,
+        "modelRuntime": registry.modelRuntime,
         "tools": [],
     }
 
 
 @pytest.mark.parametrize("state", ["new", "resume", "explicit"])
 async def test_sdk_default_never_overrides_restored_or_explicit_model(tmp_path, registry, sdk_host, state):
-    from misaka.core.sdk import create_agent_session
+    from misaka.core.sdk import createAgentSession
 
     role = make_role(tmp_path, "10032", "vendor-a/unique")
     sdk_host["modelProfile"] = str(role)
@@ -381,33 +412,33 @@ async def test_sdk_default_never_overrides_restored_or_explicit_model(tmp_path, 
         expected = registry.find("vendor-b", "shared")
     if state == "explicit":
         expected = sdk_host["model"] = registry.find("vendor-b", "org/nested")
-    result = await create_agent_session(sdk_host)
+    result = await createAgentSession(sdk_host)
     assert result["session"].model is expected
     assert result["session"].settingsManager.getModelProfile() == str(role)
     assert default_pair(result["session"].settingsManager) == ("vendor-a", "unique")
 
 
 async def test_sdk_pin_missing_auth_reports_error_instead_of_using_another_provider(tmp_path, registry, sdk_host):
-    from misaka.core.sdk import create_agent_session
+    from misaka.core.sdk import createAgentSession
 
     role = make_role(tmp_path, "10032", "vendor-a/unique")
     sdk_host["modelProfile"] = str(role)
-    registry.hasConfiguredAuth = lambda model: model.provider != "vendor-a"
-    result = await create_agent_session(sdk_host)
+    registry.modelRuntime.configured = lambda provider: provider != "vendor-a"
+    result = await createAgentSession(sdk_host)
     # TUI can still open /login; the pin is never silently replaced by another endpoint.
     assert result["session"].model is registry.find("vendor-a", "unique")
     assert "vendor-a/unique" in result["modelFallbackMessage"]
 
 
 async def test_services_keep_bound_scope_through_sdk_creation(tmp_path, registry, sdk_host):
-    from misaka.core.agent_session_services import create_agent_session_from_services
+    from misaka.core.agent_session_services import createAgentSessionFromServices
 
     role = make_role(tmp_path, "10032", "vendor-a/unique")
-    sdk_host["settingsManager"].bindModelProfile(str(role), registry)
+    sdk_host["settingsManager"].bindModelProfile(str(role), registry.modelRuntime)
     services = SimpleNamespace(**{key: sdk_host[key] for key in (
-        "cwd", "agentDir", "authStorage", "settingsManager", "modelRegistry", "resourceLoader",
+        "cwd", "agentDir", "settingsManager", "modelRuntime", "resourceLoader",
     )})
-    result = await create_agent_session_from_services({
+    result = await createAgentSessionFromServices({
         "services": services, "sessionManager": sdk_host["sessionManager"], "tools": [],
     })
     assert result["session"].model is registry.find("vendor-a", "unique")

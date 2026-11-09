@@ -14,7 +14,7 @@ class InitialMessageResult:
     initialImages: list[ImageContent] | None = None
 
 
-def build_initial_message(
+def buildInitialMessage(
     *,
     parsed: Args,
     fileText: str | None = None,
@@ -29,7 +29,7 @@ def build_initial_message(
     if parsed.messages:
         parts.append(parsed.messages.pop(0))
 
-    # Blank-line separated: piped stdin, @file text and the CLI message are distinct
+    # MISAKA fork: pi joins the parts with "". Blank-line separated: piped stdin, @file text and the CLI message are distinct
     # inputs, and joining them with "" glued the last stdin line to the prompt.
     message = "\n\n".join(part.strip("\n") for part in parts if part.strip())
     return InitialMessageResult(
@@ -38,4 +38,4 @@ def build_initial_message(
     )
 
 
-__all__ = ["InitialMessageResult", "build_initial_message"]
+__all__ = ["InitialMessageResult", "buildInitialMessage"]

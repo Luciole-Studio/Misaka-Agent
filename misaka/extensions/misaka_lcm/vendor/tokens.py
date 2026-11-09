@@ -154,7 +154,14 @@ def count_tokens(text) -> int:
 def count_message_tokens(msg: Dict[str, Any]) -> int:
     """Estimate tokens for a single OpenAI-format message."""
     total = 4  # role + overhead
-    content = normalize_content_value(msg.get("content")) or ""
+    content = msg.get("content")
+    if isinstance(content, list):
+        # misaka: U11 an image costs the provider's per-image price, not its base64 length (Hermes model_metadata)
+        from misaka.extensions.misaka_lcm.native.image_token_cost import current_image_token_cost
+        from misaka.extensions.misaka_lcm.native.model_metadata import _count_image_tokens, _wire_message_shadow
+        total += _count_image_tokens({"content": content}, current_image_token_cost())
+        content = _wire_message_shadow({"content": content})["content"]
+    content = normalize_content_value(content) or ""
     total += count_tokens(content)
     for tc in msg.get("tool_calls") or []:
         if isinstance(tc, dict):

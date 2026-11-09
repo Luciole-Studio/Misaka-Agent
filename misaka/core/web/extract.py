@@ -45,7 +45,7 @@ from misaka.core.documents.prompt import WEB_EVIDENCE_GUIDELINE
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import run_with_abort
-from misaka.core.tools.path_utils import resolve_to_cwd
+from misaka.core.tools.path_utils import resolveToCwd
 from misaka.core.web import cache, debug
 from misaka.core.web.bounded import UnsafeUrlError, vet_public_url
 from misaka.core.web.config import redact_secrets, redact_values, web_config
@@ -316,7 +316,7 @@ def _store_page(
     saved = save_page(cwd, provenance, clean)
     if saved:
         # The writer can add redaction provenance; offsets describe the actual file.
-        provenance = read_provenance(resolve_to_cwd(saved, cwd)) or provenance
+        provenance = read_provenance(resolveToCwd(saved, cwd)) or provenance
     return saved, frontmatter_line_count(provenance)
 
 

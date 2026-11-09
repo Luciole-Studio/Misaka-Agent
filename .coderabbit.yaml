@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "zh-CN"
+early_access: false
+reviews:
+  profile: "assertive"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "main"
+      - "heretic-.*"
+  path_filters:
+    - "!**/__pycache__/**"
+    - "!**/*.lock"
+    - "!**/vendor/**"
+    - "!tests/fixtures/**"
+  path_instructions:
+    - path: "misaka/**/*.py"
+      instructions: |
+        重点审查：
+        1. 状态确定性与并发/事务安全（SQLite/LCM 连接生命周期、锁竞争、异常回滚）。
+        2. 工具调用与扩展胶水层（MCP/extension）的边界条件、超时与错误处理，禁止静默吞异常。
+        3. 代码是否干净、直接、人类可读，指出过度工程化或冗余抽象。
+chat:
+  auto_reply: true

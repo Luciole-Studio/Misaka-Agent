@@ -110,7 +110,7 @@ async def test_headless_root_and_branch_share_live_description(research, monkeyp
     previous = control.describe
     branch = runs.create_node(con, run["id"], question="Child", parents=[root["id"]]) if child else root
     assert runs.acquire_driver(con, run["id"], "driver")
-    runs.prepare_runner(con, "research_branches", branch["id"])
+    runs.prepare_runner(con, "research_execution", branch["id"])
     run, branch = runs.get(con, run["id"]), runs.node(con, branch["id"])
     monkeypatch.setattr(wiring, "role_session_setup", lambda *args, **kwargs: ([], object(), {}))
     monkeypatch.setattr(planner, "_lo_session", lambda *args: run["workspace"])

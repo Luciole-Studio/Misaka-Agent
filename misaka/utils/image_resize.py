@@ -1,4 +1,8 @@
-"""Image resizing helpers for inline tool attachments."""
+"""Translated from pi's ``packages/coding-agent/src/utils/image-resize.ts`` and ``image-resize-core.ts`` (v1.1.0).
+
+MISAKA fork: Pillow stands in for Photon (``ImageOps.exif_transpose`` for ``applyExifOrientation``, LANCZOS for
+Lanczos3), and a worker thread for pi's resize worker, so the event loop is not blocked.
+"""
 
 from __future__ import annotations
 
@@ -8,24 +12,22 @@ import math
 from dataclasses import dataclass
 from io import BytesIO
 
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageOps
 
-from misaka.ai.types import ImageContent
-
-DEFAULT_MAX_BYTES = int(4.5 * 1024 * 1024)
+from misaka.utils.js import jsRound, toFixed
 
 
 @dataclass(slots=True)
 class ImageResizeOptions:
-    maxWidth: int | None = None
-    maxHeight: int | None = None
-    maxBytes: int | None = None
-    jpegQuality: int | None = None
+    maxWidth: int | None = None  # Default: 2000
+    maxHeight: int | None = None  # Default: 2000
+    maxBytes: int | None = None  # Default: 4.5MB of base64 payload (below Anthropic's 5MB limit)
+    jpegQuality: int | None = None  # Default: 80
 
 
 @dataclass(slots=True)
 class ResizedImage:
-    data: str
+    data: str  # base64
     mimeType: str
     originalWidth: int
     originalHeight: int
@@ -34,199 +36,178 @@ class ResizedImage:
     wasResized: bool
 
 
-@dataclass(slots=True)
-class _ResolvedImageResizeOptions:
-    maxWidth: int = 2000
-    maxHeight: int = 2000
-    maxBytes: int = DEFAULT_MAX_BYTES
-    jpegQuality: int = 80
+# 4.5MB of base64 payload. Provides headroom below Anthropic's 5MB limit.
+DEFAULT_MAX_BYTES = int(4.5 * 1024 * 1024)
+
+DEFAULT_OPTIONS = ImageResizeOptions(
+    maxWidth=2000,
+    maxHeight=2000,
+    maxBytes=DEFAULT_MAX_BYTES,
+    jpegQuality=80,
+)
 
 
 @dataclass(slots=True)
-class _EncodedCandidate:
+class EncodedCandidate:
     data: str
     encodedSize: int
     mimeType: str
 
 
-def _resolve_options(options: ImageResizeOptions | None) -> _ResolvedImageResizeOptions:
-    resolved = options or ImageResizeOptions()
-    return _ResolvedImageResizeOptions(
-        maxWidth=resolved.maxWidth or 2000,
-        maxHeight=resolved.maxHeight or 2000,
-        maxBytes=resolved.maxBytes or DEFAULT_MAX_BYTES,
-        jpegQuality=resolved.jpegQuality or 80,
-    )
+def encodeCandidate(buffer: bytes, mimeType: str) -> EncodedCandidate:
+    data = base64.b64encode(buffer).decode("ascii")
+    return EncodedCandidate(data=data, encodedSize=len(data.encode("utf-8")), mimeType=mimeType)
 
 
-def _encode_candidate(image: Image.Image, mime_type: str, *, jpeg_quality: int | None = None) -> _EncodedCandidate:
+def _pngBytes(image: Image.Image) -> bytes:
+    """``image.get_bytes()``."""
     buffer = BytesIO()
-    if mime_type == "image/png":
-        image.save(buffer, format="PNG")
-    elif mime_type == "image/jpeg":
-        jpeg_ready = _to_jpeg_ready(image)
-        jpeg_ready.save(buffer, format="JPEG", quality=jpeg_quality or 80)
-    else:
-        raise ValueError(f"Unsupported mime type: {mime_type}")
-    data = base64.b64encode(buffer.getvalue()).decode("ascii")
-    return _EncodedCandidate(data=data, encodedSize=len(data.encode("utf-8")), mimeType=mime_type)
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
-def _to_jpeg_ready(image: Image.Image) -> Image.Image:
-    if image.mode in {"RGB", "L"}:
-        return image
-    if "A" in image.getbands():
-        background = Image.new("RGB", image.size, (255, 255, 255))
-        background.paste(image, mask=image.getchannel("A"))
-        return background
-    return image.convert("RGB")
+def _jpegBytes(image: Image.Image, quality: int) -> bytes:
+    """``image.get_bytes_jpeg(quality)``: JPEG has no alpha, so a transparent image is laid on white."""
+    if image.mode not in {"RGB", "L"}:
+        if "A" in image.getbands():
+            background = Image.new("RGB", image.size, (255, 255, 255))
+            background.paste(image, mask=image.getchannel("A"))
+            image = background
+        else:
+            image = image.convert("RGB")
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=quality)
+    return buffer.getvalue()
 
 
-def _resize_image_bytes_sync(
-    input_buffer: bytes,
-    mime_type: str,
-    options: ImageResizeOptions | None,
-    original_base64: str | None = None,
-    input_base64_size: int | None = None,
+def resizeImageInProcess(
+    inputBytes: bytes,
+    mimeType: str,
+    options: ImageResizeOptions | None = None,
 ) -> ResizedImage | None:
-    resolved = _resolve_options(options)
-    encoded_size = (
-        input_base64_size
-        if input_base64_size is not None
-        else ((len(input_buffer) + 2) // 3) * 4
+    """Resize an image to fit within the specified max dimensions and encoded file size.
+    Returns null if the image cannot be resized below maxBytes.
+
+    Strategy for staying under maxBytes:
+    1. First resize to maxWidth/maxHeight
+    2. Try both PNG and JPEG formats, pick the smaller one
+    3. If still too large, try JPEG with decreasing quality
+    4. If still too large, progressively reduce dimensions until 1x1
+    """
+    options = options or ImageResizeOptions()
+    opts = ImageResizeOptions(
+        **{
+            name: getattr(options, name) if getattr(options, name) is not None else getattr(DEFAULT_OPTIONS, name)
+            for name in ImageResizeOptions.__dataclass_fields__
+        }
     )
+    assert opts.maxWidth is not None and opts.maxHeight is not None and opts.maxBytes is not None
+    inputBase64Size = math.ceil(len(inputBytes) / 3) * 4
 
+    image: Image.Image | None = None
     try:
-        with Image.open(BytesIO(input_buffer)) as opened:
-            opened.load()
-            normalized = ImageOps.exif_transpose(opened)
-            image = normalized.copy()
-            if normalized is not opened:
-                normalized.close()
-    except (UnidentifiedImageError, OSError, ValueError):
-        return None
+        with Image.open(BytesIO(inputBytes)) as rawImage:
+            rawImage.load()
+            oriented = ImageOps.exif_transpose(rawImage)
+            image = oriented.copy()
+            if oriented is not rawImage:
+                oriented.close()
 
-    try:
-        original_width, original_height = image.size
-        format_suffix = (mime_type.split("/", 1)[1] if mime_type else (image.format or "png")).lower()
+        originalWidth, originalHeight = image.size
+        parts = mimeType.split("/")
+        format = parts[1] if len(parts) > 1 else "png"
 
-        if (
-            original_width <= resolved.maxWidth
-            and original_height <= resolved.maxHeight
-            and encoded_size < resolved.maxBytes
-        ):
+        # Check if already within all limits (dimensions AND encoded size)
+        if originalWidth <= opts.maxWidth and originalHeight <= opts.maxHeight and inputBase64Size < opts.maxBytes:
             return ResizedImage(
-                data=(
-                    original_base64
-                    if original_base64 is not None
-                    else base64.b64encode(input_buffer).decode("ascii")
-                ),
-                mimeType=mime_type or f"image/{format_suffix}",
-                originalWidth=original_width,
-                originalHeight=original_height,
-                width=original_width,
-                height=original_height,
+                data=base64.b64encode(inputBytes).decode("ascii"),
+                mimeType=mimeType or f"image/{format}",
+                originalWidth=originalWidth,
+                originalHeight=originalHeight,
+                width=originalWidth,
+                height=originalHeight,
                 wasResized=False,
             )
 
-        target_width = original_width
-        target_height = original_height
-        if target_width > resolved.maxWidth:
-            target_height = round((target_height * resolved.maxWidth) / target_width)
-            target_width = resolved.maxWidth
-        if target_height > resolved.maxHeight:
-            target_width = round((target_width * resolved.maxHeight) / target_height)
-            target_height = resolved.maxHeight
+        # Calculate initial dimensions respecting max limits
+        targetWidth = originalWidth
+        targetHeight = originalHeight
 
-        quality_steps = list(dict.fromkeys([resolved.jpegQuality, 85, 70, 55, 40]))
-        current_width = max(1, target_width)
-        current_height = max(1, target_height)
+        if targetWidth > opts.maxWidth:
+            targetHeight = jsRound((targetHeight * opts.maxWidth) / targetWidth)
+            targetWidth = opts.maxWidth
+        if targetHeight > opts.maxHeight:
+            targetWidth = jsRound((targetWidth * opts.maxHeight) / targetHeight)
+            targetHeight = opts.maxHeight
 
-        while True:
-            resized = image.resize((current_width, current_height), Image.Resampling.LANCZOS)
+        def tryEncodings(width: int, height: int, jpegQualities: list[int]) -> list[EncodedCandidate]:
+            assert image is not None
+            resized = image.resize((width, height), Image.Resampling.LANCZOS)
+
             try:
-                candidates = [_encode_candidate(resized, "image/png")]
-                candidates.extend(
-                    _encode_candidate(resized, "image/jpeg", jpeg_quality=quality) for quality in quality_steps
-                )
-                for candidate in candidates:
-                    if candidate.encodedSize < resolved.maxBytes:
-                        return ResizedImage(
-                            data=candidate.data,
-                            mimeType=candidate.mimeType,
-                            originalWidth=original_width,
-                            originalHeight=original_height,
-                            width=current_width,
-                            height=current_height,
-                            wasResized=True,
-                        )
+                candidates = [encodeCandidate(_pngBytes(resized), "image/png")]
+                for quality in jpegQualities:
+                    candidates.append(encodeCandidate(_jpegBytes(resized, quality), "image/jpeg"))
+                return candidates
             finally:
                 resized.close()
 
-            if current_width == 1 and current_height == 1:
+        qualitySteps = list(dict.fromkeys([opts.jpegQuality, 85, 70, 55, 40]))
+        currentWidth = targetWidth
+        currentHeight = targetHeight
+
+        while True:
+            candidates = tryEncodings(currentWidth, currentHeight, qualitySteps)  # type: ignore[arg-type]
+            for candidate in candidates:
+                if candidate.encodedSize < opts.maxBytes:
+                    return ResizedImage(
+                        data=candidate.data,
+                        mimeType=candidate.mimeType,
+                        originalWidth=originalWidth,
+                        originalHeight=originalHeight,
+                        width=currentWidth,
+                        height=currentHeight,
+                        wasResized=True,
+                    )
+
+            if currentWidth == 1 and currentHeight == 1:
                 break
 
-            next_width = 1 if current_width == 1 else max(1, math.floor(current_width * 0.75))
-            next_height = 1 if current_height == 1 else max(1, math.floor(current_height * 0.75))
-            if next_width == current_width and next_height == current_height:
+            nextWidth = 1 if currentWidth == 1 else max(1, math.floor(currentWidth * 0.75))
+            nextHeight = 1 if currentHeight == 1 else max(1, math.floor(currentHeight * 0.75))
+            if nextWidth == currentWidth and nextHeight == currentHeight:
                 break
-            current_width = next_width
-            current_height = next_height
 
+            currentWidth = nextWidth
+            currentHeight = nextHeight
+
+        return None
+    except Exception:  # noqa: BLE001 - pi's catch-all: an image that cannot be resized gives no image
         return None
     finally:
-        image.close()
+        if image is not None:
+            image.close()
 
 
-def _resize_image_content_sync(
-    img: ImageContent,
-    options: ImageResizeOptions | None,
-) -> ResizedImage | None:
-    try:
-        input_buffer = base64.b64decode(img.data)
-    except ValueError:
-        return None
-    return _resize_image_bytes_sync(
-        input_buffer,
-        img.mimeType,
-        options,
-        original_base64=img.data,
-        input_base64_size=len(img.data.encode("utf-8")),
-    )
-
-
-async def resize_image_bytes(
-    input_buffer: bytes,
-    mime_type: str,
+async def resizeImage(
+    inputBytes: bytes,
+    mimeType: str,
     options: ImageResizeOptions | None = None,
 ) -> ResizedImage | None:
     """Resize raw image bytes, encoding base64 only for the returned attachment."""
-    return await asyncio.to_thread(
-        _resize_image_bytes_sync,
-        input_buffer,
-        mime_type,
-        options,
-    )
+    return await asyncio.to_thread(resizeImageInProcess, inputBytes, mimeType, options)
 
 
-async def resize_image(img: ImageContent, options: ImageResizeOptions | None = None) -> ResizedImage | None:
-    """Compatibility entry point for callers that already hold base64 image content."""
-    return await asyncio.to_thread(_resize_image_content_sync, img, options)
-
-
-def format_dimension_note(result: ResizedImage) -> str | None:
+def formatDimensionNote(result: ResizedImage) -> str | None:
+    """Format a dimension note for resized images.
+    This helps the model understand the coordinate mapping.
+    """
     if not result.wasResized:
         return None
+
     scale = result.originalWidth / result.width
-    return (
-        f"[Image: original {result.originalWidth}x{result.originalHeight}, "
-        f"displayed at {result.width}x{result.height}. "
-        f"Multiply coordinates by {scale:.2f} to map to original image.]"
-    )
+    return f"[Image: original {result.originalWidth}x{result.originalHeight}, displayed at {result.width}x{result.height}. Multiply coordinates by {toFixed(scale, 2)} to map to original image.]"
 
-
-formatDimensionNote = format_dimension_note
-resizeImage = resize_image
 
 __all__ = [
     "DEFAULT_MAX_BYTES",
@@ -234,5 +215,5 @@ __all__ = [
     "ResizedImage",
     "formatDimensionNote",
     "resizeImage",
-    "resize_image_bytes",
+    "resizeImageInProcess",
 ]

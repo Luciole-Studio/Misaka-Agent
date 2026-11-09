@@ -49,9 +49,15 @@ from urllib.parse import urlparse
 
 import httpx
 
-from misaka.ai.utils.oauth.xai import with_http_options
+from misaka.ai.auth.oauth._fetch import with_http_options
+from misaka.ai.auth.resolve import refreshStoredOAuthCredential
+from misaka.ai.utils.abort import operationSignal
 from misaka.config import home
-from misaka.core.auth_storage import AuthStorage
+from misaka.core.auth_storage import (
+    AuthStorage,
+    _coerce_storage_object,
+    oauth_account_key,
+)
 from misaka.core.web.accounting import account_call
 from misaka.core.web.config import provider_env, web_config
 from misaka.core.web.keyless import CLIENT_NAME
@@ -133,6 +139,32 @@ class OAuthAccount:
     name: str | None
 
 
+# pi's auth/resolve.ts DEFAULT_OAUTH_MINIMUM_VALIDITY_MS: a token inside this window is refreshed first.
+_OAUTH_MINIMUM_VALIDITY_MS = 5 * 60 * 1000
+
+
+def _expiresSoon(credential: Any) -> bool:
+    return time.time() * 1000 + _OAUTH_MINIMUM_VALIDITY_MS >= credential.expires
+
+
+async def _oauth_token(account: OAuthAccount, needsRefresh: Any) -> str:
+    """The account's access token, refreshed under the store lock first when ``needsRefresh`` says so; a refresh
+    that started persists even if this caller gives up (pi's ``refreshStoredOAuthCredential``)."""
+    from misaka.ai.auth.oauth.xai import xaiOAuth
+
+    store = account.storage
+    key = oauth_account_key("xai", account.name)
+    credential = await store.read(key)
+    if credential is None or credential.type != "oauth":
+        return ""
+    if needsRefresh(credential):
+        with with_http_options(api_network_options):
+            credential = await refreshStoredOAuthCredential(store, key, xaiOAuth, needsRefresh, operationSignal())
+        if credential is None:
+            return ""
+    return str((await xaiOAuth.toAuth(credential)).apiKey or "").strip()
+
+
 def _identity(token):
     return hashlib.sha256(repr((_auth_path(), token)).encode()).hexdigest()
 
@@ -158,14 +190,15 @@ async def _resolve_credentials(*, prefer_api_key=False, excluded=()) -> tuple[st
         from misaka.utils.async_lifecycle import run_in_thread
 
         storage = await run_in_thread(AuthStorage.create, _auth_path())
-        for key, credential in storage.getAll().items():
+        for key, credential in _coerce_storage_object(await storage.readLatestData()).items():
             if key != "xai" and not key.startswith("xai:"):
                 continue
             if key in excluded or not isinstance(credential, dict):
                 continue
             if credential.get("type") != "oauth":
                 if key == "xai":
-                    token = await storage.getApiKey("xai")
+                    stored = await storage.read("xai")
+                    token = stored.key if stored is not None and stored.type == "api_key" else None
                     if token:
                         return token, None
                 continue
@@ -177,9 +210,7 @@ async def _resolve_credentials(*, prefer_api_key=False, excluded=()) -> tuple[st
                 continue
             account = OAuthAccount(storage, key.partition(":")[2] or None)
             try:
-                with with_http_options(api_network_options):
-                    refreshed = await storage.refreshOAuthTokenWithLock("xai", account=account.name)
-                token = str(refreshed["apiKey"] or "").strip() if refreshed else ""
+                token = await _oauth_token(account, _expiresSoon)
             except Exception:  # noqa: BLE001 - tool or transport boundary reports the failure
                 _quarantine(str(credential.get("access", "")))
                 continue
@@ -240,11 +271,9 @@ def _inference_base_url(*, pin_origin: bool) -> str:
 
 async def _force_refresh_oauth_token(account: OAuthAccount, rejected: str) -> str:
     try:
-        with with_http_options(api_network_options):
-            refreshed = await account.storage.refreshOAuthTokenWithLock(
-                "xai", rejected_api_key=rejected, account=account.name
-            )
-        token = str(refreshed["apiKey"] or "").strip() if refreshed else ""
+        # The predicate is re-checked under the lock, so a replacement another session wrote is read back without
+        # refreshing again.
+        token = await _oauth_token(account, lambda current: current.access == rejected)
     except Exception as error:  # noqa: BLE001 - tool or transport boundary reports the failure
         logger.warning("xAI OAuth rejected-token refresh failed (%s)", type(error).__name__)
         return ""

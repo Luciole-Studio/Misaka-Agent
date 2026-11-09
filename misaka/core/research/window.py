@@ -5,13 +5,47 @@ import asyncio
 import os
 from contextlib import ExitStack, asynccontextmanager
 
-from misaka.ai.utils.overflow import output_limit_error
+from misaka.ai.utils._output_limit import output_limit_error
 from misaka.core.network import worker
 from misaka.core.platform import budget
 from misaka.core.research.report import DRAFT_CONTRACT, FINAL_CONTRACT
 from misaka.core.session_control import for_session, wait_for_session
 from misaka.utils.async_lifecycle import settle
 from misaka.utils.values import read_field
+
+# Hermes' text-truncation recovery (agent/turn_truncation.py ``_continue_text``): a reply cut at the
+# output cap with no tool call gets this nudge in the same conversation, up to the fourth cut reply,
+# and the pieces are joined. The wording is Hermes' own (conversation_loop.py), so Hermes' context
+# compressor -- the LCM engine here -- still recognizes the nudge as synthetic.
+LENGTH_CONTINUATION_OUTPUT_LIMIT = (
+    "[System: Your previous response was truncated by the output length limit. Continue exactly "
+    "where you left off. Do not restart or repeat prior text. Finish the answer directly.]"
+)
+LENGTH_CONTINUATION_LIMIT = 4
+# Below this many free tokens the prompt itself filled the window: each nudge and fragment only
+# shrinks the room (Hermes ``_MIN_CONTINUATION_HEADROOM``, #106120).
+MIN_CONTINUATION_HEADROOM = 512
+
+
+def join_truncated_parts(parts):
+    """Hermes ``_join_truncated_parts`` for replies cut at the output cap: a newline goes between
+    two pieces only where neither side already has whitespace. (Its overlap trimming is for
+    streams cut by a network error, which never reach this path.)"""
+    joined = ""
+    for part in parts:
+        if joined and not joined[-1].isspace() and part and not part[0].isspace():
+            joined += "\n"
+        joined += part
+    return joined
+
+
+def _prompt_filled_window(session, message):
+    """``(prompt_tokens, context_window)`` when the cut reply's own prompt left less than
+    ``MIN_CONTINUATION_HEADROOM`` in the window; None (keep continuing) when either is unknown."""
+    window = read_field(getattr(session, "model", None), "contextWindow") or 0
+    usage = read_field(message, "usage")
+    prompt = sum(read_field(usage, name) or 0 for name in ("input", "cacheRead", "cacheWrite")) if usage else 0
+    return (prompt, window) if window and prompt and window - prompt < MIN_CONTINUATION_HEADROOM else None
 
 
 def node_description(con, node_id):
@@ -158,15 +192,17 @@ class WindowLO:
         definitions = list(options.get("extra_tools", ()))
         scope = ExitStack()
         guard_hooks = None
-        answer, error = None, None
+        answer, error, final = None, None, None
 
         def observe(event):
-            nonlocal answer, error
+            nonlocal answer, error, final
             if read_field(event, "type") != "message_end":
                 return
             message = read_field(event, "message")
             if read_field(message, "role") != "assistant":
                 return
+            if answer is None:
+                final = message                  # the turn's last reply so far
             stop = read_field(message, "stopReason")
             if stop in {"error", "aborted", "length"} and answer is None:
                 error = read_field(message, "errorMessage") or (
@@ -195,26 +231,56 @@ class WindowLO:
             if self.headless and not hasattr(session.agent, "_misaka_guards"):
                 from misaka.agent.guards import install_guards
                 from misaka.core.platform import metering
-                from misaka.core.platform.session import BOOKKEEPING_TOOLS
+                from misaka.core.platform.vocabulary import NO_PROGRESS_VOCABULARY
 
                 guard_hooks = (session.agent.finishTurn, session.agent.prepareNextTurnWithContext)
-                install_guards(session, metering.allowance, bookkeeping_tools=BOOKKEEPING_TOOLS)
+                install_guards(session, metering.allowance, no_progress_vocabulary=NO_PROGRESS_VOCABULARY)
             # Direct await enters the session's active-run guard before yielding. A
             # queued notification cannot take the window between idle and this turn.
             # The turn's model requests -- the phase's own, compaction, the vision bridge --
             # are billed to the run through this context (metering).
             with budget.usage_context(options.get("usage_db"), options.get("usage_task_id"),
                                       options.get("usage_generation"), options.get("usage_token_cap")):
+                from misaka.core.moments import TURN
+
+                async def send(text):
+                    await session.sendCustomMessage(
+                        {"customType": "research-phase", "display": True, "content": text,
+                         "details": {"run_id": options.get("usage_task_id"), TURN: True,
+                                     "stage": "adjudication_draft" if text.startswith((DRAFT_CONTRACT, FINAL_CONTRACT)) else None}},
+                        {"triggerTurn": True})
+
                 if preflight is not None:
                     await session.prompt(prompt, {"streamingBehavior": "steer", "preflightResult": preflight})
                 else:
-                    from misaka.core.moments import TURN
-
-                    await session.sendCustomMessage(
-                        {"customType": "research-phase", "display": True, "content": prompt,
-                         "details": {"run_id": options.get("usage_task_id"), TURN: True,
-                                     "stage": "adjudication_draft" if prompt.startswith((DRAFT_CONTRACT, FINAL_CONTRACT)) else None}},
-                        {"triggerTurn": True, "prepareTurn": True})
+                    await send(prompt)
+                fragments = []
+                # A phase whose reply is its deliverable (``continue_truncated``) is continued the way
+                # Hermes continues a cut reply. A phase that delivers through a tool already has its own
+                # nudge for a reply cut before the call (``planner.commanded``). A cut reply with no
+                # visible text is not continued: Hermes turns reasoning off for that one request, and a
+                # pi session can only change its thinking level by recording the change in the transcript.
+                while (options.get("continue_truncated") and answer is None and final is not None
+                       and read_field(final, "stopReason") == "length"
+                       and not any(read_field(part, "type") == "toolCall" for part in read_field(final, "content", []))):
+                    text = "".join(read_field(part, "text", "") for part in read_field(final, "content", [])
+                                   if read_field(part, "type") == "text")
+                    if not text:
+                        break
+                    fragments.append(text)
+                    if len(fragments) >= LENGTH_CONTINUATION_LIMIT:
+                        error = (f"Response remained truncated after {LENGTH_CONTINUATION_LIMIT} continuation "
+                                 f"attempts: {error}")
+                        break
+                    filled = _prompt_filled_window(session, final)
+                    if filled is not None:
+                        error = f"Prompt used {filled[0]} of {filled[1]} context tokens; no room to answer: {error}"
+                        break
+                    self.check_active()
+                    error, final = None, None
+                    await send(LENGTH_CONTINUATION_OUTPUT_LIMIT)
+                if answer is not None and fragments:
+                    answer = join_truncated_parts([*fragments, answer])
             self.check_active()
             return None, answer or "", error or (None if answer is not None else "no completed research response")
         finally:
@@ -238,9 +304,12 @@ async def node_session(con, cfg, run, node):
     session_file = planner.lo_session_file(run, node)
     from misaka.core.wiring import role_session_setup
 
+    # Her Sisters write to her here as they do in a window (`node.run_interactive`, B123). The card
+    # notifications stay with the root's window, and the driver reads the cards itself.
     flags, assembly, env = role_session_setup(
         os.path.join(cfg["roles_root"], "last_order"), run["workspace"],
-        research_context=True, overrides=runs.session_overrides(run))
+        workflow_context=True, receive_messages=True, receive_notifications=False,
+        overrides=runs.session_overrides(run), node=node["id"])
     flags += ["--session-dir", directory]
     # A conversation recorded but never written -- the run failed before its first entry was
     # persisted -- is opened anew: asked for by name it raised FileNotFoundError on every resume,
@@ -285,7 +354,7 @@ async def node_session(con, cfg, run, node):
                     await session.prompt(text, {"streamingBehavior": "steer", "preflightResult": preflight})
                 else:
                     _obj, _answer, error = await bridge._execute(text, {
-                        "session_dir": directory, "tools": planner.session_tools(bridge),
+                        "session_dir": directory,
                         "extra_tools": list(getattr(control, "review_tools", ()) or ()),
                         "usage_db": cfg["db"], "usage_task_id": run["id"], "usage_generation": 1,
                         "usage_token_cap": None,

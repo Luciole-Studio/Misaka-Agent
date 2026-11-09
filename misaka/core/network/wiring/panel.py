@@ -103,7 +103,7 @@ class PanelPart:
 
     async def agent_settled(self, _event, ctx):
         # TodoPart precedes this part: acceptance, Git and PageIndex finish
-        # before the research driver may advance to the next phase.
+        # before a workflow's driver may advance to the next phase.
         self.reporter.active = not ctx.isIdle()
         self.reporter.note_session(ctx)
         await self.reporter.publish()

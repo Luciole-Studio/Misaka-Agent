@@ -13,8 +13,8 @@ import threading
 import pytest
 
 from misaka.core.tools import read as read_module
-from misaka.core.tools.read import create_read_tool_definition
-from misaka.core.tools.truncate import DEFAULT_MAX_BYTES, format_size, truncate_head
+from misaka.core.tools.read import createReadToolDefinition
+from misaka.core.tools.truncate import DEFAULT_MAX_BYTES, formatSize, truncateHead
 
 
 def _oracle(text, offset, limit, path):
@@ -32,10 +32,10 @@ def _oracle(text, offset, limit, path):
         user_limited_lines = end_line - start_line
     else:
         selected_content = "\n".join(all_lines[start_line:])
-    truncation = truncate_head(selected_content)
+    truncation = truncateHead(selected_content)
     if truncation.firstLineExceedsLimit:
-        first_line_size = format_size(len(all_lines[start_line].encode("utf-8")))
-        return (f"[Line {start_line_display} is {first_line_size}, exceeds {format_size(DEFAULT_MAX_BYTES)} limit. "
+        first_line_size = formatSize(len(all_lines[start_line].encode("utf-8")))
+        return (f"[Line {start_line_display} is {first_line_size}, exceeds {formatSize(DEFAULT_MAX_BYTES)} limit. "
                 f"Use bash: sed -n '{start_line_display}p' {path} | head -c {DEFAULT_MAX_BYTES}]"), truncation
     if truncation.truncated:
         end_line_display = start_line_display + truncation.outputLines - 1
@@ -46,7 +46,7 @@ def _oracle(text, offset, limit, path):
                             f"Use offset={next_offset} to continue.]")
         else:
             output_text += (f"\n\n[Showing lines {start_line_display}-{end_line_display} of {total_file_lines} "
-                            f"({format_size(DEFAULT_MAX_BYTES)} limit). Use offset={next_offset} to continue.]")
+                            f"({formatSize(DEFAULT_MAX_BYTES)} limit). Use offset={next_offset} to continue.]")
         return output_text, truncation
     if user_limited_lines is not None and start_line + user_limited_lines < len(all_lines):
         remaining = len(all_lines) - (start_line + user_limited_lines)
@@ -80,7 +80,7 @@ async def test_paged_output_is_what_the_whole_file_algorithm_produced(tmp_path, 
     monkeypatch.setattr(read_module, "_SCAN_CHUNK_CHARS", chunk)     # 7: every boundary lands mid-chunk
     path = tmp_path / "doc.txt"
     path.write_bytes(data)
-    tool = create_read_tool_definition(str(tmp_path))
+    tool = createReadToolDefinition(str(tmp_path))
     text = data.decode("utf-8", errors="replace")
     total = len(text.split("\n"))
     for offset, limit in [(None, None), (1, 1), (2, 3), (None, 10), (total, None), (total, 5),
@@ -103,7 +103,7 @@ async def test_a_fifo_is_refused_at_once_and_leaves_no_thread_behind(tmp_path):
     os.mkfifo(tmp_path / "pipe")
     before = threading.active_count()
     with pytest.raises(RuntimeError, match="not a regular file"):
-        await asyncio.wait_for(create_read_tool_definition(str(tmp_path)).execute("call", {"path": "pipe"}), 5)
+        await asyncio.wait_for(createReadToolDefinition(str(tmp_path)).execute("call", {"path": "pipe"}), 5)
     await asyncio.sleep(0.05)
     assert threading.active_count() <= before + 1       # the default executor may keep one idle worker
 
@@ -111,13 +111,13 @@ async def test_a_fifo_is_refused_at_once_and_leaves_no_thread_behind(tmp_path):
 @pytest.mark.skipif(not os.path.exists("/dev/zero"), reason="needs /dev/zero")
 async def test_a_device_is_refused(tmp_path):
     with pytest.raises(RuntimeError, match="not a regular file"):
-        await asyncio.wait_for(create_read_tool_definition(str(tmp_path)).execute("call", {"path": "/dev/zero"}), 5)
+        await asyncio.wait_for(createReadToolDefinition(str(tmp_path)).execute("call", {"path": "/dev/zero"}), 5)
 
 
 async def test_a_directory_is_still_reported_as_one(tmp_path):
     (tmp_path / "folder").mkdir()
     with pytest.raises(IsADirectoryError):
-        await create_read_tool_definition(str(tmp_path)).execute("call", {"path": "folder"})
+        await createReadToolDefinition(str(tmp_path)).execute("call", {"path": "folder"})
 
 
 async def test_a_large_file_pages_without_being_held_whole(tmp_path, monkeypatch):
@@ -137,6 +137,6 @@ async def test_a_large_file_pages_without_being_held_whole(tmp_path, monkeypatch
         return real(Watched(stream), *args)
 
     monkeypatch.setattr(read_module, "_scan_text", watched)
-    result = await create_read_tool_definition(str(tmp_path)).execute("call", {"path": "big.log", "offset": 150_000, "limit": 2})
+    result = await createReadToolDefinition(str(tmp_path)).execute("call", {"path": "big.log", "offset": 150_000, "limit": 2})
     assert result.content[0].text.startswith("line 149999\nline 150000\n\n[50000 more lines")
     assert requested and all(0 < size <= read_module._SCAN_CHUNK_CHARS for size in requested)

@@ -14,11 +14,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from misaka.ai import api_registry
-from misaka.ai.api_registry import ApiProvider, register_api_provider
-from misaka.ai.models import get_model
-from misaka.ai.providers._common import _empty_usage
-from misaka.ai.stream import complete_simple
+from misaka.ai import compat as api_registry
+from misaka.ai.api import _meter
+from misaka.ai.api._common import _empty_usage
+from misaka.ai.compat import ApiProvider, completeSimple, getModel, registerApiProvider
 from misaka.ai.types import (
     AssistantMessage,
     DoneEvent,
@@ -28,7 +27,7 @@ from misaka.ai.types import (
     TextDeltaEvent,
 )
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
-from misaka.ai.utils.retry import RETRYABLE_PROVIDER_ERROR_PATTERN
+from misaka.ai.utils.retry import _RETRYABLE_PROVIDER_ERROR_PATTERN
 from misaka.core.network import dispatch, worker
 from misaka.core.platform import budget, metering, repo, tasks
 from misaka.core.research import runs
@@ -129,16 +128,16 @@ def provider(monkeypatch):
         asyncio.get_running_loop().create_task(answer())
         return out
 
-    register_api_provider(ApiProvider(api="metered-test", stream=stream_simple, streamSimple=stream_simple),
-                          source_id="token-cap-test")
-    monkeypatch.setattr(api_registry, "_request_meter", metering.meter)
-    model = get_model("anthropic", "claude-sonnet-4-5").model_copy(update={"api": "metered-test", "maxTokens": 8_000})
+    registerApiProvider(ApiProvider(api="metered-test", stream=stream_simple, streamSimple=stream_simple),
+                          sourceId="token-cap-test")
+    monkeypatch.setattr(_meter, "_request_meter", metering.meter)
+    model = getModel("anthropic", "claude-sonnet-4-5").model_copy(update={"api": "metered-test", "maxTokens": 8_000})
     yield SimpleNamespace(model=model, sent=sent)
-    api_registry.unregister_api_providers("token-cap-test")
+    api_registry.unregisterApiProviders("token-cap-test")
 
 
 def _ask(model, options=None):
-    return asyncio.run(complete_simple(model, {"messages": [{"role": "user", "content": "hi", "timestamp": 0}]}, options))
+    return asyncio.run(completeSimple(model, {"messages": [{"role": "user", "content": "hi", "timestamp": 0}]}, options))
 
 
 def test_a_request_is_recorded_and_its_lease_given_back(board, provider):
@@ -163,8 +162,19 @@ def test_a_run_that_has_spent_its_cap_stops_with_a_reason_no_retry_matches(board
     with budget.usage_context(board.path, board.card, 1, 100_000):
         message = _ask(provider.model)
     assert message.stopReason == "error" and worker.stopped_at_cap(message.errorMessage)
-    assert not RETRYABLE_PROVIDER_ERROR_PATTERN.search(message.errorMessage)
+    assert not _RETRYABLE_PROVIDER_ERROR_PATTERN.search(message.errorMessage)
     assert provider.sent == [], "nothing was sent"
+
+
+def test_a_request_the_meter_ends_carries_its_start_and_duration(board, provider):
+    """MISAKA fork: a reply the meter ends a request with is stamped like a provider's, with the request's start."""
+    budget.settle_request(board.con, None, board.run, 1, 99_000)
+    started = time.time_ns() // 1_000_000
+    with budget.usage_context(board.path, board.card, 1, 100_000):
+        message = _ask(provider.model)
+    assert message.stopReason == "error"
+    assert started <= message.timestamp <= time.time_ns() // 1_000_000
+    assert message.durationMs is not None
 
 
 def test_without_a_ledger_a_request_is_untouched(provider, monkeypatch):
@@ -178,8 +188,8 @@ def test_a_local_allowance_bounds_a_session_with_no_board(provider):
     async def two():
         with metering.local_allowance(USED + 5_000):
             context = {"messages": [{"role": "user", "content": "hi", "timestamp": 0}]}
-            first = await complete_simple(provider.model, context)
-            second = await complete_simple(provider.model, context)
+            first = await completeSimple(provider.model, context)
+            second = await completeSimple(provider.model, context)
             return first, second, metering.allowance()
     first, second, left = asyncio.run(two())
     assert first.stopReason == "stop" and second.stopReason == "error"
@@ -198,25 +208,29 @@ def test_a_wait_ends_when_the_request_is_aborted(board, provider):
     async def ask():
         asyncio.get_running_loop().create_task(abort_soon())
         with budget.usage_context(board.path, board.card, 1, 20_000):
-            return await complete_simple(provider.model, {"messages": []}, SimpleStreamOptions(signal=signal))
+            return await completeSimple(provider.model, {"messages": []}, SimpleStreamOptions(signal=signal))
 
     started = time.monotonic()
+    requested = time.time_ns() // 1_000_000
     message = asyncio.run(ask())
     assert message.stopReason == "aborted" and time.monotonic() - started < 3
+    # MISAKA fork: stamped with the request's start, as a provider stamps its replies, and timed from there.
+    assert requested <= message.timestamp < requested + 200
+    assert message.durationMs is not None and message.durationMs >= 250
 
 
 def test_the_provider_gets_the_callers_signal(board, provider):
     """0.18.9 deep-copied the options: an Event a provider had already waited on dragged the running
     loop into the copy ("cannot pickle '_asyncio.Task' object" on every card's second request), and
     the copy's signal never fired, so nothing could abort a metered request."""
-    from misaka.agent.agent import AbortController
+    from misaka.utils.js import AbortController
 
     async def ask():
         controller = AbortController()
         waiter = asyncio.ensure_future(controller.signal.wait())     # a provider waited on it before
         await asyncio.sleep(0)
         with budget.usage_context(board.path, board.card, 1, 1_000_000):
-            message = await complete_simple(provider.model, {"messages": []},
+            message = await completeSimple(provider.model, {"messages": []},
                                             SimpleStreamOptions(signal=controller.signal, maxTokens=4_000))
         waiter.cancel()
         return controller, message
@@ -241,7 +255,7 @@ def test_the_guards_read_the_cap_less_what_is_spent(board, provider):
     async def ask():
         with budget.usage_context(board.path, board.card, 1, 10_000):
             budget.lease_request(board.con, 10_000, board.run, 1, need=1_000, want=3_000)   # another card's
-            await complete_simple(provider.model, {"messages": []})
+            await completeSimple(provider.model, {"messages": []})
             return metering.allowance()
     assert asyncio.run(ask()) == (10_000 - USED, 10_000), "neither its own lease nor another's is spent"
 
@@ -249,7 +263,7 @@ def test_the_guards_read_the_cap_less_what_is_spent(board, provider):
 def test_a_local_allowance_running_out_does_not_stop_the_run(board, provider):
     async def review():
         with budget.usage_context(board.path, board.card, 1, 10_000_000), metering.local_allowance(10):
-            return await complete_simple(provider.model, {"messages": []})
+            return await completeSimple(provider.model, {"messages": []})
     message = asyncio.run(review())
     assert message.stopReason == "error" and "allowance" in message.errorMessage
     assert not worker.stopped_at_cap(message.errorMessage)
@@ -269,7 +283,7 @@ def test_a_request_is_settled_before_its_caller_has_the_reply(board, provider, m
     with budget.usage_context(board.path, board.card, 1, 1_000_000):
         loop = asyncio.new_event_loop()
         try:
-            message = loop.run_until_complete(complete_simple(
+            message = loop.run_until_complete(completeSimple(
                 provider.model, {"messages": [{"role": "user", "content": "hi", "timestamp": 0}]}, None))
             assert message.stopReason == "stop"
             assert budget.reserved(board.con) == 0
@@ -292,16 +306,16 @@ def test_a_request_refused_before_its_reply_began_spends_nothing(board, monkeypa
         asyncio.get_running_loop().create_task(fail())
         return out
 
-    register_api_provider(ApiProvider(api="metered-refused", stream=refuse, streamSimple=refuse),
-                          source_id="token-cap-test-refused")
-    monkeypatch.setattr(api_registry, "_request_meter", metering.meter)
-    model = get_model("anthropic", "claude-sonnet-4-5").model_copy(update={"api": "metered-refused"})
+    registerApiProvider(ApiProvider(api="metered-refused", stream=refuse, streamSimple=refuse),
+                          sourceId="token-cap-test-refused")
+    monkeypatch.setattr(_meter, "_request_meter", metering.meter)
+    model = getModel("anthropic", "claude-sonnet-4-5").model_copy(update={"api": "metered-refused"})
     try:
         with budget.usage_context(board.path, board.card, 1, 1_000_000):
             for _ in range(4):
                 assert _ask(model, None).stopReason == "error"
     finally:
-        api_registry.unregister_api_providers("token-cap-test-refused")
+        api_registry.unregisterApiProviders("token-cap-test-refused")
     assert budget.spent(board.con, task_ids=budget.scope(board.con, board.run)) == 0
     assert budget.reserved(board.con) == 0
 
@@ -329,6 +343,7 @@ def test_a_streamed_delta_is_not_kept_and_not_scanned():
         ("harn_event", json.dumps({"type": "agent_end", "messages": [{"usage": {"totalTokens": 7}}]})),
         ("budget_usage", json.dumps({"totalTokens": 3}))])
     assert budget.spent(con) == 10
+    con.close()
 
 
 def test_a_card_stopped_by_the_cap_waits_ready_instead_of_failing():
@@ -350,11 +365,9 @@ def test_a_refused_request_stops_the_whole_run_until_the_cap_is_raised(board, pr
 
 HALTED_CARD = '''
 import asyncio
-from misaka.ai.api_registry import ApiProvider, register_api_provider
-from misaka.ai.models import get_model
-from misaka.ai.stream import complete_simple
+from misaka.ai.compat import ApiProvider, completeSimple, getModel, registerApiProvider
 from misaka.ai.utils.event_stream import AssistantMessageEventStream
-from misaka.core.platform import metering
+from misaka.cli import bootstrap
 from misaka.utils import loop_watchdog
 
 def slow(model, context, options=None):
@@ -364,11 +377,11 @@ def slow(model, context, options=None):
     asyncio.get_running_loop().create_task(never())
     return out
 
-register_api_provider(ApiProvider(api="slow-test", stream=slow, streamSimple=slow), source_id="slow")
-metering.install()
+registerApiProvider(ApiProvider(api="slow-test", stream=slow, streamSimple=slow), sourceId="slow")
+bootstrap.install(check_settings=False)   # metering, and research owning its cards, as in a real card
 loop_watchdog.configure("card-t_halted", exit_on_stall=True)
-model = get_model("anthropic", "claude-sonnet-4-5").model_copy(update={"api": "slow-test", "maxTokens": 32_000})
-asyncio.run(loop_watchdog.watched(complete_simple(model, {"messages": [{"role": "user", "content": "x" * 40_000, "timestamp": 0}]})))
+model = getModel("anthropic", "claude-sonnet-4-5").model_copy(update={"api": "slow-test", "maxTokens": 32_000})
+asyncio.run(loop_watchdog.watched(completeSimple(model, {"messages": [{"role": "user", "content": "x" * 40_000, "timestamp": 0}]})))
 '''
 
 
@@ -414,7 +427,7 @@ def test_a_google_request_refused_on_its_first_read_spends_nothing(board, monkey
     was charged the context's bound, on every retry."""
     from google.genai import errors as genai_errors
 
-    from misaka.ai.providers import google as google_provider
+    from misaka.ai.api import google_generative_ai as google_provider
 
     class Models:
         async def generate_content_stream(self, **kw):
@@ -424,10 +437,47 @@ def test_a_google_request_refused_on_its_first_read_spends_nothing(board, monkey
                 yield  # pragma: no cover
             return refused()
 
-    monkeypatch.setattr(google_provider, "create_client", lambda *a, **k: SimpleNamespace(aio=SimpleNamespace(models=Models())))
-    monkeypatch.setattr(api_registry, "_request_meter", metering.meter)
+    monkeypatch.setattr(google_provider, "_createClient", lambda *a, **k: SimpleNamespace(aio=SimpleNamespace(models=Models())))
+    monkeypatch.setattr(_meter, "_request_meter", metering.meter)
     monkeypatch.setenv("GEMINI_API_KEY", "x")
     with budget.usage_context(board.path, board.card, 1, 1_000_000):
-        message = _ask(get_model("google", "gemini-2.5-flash"), None)
+        message = _ask(getModel("google", "gemini-2.5-flash"), None)
     assert message.stopReason == "error"
     assert budget.spent(board.con, task_ids=budget.scope(board.con, board.run)) == 0
+
+
+async def test_a_built_in_api_is_metered_once_called_directly_or_through_the_registry(monkeypatch):
+    """Built-in providers call `lazyApi` streams directly, as pi's do; compat's `stream()` reaches the same streams
+    through the registry. Either way the meter sees the request once."""
+    from misaka.ai.api.lazy import lazyApi
+
+    metered: list[str] = []
+
+    def meter(model, context, options, send):
+        metered.append(model.api)
+        return send(options)
+
+    def reply(model, context, options=None):
+        out = AssistantMessageEventStream()
+        message = AssistantMessage(content=[], api=model.api, provider=model.provider, model=model.id,
+                                   usage=_empty_usage(), stopReason="stop", timestamp=0)
+        out.push(DoneEvent(reason="stop", message=message))
+        out.end(message)
+        return out
+
+    async def load():
+        return SimpleNamespace(stream=reply, streamSimple=reply)
+
+    api = lazyApi(load)
+    monkeypatch.setattr(_meter, "_request_meter", meter)
+    model = getModel("anthropic", "claude-sonnet-4-5").model_copy(update={"api": "lazy-metered-test"})
+    await api.streamSimple(model, {"messages": []}).result()
+    assert metered == ["lazy-metered-test"]
+
+    registerApiProvider(ApiProvider(api="lazy-metered-test", stream=api.stream, streamSimple=api.streamSimple),
+                          sourceId="lazy-metered-test")
+    try:
+        await completeSimple(model, {"messages": []})
+    finally:
+        api_registry.unregisterApiProviders("lazy-metered-test")
+    assert metered == ["lazy-metered-test", "lazy-metered-test"]

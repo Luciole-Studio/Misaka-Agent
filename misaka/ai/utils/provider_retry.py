@@ -1,40 +1,41 @@
-"""Provider retry policy, translated from pi's ``utils/provider-retry.ts``.
+"""Translated from pi's ``packages/ai/src/utils/provider-retry.ts`` (v1.1.0).
 
-Upstream's note is the reason this exists at all (``provider-retry.ts:97-104``): the
-built-in retry timers of the SDKs it wraps ignore the request's ``AbortSignal``, so its
-callers pass ``maxRetries: 0`` and wrap the request with this helper instead, which
-sleeps interruptibly.
-
-The policy below: ``x-should-retry: true``/``false`` short-circuits, a missing status
-retries, and 408/409/429/5xx retry. That 408/409/429/5xx ladder is the one
-``_should_retry`` walks in both Python clients' ``_base_client`` (checked against openai
-3.3.1 and anthropic 0.125.0; re-read it whenever either is upgraded). A server-requested
-delay above ``maxRetryDelayMs`` fails immediately rather than parking the request for
-minutes -- sixty seconds by default, zero to allow any delay.
-
-Callers: ``anthropic.py``, ``openai_completions.py``, ``openai_responses.py``,
-``azure_openai_responses.py``, ``google_shared.py`` and ``images/openrouter.py`` all set the
-SDK's own ``maxRetries`` to zero and wrap the request with ``retry_provider_request``.
+MISAKA fork: Python SDK errors are not pi's ``ProviderError`` (``status`` plus ``headers``): openai and anthropic keep
+``status_code`` and the headers on ``response``, transport failures carry only the request. ``_isProviderError`` and
+``_header`` read those shapes through ``misaka.ai.utils._sdk_error``. ``Number.parseFloat`` and ``Date.parse`` are
+stood in for by ``_parse_float`` and ``email.utils``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import math
 import random
+import re
+import time
 from collections.abc import Awaitable, Callable
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, TypedDict
 
 import httpx
 
-from misaka.ai.utils.abort import sleep, throw_if_aborted
-from misaka.ai.utils.error_body import provider_error_headers, provider_error_status
+from misaka.ai.utils._sdk_error import provider_error_headers, provider_error_status
+from misaka.utils.js import DOMException, addAbortListener
 from misaka.utils.values import signal_aborted
 
-DEFAULT_MAX_RETRY_DELAY_MS = 60_000
+_DEFAULT_MAX_RETRY_DELAY_MS = 60_000
+
+
+class _ProviderRetryOptions(TypedDict, total=False):
+    maxRetries: int | None
+    maxRetryDelayMs: float | None
+    signal: Any
+    # HTTP statuses that fail at once although the default policy would retry them.
+    noRetryStatuses: list[int] | tuple[int, ...] | None
 
 
 def _header(error: Any, name: str) -> str | None:
+    """MISAKA fork: ``error.headers?.get(name)`` on the headers a Python SDK error carries."""
     headers = provider_error_headers(error)
     getter = getattr(headers, "get", None) if headers is not None else None
     if getter is None:
@@ -43,135 +44,146 @@ def _header(error: Any, name: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _is_provider_error(error: Any) -> bool:
-    """Whether this came back from a provider at all, as opposed to a local failure.
-
-    Upstream tests for ``"status" in error && "headers" in error`` (``provider-retry.ts:15``)
-    -- the shape its TypeScript clients raise. Neither name is set on what openai 3.3.1
-    and anthropic 0.125.0 raise: their ``APIStatusError`` carries ``status_code`` and keeps
-    the headers on ``response``. The probe is shared with ``utils/error_body`` so both
-    modules recognise the same objects.
-    """
+def _isProviderError(error: Any) -> bool:
+    """MISAKA fork: upstream tests for ``"status" in error && "headers" in error``, the shape its TypeScript clients
+    raise. openai and anthropic set neither: their ``APIStatusError`` carries ``status_code`` and keeps the headers on
+    ``response``; a transport failure (``APIConnectionError``, ``httpx.ConnectError``) carries only the request."""
     if not isinstance(error, Exception):
         return False
+    if hasattr(error, "status") and hasattr(error, "headers"):
+        return True
     if provider_error_status(error) is not None:
         return True
     if provider_error_headers(error) is not None:
         return True
-    # Both probes above miss a transport failure: on openai 3.3.1's `APIConnectionError`
-    # and on `httpx.ConnectError` / `httpx.ReadTimeout`, none of `status`, `status_code`,
-    # `headers` or `response` is set. What those three do carry is the request they
-    # failed on.
     if isinstance(error, httpx.TransportError):
         return True
     return getattr(error, "request", None) is not None
 
 
-def is_retryable_provider_error(error: Any) -> bool:
-    """Mirrors upstream's ``isRetryableProviderError`` (``provider-retry.ts:23-35``)."""
-    should_retry = _header(error, "x-should-retry")
-    if should_retry == "true":
+def _isRetryableProviderError(error: Any) -> bool:
+    """Mirrors the pinned OpenAI/Anthropic SDK retry policy; review when either SDK is upgraded."""
+    shouldRetry = _header(error, "x-should-retry")
+    if shouldRetry == "true":
         return True
-    if should_retry == "false":
+    if shouldRetry == "false":
         return False
 
     status = provider_error_status(error)
-    # A missing status retries, as upstream does (`provider-retry.ts:28`).
     if status is None:
         return True
-    return status in (408, 409, 429) or status >= 500
+    return status == 408 or status == 409 or status == 429 or status >= 500
 
 
-def _validate_server_retry_delay_ms(
-    delay_ms: float, max_retry_delay_ms: float | None, provider_error_message: str
-) -> float:
-    max_delay_ms = DEFAULT_MAX_RETRY_DELAY_MS if max_retry_delay_ms is None else max_retry_delay_ms
-    if max_delay_ms > 0 and delay_ms > max_delay_ms:
-        raise RuntimeError(
-            f"Server requested {math.ceil(delay_ms / 1000)}s retry delay "
-            f"(max: {math.ceil(max_delay_ms / 1000)}s). {provider_error_message}"
-        )
-    return delay_ms
+_JS_FLOAT_PREFIX = re.compile(r"\s*([+-]?(?:Infinity|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?))")
 
 
-def get_retry_delay_ms(
-    error: Any, retry_index: int, max_retry_delay_ms: float | None, now_ms: float | None = None
-) -> float:
-    """What the server asked for, or exponential backoff with jitter.
-
-    ``now_ms`` is injectable because the HTTP-date form of ``retry-after`` is relative to
-    the current time, and a test that cannot pin "now" cannot check that branch.
-    """
-    message = str(error)
-
-    retry_after_ms = _header(error, "retry-after-ms")
-    if retry_after_ms:
-        try:
-            return _validate_server_retry_delay_ms(float(retry_after_ms), max_retry_delay_ms, message)
-        except ValueError:
-            pass
-
-    retry_after = _header(error, "retry-after")
-    if retry_after:
-        try:
-            delay_ms = float(retry_after) * 1000
-        except ValueError:
-            try:
-                when = parsedate_to_datetime(retry_after)
-            except (TypeError, ValueError):
-                when = None
-            if when is None:
-                delay_ms = float("nan")
-            else:
-                current = now_ms if now_ms is not None else _now_ms()
-                delay_ms = when.timestamp() * 1000 - current
-        return _validate_server_retry_delay_ms(delay_ms, max_retry_delay_ms, message)
-
-    # 0.5s doubling, capped at 8s, then shaved by up to a quarter -- upstream's formula
-    # (`provider-retry.ts:65-66`).
-    exponential_delay = min(0.5 * 2**retry_index, 8) * 1000
-    # random() here is jitter, not a secret; ruff's crypto rule is not enabled in this repo.
-    return exponential_delay * (1 - random.random() * 0.25)
+def _parse_float(text: str) -> float:
+    """MISAKA fork: ``Number.parseFloat``: the leading number, ``nan`` when there is none."""
+    match = _JS_FLOAT_PREFIX.match(text)
+    return float(match.group(1).replace("Infinity", "inf")) if match else float("nan")
 
 
 def _now_ms() -> float:
-    import time
-
+    """MISAKA fork: ``Date.now()``; tests patch it to pin "now" for the HTTP-date form of ``retry-after``."""
     return time.time() * 1000
 
 
-async def retry_provider_request[T](
-    request: Callable[[], Awaitable[T]],
-    *,
-    max_retries: int = 0,
-    max_retry_delay_ms: float | None = None,
-    signal: Any = None,
+def _validateServerRetryDelayMs(delayMs: float, maxRetryDelayMs: float | None, providerErrorMessage: str) -> float:
+    maxDelayMs = _DEFAULT_MAX_RETRY_DELAY_MS if maxRetryDelayMs is None else maxRetryDelayMs
+    if maxDelayMs > 0 and delayMs > maxDelayMs:
+        raise RuntimeError(
+            f"Server requested {math.ceil(delayMs / 1000)}s retry delay (max: {math.ceil(maxDelayMs / 1000)}s). {providerErrorMessage}"
+        )
+    return delayMs
+
+
+def _getRetryDelayMs(error: Any, retryIndex: int, maxRetryDelayMs: float | None) -> float:
+    retryAfterMs = _header(error, "retry-after-ms")
+    if retryAfterMs:
+        value = _parse_float(retryAfterMs)
+        if math.isfinite(value):
+            return _validateServerRetryDelayMs(value, maxRetryDelayMs, str(error))
+
+    retryAfter = _header(error, "retry-after")
+    if retryAfter:
+        seconds = _parse_float(retryAfter)
+        if math.isnan(seconds):
+            try:
+                when = parsedate_to_datetime(retryAfter)
+            except (TypeError, ValueError):
+                when = None
+            delayMs = float("nan") if when is None else when.timestamp() * 1000 - _now_ms()
+        else:
+            delayMs = seconds * 1000
+        if math.isfinite(delayMs):
+            return _validateServerRetryDelayMs(delayMs, maxRetryDelayMs, str(error))
+
+    exponentialDelay = min(0.5 * 2**retryIndex, 8) * 1000
+    return exponentialDelay * (1 - random.random() * 0.25)
+
+
+def _createAbortError() -> Exception:
+    error = DOMException("Request aborted", "AbortError")
+    return error
+
+
+async def _abortableSleep(ms: float, signal: Any = None) -> None:
+    if signal_aborted(signal):
+        raise _createAbortError()
+    loop = asyncio.get_running_loop()
+    done: asyncio.Future[None] = loop.create_future()
+
+    def onAbort() -> None:
+        timeout.cancel()
+        if not done.done():
+            done.set_exception(_createAbortError())
+
+    def finish() -> None:
+        remove()
+        if not done.done():
+            done.set_result(None)
+
+    timeout = loop.call_later(max(0.0, ms) / 1000, finish)
+    remove = addAbortListener(signal, onAbort) if signal is not None else (lambda: None)
+    try:
+        await done
+    finally:
+        timeout.cancel()
+        remove()
+
+
+async def retryProviderRequest[T](
+    request: Callable[[], Awaitable[T]], options: _ProviderRetryOptions | None = None
 ) -> T:
-    """Run ``request``, retrying what the policy says is worth retrying."""
-    retries_remaining = max_retries
+    """Reproduce the retry behavior used by the OpenAI and Anthropic SDKs while making
+    their backoff sleep interruptible. Their built-in retry timers ignore the
+    request AbortSignal, so callers must invoke the SDK with `maxRetries: 0` and
+    wrap the request with this helper. Provider-requested delays above
+    `maxRetryDelayMs` fail immediately (60 seconds by default); set it to zero to
+    disable the limit.
+    """
+    options = options if options is not None else {}
+    maxRetries = options.get("maxRetries") or 0
+    retriesRemaining = maxRetries
+    signal = options.get("signal")
 
     while True:
         try:
-            # Upstream's note here: each retry is a fresh SDK request, so
-            # `X-Stainless-Retry-Count` remains zero (`provider-retry.ts:114`).
+            # Each retry is a fresh SDK request, so X-Stainless-Retry-Count remains zero.
             return await request()
-        except Exception as error:  # the policy below decides what is retryable
+        except Exception as error:
             if signal_aborted(signal):
-                throw_if_aborted(signal)
-            if (
-                retries_remaining <= 0
-                or not _is_provider_error(error)
-                or not is_retryable_provider_error(error)
-            ):
+                raise _createAbortError() from error
+            if retriesRemaining <= 0 or not _isProviderError(error) or not _isRetryableProviderError(error):
                 raise
-            retry_index = max_retries - retries_remaining
-            retries_remaining -= 1
-            await sleep(get_retry_delay_ms(error, retry_index, max_retry_delay_ms), signal)
+            status = provider_error_status(error)
+            if status is not None and status in (options.get("noRetryStatuses") or ()):
+                raise
+
+            retryIndex = maxRetries - retriesRemaining
+            retriesRemaining -= 1
+            await _abortableSleep(_getRetryDelayMs(error, retryIndex, options.get("maxRetryDelayMs")), signal)
 
 
-__all__ = [
-    "DEFAULT_MAX_RETRY_DELAY_MS",
-    "get_retry_delay_ms",
-    "is_retryable_provider_error",
-    "retry_provider_request",
-]
+__all__ = ["retryProviderRequest"]

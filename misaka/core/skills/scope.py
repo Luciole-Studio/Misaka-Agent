@@ -32,7 +32,7 @@ class SkillScope:
     hooks: dict = field(default_factory=dict)
     review: object = None
     model: object = None
-    model_registry: object = None
+    model_runtime: object = None
     deadline: float | None = None
     stop: object = field(default_factory=threading.Event, repr=False)
     references: object = None

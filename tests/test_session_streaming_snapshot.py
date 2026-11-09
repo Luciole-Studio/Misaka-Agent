@@ -38,7 +38,11 @@ def fixture_session(tmp_path):
 
     def emit(kind, message=None):
         event = SimpleNamespace(type=kind, message=message)
-        agent._reduce_state(event)  # Native source of streamingMessage; no parallel buffer.
+        # Native source of streamingMessage (the reduction `Agent._processEvents` does); no parallel buffer.
+        if kind in ('message_start', 'message_update'):
+            agent.state.streamingMessage = message
+        elif kind in ('message_end', 'agent_end'):
+            agent.state.streamingMessage = None
         for callback in tuple(listeners):
             callback(event)
 
@@ -172,7 +176,7 @@ async def test_real_agent_session_publishes_native_stream_and_commits_once(host)
             updated.set()
 
     unsubscribe = session.subscribe(observe)
-    session.agent.streamFn = lambda *_args, **_kwargs: output
+    session.agent.streamFunction = lambda *_args, **_kwargs: output
     await control.start()
     turn = asyncio.create_task(session.prompt('native fixture question'))
     try:

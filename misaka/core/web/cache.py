@@ -208,8 +208,7 @@ _index_lock = threading.Lock()
 def _cache_dir() -> Path | None:
     """``~/.misaka/cache/web``, created on demand; None when it cannot be.
 
-    ``~/.misaka/cache/<subsystem>/`` is the established layout (``core/mcp.py``,
-    ``skills/index.py``). Read from ``CFG`` on every call rather than expanded from a
+    ``~/.misaka/cache/<subsystem>/`` is the established layout (``skills/index.py``). Read from ``CFG`` on every call rather than expanded from a
     literal once at import, for two reasons: a path frozen at import time would still
     point at the developer's own cache after a test moved ``HOME``, and ``CFG`` is what
     ``tests/conftest.py`` and every web test already redirect. A cache that escapes that

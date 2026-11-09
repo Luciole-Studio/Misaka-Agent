@@ -2,7 +2,8 @@
 
 2026-10-07 (GitHub issue #9): a run's spending could not be seen anywhere. The board's ledger
 counts tokens against the cap (``budget_usage`` rows, a total each); what a call cost is kept
-where Pi keeps it, on each assistant message's ``usage.cost`` in the session file. A run's
+where Pi keeps it, on each assistant message's ``usage.cost`` in the session file (and on the
+tool results, summaries and ``usage`` entries that carry one, as Pi's footer counts them). A run's
 conversations are its root Last Order's (her window, from the run's start), every other folder
 the run opened in the session store (each node's Last Order, a command-line root), and each of
 its cards' session folders, every attempt and subagent included.
@@ -32,8 +33,43 @@ def _add(into, usage):
         into["unpriced"] += 1          # a model with no price in the catalogue costs nothing here
 
 
+def _entry_ms(entry, message):
+    """When an entry was written, in ms: a message's own timestamp, else the entry's ISO one."""
+    stamp = message.get("timestamp") if isinstance(message, dict) else None
+    if isinstance(stamp, (int, float)):
+        return stamp
+    written = entry.get("timestamp")
+    if isinstance(written, str):
+        from datetime import datetime
+        try:
+            return datetime.fromisoformat(written).timestamp() * 1000
+        except ValueError:
+            return None
+    return None
+
+
+def _spent(entry):
+    """``(usage, provider/model label)`` of one session entry, the entry kinds pi's footer counts
+    (core/usage_totals.getUsageCostBreakdown): assistant messages, tool results and summaries that
+    carry usage, and ``usage`` entries (a cache warm-up). ``(None, None)`` for the rest."""
+    kind = entry.get("type")
+    message = entry.get("message") if kind == "message" else None
+    if isinstance(message, dict):
+        usage = message.get("usage")
+        if message.get("role") == "assistant":
+            return usage, f"{message.get('provider') or '?'}/{message.get('model') or '?'}"
+        if message.get("role") == "toolResult":
+            return usage, "Tools/summaries"
+        return None, None
+    if kind == "usage":
+        return entry.get("usage"), f"{entry.get('provider') or '?'}/{entry.get('model') or '?'}"
+    if kind in ("branch_summary", "compaction"):
+        return entry.get("usage"), "Tools/summaries"
+    return None, None
+
+
 def session_usage(paths, *, since_ms=None, until_ms=None, by_model=None):
-    """The usage of the assistant messages in these session files, within the time window given."""
+    """The usage these session files record, within the time window given."""
     total = _blank()
     for path in paths:
         try:
@@ -43,19 +79,20 @@ def session_usage(paths, *, since_ms=None, until_ms=None, by_model=None):
             continue
         for line in lines:
             try:
-                message = json.loads(line).get("message") or {}
-            except (ValueError, AttributeError):
+                entry = json.loads(line)
+            except ValueError:
                 continue
-            usage = message.get("usage") if isinstance(message, dict) else None
-            if message.get("role") != "assistant" or not isinstance(usage, dict):
+            if not isinstance(entry, dict):
                 continue
-            stamp = message.get("timestamp")
+            usage, label = _spent(entry)
+            if not isinstance(usage, dict):
+                continue
+            stamp = _entry_ms(entry, entry.get("message"))
             if isinstance(stamp, (int, float)) and (since_ms and stamp < since_ms or until_ms and stamp > until_ms):
                 continue
             _add(total, usage)
             if by_model is not None:
-                model = f"{message.get('provider') or '?'}/{message.get('model') or '?'}"
-                _add(by_model.setdefault(model, _blank()), usage)
+                _add(by_model.setdefault(label, _blank()), usage)
     return total
 
 

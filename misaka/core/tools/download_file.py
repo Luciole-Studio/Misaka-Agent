@@ -47,7 +47,7 @@ from misaka.core.documents.prompt import (
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.tools._common import run_with_abort
-from misaka.core.tools.path_utils import DOWNLOAD_DIR_NAME, resolve_to_cwd
+from misaka.core.tools.path_utils import DOWNLOAD_DIR_NAME, resolveToCwd
 from misaka.core.web.bounded import UnsafeUrlError, open_checked_stream
 from misaka.core.web.evidence import citable_url
 from misaka.core.web.screening import screen_url
@@ -332,8 +332,8 @@ async def _index_in_corpus(path: str, workspace: str) -> tuple[str, str | None]:
         # by one: on the event loop that is the whole session held still for minutes.
         doc_id, pages = await run_in_thread(corpus.ingest, path, workspace=workspace)
     except Exception as error:  # noqa: BLE001 - the file is downloaded, verified and kept; indexing is the step after, and its failures may damage nothing but themselves
-        # ValueError is ingest's documented refusal (a scanned PDF with no text layer), and
-        # its text is exactly the instruction the model needs -- OCR it, then doc_add. Any
+        # ValueError is ingest's documented refusal (a scan no OCR could read, or with no OCR
+        # program installed), and its text says which. Any
         # other failure is reported the same way rather than swallowed: the file is on disk
         # either way, and a download that succeeded must not be reported as one that failed.
         reason = str(error) or type(error).__name__  # some OSErrors carry no message at all
@@ -485,7 +485,7 @@ def create_download_file_tool_definition(
             return _result(screened.refusal)
         url = screened.url
 
-        directory = resolve_to_cwd(DOWNLOAD_DIR_NAME, cwd)
+        directory = resolveToCwd(DOWNLOAD_DIR_NAME, cwd)
         try:
             result, aborted = await run_with_abort(
                 _download(url, parsed.path.strip(), directory, signal, cwd), signal

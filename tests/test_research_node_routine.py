@@ -5,6 +5,7 @@ again on the same card, continued in her own conversation; the review loop ends 
 alternatives on a card of their own, and the node's decision turns proposals into options, which
 open as nodes only when the root reconciles the level. The model turns are scripted; everything
 the driver records is real."""
+import asyncio
 import hashlib
 import json
 import re
@@ -18,10 +19,10 @@ from misaka.core.platform import cards, repo, tasks
 from misaka.core.research import (
     commands,
     context,
-    graph,
     planner,
     report,
     runs,
+    views,
     workflow,
 )
 from misaka.core.session_manager import SessionManager
@@ -40,7 +41,7 @@ def lab(tmp_path, monkeypatch):
         assert runs.acquire_driver(con, run["id"], "driver:test")
         run = runs.get(con, run["id"])
         root = runs.root(con, run["id"])
-        runs.prepare_runner(con, "research_branches", root["id"])
+        runs.prepare_runner(con, "research_execution", root["id"])
         root = runs.node(con, root["id"])
         # The root's conversation, as the user's window would hold it.
         manager = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
@@ -171,7 +172,7 @@ async def test_a_revision_is_reviewed_again_then_alternatives_become_a_decision(
         == ["critique.md", "critique-2.md"]
     divergence = runs.tasks(con, run["id"], kind="divergence", node_id=root["id"])
     assert [(row["local_id"], row["assignee"]) for row in divergence] == [("@divergence", RED)]
-    assert [Path(row["path"]).name for row in graph.syntheses(con, run, root)] == ["synthesis.md", "synthesis-2.md"]
+    assert [Path(row["path"]).name for row in views.syntheses(con, run, root)] == ["synthesis.md", "synthesis-2.md"]
     # The rework was told what it reworks: the round-1 review and what was done with each issue.
     assert syntheses[0] is None and syntheses[1]["version"] == 2 and "revise" in syntheses[1]["dispositions"]
     critique = runs.issues(con, run["id"], node_id=root["id"], origin="critique")
@@ -189,9 +190,9 @@ async def test_a_revision_is_reviewed_again_then_alternatives_become_a_decision(
                 if entry.get("type") == "custom_message" and entry.get("customType") == "research-review"]
     assert len(returned) == 1 and "Critique of version 2" in returned[0]["content"]
     # The views followed the node through its phases.
-    node_view = (lab.tmp / graph.node_view_path(root["id"])).read_text(encoding="utf-8")
+    node_view = (lab.tmp / views.node_view_path(root["id"])).read_text(encoding="utf-8")
     assert "attempt 2" in node_view and "Divergence review" in node_view and "synthesis-2.md" in node_view
-    assert "Which cause leads?" in (lab.tmp / graph.graph_path(run)).read_text(encoding="utf-8")
+    assert "Which cause leads?" in (lab.tmp / views.graph_path(run)).read_text(encoding="utf-8")
 
 
 async def test_the_red_team_loop_runs_first_then_the_divergence_loop_until_no_gap_is_left(lab):
@@ -227,7 +228,7 @@ async def test_the_red_team_loop_runs_first_then_the_divergence_loop_until_no_ga
 
     # The red team's loop, then the divergence review's: one revision each, each reviewed again.
     assert order == ["dispose:1", "gaps:2", "decide"]
-    assert [Path(row["path"]).name for row in graph.syntheses(con, run, root)] == \
+    assert [Path(row["path"]).name for row in views.syntheses(con, run, root)] == \
         ["synthesis.md", "synthesis-2.md", "synthesis-3.md"]
     [red] = runs.tasks(con, run["id"], kind="red_team", node_id=root["id"])
     [review] = runs.tasks(con, run["id"], kind="divergence", node_id=root["id"])
@@ -282,22 +283,45 @@ async def test_an_issue_the_red_team_raises_again_word_for_word_is_answered_agai
 
 async def test_a_conclusion_waits_for_a_card_woken_to_answer_a_message(lab):
     """2026-10-01: Last Order woke card B to ask about her material, disposed without waiting, and
-    version 2 was written while B answered -- B was missing from its material map."""
+    version 2 was written while B answered -- B was missing from its material map. Since R40 her
+    answer is a consultation and B stays done: the node waits for the consultation instead."""
     con, run, root = lab.con, lab.run, lab.root
+    asked = {}
 
     def dispositions(con_, key):
         [card] = runs.tasks(con, run["id"], kind="research", node_id=root["id"])
-        # A SendMessage to the finished card: a consultation, its own new attempt.
-        assert tasks.claim_resume(con, card["id"], "consult", 1, expected_generation=card["generation"],
-                                  consult=True)
+        if not asked:
+            # A SendMessage to the finished card: a consultation, not an attempt.
+            consultation = tasks.start_consultation(con, card["id"], generation=card["generation"],
+                                                    lock="consult:test", asker={"sender": "last-order"})
+            asked.update(card=card["id"], run=consultation["id"])
         [issue] = runs.issues(con, run["id"], node_id=root["id"], round=int(key.split(":")[1]), origin="critique")
         return {"dispositions": [{"issue_id": issue["id"], "disposition": "revise", "reason": "r"}]}
 
     _script(lab, reviews={1: [_issue("Dates?")], 2: []}, alternatives=[], dispositions=dispositions,
             decide=lambda con_: {"decisions": [], "declined": []})
+    written_while_answering = []
+    scripted = planner.synthesize
+
+    def synthesize(con_, *args, **kwargs):
+        written_while_answering.append(bool(asked) and tasks.live_consultation(con, asked["card"]) is not None)
+        return scripted(con_, *args, **kwargs)
+
+    lab.monkeypatch.setattr(planner, "synthesize", synthesize)
+    real_sleep, polls = asyncio.sleep, []
+
+    async def answering(seconds):
+        if asked and tasks.live_consultation(con, asked["card"]) is not None:
+            polls.append(seconds)
+            if len(polls) == 3:                   # she answers while the node waits
+                tasks.end_consultation(con, asked["run"], "consult:test", "done")
+        await real_sleep(0)
+
+    lab.monkeypatch.setattr(workflow.asyncio, "sleep", answering)
     assert await _expand(lab, _Runner(con)) == "closed"
     [card] = runs.tasks(con, run["id"], kind="research", node_id=root["id"])
-    assert card["generation"] == 2 and card["status"] == "done"
+    assert (card["generation"], card["status"]) == (1, "done")
+    assert len(polls) == 3 and written_while_answering == [False, False]
     assert lab.material == [[card["id"]], [card["id"]]]      # version 2 was written from the card too
 
 
@@ -347,12 +371,12 @@ async def test_a_node_resumed_inside_the_divergence_loop_picks_up_where_it_stopp
     with pytest.raises(RuntimeError, match="provider fell over"):
         await _expand(lab, runner)
     # What a retry does: the node goes back to planning, and every phase picks up what it recorded.
-    con.execute("UPDATE research_branches SET status='planning' WHERE id=?", (root["id"],))
+    con.execute("UPDATE research_execution SET status='planning' WHERE id=?", (root["id"],))
     lab.root = runs.node(con, root["id"])
     assert await _expand(lab, runner) == "closed"
 
     assert order == ["dispose:1", "gaps:2", "decide"]
-    assert [Path(r["path"]).name for r in graph.syntheses(con, run, root)] == \
+    assert [Path(r["path"]).name for r in views.syntheses(con, run, root)] == \
         ["synthesis.md", "synthesis-2.md", "synthesis-3.md"]
     assert len(runs.tasks(con, run["id"], kind="red_team", node_id=root["id"])) == 1
     [review] = runs.tasks(con, run["id"], kind="divergence", node_id=root["id"])
@@ -366,16 +390,15 @@ async def test_a_join_runs_both_review_loops_like_any_node(lab):
     con, run, root = lab.con, lab.run, lab.root
     # A join sits one below its deepest parent: depth 2 here, so a limit of 3 leaves it room to fork
     # (at the limit it would close after its red-team loop, with no divergence review).
-    con.execute("UPDATE research_runs SET limits_json=? WHERE id=?",
-                (json.dumps({**runs.limits(run), "max_depth": 3}), run["id"]))
+    runs.update_limits(con, run["id"], {"max_depth": 3})
     lab.run = run = runs.get(con, run["id"])
     a = runs.create_node(con, run["id"], question="Fiscal limits?", parents=[root["id"]])
     b = runs.create_node(con, run["id"], question="Local coalitions?", parents=[root["id"]])
     for parent in (a, b):
-        con.execute("UPDATE research_branches SET status='closed' WHERE id=?", (parent["id"],))
+        con.execute("UPDATE research_execution SET status='closed' WHERE id=?", (parent["id"],))
     join = runs.create_node(con, run["id"], question="Both at once?", parents=[a["id"], b["id"]])
     workflow._prepare_sessions(con, run)
-    runs.prepare_runner(con, "research_branches", join["id"])
+    runs.prepare_runner(con, "research_execution", join["id"])
     join = runs.node(con, join["id"])
     plan = dict(runs.action(con, run["id"], root["id"], "plan")["payload"])
     plan["tasks"] = [{**plan["tasks"][0], "local_id": "both", "title": "Both causes"}]
@@ -399,11 +422,10 @@ async def test_a_join_runs_both_review_loops_like_any_node(lab):
             decide=lambda con_: (order.append("decide"), {"decisions": [], "declined": []})[1])
     assert await _expand(lab, _Runner(con)) == "closed"
     assert order == ["dispose:1", "gaps:2", "decide"]
-    assert [Path(r["path"]).name for r in graph.syntheses(con, run, join)] == \
+    assert [Path(r["path"]).name for r in views.syntheses(con, run, join)] == \
         ["synthesis.md", "synthesis-2.md", "synthesis-3.md"]
     assert join["depth"] == 2
-    assert sorted(row[0] for row in con.execute("SELECT parent_id FROM research_edges WHERE child_id=?",
-                                                 (join["id"],))) == sorted([a["id"], b["id"]])
+    assert sorted(row["id"] for row in runs.parents(con, join["id"])) == sorted([a["id"], b["id"]])
     for parent in (a, b):
         assert not runs.issues(con, run["id"], node_id=parent["id"])        # nothing landed on a parent
 
@@ -529,13 +551,12 @@ async def test_the_reconciliation_opens_a_fork_of_the_parent_conversation(lab):
     assert child["fork_entry"] == SessionManager.open(run["root_session"]).getLeafId()
     assert planner.deliberation_text(child["session_file"], child["fork_entry"]) == ""
     # Nothing is pending and no new conclusion exists: the next barrier needs no reconciliation.
-    assert graph.reconcile_state(con, runs.get(con, run["id"]))[0] is False
+    assert views.reconcile_state(con, runs.get(con, run["id"]))[0] is False
 
 
 async def test_a_join_is_a_fork_of_the_lowest_node_its_parents_share(lab):
     con, run, root = lab.con, lab.run, lab.root
-    con.execute("UPDATE research_runs SET limits_json=? WHERE id=?",
-                (json.dumps({**runs.limits(run), "max_depth": 2}), run["id"]))
+    runs.update_limits(con, run["id"], {"max_depth": 2})
     run = runs.get(con, run["id"])
     a = runs.create_node(con, run["id"], question="Fiscal limits?", parents=[root["id"]])
     b = runs.create_node(con, run["id"], question="Local coalitions?", parents=[root["id"]])
@@ -560,7 +581,7 @@ async def test_a_gap_is_filled_inside_the_node_that_left_it_and_never_handed_dow
     runs.add_decision(con, run["id"], node=root, round=1, origin="plan", index=0, question="Which method?",
                       stakes="s", options=[{"label": "decision points", "premise": "p", "own": True},
                                            {"label": "structural limits", "premise": "s"}])
-    runs.prepare_runner(con, "research_branches", root["id"])
+    runs.prepare_runner(con, "research_execution", root["id"])
     root = runs.node(con, root["id"])
     red, review = (cards.create(con, run["workspace"], title, f"## deliverable\n{name}\n", RED, after_row=lambda tid, kind=kind:
                                 runs.link_task(con, run["id"], tid, kind=kind, node=root, local_id=f"@{kind}"))
@@ -625,7 +646,7 @@ async def test_a_gap_is_filled_inside_the_node_that_left_it_and_never_handed_dow
     root = workflow._close(con, run, root, "closed") and runs.node(con, root["id"])
     pending = runs.pending_options(con, run["id"])
     assert [o["label"] for o in pending] == ["structural limits", "composite monarchy"]
-    paths = graph.render_paths(graph.snapshot(con, runs.get(con, run["id"])))
+    paths = views.render_paths(views.snapshot(con, runs.get(con, run["id"])))
     assert "gap" not in paths and f"takes up `{rival['id']}`" in paths
 
     def reconcile(con_, run_, cfg, window, *, round, material, validate):
@@ -669,15 +690,15 @@ async def test_an_erratum_corrects_an_earlier_conclusion_without_rewriting_it(la
     await tool.execute("call-1", erratum, None, None, ctx)
     [recorded] = runs.errata(con, run["id"])
     assert recorded["raised_by"] == child["id"] and recorded["node"] == root["id"]
-    assert runs.artifact_text(graph.syntheses(con, run, root)[-1]) == "Lebow's cuspal counterfactuals\n"
+    assert runs.artifact_text(views.syntheses(con, run, root)[-1]) == "Lebow's cuspal counterfactuals\n"
     # It reaches every node below the corrected one, the views and the report's record.
     grandchild = runs.create_node(con, run["id"], question="Below", parents=[child["id"]]) \
         if runs.limits(run)["max_depth"] > 1 else child
     assert "no 'cuspal' pair exists" in context.render(context.build(con, run, node=grandchild))
     assert "no 'cuspal' pair exists" in planner.errata_above(con, run, grandchild)
-    data = graph.snapshot(con, runs.get(con, run["id"]))
-    assert "no 'cuspal' pair exists" in graph.render_graph(data)
-    assert "Corrections recorded against this node" in graph.render_node(data, root["id"])
+    data = views.snapshot(con, runs.get(con, run["id"]))
+    assert "no 'cuspal' pair exists" in views.render_graph(data)
+    assert "Corrections recorded against this node" in views.render_node(data, root["id"])
     assert report._record(con, runs.get(con, run["id"]))["errata"] == [recorded]
 
 
@@ -738,8 +759,7 @@ async def test_a_node_at_max_depth_is_reviewed_without_a_divergence_card_and_clo
     its empty card scope after the red team returned 'failed' -- every last-level node failed at
     critiquing the moment its review came back."""
     con, run, root = lab.con, lab.run, lab.root
-    con.execute("UPDATE research_runs SET limits_json=? WHERE id=?",
-                (json.dumps({**runs.limits(run), "max_depth": 0}), run["id"]))
+    runs.update_limits(con, run["id"], {"max_depth": 0})
     lab.run = runs.get(con, run["id"])
     _script(lab, reviews={1: []}, alternatives=[], dispositions=lambda con_, key: {"dispositions": []},
             decide=lambda con_: {"decisions": [], "declined": []})

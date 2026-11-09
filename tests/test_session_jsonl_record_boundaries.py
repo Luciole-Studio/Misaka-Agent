@@ -10,8 +10,8 @@ from misaka.core.session_manager import (
     SessionManager,
     _dump_jsonl,
     _parse_jsonl_entries,
-    load_entries_from_file,
-    read_session_header,
+    loadEntriesFromFile,
+    readSessionHeader,
 )
 
 TEXT = "中文\u0085next\u2028line\u2029paragraph\nreal newline\rreturn"
@@ -40,7 +40,7 @@ def test_native_open_list_and_forks_preserve_unicode(tmp_path):
     original, path = transcript(tmp_path)
     before = path.read_bytes()
     assert all(character.encode() in before for character in ("\u0085", "\u2028", "\u2029"))
-    assert read_session_header(str(path))["id"] == original.getSessionId()
+    assert readSessionHeader(str(path))["id"] == original.getSessionId()
     for manager in (SessionManager.open(str(path)), SessionManager.openInMemory(str(path))):
         assert manager.getEntries() == original.getEntries()
         assert manager.getLeafId() == original.getLeafId()
@@ -59,7 +59,7 @@ def test_native_open_list_and_forks_preserve_unicode(tmp_path):
     for manager in (forked, SessionManager.open(research_path)):
         assert manager.getSessionId() != original.getSessionId()
         assert manager.getEntries() == original.getEntries()
-        assert read_session_header(manager.getSessionFile())["parentSession"] == str(path)
+        assert readSessionHeader(manager.getSessionFile())["parentSession"] == str(path)
     assert path.read_bytes() == before
 
 
@@ -71,10 +71,10 @@ def test_file_record_endings_and_header_unicode(tmp_path, ending):
     path = tmp_path / "fixture.jsonl"
     path.write_bytes((ending or b"\n").join(records) + ending)
     before = path.read_bytes()
-    assert read_session_header(str(path)) == header
-    assert load_entries_from_file(str(path), strict=True) == entries
+    assert readSessionHeader(str(path)) == header
+    assert loadEntriesFromFile(str(path), strict=True) == entries
     assert path.read_bytes() == before
-    load_entries_from_file(str(path), strict=True, repair_unterminated=True)
+    loadEntriesFromFile(str(path), strict=True, repair_unterminated=True)
     assert path.read_bytes() == before + (b"\n" if not ending else b"")
 
 
@@ -104,8 +104,8 @@ def test_empty_or_missing_session_header_stays_invalid(tmp_path, content):
     path.write_text(content, encoding="utf-8")
     with pytest.raises(InvalidSessionFileError):
         SessionManager.open(str(path))
-    assert read_session_header(str(path)) == {}
-    assert load_entries_from_file(str(path)) == []
+    assert readSessionHeader(str(path)) == {}
+    assert loadEntriesFromFile(str(path)) == []
 
 
 def test_sister_resume_preserves_unicode(tmp_path):

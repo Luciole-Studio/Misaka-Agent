@@ -1,77 +1,185 @@
-"""Hierarchical settings management for coding-agent runtime behavior."""
+"""Hierarchical settings management for coding-agent runtime behavior.
+
+Translated from pi's ``coding-agent/src/core/settings-manager.ts`` (v1.3.0); defaults are ``settings_defaults``, the
+settings types ``settings_schema`` (re-exported here).
+"""
 
 from __future__ import annotations
 
 import asyncio
 import copy
 import json
+import math
 import os
+import sys
 import time
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from filelock import FileLock, Timeout
 
-from misaka.ai.types import Model, ModelThinkingLevel, Transport
-from misaka.ai.utils.retry import DEFAULT_MAX_AGENT_RETRY_DELAY_MS
+from misaka.ai.types import Model, ModelThinkingLevel
 from misaka.config import get_agent_dir, home
 from misaka.core.http_dispatcher import (
     DEFAULT_HTTP_IDLE_TIMEOUT_MS,
     parseHttpIdleTimeoutMs,
 )
+from misaka.core.settings_defaults import SETTINGS_DEFAULTS
+from misaka.core.settings_schema import (
+    BranchSummarySettings,
+    CacheWarmingMode,
+    CodemodeMode,
+    CodemodeSettings,
+    CompactionModelOverride,
+    CompactionSettings,
+    DefaultProjectTrust,
+    ImageSettings,
+    MarkdownSettings,
+    MermaidRenderingMode,
+    ProviderRetrySettings,
+    QuietStartup,
+    RetrySettings,
+    SessionShareDestination,
+    Settings,
+    TerminalSettings,
+    ThinkingBudgetsSettings,
+    TransportSetting,
+    WarningSettings,
+)
 from misaka.utils import atomic
-from misaka.utils.paths import normalize_path, resolve_path
+from misaka.utils.js import UNDEFINED, jsString, jsTrim
+from misaka.utils.paths import normalizePath, resolvePath
+
+# Cache-warming profile. "idle" also warms between agent runs.
+CACHE_WARMING_MODES: tuple[CacheWarmingMode, ...] = ("off", "streaming", "idle")
 
 DEFAULT_COMPACTION_TOKEN_SETTINGS = {
-    "reserveTokens": 16384,
-    "keepRecentTokens": 20000,
+    "reserveTokens": SETTINGS_DEFAULTS["compaction"]["reserveTokens"],
+    "keepRecentTokens": SETTINGS_DEFAULTS["compaction"]["keepRecentTokens"],
 }
-# Cache-warming profile. "idle" also warms between agent runs.
-CACHE_WARMING_MODES = ("off", "streaming", "idle")
 _MAX_SAFE_INTEGER = 2**53 - 1
 
 
 def _is_non_negative_safe_integer(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_SAFE_INTEGER
+    """`typeof value === "number" && Number.isSafeInteger(value) && value >= 0`: an integral float such as 4096.0
+    is a safe integer too."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    if isinstance(value, float) and not (math.isfinite(value) and value.is_integer()):
+        return False
+    return 0 <= value <= _MAX_SAFE_INTEGER
 
-type CompactionSettings = dict[str, Any]
-type BranchSummarySettings = dict[str, Any]
-type ProviderRetrySettings = dict[str, Any]
-type RetrySettings = dict[str, Any]
-type TerminalSettings = dict[str, Any]
-type ImageSettings = dict[str, Any]
-type ThinkingBudgetsSettings = dict[str, Any]
-type MarkdownSettings = dict[str, Any]
-type WarningSettings = dict[str, Any]
-type Settings = dict[str, Any]
 type SettingsScope = Literal["global", "role", "project"]
 # The keys a role may hold a value of its own for. A role session that sets one of these writes
 # its own scope; every other key is the user's, shared by every role, and stays global. This
 # table is what keeps Last Order's and a Sister's configuration apart -- not per-key special cases.
-ROLE_KEYS = frozenset({"defaultProvider", "defaultModel", "defaultThinkingLevel", "mcpServers", "web"})
-type TransportSetting = Transport
-type DefaultProjectTrust = Literal["ask", "always", "never"]
+ROLE_SETTING_KEYS = frozenset({"defaultProvider", "defaultModel", "defaultThinkingLevel", "web"})
+# MISAKA fork: the kinds of agent the `roles` section sets switches for. Last Order and the Sisters are told apart
+# by the role a session is bound to; a sub-agent is bound to none, and its runner asks for "subagents".
+type RoleType = Literal["lastOrder", "sisters", "subagents"]
+ROLE_TYPES: tuple[RoleType, ...] = ("lastOrder", "sisters", "subagents")
+CODEMODE_TOOL = "codemode"
 
 
 class SettingsManagerOptions(TypedDict, total=False):
     projectTrusted: bool
 
 
-def deep_merge_settings(base: Settings, overrides: Settings) -> Settings:
-    """Deep merge settings: overrides take precedence, nested objects merge recursively.
+def deepMergeObjects(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """Overrides take precedence, nested objects merge recursively.
     (pi 97f0ccd #7572: previously everything below the first level was replaced wholesale,
     dropping sibling keys from base.)"""
     result = dict(base)
     for key, override_value in overrides.items():
         base_value = base.get(key)
         result[key] = (
-            deep_merge_settings(base_value, override_value)
+            deepMergeObjects(base_value, override_value)
             if isinstance(base_value, dict) and isinstance(override_value, dict)
             else override_value
         )
     return result
+
+
+# Tools enabled at startup when `defaultTools` does not change them.
+# MISAKA fork: MISAKA's eight default tools, where pi has read/bash/edit/write.
+DEFAULT_TOOL_NAMES: tuple[str, ...] = ("read", "bash", "edit", "write", "office", "grep", "find", "ls")
+
+
+def isToolModifier(entry: Any) -> bool:
+    """Whether a tool selection entry is a `+name` or `-name` modifier."""
+    return isinstance(entry, str) and entry.startswith(("+", "-"))
+
+
+def getToolListError(entries: Sequence[str]) -> str | None:
+    """Validate a tool list from `--tools` or the SDK `tools` option. It is either an allowlist of plain
+    names and patterns or a list of only `+name`/`-name` entries with exact names. Returns the
+    problem, or None when the list is valid."""
+    modifiers = [entry for entry in entries if isToolModifier(entry)]
+    if len(modifiers) == 0:
+        return None
+    if len(modifiers) < len(entries):
+        return "tool names cannot be mixed with +name or -name entries"
+    pattern = next((entry for entry in modifiers if "*" in entry), None)
+    if pattern:
+        return f"+name and -name entries take exact tool names, not patterns: {pattern}"
+    return None
+
+
+def applyToolModifiers(base: Sequence[str], entries: Sequence[str]) -> list[str]:
+    """Apply the `+name` and `-name` entries of `entries` to `base` in order: `+name` adds a tool and
+    `-name` removes one. Other entries are ignored."""
+    tools = [*base]
+    for entry in entries:
+        if not isToolModifier(entry):
+            continue
+        name = entry[1:]
+        index = tools.index(name) if name in tools else -1
+        if entry.startswith("+") and index == -1 and name:
+            tools.append(name)
+        elif entry.startswith("-") and index != -1:
+            del tools[index]
+    return tools
+
+
+def mergeDefaultTools(base: Any, overrides: Any) -> Any:
+    """Merge `defaultTools` of two settings layers. A list with plain tool names replaces the inherited
+    one; a list of only `+name`/`-name` entries is appended, so it modifies the inherited selection."""
+    if overrides is None:
+        return base
+    # Settings files are not validated; a malformed value replaces instead of throwing here.
+    if not isinstance(base, list) or not isinstance(overrides, list) or not all(map(isToolModifier, overrides)):
+        return overrides
+    return [*base, *overrides]
+
+
+def resolveDefaultTools(entries: list[str]) -> list[str]:
+    """Resolve a merged `defaultTools` list: plain names replace `DEFAULT_TOOL_NAMES`, then `+name` adds
+    and `-name` removes a tool, in list order."""
+    plain = [entry for entry in entries if not isToolModifier(entry)]
+    return applyToolModifiers(plain if len(plain) > 0 or len(entries) == 0 else DEFAULT_TOOL_NAMES, entries)
+
+
+def deepMergeSettings(base: Settings, overrides: Settings) -> Settings:
+    """Deep merge settings: project/overrides take precedence, nested objects merge recursively."""
+    merged = deepMergeObjects(base, overrides)
+    default_tools = mergeDefaultTools(base.get("defaultTools"), overrides.get("defaultTools"))
+    return merged if default_tools is None else {**merged, "defaultTools": default_tools}
+
+
+# An absent setting; JSON's null is a value, and an invalid one.
+_UNDEFINED = object()
+
+
+def parseTimeoutSetting(value: Any, settingName: str) -> int | None:
+    timeoutMs = parseHttpIdleTimeoutMs(None if value is _UNDEFINED else value)
+    if timeoutMs is not None:
+        return timeoutMs
+    if value is not _UNDEFINED:
+        raise ValueError(f"Invalid {settingName} setting: {value}")
+    return None
 
 
 @dataclass(slots=True)
@@ -81,7 +189,7 @@ class SettingsError:
     path: str | None = None
 
 
-def _to_settings_error(
+def toSettingsError(
     scope: SettingsScope,
     error: Exception | BaseException,
     path: str | None = None,
@@ -122,8 +230,8 @@ class SettingsStorage:
 
 class FileSettingsStorage(SettingsStorage):
     def __init__(self, cwd: str, agent_dir: str):
-        resolved_cwd = resolve_path(cwd)
-        resolved_agent_dir = resolve_path(agent_dir)
+        resolved_cwd = resolvePath(cwd)
+        resolved_agent_dir = resolvePath(agent_dir)
         self.globalSettingsPath = str(Path(resolved_agent_dir) / "settings.json")
         # None when ``cwd`` has no project scope of its own: its config directory is the home.
         project_dir = home.project_dir(resolved_cwd)
@@ -225,15 +333,15 @@ class SettingsManager:
         self.errors: list[SettingsError] = list(initialErrors or [])
         self.settingsPaths = dict(settingsPaths or {})
         self.writeQueue: asyncio.Future[None] | None = None
-        # A role's own settings live in its directory (``ROLE_KEYS``); credentials and every
+        # A role's own settings live in its directory (``ROLE_SETTING_KEYS``); credentials and every
         # other setting keep their scopes. The role is bound explicitly, never read from env.
-        self._modelProfileRegistry: Any = None
+        self._modelProfileRuntime: Any = None
         self._modelDefaultsReadOnly = False
 
     def _merged(self) -> Settings:
         """global <- project <- role: the role is the most specific owner of what it holds."""
-        merged = deep_merge_settings(self.globalSettings, self.projectSettings)
-        return deep_merge_settings(merged, self.roleSettings) if self.roleSettings else merged
+        merged = deepMergeSettings(self.globalSettings, self.projectSettings)
+        return deepMergeSettings(merged, self.roleSettings) if self.roleSettings else merged
 
     @classmethod
     def create(
@@ -283,13 +391,13 @@ class SettingsManager:
         initial_errors: list[SettingsError] = []
         if global_load["error"] is not None:
             initial_errors.append(
-                _to_settings_error(
+                toSettingsError(
                     "global", global_load["error"], settings_paths.get("global")
                 )
             )
         if project_load["error"] is not None:
             initial_errors.append(
-                _to_settings_error(
+                toSettingsError(
                     "project", project_load["error"], settings_paths.get("project")
                 )
             )
@@ -358,6 +466,10 @@ class SettingsManager:
         except Exception as error:  # noqa: BLE001
             return {"settings": {}, "error": error}
 
+    def getSettings(self) -> Settings:
+        """A copy of the effective settings: global and project settings merged, with overrides."""
+        return copy.deepcopy(self.settings)
+
     def getGlobalSettings(self) -> Settings:
         return copy.deepcopy(self.globalSettings)
 
@@ -416,7 +528,7 @@ class SettingsManager:
         self.settings = self._merged()
 
     def applyOverrides(self, overrides: Settings) -> None:
-        self.settings = deep_merge_settings(self.settings, overrides)
+        self.settings = deepMergeSettings(self.settings, overrides)
 
     def markModified(self, field: str, nestedKey: str | None = None) -> None:
         self.modifiedFields.add(field)
@@ -430,7 +542,7 @@ class SettingsManager:
 
     def recordError(self, scope: SettingsScope, error: Exception | BaseException) -> None:
         self.errors.append(
-            _to_settings_error(scope, error, self.settingsPaths.get(scope))
+            toSettingsError(scope, error, self.settingsPaths.get(scope))
         )
 
     def clearModifiedScope(self, scope: SettingsScope) -> None:
@@ -443,7 +555,7 @@ class SettingsManager:
         self.modifiedProjectNestedFields.clear()
 
     @staticmethod
-    def _clone_modified_nested_fields(source: dict[str, set[str]]) -> dict[str, set[str]]:
+    def cloneModifiedNestedFields(source: dict[str, set[str]]) -> dict[str, set[str]]:
         return {key: set(value) for key, value in source.items()}
 
     def _persistScopedSettings(
@@ -513,7 +625,7 @@ class SettingsManager:
 
         snapshot_global_settings = copy.deepcopy(self.globalSettings)
         modified_fields = set(self.modifiedFields)
-        modified_nested_fields = self._clone_modified_nested_fields(self.modifiedNestedFields)
+        modified_nested_fields = self.cloneModifiedNestedFields(self.modifiedNestedFields)
         self.enqueueWrite(
             "global",
             lambda: self._persistScopedSettings("global", snapshot_global_settings, modified_fields, modified_nested_fields),
@@ -528,7 +640,7 @@ class SettingsManager:
 
         snapshot_project_settings = copy.deepcopy(self.projectSettings)
         modified_fields = set(self.modifiedProjectFields)
-        modified_nested_fields = self._clone_modified_nested_fields(self.modifiedProjectNestedFields)
+        modified_nested_fields = self.cloneModifiedNestedFields(self.modifiedProjectNestedFields)
         self.enqueueWrite(
             "project",
             lambda: self._persistScopedSettings("project", snapshot_project_settings, modified_fields, modified_nested_fields),
@@ -577,7 +689,7 @@ class SettingsManager:
     def _owner_scope(self, key: str) -> SettingsScope:
         """Where a write of ``key`` from this session lands: the role's own file for a key the
         role may hold, the user's global file for everything else."""
-        return "role" if self.roleSettings is not None and key in ROLE_KEYS else "global"
+        return "role" if self.roleSettings is not None and key in ROLE_SETTING_KEYS else "global"
 
     def getSection(self, key: str) -> dict[str, Any]:
         """One named mapping of the merged settings (``web``, ``mcpServers``, ``moa``, ...)."""
@@ -702,11 +814,11 @@ class SettingsManager:
 
     def getSessionDir(self) -> str | None:
         session_dir = self.settings.get("sessionDir")
-        return normalize_path(session_dir) if session_dir else session_dir
+        return normalizePath(session_dir) if session_dir else session_dir
 
     def bindRole(self, profile_dir: str | None) -> None:
         """Serve ``profile_dir`` as this session's role: its settings.json is read now and is
-        where the role's own keys (``ROLE_KEYS``) are written from here on."""
+        where the role's own keys (``ROLE_SETTING_KEYS``) are written from here on."""
         if not profile_dir:
             return
         from misaka.config import profiles
@@ -715,9 +827,9 @@ class SettingsManager:
         self._load_role()
         self.settings = self._merged()
 
-    def bindModelProfile(self, profile_dir: str, model_registry: Any) -> None:
+    def bindModelProfile(self, profile_dir: str, model_runtime: Any) -> None:
         self.bindRole(profile_dir)
-        self._modelProfileRegistry = model_registry
+        self._modelProfileRuntime = model_runtime
 
     def getModelProfile(self) -> str | None:
         return self._role_dir()
@@ -739,11 +851,11 @@ class SettingsManager:
             return None
         if not (isinstance(provider, str) and provider and isinstance(model, str) and model):
             raise ValueError(f"{self.settingsPaths.get('role')}: defaultProvider and defaultModel go together")
-        if self._modelProfileRegistry is not None:
+        if self._modelProfileRuntime is not None:
             from misaka.config import profiles
 
             provider, model = profiles.resolve_model_reference(
-                f"{provider}/{model}", self._modelProfileRegistry).split("/", 1)
+                f"{provider}/{model}", self._modelProfileRuntime).split("/", 1)
         return provider, model
 
     def hasPinnedModelDefault(self) -> bool:
@@ -753,7 +865,7 @@ class SettingsManager:
         pin = self._role_pin()
         if pin is not None:
             return pin
-        merged = deep_merge_settings(self.globalSettings, self.projectSettings)
+        merged = deepMergeSettings(self.globalSettings, self.projectSettings)
         return merged.get("defaultProvider"), merged.get("defaultModel")
 
     def getDefaultProvider(self) -> str | None:
@@ -774,11 +886,11 @@ class SettingsManager:
         if self.roleSettings is not None:
             if not provider or not modelId:
                 raise ValueError("Both provider and model are required")
-            if self._modelProfileRegistry is not None:
+            if self._modelProfileRuntime is not None:
                 from misaka.config import profiles
 
                 provider, modelId = profiles.resolve_model_reference(
-                    f"{provider}/{modelId}", self._modelProfileRegistry).split("/", 1)
+                    f"{provider}/{modelId}", self._modelProfileRuntime).split("/", 1)
 
             def apply(data: dict[str, Any]) -> None:
                 data["defaultProvider"], data["defaultModel"] = provider, modelId
@@ -792,24 +904,91 @@ class SettingsManager:
         self.save()
 
     def getSteeringMode(self) -> str:
-        return self.settings.get("steeringMode") or "one-at-a-time"
+        return self.settings.get("steeringMode") or SETTINGS_DEFAULTS["steeringMode"]
 
     def setSteeringMode(self, mode: str) -> None:
         self._set_global_value("steeringMode", mode)
 
     def getFollowUpMode(self) -> str:
-        return self.settings.get("followUpMode") or "one-at-a-time"
+        return self.settings.get("followUpMode") or SETTINGS_DEFAULTS["followUpMode"]
 
     def setFollowUpMode(self, mode: str) -> None:
         self._set_global_value("followUpMode", mode)
 
-    def getDefaultTools(self) -> list[str] | None:
-        """Built-in startup selection; extension/custom tools stay enabled. None when unset."""
+    def _configuredDefaultTools(self) -> list[str] | None:
+        """pi's `getDefaultTools`: the resolved `defaultTools` selection, or None when no settings layer sets it."""
         tools = self.settings.get("defaultTools")
-        return list(tools) if isinstance(tools, list) else None
+        if tools is None:
+            return None
+        return resolveDefaultTools(
+            [tool for tool in tools if isinstance(tool, str)] if isinstance(tools, list) else []
+        )
+
+    def getDefaultTools(self) -> list[str] | None:
+        """The resolved `defaultTools` selection, or None when no settings layer sets it. MISAKA fork: a session
+        bound to a role also takes its kind's codemode switch (`roles.<kind>.codemode`) when one is set, so its
+        new sessions and `/reload` follow it as they follow `defaultTools`."""
+        configured = self._configuredDefaultTools()
+        roleType = self.getRoleType()
+        codemode = self._roleSwitch(roleType, "codemode") if roleType is not None else None
+        if codemode is None:
+            return configured
+        return applyToolModifiers(
+            DEFAULT_TOOL_NAMES if configured is None else configured, [f"{'+' if codemode else '-'}{CODEMODE_TOOL}"]
+        )
+
+    # ── MISAKA fork: the kinds of agent (`roles`) ──────────────────────────────────────────
+
+    def getRoleType(self) -> RoleType | None:
+        """Which kind of agent this manager's bound role is -- Last Order or a Sister -- or None for a session
+        without a role (a sub-agent, a bare engine)."""
+        roleDir = self._role_dir()
+        if roleDir is None:
+            return None
+        from misaka.config import profiles
+
+        return "lastOrder" if profiles.is_last_order(roleDir) else "sisters"
+
+    def _roleSwitch(self, roleType: RoleType, key: str) -> bool | None:
+        if roleType not in ROLE_TYPES:
+            raise ValueError(f"Unknown kind of agent: {roleType!r}")
+        entry = self._settings_object("roles").get(roleType)
+        value = entry.get(key) if isinstance(entry, dict) else None
+        return value if isinstance(value, bool) else None
+
+    def getRoleCodemode(self, roleType: RoleType) -> bool:
+        """Whether new sessions of `roleType` start with the codemode tool: `roles.<kind>.codemode` when it is set,
+        otherwise what they do without it -- Last Order and the Sisters follow `defaultTools`, and sub-agents
+        start with every tool."""
+        explicit = self._roleSwitch(roleType, "codemode")
+        if explicit is not None:
+            return explicit
+        if roleType == "subagents":
+            return True
+        configured = self._configuredDefaultTools()
+        return CODEMODE_TOOL in (DEFAULT_TOOL_NAMES if configured is None else configured)
+
+    def setRoleCodemode(self, roleType: RoleType, enabled: bool) -> None:
+        """Set `roles.<kind>.codemode` in the home's settings.json, for every new session of that kind."""
+        if roleType not in ROLE_TYPES:
+            raise ValueError(f"Unknown kind of agent: {roleType!r}")
+        roles = self._ensure_global_nested("roles")
+        entry = roles.get(roleType)
+        if not isinstance(entry, dict):
+            entry = roles[roleType] = {}
+        entry["codemode"] = enabled
+        self.markModified("roles", roleType)
+        self.save()
+
+    def getThemeSetting(self) -> str | None:
+        value = self.settings.get("theme")
+        if isinstance(value, str):
+            return value
+        return None
 
     def getTheme(self) -> str | None:
-        return self.settings.get("theme")
+        theme = self.getThemeSetting()
+        return None if theme is not None and "/" in theme else theme
 
     def setTheme(self, theme: str) -> None:
         self._set_global_value("theme", theme)
@@ -825,7 +1004,7 @@ class SettingsManager:
         return level if isinstance(level, str) and level else None
 
     def setDefaultThinkingLevel(self, level: str) -> None:
-        # A role session saves the level as the role's own (``ROLE_KEYS``); outside a role it is
+        # A role session saves the level as the role's own (``ROLE_SETTING_KEYS``); outside a role it is
         # the global default, as in pi. A role file that cannot be read or written raises.
         if self._owner_scope("defaultThinkingLevel") == "role":
             self._write_role(lambda data: data.__setitem__("defaultThinkingLevel", level))
@@ -834,10 +1013,22 @@ class SettingsManager:
 
     def getDefaultProjectTrust(self) -> DefaultProjectTrust:
         value = self.globalSettings.get("defaultProjectTrust")
-        return value if value in {"ask", "always", "never"} else "ask"
+        return value if value == "always" or value == "never" else SETTINGS_DEFAULTS["defaultProjectTrust"]
 
     def setDefaultProjectTrust(self, defaultProjectTrust: DefaultProjectTrust) -> None:
         self._set_global_value("defaultProjectTrust", defaultProjectTrust)
+
+    def getOrCreateDeviceId(self) -> str:
+        """Stable ID of this installation, e.g. sent to OpenAI as its agent host ID.
+
+        Created on first use. Project settings are ignored so a committed project settings
+        file cannot give every clone the same ID.
+        """
+        if not self.globalSettings.get("deviceId"):
+            self.globalSettings["deviceId"] = str(uuid.uuid4())
+            self.markModified("deviceId")
+            self.save()
+        return self.globalSettings["deviceId"]
 
     def getModelThinkingLevel(self, provider: str, modelId: str) -> ModelThinkingLevel | None:
         levels = self.settings.get("modelThinkingLevels")
@@ -867,13 +1058,24 @@ class SettingsManager:
         self.save()
 
     def getTransport(self) -> TransportSetting:
-        return self._nullish(self.settings.get("transport"), "auto")
+        return self._nullish(self.settings.get("transport"), SETTINGS_DEFAULTS["transport"])
 
     def setTransport(self, transport: TransportSetting) -> None:
         self._set_global_value("transport", transport)
 
+    def getSessionShareDestination(self) -> SessionShareDestination:
+        destination = self.settings.get("sessionShareDestination")
+        return (
+            destination
+            if destination == "gist" or destination == "radius"
+            else SETTINGS_DEFAULTS["sessionShareDestination"]
+        )
+
+    def setSessionShareDestination(self, destination: SessionShareDestination) -> None:
+        self._set_global_value("sessionShareDestination", destination)
+
     def getCompactionEnabled(self) -> bool:
-        return self._nullish(self._settings_object("compaction").get("enabled"), True)
+        return self._nullish(self._settings_object("compaction").get("enabled"), SETTINGS_DEFAULTS["compaction"]["enabled"])
 
     def setCompactionEnabled(self, enabled: bool) -> None:
         compaction = self._ensure_global_nested("compaction")
@@ -883,31 +1085,32 @@ class SettingsManager:
 
     def getCompactionTokenSetting(self, field: str, model: Model | None = None) -> int:
         compaction = self._settings_object("compaction")
-        ordinary = compaction.get(field)
-        if ordinary is not None and not _is_non_negative_safe_integer(ordinary):
+        # A JSON null is a value here, as it is to pi (`!== undefined`): only an absent field is unset.
+        ordinary = compaction.get(field, UNDEFINED)
+        if ordinary is not UNDEFINED and not _is_non_negative_safe_integer(ordinary):
             raise ValueError(
-                f"Invalid compaction.{field} setting: {ordinary}. Expected a non-negative safe integer."
+                f"Invalid compaction.{field} setting: {jsString(ordinary)}. Expected a non-negative safe integer."
             )
         model_key = f"{model.provider}/{model.id}" if model is not None else None
         model_overrides = compaction.get("modelOverrides")
         entry = (
-            model_overrides.get(model_key)
+            model_overrides.get(model_key, UNDEFINED)
             if model_key is not None and isinstance(model_overrides, dict)
-            else None
+            else UNDEFINED
         )
-        if entry is not None and not isinstance(entry, dict):
+        if entry is not UNDEFINED and not isinstance(entry, dict):
             raise ValueError(
-                f'Invalid compaction.modelOverrides["{model_key}"] setting: {entry}. Expected an object.'
+                f'Invalid compaction.modelOverrides["{model_key}"] setting: {jsString(entry)}. Expected an object.'
             )
-        override = entry.get(field) if entry is not None else None
-        if override is not None and not _is_non_negative_safe_integer(override):
+        override = entry.get(field, UNDEFINED) if isinstance(entry, dict) else UNDEFINED
+        if override is not UNDEFINED and not _is_non_negative_safe_integer(override):
             raise ValueError(
-                f'Invalid compaction.modelOverrides["{model_key}"].{field} setting: {override}. '
+                f'Invalid compaction.modelOverrides["{model_key}"].{field} setting: {jsString(override)}. '
                 "Expected a non-negative safe integer."
             )
-        if override is not None:
+        if override is not UNDEFINED:
             return override
-        if ordinary is not None:
+        if ordinary is not UNDEFINED:
             return ordinary
         return DEFAULT_COMPACTION_TOKEN_SETTINGS[field]
 
@@ -928,15 +1131,19 @@ class SettingsManager:
     def getBranchSummarySettings(self) -> dict[str, Any]:
         branch_summary = self._settings_object("branchSummary")
         return {
-            "reserveTokens": self._nullish(branch_summary.get("reserveTokens"), 16384),
-            "skipPrompt": self._nullish(branch_summary.get("skipPrompt"), False),
+            "reserveTokens": self._nullish(
+                branch_summary.get("reserveTokens"), SETTINGS_DEFAULTS["branchSummary"]["reserveTokens"]
+            ),
+            "skipPrompt": self._nullish(branch_summary.get("skipPrompt"), SETTINGS_DEFAULTS["branchSummary"]["skipPrompt"]),
         }
 
     def getBranchSummarySkipPrompt(self) -> bool:
-        return self._nullish(self._settings_object("branchSummary").get("skipPrompt"), False)
+        return self._nullish(
+            self._settings_object("branchSummary").get("skipPrompt"), SETTINGS_DEFAULTS["branchSummary"]["skipPrompt"]
+        )
 
     def getRetryEnabled(self) -> bool:
-        return self._nullish(self._settings_object("retry").get("enabled"), True)
+        return self._nullish(self._settings_object("retry").get("enabled"), SETTINGS_DEFAULTS["retry"]["enabled"])
 
     def setRetryEnabled(self, enabled: bool) -> None:
         retry_settings = self._ensure_global_nested("retry")
@@ -948,19 +1155,16 @@ class SettingsManager:
         retry_settings = self._settings_object("retry")
         return {
             "enabled": self.getRetryEnabled(),
-            "maxRetries": self._nullish(retry_settings.get("maxRetries"), 3),
-            "baseDelayMs": self._nullish(retry_settings.get("baseDelayMs"), 2000),
-            "maxAgentDelayMs": self._nullish(retry_settings.get("maxAgentDelayMs"), DEFAULT_MAX_AGENT_RETRY_DELAY_MS),
+            "maxRetries": self._nullish(retry_settings.get("maxRetries"), SETTINGS_DEFAULTS["retry"]["maxRetries"]),
+            "baseDelayMs": self._nullish(retry_settings.get("baseDelayMs"), SETTINGS_DEFAULTS["retry"]["baseDelayMs"]),
+            "maxAgentDelayMs": self._nullish(
+                retry_settings.get("maxAgentDelayMs"), SETTINGS_DEFAULTS["retry"]["maxAgentDelayMs"]
+            ),
         }
 
     def getHttpIdleTimeoutMs(self) -> int:
-        if "httpIdleTimeoutMs" not in self.settings:
-            return DEFAULT_HTTP_IDLE_TIMEOUT_MS
-        value = self.settings["httpIdleTimeoutMs"]
-        timeout_ms = parseHttpIdleTimeoutMs(value)
-        if timeout_ms is None:
-            raise ValueError(f"Invalid httpIdleTimeoutMs setting: {value}")
-        return timeout_ms
+        timeout_ms = parseTimeoutSetting(self.settings.get("httpIdleTimeoutMs", _UNDEFINED), "httpIdleTimeoutMs")
+        return DEFAULT_HTTP_IDLE_TIMEOUT_MS if timeout_ms is None else timeout_ms
 
     def setHttpIdleTimeoutMs(self, timeoutMs: float) -> None:
         if isinstance(timeoutMs, bool) or not isinstance(timeoutMs, int | float):
@@ -970,12 +1174,12 @@ class SettingsManager:
             raise ValueError(f"Invalid httpIdleTimeoutMs setting: {timeoutMs}")
         self._set_global_value("httpIdleTimeoutMs", timeout_ms)
 
-    def getCacheWarmingMode(self) -> str:
+    def getCacheWarmingMode(self) -> CacheWarmingMode:
         """Read from global settings only because warming costs money."""
         mode = self.globalSettings.get("cacheWarming")
-        return mode if mode is not None and mode in CACHE_WARMING_MODES else "streaming"
+        return mode if mode is not None and mode in CACHE_WARMING_MODES else SETTINGS_DEFAULTS["cacheWarming"]
 
-    def setCacheWarmingMode(self, mode: str) -> None:
+    def setCacheWarmingMode(self, mode: CacheWarmingMode) -> None:
         self._set_global_value("cacheWarming", mode)
 
     def getProviderRetrySettings(self) -> dict[str, Any]:
@@ -984,14 +1188,34 @@ class SettingsManager:
         return {
             "timeoutMs": provider_settings.get("timeoutMs"),
             "maxRetries": provider_settings.get("maxRetries"),
-            "maxRetryDelayMs": self._nullish(provider_settings.get("maxRetryDelayMs"), 60000),
+            "maxRetryDelayMs": self._nullish(
+                provider_settings.get("maxRetryDelayMs"), SETTINGS_DEFAULTS["retry"]["provider"]["maxRetryDelayMs"]
+            ),
         }
 
+    def getWebSocketConnectTimeoutMs(self) -> int | None:
+        return parseTimeoutSetting(self.settings.get("websocketConnectTimeoutMs", _UNDEFINED), "websocketConnectTimeoutMs")
+
     def getHideThinkingBlock(self) -> bool:
-        return self._nullish(self.settings.get("hideThinkingBlock"), False)
+        return self._nullish(self.settings.get("hideThinkingBlock"), SETTINGS_DEFAULTS["hideThinkingBlock"])
+
+    def getShowCacheMissNotices(self) -> bool:
+        return self._nullish(self.settings.get("showCacheMissNotices"), SETTINGS_DEFAULTS["showCacheMissNotices"])
+
+    def getExternalEditorCommand(self) -> str:
+        configuredEditor = self.settings.get("externalEditor")
+        if isinstance(configuredEditor, str) and jsTrim(configuredEditor) != "":
+            return configuredEditor
+        environmentEditor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+        if environmentEditor:
+            return environmentEditor
+        return "notepad" if sys.platform == "win32" else "nano"
 
     def setHideThinkingBlock(self, hide: bool) -> None:
         self._set_global_value("hideThinkingBlock", hide)
+
+    def setShowCacheMissNotices(self, show: bool) -> None:
+        self._set_global_value("showCacheMissNotices", show)
 
     def getShellPath(self) -> str | None:
         return self.settings.get("shellPath")
@@ -999,18 +1223,20 @@ class SettingsManager:
     def setShellPath(self, path: str | None) -> None:
         self._set_global_value("shellPath", path)
 
-    def getQuietStartup(self) -> bool:
-        return self._nullish(self.settings.get("quietStartup"), False)
+    def getQuietStartup(self) -> QuietStartup:
+        value = self.settings.get("quietStartup")
+        return value if value is True or value == "header" else SETTINGS_DEFAULTS["quietStartup"]
 
-    def setQuietStartup(self, quiet: bool) -> None:
+    def setQuietStartup(self, quiet: QuietStartup) -> None:
         self._set_global_value("quietStartup", quiet)
 
     def getEnableInstallTelemetry(self) -> bool:
         # The setting answers "may this install be identified to a service". All that rides
         # on it is `core/provider_attribution.py` naming the client "misaka" to aggregator
-        # gateways; nothing else is sent. Upstream defaults it on; MISAKA defaults it off,
-        # so being named is something the user turns on rather than something they find.
-        return self._nullish(self.settings.get("enableInstallTelemetry"), False)
+        # gateways; nothing else is sent. Upstream defaults it on; MISAKA defaults it off
+        # (`# MISAKA fork:` in settings_defaults.py), so being named is something the user
+        # turns on rather than something they find.
+        return self._nullish(self.settings.get("enableInstallTelemetry"), SETTINGS_DEFAULTS["enableInstallTelemetry"])
 
     def setEnableInstallTelemetry(self, enabled: bool) -> None:
         self._set_global_value("enableInstallTelemetry", enabled)
@@ -1023,7 +1249,7 @@ class SettingsManager:
 
 
     def getCollapseChangelog(self) -> bool:
-        return self._nullish(self.settings.get("collapseChangelog"), False)
+        return self._nullish(self.settings.get("collapseChangelog"), SETTINGS_DEFAULTS["collapseChangelog"])
 
     def setCollapseChangelog(self, collapse: bool) -> None:
         self._set_global_value("collapseChangelog", collapse)
@@ -1034,6 +1260,13 @@ class SettingsManager:
 
     def setExtensionPaths(self, paths: list[str]) -> None:
         self._set_global_value("extensions", paths)
+
+    def setProjectExtensionPaths(self, paths: list[str]) -> None:
+        self._assertProjectTrustedForWrite()
+        project_settings = copy.deepcopy(self.projectSettings)
+        project_settings["extensions"] = paths
+        self.markProjectModified("extensions")
+        self.saveProjectSettings(project_settings)
 
     def getPromptTemplatePaths(self) -> list[str]:
         return list(self.settings.get("prompts") or [])
@@ -1062,7 +1295,7 @@ class SettingsManager:
         self.saveProjectSettings(project_settings)
 
     def getEnableSkillCommands(self) -> bool:
-        return self._nullish(self.settings.get("enableSkillCommands"), True)
+        return self._nullish(self.settings.get("enableSkillCommands"), SETTINGS_DEFAULTS["enableSkillCommands"])
 
     def setEnableSkillCommands(self, enabled: bool) -> None:
         self._set_global_value("enableSkillCommands", enabled)
@@ -1086,7 +1319,7 @@ class SettingsManager:
         return overrides
 
     def getShowImages(self) -> bool:
-        return self._nullish(self._settings_object("terminal").get("showImages"), True)
+        return self._nullish(self._settings_object("terminal").get("showImages"), SETTINGS_DEFAULTS["terminal"]["showImages"])
 
     def setShowImages(self, show: bool) -> None:
         terminal = self._ensure_global_nested("terminal")
@@ -1097,7 +1330,7 @@ class SettingsManager:
     def getImageWidthCells(self) -> int:
         width = self._settings_object("terminal").get("imageWidthCells")
         if not isinstance(width, (int, float)) or isinstance(width, bool) or not float("-inf") < float(width) < float("inf"):
-            return 60
+            return SETTINGS_DEFAULTS["terminal"]["imageWidthCells"]
         return max(1, int(width // 1))
 
     def setImageWidthCells(self, width: int) -> None:
@@ -1110,7 +1343,10 @@ class SettingsManager:
         terminal = self._settings_object("terminal")
         if terminal.get("clearOnShrink") is not None:
             return terminal["clearOnShrink"]
-        return os.environ.get("MISAKA_CLEAR_ON_SHRINK") == "1"
+        # MISAKA fork: `MISAKA_CLEAR_ON_SHRINK`, where upstream reads `PI_CLEAR_ON_SHRINK`.
+        if os.environ.get("MISAKA_CLEAR_ON_SHRINK") == "1":
+            return True
+        return SETTINGS_DEFAULTS["terminal"]["clearOnShrink"]
 
     def setClearOnShrink(self, enabled: bool) -> None:
         terminal = self._ensure_global_nested("terminal")
@@ -1119,7 +1355,9 @@ class SettingsManager:
         self.save()
 
     def getShowTerminalProgress(self) -> bool:
-        return self._nullish(self._settings_object("terminal").get("showTerminalProgress"), False)
+        return self._nullish(
+            self._settings_object("terminal").get("showTerminalProgress"), SETTINGS_DEFAULTS["terminal"]["showTerminalProgress"]
+        )
 
     def setShowTerminalProgress(self, enabled: bool) -> None:
         terminal = self._ensure_global_nested("terminal")
@@ -1128,7 +1366,7 @@ class SettingsManager:
         self.save()
 
     def getImageAutoResize(self) -> bool:
-        return self._nullish(self._settings_object("images").get("autoResize"), True)
+        return self._nullish(self._settings_object("images").get("autoResize"), SETTINGS_DEFAULTS["images"]["autoResize"])
 
     def setImageAutoResize(self, enabled: bool) -> None:
         images = self._ensure_global_nested("images")
@@ -1137,7 +1375,7 @@ class SettingsManager:
         self.save()
 
     def getBlockImages(self) -> bool:
-        return self._nullish(self._settings_object("images").get("blockImages"), False)
+        return self._nullish(self._settings_object("images").get("blockImages"), SETTINGS_DEFAULTS["images"]["blockImages"])
 
     def setBlockImages(self, blocked: bool) -> None:
         images = self._ensure_global_nested("images")
@@ -1152,15 +1390,16 @@ class SettingsManager:
         self._set_global_value("enabledModels", patterns)
 
     def getDoubleEscapeAction(self) -> str:
-        return self._nullish(self.settings.get("doubleEscapeAction"), "tree")
+        return self._nullish(self.settings.get("doubleEscapeAction"), SETTINGS_DEFAULTS["doubleEscapeAction"])
 
     def setDoubleEscapeAction(self, action: str) -> None:
         self._set_global_value("doubleEscapeAction", action)
 
     def getTreeFilterMode(self) -> str:
         mode = self.settings.get("treeFilterMode")
-        valid = {"default", "no-tools", "user-only", "labeled-only", "all"}
-        return mode if mode in valid else "default"
+        valid = ("default", "no-tools", "user-only", "labeled-only", "all")
+        # `valid.includes(mode)`: a list or an object in settings.json is not a mode, nor an error.
+        return mode if isinstance(mode, str) and mode in valid else SETTINGS_DEFAULTS["treeFilterMode"]
 
     def setTreeFilterMode(self, mode: str) -> None:
         self._set_global_value("treeFilterMode", mode)
@@ -1174,26 +1413,38 @@ class SettingsManager:
         self._set_global_value("showHardwareCursor", enabled)
 
     def getEditorPaddingX(self) -> int:
-        return self._nullish(self.settings.get("editorPaddingX"), 0)
+        return self._nullish(self.settings.get("editorPaddingX"), SETTINGS_DEFAULTS["editorPaddingX"])
 
     def setEditorPaddingX(self, padding: int) -> None:
         self._set_global_value("editorPaddingX", max(0, min(3, int(padding))))
 
     def getOutputPad(self) -> Literal[0, 1]:
         value = self.settings.get("outputPad")
-        return 0 if type(value) in (int, float) and value == 0 else 1
+        return 0 if type(value) in (int, float) and value == 0 else SETTINGS_DEFAULTS["outputPad"]
 
     def setOutputPad(self, padding: Literal[0, 1]) -> None:
         self._set_global_value("outputPad", padding)
 
     def getAutocompleteMaxVisible(self) -> int:
-        return self._nullish(self.settings.get("autocompleteMaxVisible"), 5)
+        return self._nullish(self.settings.get("autocompleteMaxVisible"), SETTINGS_DEFAULTS["autocompleteMaxVisible"])
 
     def setAutocompleteMaxVisible(self, maxVisible: int) -> None:
         self._set_global_value("autocompleteMaxVisible", max(3, min(20, int(maxVisible))))
 
     def getCodeBlockIndent(self) -> str:
-        return self._nullish(self._settings_object("markdown").get("codeBlockIndent"), "  ")
+        return self._nullish(
+            self._settings_object("markdown").get("codeBlockIndent"), SETTINGS_DEFAULTS["markdown"]["codeBlockIndent"]
+        )
+
+    def getMermaidRenderingMode(self) -> MermaidRenderingMode:
+        mode = self._settings_object("markdown").get("mermaid")
+        return mode if mode == "off" or mode == "final" else SETTINGS_DEFAULTS["markdown"]["mermaid"]
+
+    def setMermaidRenderingMode(self, mode: MermaidRenderingMode) -> None:
+        markdown = self._ensure_global_nested("markdown")
+        markdown["mermaid"] = mode
+        self.markModified("markdown", "mermaid")
+        self.save()
 
     def getWarnings(self) -> dict[str, Any]:
         return dict(self._settings_object("warnings"))
@@ -1202,15 +1453,28 @@ class SettingsManager:
         self._set_global_value("warnings", {**warnings})
 
 __all__ = [
+    "CACHE_WARMING_MODES",
+    "CODEMODE_TOOL",
+    "DEFAULT_TOOL_NAMES",
+    "ROLE_SETTING_KEYS",
+    "ROLE_TYPES",
     "BranchSummarySettings",
+    "CacheWarmingMode",
+    "CodemodeMode",
+    "CodemodeSettings",
+    "CompactionModelOverride",
     "CompactionSettings",
     "DefaultProjectTrust",
     "FileSettingsStorage",
     "ImageSettings",
     "InMemorySettingsStorage",
     "MarkdownSettings",
+    "MermaidRenderingMode",
     "ProviderRetrySettings",
+    "QuietStartup",
     "RetrySettings",
+    "RoleType",
+    "SessionShareDestination",
     "Settings",
     "SettingsError",
     "SettingsManager",
@@ -1221,4 +1485,7 @@ __all__ = [
     "ThinkingBudgetsSettings",
     "TransportSetting",
     "WarningSettings",
+    "applyToolModifiers",
+    "getToolListError",
+    "isToolModifier",
 ]

@@ -103,7 +103,7 @@ def validate_frontmatter(content, *, new_skill=False):
     plus the size limits only a write enforces."""
     from misaka.core.skills.index import SKILL_PROMPT_DESC_LIMIT
     from misaka.core.skills.linter import lint_content
-    from misaka.utils.frontmatter import parse_frontmatter
+    from misaka.utils.frontmatter import parseFrontmatter
 
     if not str(content or "").strip():
         return "Content cannot be empty."
@@ -113,7 +113,7 @@ def validate_frontmatter(content, *, new_skill=False):
     errors = [f.message for f in lint_content(text) if f.severity == "error"]
     if errors:
         return "; ".join(errors)
-    parsed = parse_frontmatter(text)                     # the linter parsed it: valid, typed name and description
+    parsed = parseFrontmatter(text)                     # the linter parsed it: valid, typed name and description
     desc = parsed.frontmatter["description"].strip().strip("'\"")
     if len(desc) > MAX_DESCRIPTION_LENGTH:
         return f"Description exceeds {MAX_DESCRIPTION_LENGTH} characters."
@@ -143,8 +143,8 @@ def validate_frontmatter(content, *, new_skill=False):
 def name_mismatch(name, content):
     """The frontmatter ``name`` is the directory name: the index, ``/skill`` and ``skill_view``
     all address a skill by it, so the two must not drift apart."""
-    from misaka.utils.frontmatter import parse_frontmatter
-    declared = str((parse_frontmatter(str(content)).frontmatter or {}).get("name") or "").strip()
+    from misaka.utils.frontmatter import parseFrontmatter
+    declared = str((parseFrontmatter(str(content)).frontmatter or {}).get("name") or "").strip()
     name = Path(name).name
     if declared != name:
         return f"Frontmatter name '{declared}' must equal the skill directory name '{name}'."
@@ -190,8 +190,8 @@ def _description_preview(content):
         is_skill_description_truncated,
         truncate_skill_description,
     )
-    from misaka.utils.frontmatter import parse_frontmatter
-    desc = str((parse_frontmatter(content).frontmatter or {}).get("description") or "")
+    from misaka.utils.frontmatter import parseFrontmatter
+    desc = str((parseFrontmatter(content).frontmatter or {}).get("description") or "")
     if not is_skill_description_truncated(desc):
         return None
     return f"The skill index will show: {truncate_skill_description(desc)}"
@@ -558,9 +558,9 @@ def _gist(action, name, content="", file_path="", old_string=""):
         return f"patch skill {name}{('/' + file_path) if file_path else ''}: {old_string[:40]}…"
     if action == "delete":
         return f"Delete skill '{name}'"
-    from misaka.utils.frontmatter import FrontmatterError, parse_frontmatter
+    from misaka.utils.frontmatter import FrontmatterError, parseFrontmatter
     try:
-        desc = str((parse_frontmatter(content or "").frontmatter or {}).get("description") or "")
+        desc = str((parseFrontmatter(content or "").frontmatter or {}).get("description") or "")
     except FrontmatterError:
         desc = ""
     label = "Rewrite skill" if action == "edit" else "Create skill"

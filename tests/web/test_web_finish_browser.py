@@ -193,6 +193,16 @@ async def test_nous_selection_entitlement_forwarding_and_account_cache(monkeypat
     assert 'gateway-secret-token' not in config.redact_secrets('gateway-secret-token')
 
 
+async def _put(store, provider, record):
+    """Write one auth.json record through the store's CredentialStore ``modify``."""
+    from misaka.core.auth_storage import _to_runtime_credential
+
+    async def replace(_current):
+        return _to_runtime_credential(record, resolve_api_key=False)
+
+    await store.modify(provider, replace)
+
+
 async def test_nous_rejection_and_explicit_vendor_are_not_billed_elsewhere(monkeypatch):
     monkeypatch.setenv('TOOL_GATEWAY_USER_TOKEN', 'gateway-secret-token')
     monkeypatch.setenv('FIRECRAWL_API_KEY', 'direct-key')
@@ -207,31 +217,30 @@ async def test_nous_rejection_and_explicit_vendor_are_not_billed_elsewhere(monke
 
 async def test_nous_refresh_stays_on_login_portal_and_logout_wins(monkeypatch, isolated):
     auth = gateway.storage()
-    auth.set('nous', {'type': 'oauth', 'access': 'old-token', 'refresh': 'old-refresh', 'expires': 1,
-                      'portal_base_url': 'https://portal.test'})
+    await _put(auth, 'nous', {'type': 'oauth', 'access': 'old-token', 'refresh': 'old-refresh', 'expires': 1,
+                              'portal_base_url': 'https://portal.test'})
     requests, _ = fake_network(monkeypatch, lambda r: httpx.Response(200, json={
         'access_token': 'new-token', 'refresh_token': 'new-refresh', 'expires_in': 3600}))
     access, base = await gateway.token()
     assert access == 'new-token' and base == 'https://portal.test'
     assert requests[0].headers['x-nous-refresh-token'] == 'old-refresh'
     assert b'refresh_token=old-refresh' not in requests[0].content
-    gateway.storage().remove('nous')
+    await gateway.storage().delete('nous')
     with pytest.raises(ValueError, match='missing'):
         await gateway.token(rejected=access)
     assert len(requests) == 1
 
 
-async def test_nous_device_code_real_auth_store(monkeypatch, isolated):
+async def test_nous_device_code_real_auth_store(monkeypatch, isolated, capsys):
     responses = iter([
         {'device_code': 'device-one', 'user_code': 'ABCD', 'verification_uri': 'https://portal.nousresearch.com/device', 'expires_in': 60, 'interval': 0.01},
         {'access_token': 'new-token', 'refresh_token': 'refresh-token', 'expires_in': 3600},
     ])
     requests, _ = fake_network(monkeypatch, lambda r: httpx.Response(200, json=next(responses)))
-    shown = []
-    auth = gateway.storage()
-    await auth.login('nous', SimpleNamespace(onDeviceCode=shown.append, signal=None))
-    assert shown[0].userCode == 'ABCD'
-    assert auth.get('nous')['access'] == 'new-token'
+    from misaka.cli.web import login_and_store
+    await login_and_store(gateway.nousOAuth, gateway._auth_path(), 'nous')
+    assert 'Device code: ABCD' in capsys.readouterr().out
+    assert gateway.storage().readState.data.get('nous')['access'] == 'new-token'
     assert [r.url.path for r in requests] == ['/api/oauth/device/code', '/api/oauth/token']
     assert b'client_id=hermes-cli' in requests[0].content
 
@@ -444,9 +453,9 @@ async def test_cloud_creation_cancellation_drains_ack_and_releases_once(monkeypa
 
 async def test_real_session_empty_ceiling_and_browser_use_readonly_fallback(monkeypatch, isolated):
     from misaka.core.auth_storage import AuthStorage
-    from misaka.core.model_registry import ModelRegistry
+    from misaka.core.model_runtime import ModelRuntime
     from misaka.core.resource_loader import DefaultResourceLoader
-    from misaka.core.sdk import create_agent_session
+    from misaka.core.sdk import createAgentSession
     from misaka.core.session_manager import SessionManager
     monkeypatch.setattr(settings, 'executable', lambda _: '/fixture/browser')
     config.update_config({'browser.backend': 'browser-use'})
@@ -455,8 +464,9 @@ async def test_real_session_empty_ceiling_and_browser_use_readonly_fallback(monk
     loader = DefaultResourceLoader({'cwd': str(isolated), 'agentDir': str(isolated), 'noExtensions': True,
                                     'noContextFiles': True, 'noPromptTemplates': True, 'noThemes': True})
     await loader.reload()
-    session = (await create_agent_session({'cwd': str(isolated), 'agentDir': str(isolated), 'authStorage': auth,
-        'modelRegistry': ModelRegistry.inMemory(auth), 'resourceLoader': loader, 'parts': [owner],
+    session = (await createAgentSession({'cwd': str(isolated), 'agentDir': str(isolated),
+        'modelRuntime': await ModelRuntime.create({"authStorage": auth, "modelsPath": None}),
+        'resourceLoader': loader, 'parts': [owner],
         'customTools': list(owner.tools), 'sessionManager': SessionManager.inMemory(str(isolated))}))['session']
     try:
         assert 'browser_exec' in session.getActiveToolNames() and 'browser_click' not in session.getActiveToolNames()
@@ -475,21 +485,22 @@ async def test_real_session_empty_ceiling_and_browser_use_readonly_fallback(monk
 async def test_auxiliary_vision_exactly_once_and_native_zero(monkeypatch):
     import base64
 
-    from misaka.ai.models import get_model
+    from misaka.ai.compat import getModel
     from misaka.core.web.browser.tools import image_content
-    from misaka.utils.image_process import process_image
+    from misaka.utils.image_process import processImage
     body = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jE1sAAAAASUVORK5CYII=')
-    assert (await process_image(body, 'image/png')).ok
+    assert (await processImage(body, 'image/png')).ok
     calls = []
-    model = get_model('openai', 'gpt-4o')
+    model = getModel('openai', 'gpt-4o')
     async def complete(*_args):
         calls.append(True); return SimpleNamespace(content=[SimpleNamespace(text='fixture image analysis')])
     async def auth(_):
-        return SimpleNamespace(auth=SimpleNamespace(baseUrl=None, apiKey='fixture-key', headers={}), env={})
+        return {'ok': True, 'apiKey': 'fixture-key', 'headers': {}, 'env': {}}
     import importlib
-    monkeypatch.setattr(importlib.import_module('misaka.ai.stream'), 'complete_simple', complete)
+    monkeypatch.setattr(importlib.import_module('misaka.ai.compat'), 'completeSimple', complete)
     config.update_config({'browser.vision_model': 'openai/gpt-4o'})
-    registry = SimpleNamespace(find=lambda *_: model, getAuth=auth)
+    registry = SimpleNamespace(find=lambda *_: model, hasConfiguredAuth=lambda _model: True,
+                               getApiKeyAndHeaders=auth)
     assert (await image_content(body, 'question', SimpleNamespace(model=model, modelRegistry=registry)))[0]['type'] == 'image'
     assert not calls
     text_model = SimpleNamespace(input=['text'])
@@ -526,7 +537,7 @@ def test_real_cli_browser_setup_and_explicit_install_flags(monkeypatch, isolated
     assert commands[0][-1] == 'agent-browser@0.26.0'
     assert commands[1][-1] == 'install'
     assert str(isolated) in commands[1][0]
-    assert commands[1][0].endswith('node_modules/.bin/agent-browser.cmd')
+    assert Path(commands[1][0]).as_posix().endswith('node_modules/.bin/agent-browser.cmd')
 
 
 async def test_camofox_managed_state_requires_reusable_identity(monkeypatch, isolated):
@@ -550,3 +561,43 @@ async def test_lightpanda_does_not_silently_ignore_network_routes(monkeypatch, i
     session = BrowserSession(str(isolated), {'lightpanda_path': '/fixture/lightpanda'}, 'local')
     with pytest.raises(ValueError, match='one all-request proxy'):
         await launch(session)
+
+
+@pytest.mark.parametrize('gone', [404, 410])
+async def test_a_camofox_tab_the_server_let_go_is_reopened(monkeypatch, isolated, gone):
+    """410 Gone is a tab the server already let go of, as 404 is: navigating on it kept the dead
+    tab and every later browser call failed (R9)."""
+    monkeypatch.setenv('CAMOFOX_URL', 'https://camofox.test')
+    monkeypatch.setattr('misaka.core.web.browser.session.check_url', async_identity)
+
+    def reply(r):
+        if r.url.path == '/tabs/old/navigate':
+            return httpx.Response(gone, json={'error': 'tab gone'})
+        if r.url.path == '/tabs' and r.method == 'POST':
+            return httpx.Response(200, json={'tabId': 'fresh', 'url': 'https://page.test/'})
+        if r.url.path.endswith('/snapshot'):
+            return httpx.Response(200, json={'snapshot': 'page', 'url': 'https://page.test/', 'refsCount': 0})
+        return httpx.Response(200, json={'success': True})
+
+    fake_network(monkeypatch, reply)
+    session = BrowserSession(str(isolated), {'camofox_managed_persistence': True}, 'camofox')
+    session.camofox_tab = 'old'
+    try:
+        result = await session._camofox('browser_navigate', {'url': 'https://page.test/'})
+        assert result['success'] and session.camofox_tab == 'fresh'
+    finally:
+        await session.close()
+
+
+async def test_a_camofox_server_error_on_navigate_still_fails(monkeypatch, isolated):
+    monkeypatch.setenv('CAMOFOX_URL', 'https://camofox.test')
+    monkeypatch.setattr('misaka.core.web.browser.session.check_url', async_identity)
+    fake_network(monkeypatch, lambda r: httpx.Response(500, json={'error': 'boom'}))
+    session = BrowserSession(str(isolated), {'camofox_managed_persistence': True}, 'camofox')
+    session.camofox_tab = 'old'
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await session._camofox('browser_navigate', {'url': 'https://page.test/'})
+        assert session.camofox_tab == 'old'
+    finally:
+        await session.close()

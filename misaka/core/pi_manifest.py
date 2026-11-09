@@ -1,10 +1,12 @@
-"""Read Pi resource manifests from ``package.json`` files."""
+"""Translated from pi's ``packages/coding-agent/src/core/pi-manifest.ts`` (v1.1.0)."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import Any, TypedDict, TypeGuard, cast
+
+from misaka.utils.text import stripBom
 
 
 class PiManifest(TypedDict, total=False):
@@ -14,49 +16,45 @@ class PiManifest(TypedDict, total=False):
     themes: list[str]
 
 
-_RESOURCE_FIELDS = ("extensions", "skills", "prompts", "themes")
+RESOURCE_FIELDS = ("extensions", "skills", "prompts", "themes")
+
+
+def isObject(value: Any) -> TypeGuard[dict[str, Any]]:
+    return isinstance(value, dict)
+
+
 _JSON_NUMBER = object()
 
 
-def _reject_non_json_constant(value: str) -> None:
+def _rejectNonJsonConstant(value: str) -> None:
     raise ValueError(value)
 
 
-def _parse_json_number(_value: str) -> object:
-    # Manifest validation only distinguishes strings from non-strings. A sentinel
-    # also avoids Python's integer digit limit, which JavaScript JSON.parse lacks.
+def _parseJsonNumber(_value: str) -> object:
+    # `JSON.parse`: a manifest only tells strings from the rest. A sentinel also avoids Python's integer digit limit,
+    # which JavaScript lacks, and NaN/Infinity are refused as JSON.parse refuses them.
     return _JSON_NUMBER
 
 
-def read_pi_manifest(package_json_path: str) -> PiManifest | None:
-    """Python equivalent of Pi's ``readPiManifest``."""
+def readPiManifest(packageJsonPath: str) -> PiManifest | None:
     try:
-        content = Path(package_json_path).read_bytes().decode("utf-8", errors="replace")
-        package: object = json.loads(
-            content.removeprefix("\ufeff"),
-            parse_constant=_reject_non_json_constant,
-            parse_float=_parse_json_number,
-            parse_int=_parse_json_number,
+        pkg: Any = json.loads(
+            stripBom(Path(packageJsonPath).read_bytes().decode("utf-8", errors="replace")),
+            parse_constant=_rejectNonJsonConstant,
+            parse_float=_parseJsonNumber,
+            parse_int=_parseJsonNumber,
         )
-    except Exception:  # noqa: BLE001 - Pi intentionally treats every manifest error as absent
+        if not isObject(pkg) or not isObject(pkg.get("pi")):
+            return None
+
+        manifest: dict[str, list[str]] = {}
+        for field in RESOURCE_FIELDS:
+            entries = pkg["pi"].get(field)
+            if isinstance(entries, list) and all(isinstance(entry, str) for entry in entries):
+                manifest[field] = entries
+        return cast(PiManifest, manifest)
+    except Exception:  # noqa: BLE001 - pi treats every manifest error as absent
         return None
 
-    if not isinstance(package, dict):
-        return None
-    pi_section = package.get("pi")
-    if not isinstance(pi_section, dict):
-        return None
 
-    manifest: dict[str, list[str]] = {}
-    for field in _RESOURCE_FIELDS:
-        entries = pi_section.get(field)
-        if isinstance(entries, list) and all(
-            isinstance(entry, str) for entry in entries
-        ):
-            manifest[field] = entries
-    return cast(PiManifest, manifest)
-
-
-readPiManifest = read_pi_manifest
-
-__all__ = ["PiManifest", "readPiManifest", "read_pi_manifest"]
+__all__ = ["PiManifest", "readPiManifest"]

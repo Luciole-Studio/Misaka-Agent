@@ -131,6 +131,18 @@ async def test_native_role_startup_routes_each_provider(local_models, role, kind
     assert [(provider, data["model"]) for provider, data in requests] == [pair]
 
 
+async def test_a_headless_session_takes_its_name_from_the_command_line(local_models):
+    """``misaka dm`` names a new Bot Chat with ``--name``, which a headless session applies as pi's
+    main.ts and ``cli.engine`` do; the name reaches the file with the first message."""
+    from misaka.core.session_manager import SessionManager
+
+    root, _requests = local_models
+    async with opened(root, "sisters/10032", "dm", ["--name", "Bot Chat"]) as (_, session):
+        await prompt(session, "hello")
+        path = session.sessionManager.getSessionFile()
+    assert SessionManager.open(path).getSessionName() == "Bot Chat"
+
+
 async def test_native_saved_default_isolated_and_reused(local_models):
     root, requests = local_models
     paths = [home.path("settings"), home.path("roles_root") / "last_order/settings.json",
@@ -138,7 +150,7 @@ async def test_native_saved_default_isolated_and_reused(local_models):
     before = [path.read_bytes() for path in paths]
     async with opened(root, "sisters/10032", "foreground") as (_, session):
         target = session.modelRegistry.find("fixture-lo", "shared")
-        await session.setModel(target, persist=True)
+        await session.setModel(target, {"persist": True})
         await session.settingsManager.flush()
         assert session.settingsManager.getDefaultModelPair() == ("fixture-lo", "shared")
         await prompt(session, "SAVED_MARKER")
@@ -178,7 +190,7 @@ async def test_native_child_default_guard_preserves_parent_and_global(local_mode
         assert session.settingsManager.getModelProfile() is None
         target = session.modelRegistry.find("fixture-b", "different")
         with pytest.raises(ValueError, match="/agents"):
-            await session.setModel(target, persist=True)
+            await session.setModel(target, {"persist": True})
         assert (session.model.provider, session.model.id) == ("fixture-a", "shared")
         await session.setModel(target)
         await prompt(session, "CHILD_MARKER")

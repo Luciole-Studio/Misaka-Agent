@@ -1,328 +1,127 @@
-"""Persistent project-trust decisions with nearest-parent inheritance."""
+"""Translated from pi's ``packages/coding-agent/src/core/project-trust.ts`` (v1.3.0).
+
+MISAKA forks:
+- No RPC mode.
+- The prompt names what trusting loads, since MISAKA never installs project packages or runs project extensions.
+"""
 
 from __future__ import annotations
 
-import json
-import os
-import time
-from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, TypedDict, TypeVar
-
-from filelock import FileLock, Timeout
+from collections.abc import Callable, Mapping
+from typing import Any, Literal, TypedDict
 
 from misaka.config import APP_NAME, home
-from misaka.utils import atomic
-from misaka.utils.paths import canonicalize_path, resolve_path
+from misaka.core.settings_defaults import SETTINGS_DEFAULTS
+from misaka.core.trust_manager import (
+    ProjectTrustDecision,
+    ProjectTrustOption,
+    ProjectTrustStore,
+    ProjectTrustStoreEntry,
+    ProjectTrustUpdate,
+    getProjectTrustOptions,
+    hasTrustRequiringProjectResources,
+)
 
-type ProjectTrustDecision = bool | None
-
-_T = TypeVar("_T")
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectTrustStoreEntry:
-    path: str
-    decision: bool
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectTrustUpdate:
-    path: str
-    decision: ProjectTrustDecision
+# MISAKA fork: no RPC mode.
+type AppMode = Literal["interactive", "print", "json"]
 
 
-@dataclass(frozen=True, slots=True)
-class ProjectTrustOption:
-    label: str
-    trusted: bool
-    updates: list[ProjectTrustUpdate]
-    savedPath: str | None = None
+class ResolveProjectTrustedOptions(TypedDict, total=False):
+    cwd: str
+    trustStore: ProjectTrustStore
+    trustOverride: bool
+    defaultProjectTrust: Literal["ask", "always", "never"]
+    extensionsResult: Any
+    projectTrustContext: Any
+    onExtensionError: Callable[[str], None]
 
 
-class ProjectTrustOptions(TypedDict, total=False):
-    includeSessionOnly: bool
-
-
-def _normalize_cwd(cwd: str) -> str:
-    return canonicalize_path(resolve_path(cwd))
-
-
-def get_project_trust_parent_path(cwd: str) -> str | None:
-    trust_path = _normalize_cwd(cwd)
-    parent = os.path.dirname(trust_path)
-    return None if parent == trust_path else parent
-
-
-def get_project_trust_options(
-    cwd: str,
-    options: ProjectTrustOptions | None = None,
-) -> list[ProjectTrustOption]:
-    trust_path = _normalize_cwd(cwd)
-    trust_options = [
-        ProjectTrustOption(
-            label="Trust",
-            trusted=True,
-            updates=[ProjectTrustUpdate(path=trust_path, decision=True)],
-            savedPath=trust_path,
-        )
-    ]
-    parent_path = get_project_trust_parent_path(cwd)
-    if parent_path is not None:
-        trust_options.append(
-            ProjectTrustOption(
-                label=f"Trust parent folder ({parent_path})",
-                trusted=True,
-                updates=[
-                    ProjectTrustUpdate(path=parent_path, decision=True),
-                    ProjectTrustUpdate(path=trust_path, decision=None),
-                ],
-                savedPath=parent_path,
-            )
-        )
-    if options and options.get("includeSessionOnly"):
-        trust_options.append(
-            ProjectTrustOption(
-                label="Trust (this session only)",
-                trusted=True,
-                updates=[],
-            )
-        )
-    trust_options.append(
-        ProjectTrustOption(
-            label="Do not trust",
-            trusted=False,
-            updates=[ProjectTrustUpdate(path=trust_path, decision=False)],
-            savedPath=trust_path,
-        )
-    )
-    if options and options.get("includeSessionOnly"):
-        trust_options.append(
-            ProjectTrustOption(
-                label="Do not trust (this session only)",
-                trusted=False,
-                updates=[],
-            )
-        )
-    return trust_options
-
-
-def has_trust_requiring_project_resources(cwd: str) -> bool:
-    current = Path(_normalize_cwd(cwd))
-    config_dir = home.project_dir(current)
-    if config_dir is not None and any(
-        (config_dir / entry).exists()
-        for entry in ("settings.json", "prompts", "themes")
-    ):
-        return True
-
-    user_home = Path(_normalize_cwd(str(Path.home())))
-    # pi trust-manager.ts:187/197 excludes the user's *own* global directory from this walk:
-    # without that it reaches $HOME, finds the user's own definitions, and asks "Trust project
-    # folder?" in every non-git directory under $HOME -- training users to click Trust
-    # reflexively. Here ``project_dir`` is what draws that line: the home is never a project.
-    while True:
-        config_dir = home.project_dir(current)
-        if config_dir is not None and (config_dir / home.SUBAGENTS_DIR).is_dir():
-            return True
-        if (current / ".git").exists() or current == user_home or current.parent == current:
-            return False
-        current = current.parent
-
-
-def _find_nearest_trust_entry(
-    data: dict[str, ProjectTrustDecision], cwd: str
-) -> ProjectTrustStoreEntry | None:
-    current = _normalize_cwd(cwd)
-    while True:
-        value = data.get(current)
-        if isinstance(value, bool):
-            return ProjectTrustStoreEntry(path=current, decision=value)
-        parent = os.path.dirname(current)
-        if parent == current:
-            return None
-        current = parent
-
-
-def _read_trust_file(path: str) -> dict[str, ProjectTrustDecision]:
-    if not os.path.exists(path):
-        return {}
-    try:
-        parsed = json.loads(
-            Path(path).read_text(encoding="utf-8").removeprefix("\ufeff")
-        )
-    except Exception as error:
-        raise RuntimeError(f"Failed to read trust store {path}: {error}") from error
-    if not isinstance(parsed, dict):
-        raise TypeError(f"Invalid trust store {path}: expected an object")
-    for key, value in parsed.items():
-        if not isinstance(key, str) or not (isinstance(value, bool) or value is None):
-            raise TypeError(
-                f"Invalid trust store {path}: value for {json.dumps(key)} must be true, false, or null"
-            )
-    return parsed
-
-
-def _write_trust_file(path: str, data: dict[str, ProjectTrustDecision]) -> None:
-    sorted_data = {key: data[key] for key in sorted(data)}
-    atomic.write_text(
-        path, json.dumps(sorted_data, indent=2, ensure_ascii=False) + "\n"
-    )
-
-
-class ProjectTrustStore:
-    def __init__(self, agent_dir: str) -> None:
-        # pi keeps trust.json in the agent directory. The home keeps it with its state; an
-        # embedder's own engine directory still gets it beside its settings.
-        directory = Path(os.path.realpath(resolve_path(agent_dir)))
-        self.trust_path = str(home.path("trust") if directory == home.home() else directory / "trust.json")
-        self.trustPath = self.trust_path
-
-    def _acquire_lock(self) -> FileLock:
-        os.makedirs(os.path.dirname(self.trust_path), exist_ok=True)
-        last_error: Exception | None = None
-        for attempt in range(1, 11):
-            lock = FileLock(f"{self.trust_path}.lock", timeout=0)
-            try:
-                lock.acquire()
-                return lock
-            except Timeout as error:
-                if attempt == 10:
-                    raise
-                last_error = error
-                time.sleep(0.02)
-        raise last_error or RuntimeError("Failed to acquire trust store lock")
-
-    def _with_lock(self, fn: Callable[[], _T]) -> _T:
-        lock = self._acquire_lock()
-        try:
-            return fn()
-        finally:
-            lock.release()
-
-    def get(self, cwd: str) -> ProjectTrustDecision:
-        entry = self.get_entry(cwd)
-        return entry.decision if entry is not None else None
-
-    def get_entry(self, cwd: str) -> ProjectTrustStoreEntry | None:
-        return self._with_lock(
-            lambda: _find_nearest_trust_entry(_read_trust_file(self.trust_path), cwd)
-        )
-
-    def set(self, cwd: str, decision: ProjectTrustDecision) -> None:
-        self.set_many([ProjectTrustUpdate(path=cwd, decision=decision)])
-
-    def set_many(self, decisions: Iterable[ProjectTrustUpdate]) -> None:
-        updates = list(decisions)
-        for update in updates:
-            if not (isinstance(update.decision, bool) or update.decision is None):
-                raise TypeError("Project trust decision must be true, false, or null")
-
-        def write() -> None:
-            data = _read_trust_file(self.trust_path)
-            for update in updates:
-                key = _normalize_cwd(update.path)
-                if update.decision is None:
-                    data.pop(key, None)
-                else:
-                    data[key] = update.decision
-            _write_trust_file(self.trust_path, data)
-
-        self._with_lock(write)
-
-    getEntry = get_entry
-    setMany = set_many
-
-
-def _format_project_trust_prompt(cwd: str) -> str:
+def formatProjectTrustPrompt(cwd: str) -> str:
+    # MISAKA fork: what trusting loads (see trust_manager.hasTrustRequiringProjectResources).
     return (
         f"Trust project folder?\n{cwd}\n\n"
-        f"This allows {APP_NAME} to load {home.DIR_NAME}/settings.json, "
+        f"This allows {APP_NAME} to load {home.DIR_NAME}/settings.json, {home.DIR_NAME}/mcp.json, "
         f"{home.DIR_NAME}/prompts, {home.DIR_NAME}/themes, and Sisters project "
         f"agent definitions from {home.DIR_NAME}/{home.SUBAGENTS_DIR}."
     )
 
 
 def _member(source: Any, name: str) -> Any:
+    """``source.name`` for an object or a mapping."""
     return source[name] if isinstance(source, Mapping) else getattr(source, name)
 
 
-async def resolve_project_trusted(options: dict[str, Any]) -> bool:
-    trust_override = options.get("trustOverride")
-    if trust_override is not None:
-        return trust_override
+async def selectProjectTrustOption(cwd: str, ctx: Any) -> ProjectTrustOption | None:
+    options = getProjectTrustOptions(cwd, {"includeSessionOnly": True})
+    selected = await _member(_member(ctx, "ui"), "select")(
+        formatProjectTrustPrompt(cwd),
+        [option.label for option in options],
+    )
+    return next((option for option in options if option.label == selected), None)
 
-    cwd = options["cwd"]
-    if not has_trust_requiring_project_resources(cwd):
-        return True
 
-    trust_store: ProjectTrustStore = options["trustStore"]
-    extensions_result = options.get("extensionsResult")
-    if extensions_result is not None:
-        from misaka.core.extensions.runner import emit_project_trust_event
+def saveProjectTrustPromptResult(trustStore: ProjectTrustStore, result: ProjectTrustOption) -> None:
+    if len(result.updates) > 0:
+        trustStore.setMany(result.updates)
 
-        emitted = await emit_project_trust_event(
-            extensions_result,
-            {"type": "project_trust", "cwd": cwd},
+
+async def resolveProjectTrusted(options: ResolveProjectTrustedOptions) -> bool:
+    if options.get("trustOverride") is not None:
+        return options["trustOverride"]
+    if not hasTrustRequiringProjectResources(options["cwd"]):
+        # pi v1.5.0 (#10947): a saved decision wins; auto-trust applies only when none is saved.
+        saved = options["trustStore"].get(options["cwd"])
+        return saved if saved is not None else True
+
+    if options.get("extensionsResult"):
+        from misaka.core.extensions.runner import emitProjectTrustEvent
+
+        emitted = await emitProjectTrustEvent(
+            options["extensionsResult"],
+            {"type": "project_trust", "cwd": options["cwd"]},
             options["projectTrustContext"],
         )
-        on_extension_error = options.get("onExtensionError")
-        if on_extension_error is not None:
-            for error in emitted["errors"]:
-                on_extension_error(
-                    f'Extension "{error.extensionPath}" project_trust error: {error.error}'
-                )
-        result = emitted.get("result")
-        if result is not None:
+        result, errors = emitted.get("result"), emitted["errors"]
+        for error in errors:
+            onExtensionError = options.get("onExtensionError")
+            if onExtensionError is not None:
+                onExtensionError(f'Extension "{error.extensionPath}" project_trust error: {error.error}')
+        if result:
             trusted = result["trusted"] == "yes"
             if result.get("remember") is True:
-                trust_store.set(cwd, trusted)
+                options["trustStore"].set(options["cwd"], trusted)
             return trusted
 
-    decision = trust_store.get(cwd)
+    decision = options["trustStore"].get(options["cwd"])
     if decision is not None:
         return decision
 
-    default_project_trust = options.get("defaultProjectTrust", "ask")
-    if default_project_trust == "always":
-        return True
-    if default_project_trust == "never":
+    match options.get("defaultProjectTrust") or SETTINGS_DEFAULTS["defaultProjectTrust"]:
+        case "always":
+            return True
+        case "never":
+            return False
+        case "ask":
+            pass
+
+    if not _member(options["projectTrustContext"], "hasUI"):
         return False
 
-    context = options["projectTrustContext"]
-    if not _member(context, "hasUI"):
-        return False
+    selected = await selectProjectTrustOption(options["cwd"], options["projectTrustContext"])
+    if selected is not None:
+        saveProjectTrustPromptResult(options["trustStore"], selected)
+        return selected.trusted
+    return False
 
-    trust_options = get_project_trust_options(cwd, {"includeSessionOnly": True})
-    select = _member(_member(context, "ui"), "select")
-    selected_label = await select(
-        _format_project_trust_prompt(cwd),
-        [option.label for option in trust_options],
-    )
-    selected = next(
-        (option for option in trust_options if option.label == selected_label),
-        None,
-    )
-    if selected is None:
-        return False
-    if selected.updates:
-        trust_store.set_many(selected.updates)
-    return selected.trusted
-
-
-hasTrustRequiringProjectResources = has_trust_requiring_project_resources
 
 __all__ = [
+    "AppMode",
     "ProjectTrustDecision",
     "ProjectTrustOption",
-    "ProjectTrustOptions",
     "ProjectTrustStore",
     "ProjectTrustStoreEntry",
     "ProjectTrustUpdate",
-    "get_project_trust_options",
-    "get_project_trust_parent_path",
+    "ResolveProjectTrustedOptions",
     "hasTrustRequiringProjectResources",
-    "has_trust_requiring_project_resources",
-    "resolve_project_trusted",
+    "resolveProjectTrusted",
 ]

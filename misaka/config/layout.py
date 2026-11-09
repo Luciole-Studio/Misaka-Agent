@@ -15,10 +15,14 @@ feature they cannot find.
 idempotent, it never overwrites, and it never raises: a read-only home is a reason to run
 with less, not a reason not to start.
 
+Last Order's ``SOUL.md`` is written once, with her folder, the way ``roster.create_sister``
+writes a Sister's and Hermes seeds ``SOUL.md`` into a new home: a file a user can see is a
+voice they can find. It stays optional: shared and role duties are assembled without it
+(``config.identity``), so a user who deletes it or empties it runs Last Order without one, and
+a later start does not put it back.
+
 What is deliberately NOT created:
 
-* ``SOUL.md`` for any role. It is an optional personality slot. Shared and role duties
-  are assembled separately (``config.identity``); the README explains customisation.
 * ``models.json``. pi does not create it either, and an empty ``providers`` map is
   not more useful than its absence; the README says what it is for.
 """
@@ -34,7 +38,9 @@ define, it shares with every other role.
     last_order/        Last Order, the coordinator
       SOUL.md          her voice -- OPTIONAL; shared duties and role charter are kept
       settings.json    what she holds of her own: "defaultProvider"/"defaultModel" (the model
-                       she starts on; /model Ctrl+S writes it), "mcpServers", "web"
+                       she starts on; /model Ctrl+S writes it), "web"
+      mcp.json         her MCP servers, over the global ones (`misaka mcp`, `/mcp` in her window)
+      credentials/     the sign-ins of her own MCP servers (mcp-auth.json)
       skills/          skills only she sees
       subagents/       sub-agent types only she sees
     sisters/<id>/      one per Sister, same layout (`misaka create <id>` builds it)
@@ -45,10 +51,15 @@ In the home, shared by every role:
     ../settings.json   every other setting, and the fallback model
     ../skills/         skills every role sees
     ../subagents/      sub-agent types every role sees
+    ../mcp.json        MCP servers every role connects (`misaka mcp add -g`); their
+                       sign-ins are in ../credentials/mcp-auth.json
 
-An MCP server entry has the shape Hermes uses:
+An mcp.json has the shape other MCP clients use:
 
-    "mcpServers": {"camofox": {"command": "npx", "args": ["-y", "camofox-mcp"]}}
+    {"mcpServers": {"camofox": {"command": "npx", "args": ["-y", "camofox-mcp"]}}}
+
+A role's entry replaces a global server of the same name; one with only "enabled", "exposure"
+or "toolExposure" changes it for her alone: {"mcpServers": {"camofox": {"enabled": false}}}.
 
 Skills resolve project -> role -> shared -> external, first match winning. The project
 layer is a `skills/` folder in whatever directory MISAKA runs in.
@@ -56,6 +67,11 @@ layer is a `skills/` folder in whatever directory MISAKA runs in.
 Providers and credentials are shared by every role too: `/login` writes
 `../credentials/auth.json`, `/model` writes `../settings.json`, and `../models.json` is where you
 declare a provider the built-in catalog does not carry (a local proxy, a private gateway).
+"""
+
+LAST_ORDER_SOUL = """# Last Order
+
+You are Last Order of the MISAKA Network.
 """
 
 SHARED_README = """# shared
@@ -92,7 +108,7 @@ def _mkdir(path, made):
 def _seed(path, text, made):
     if os.path.exists(path):
         return False
-    with open(path, "x", encoding="utf-8") as handle:
+    with open(path, "x", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
     made.append(path)
     return True
@@ -123,7 +139,9 @@ def ensure():
         _seed(str(roles / "README.md"), README, made)
         _mkdir(str(home.path("profiles_root")), made)
         last_order = roles / "last_order"
-        _mkdir(str(last_order), made)
+        if _mkdir(str(last_order), made):
+            # Only with her folder: a SOUL.md she is missing afterwards was taken out on purpose.
+            _seed(str(last_order / "SOUL.md"), LAST_ORDER_SOUL, made)
         if _mkdir(str(last_order / "skills"), made):
             _seed(str(last_order / "skills" / "README.md"), SKILLS_README.format(who="Last Order only"), made)
     except OSError:

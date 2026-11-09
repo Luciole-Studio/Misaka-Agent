@@ -14,14 +14,15 @@ import shutil
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
-from misaka.ai.session_resources import register_session_resource_cleanup
+from misaka.ai.session_resources import registerSessionResourceCleanup
 from misaka.config import get_sessions_dir, home, sessions
-from misaka.core.platform import processes
-from misaka.core.session_manager import iter_session_files, read_session_header
+from misaka.core.platform import owners, processes
+from misaka.core.session_manager import iter_session_files, readSessionHeader
 from misaka.core.wiring import KINDS, sender_address
-from misaka.utils import atomic, local_socket
+from misaka.utils import atomic, file_lock, local_socket
 
 SESSION_KINDS = KINDS
 
@@ -56,6 +57,51 @@ def _index_dir():
 def owner_record(path):
     key = os.path.realpath(path)
     return _object(_index_dir() / (hashlib.sha256(key.encode()).hexdigest() + ".json"))
+
+
+@contextmanager
+def deletable(path):
+    """Hermes deletes no session with a queued or running turn (``require_idle``,
+    hermes_state_mutation_guards.py): ``hermes sessions delete`` names it and deletes nothing. Yields
+    that refusal, or None while the file may go.
+
+    Running is a live owner of the file: a window, a card, a contact turn. A role's contact session is
+    also queued while a delivery holds its lock (``misaka.cli.dm``) or mail addressed to it waits, and
+    it is deleted under that lock, so no delivery starts until the file is gone: the next one begins a
+    new Bot Chat, and a writer still holding the old file cannot put it back."""
+    session_id = readSessionHeader(path).get("id") or os.path.basename(path)
+    refusal = (f"Cannot delete session '{session_id}': it has a queued or running turn. "
+               "Wait for it to finish (or stop it), then retry.")
+    role = sessions.contact_role(path)
+    fd = None
+    try:
+        if role is not None:
+            lock = sessions.contact_lock_path(role)
+            os.makedirs(os.path.dirname(lock), exist_ok=True)
+            fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+            if not file_lock.lock_fd(fd, blocking=False):
+                yield refusal
+                return
+        owner = owner_record(path)
+        if owner.get("state") != "saved" and processes.identity_is_alive(owner.get("pid"), owner.get("identity")):
+            yield refusal
+            return
+        if role is not None:
+            from misaka.core.network import messages
+
+            con = messages.connect()
+            try:
+                waiting = con.execute("SELECT 1 FROM messages WHERE to_session=? AND delivered_at IS NULL LIMIT 1",
+                                      (session_id,)).fetchone()
+            finally:
+                con.close()
+            if waiting:
+                yield refusal
+                return
+        yield None
+    finally:
+        if fd is not None:
+            os.close(fd)   # Closing releases the lock.
 
 
 # Where SessionControl puts its socket directory (a short path: macOS sockaddr_un is 104 bytes).
@@ -111,7 +157,9 @@ def _sweep_orphan_controls(spoken_for):
                     continue
             except OSError:
                 continue
-            if _live_socket(os.path.join(directory, "control.sock")):
+            # Asked under every spelling of the parent: a Windows pipe answers only to the name it was created under,
+            # and the temp directory a session made it in may be an 8.3 short path that realpath spells out.
+            if any(_live_socket(os.path.join(spelling, name, "control.sock")) for spelling in _CONTROL_PARENTS):
                 continue
             shutil.rmtree(directory, ignore_errors=True)
             removed += 1
@@ -220,7 +268,7 @@ def live_session(session_id):
     """The catalog record of a live session with this id, or None.
 
     A session is the most precise address there is -- a specific Last Order window in a
-    research tree, one attempt at one card -- and its id is what the panel shows and what a
+    workflow's tree, one attempt at one card -- and its id is what the panel shows and what a
     message carries as its sender, so a reply can go back to exactly that conversation."""
     if not session_id:
         return None
@@ -280,7 +328,7 @@ class CatalogPart:
             if (session_id is None or session_id == self.session_id
                     or self.session is not None and session_id == self.session.sessionId):
                 self._close()
-        self._unregister = register_session_resource_cleanup(cleanup)
+        self._unregister = registerSessionResourceCleanup(cleanup)
 
     def _publish(self, ctx, state):
         manager = ctx.sessionManager
@@ -296,7 +344,7 @@ class CatalogPart:
         # neighbour.
         space = None if kind == "dm" else (_object(record).get("space")
                                            or os.environ.get("MISAKA_NET_SPACE") or None)
-        # A reserved filename is not history. Keep Pi's first-assistant flush;
+        # A reserved filename is not history. Keep Pi's first-message flush;
         # only this live-owner pointer makes an unsaved session visible.
         value = {"id": manager.getSessionId(), "path": os.path.realpath(path) if path else None,
                  "pending": bool(path and not manager.flushed and not os.path.exists(path)),
@@ -392,15 +440,25 @@ def list_entries(con, *, extra_paths=()):
     product = os.path.realpath(sessions.sessions_root())
     roots = {product, get_sessions_dir()}
     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")} if con else set()
-    run_rows = {r["id"]: dict(r) for r in con.execute("SELECT * FROM research_runs")} if "research_runs" in tables else {}
-    nodes = {r["id"]: dict(r) for r in con.execute("SELECT * FROM research_branches")} if "research_branches" in tables else {}
-    links = {r["task_id"]: dict(r) for r in con.execute("SELECT * FROM research_run_tasks")} if "research_run_tasks" in tables else {}
+    # The runs, nodes and card links of the workflows that own cards, as their owners list them
+    # (``platform.owners``).
+    run_rows, nodes, links = {}, {}, {}
+    own_dirs = {"cards", "subagents"}.union(*(owner.session_dirs() for owner in owners.registered()))
+    if con is not None:
+        for owner in owners.registered():
+            scopes, units, cards = owner.catalog(con)
+            run_rows.update(scopes)
+            nodes.update(units)
+            links.update(cards)
     cards = {}
     if "tasks" in tables:
         for row in con.execute("SELECT * FROM tasks"):
             directory = os.path.realpath(sessions.card_session_dir(row))
             roots.add(directory)
             cards[directory] = dict(row)
+
+    card_keys = list(cards)
+    card_order = {directory: index for index, directory in enumerate(card_keys)}
 
     records, ephemeral = {}, []
     alive = {}
@@ -429,7 +487,7 @@ def list_entries(con, *, extra_paths=()):
     for path in sorted(paths):
         record = records.get(path, {})
         pending = record.get("pending") and record.get("state") != "saved" and not os.path.exists(path)
-        header = record if pending else read_session_header(path)
+        header = record if pending else readSessionHeader(path)
         if not isinstance(header.get("id"), str) or not isinstance(header.get("cwd"), str):
             continue
         try:
@@ -444,10 +502,14 @@ def list_entries(con, *, extra_paths=()):
         if record.get("state") != "saved" and record.get("control"):
             row.update(control=record["control"], paused=record.get("paused", False))
         parts = _relative(path, product)
-        if len(parts) > 1 and parts[0] not in {"cards", "research", "subagents"}:
+        if len(parts) > 1 and parts[0] not in own_dirs:
             row["role"] = record.get("role", _role(parts[0]))
             row["kind"] = "dm" if parts[1] == "dm" else record.get("kind", "foreground")
-        card = next((r for directory, r in cards.items() if _relative(path, directory)), None)
+        # The first card (in table order) whose session directory holds the file. Looked up through the file's own
+        # parents: trying every card's directory on every file was 515 x 298 `relative_to` calls, 2.3 s at each
+        # panel poll (2026-10-29).
+        holders = [card_order[str(parent)] for parent in Path(path).parents if str(parent) in card_order]
+        card = cards[card_keys[min(holders)]] if holders else None
         run, node = None, None
         if card:
             if not os.path.isdir(card["workspace"] or ""):
@@ -456,15 +518,15 @@ def list_entries(con, *, extra_paths=()):
                        kind="card", workspace=card["workspace"], cwd=card["workspace"], task_status=card["status"])
             link = links.get(card["id"], {})
             run, node = run_rows.get(link.get("run_id")), nodes.get(link.get("branch_id"))
-        run_parts = parts[1].split("--", 3) if len(parts) >= 3 and parts[0] == "research" else []
-        if len(run_parts) >= 2:
-            run = run_rows.get(run_parts[0])
-            scope = run_parts[1]
-            if scope == "root-lo":
-                node = next((n for n in nodes.values() if n["run_id"] == run_parts[0] and n["depth"] == 0), None)
-                row.update(kind="node", role="last-order")
-            elif scope.startswith("node-"):
-                node = nodes.get(scope[5:])
+        # A workflow's own conversation, placed by its owner: the run, and the node whose Last
+        # Order it is.
+        place = next((found for owner in owners.registered()
+                      if (found := owner.session_place(parts, nodes)) is not None), None)
+        if place is not None:
+            scope, unit, coordinator = place
+            run = run_rows.get(scope)
+            if coordinator:
+                node = nodes.get(unit) if unit else None
                 row.update(kind="node", role="last-order")
         if path in node_files:
             node = node_files[path]
@@ -498,10 +560,10 @@ def list_entries(con, *, extra_paths=()):
     entries.extend({**e, "workspace": os.path.realpath(e["cwd"]), "modified": 0}
                    for e in ephemeral if os.path.isdir(e.get("cwd") or ""))
     entries.sort(key=lambda e: e["modified"], reverse=True)
-    owners = set()
+    keyed = set()
     for entry in entries:
-        owner = ("card", entry["task_id"]) if entry["kind"] == "card" and entry.get("task_id") else None
-        if owner and owner not in owners:
-            entry["live_key"] = owner
-            owners.add(owner)
+        key = ("card", entry["task_id"]) if entry["kind"] == "card" and entry.get("task_id") else None
+        if key and key not in keyed:
+            entry["live_key"] = key
+            keyed.add(key)
     return entries

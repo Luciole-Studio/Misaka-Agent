@@ -3,16 +3,14 @@ import asyncio
 
 import pytest
 
-from misaka.core.skills.wiring.skills import SkillsPart
+from misaka.core.platform.home_guard import HomeGuard
 
 
 def _write(tmp_path, kind, path):
     workspace = tmp_path / "project"
     workspace.mkdir(exist_ok=True)
-    part = SkillsPart(None, str(tmp_path / "profile"), cwd=str(workspace), kind=kind)
-    part._live_roots = set()
-    part._refresh_roots = lambda: None
-    return asyncio.run(part.tool_call({"toolName": "write", "input": {"path": path, "content": "x"}}, None))
+    guard = HomeGuard(kind, str(workspace), guard_paths=True)
+    return asyncio.run(guard.tool_call({"toolName": "write", "input": {"path": path, "content": "x"}}, None))
 
 
 # -- H4: a card rewriting the instructions every later session loads --------------------------------------
@@ -34,15 +32,6 @@ def test_on_a_file_system_that_keeps_case_a_variant_is_another_file(tmp_path, mo
     monkeypatch.setattr(home, "FOLDS_CASE", False)
     assert _write(tmp_path, "card", "project.md") is None
     assert _write(tmp_path, "card", "PROJECT.md")["block"]
-
-
-def test_the_shell_guard_reads_a_live_tree_in_any_case(tmp_path, monkeypatch):
-    from misaka.config import home
-    from misaka.core.skills.wiring.skills import _command_touches
-    monkeypatch.setattr(home, "FOLDS_CASE", True)
-    live = str(tmp_path / ".misaka" / "skills")
-    variant = str(tmp_path / ".MISAKA" / "Skills" / "x")
-    assert _command_touches(f"rm -rf {variant}", str(tmp_path), {live}) == "path"
 
 
 def test_web_evidence_originals_are_refused_in_any_case(tmp_path, monkeypatch):
@@ -78,7 +67,7 @@ def test_last_order_and_ordinary_files_are_untouched(tmp_path, kind, path):
 
 def test_the_file_tools_do_not_read_misakas_credentials(tmp_path, monkeypatch):
     from misaka.config import home
-    from misaka.core.tools.grep import create_grep_tool
+    from misaka.core.tools.grep import createGrepTool
     from misaka.core.web.evidence import CREDENTIALS_REFUSED, check_material_read
     monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
     auth = home.path("auth")
@@ -90,7 +79,7 @@ def test_the_file_tools_do_not_read_misakas_credentials(tmp_path, monkeypatch):
         with pytest.raises(ValueError, match="not read through file tools"):
             check_material_read(str(path))
     check_material_read(str(tmp_path / "home" / "notes.md"))
-    grep = create_grep_tool(str(tmp_path))
+    grep = createGrepTool(str(tmp_path))
     found = asyncio.run(grep.execute("g", {"pattern": "secret-value", "path": str(tmp_path / "home")}, None, None))
     text = found.content[0].text
     assert "notes.md" in text and "sk-secret" not in text and "exa-secret" not in text
@@ -127,10 +116,10 @@ def test_a_runner_claims_its_row_where_no_identity_can_be_read(tmp_path, monkeyp
         runs.init(con)
         run = runs.create(con, workspace=str(tmp_path), question="How was the salt monopoly run?")
         root = runs.root(con, run["id"])
-        key = runs.prepare_runner(con, "research_branches", root["id"])
+        key = runs.prepare_runner(con, "research_execution", root["id"])
         monkeypatch.setattr(processes, "identity", lambda pid: None)
-        assert runs.claim_runner(con, "research_branches", root["id"], key)
-        assert runs.claim_runner(con, "research_branches", root["id"], key), "the same process claims again"
+        assert runs.claim_runner(con, "research_execution", root["id"], key)
+        assert runs.claim_runner(con, "research_execution", root["id"], key), "the same process claims again"
         assert processes.identity(12345) is None, "everyone else still sees an unreadable process as unknown"
 
 

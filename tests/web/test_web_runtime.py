@@ -364,7 +364,7 @@ async def test_product_runtime_disposal_awaits_web_part_before_session_invalidat
         stages.append('session')
 
     session = SimpleNamespace(extensionRunner=SimpleNamespace(
-        create_context=lambda: None, has_handlers=lambda _name: False,
+        createContext=lambda: None, hasHandlers=lambda _name: False,
     ), dispose=invalidate)
     session.moments = Moments(session, [owner])
     runtime = AgentSessionRuntime(session, None, None)

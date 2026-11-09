@@ -7,10 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from misaka.core.research.wiring import research
-from misaka.ui.tui import visibleWidth
-from misaka.ui.tui.interactive.components.ask_user_question import (
+from misaka.modes.interactive.components.ask_user_question import (
     AskUserQuestionComponent,
 )
+from misaka.ui.tui import visibleWidth
 
 
 def research_questions():

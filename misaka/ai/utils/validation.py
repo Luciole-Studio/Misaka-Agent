@@ -1,10 +1,19 @@
-"""Tool-call argument validation and JSON-schema coercion helpers."""
+"""Translated from pi's ``packages/ai/src/utils/validation.ts`` (v1.3.0).
+
+MISAKA fork: TypeBox's ``Compile`` is a jsonschema Draft 2020-12 validator, and a TypeBox schema
+(``Object.getOwnPropertySymbols(...).includes(TYPEBOX_KIND)``) is a pydantic model class, validated with
+``model_validate``. ``Value.Convert``, which upstream runs on every tool's arguments first, is ported in
+``typebox_convert``: a pydantic tool's arguments go through it, as a TypeBox tool's do upstream. A plain JSON schema
+has no ``~kind``, so upstream's ``Value.Convert`` leaves its arguments as they are and only ``coerceWithJsonSchema``
+changes them; here too. A pydantic tool's converted arguments pass both pydantic and the Draft 2020-12 check of its
+schema, as upstream's pass ``Check``. Error texts come from jsonschema and pydantic, not TypeBox.
+"""
 
 from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
@@ -12,111 +21,96 @@ from jsonschema import Draft202012Validator
 from jsonschema import ValidationError as JsonSchemaValidationError
 from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
+from referencing.exceptions import Unresolvable
 
 from misaka.ai.types import Tool, ToolCall
+from misaka.ai.utils.typebox_convert import Convert
+from misaka.ai.utils.typebox_helpers import typeboxSchema
+from misaka.utils.js import jsIsInteger, jsNumber, jsonStringify, jsString, jsTrim
 
-type JsonSchemaObject = dict[str, Any]
-
-# Keyed by content, and bounded: see _get_validator.
+# MISAKA fork: keyed by content and bounded, not a WeakMap: schemas are dicts (not weak-referenceable) and the union-arm
+# coercion builds fresh copies, so an address-keyed cache grew on every tool call and could hand back another schema's
+# validator once CPython reused a freed address.
 _VALIDATOR_CACHE_LIMIT = 512
-_validator_cache: dict[str, Draft202012Validator] = {}
+_validatorCache: dict[str, Draft202012Validator] = {}
+
+_JsonSchemaObject = dict[str, Any]
 
 
-def _is_json_schema_object(value: Any) -> bool:
-    return isinstance(value, Mapping)
-
-
-def _get_schema_types(schema: JsonSchemaObject) -> list[str]:
-    schema_type = schema.get("type")
-    if isinstance(schema_type, str):
-        return [schema_type]
-    if isinstance(schema_type, list):
-        return [value for value in schema_type if isinstance(value, str)]
+def _getSchemaTypes(schema: _JsonSchemaObject) -> list[str]:
+    schemaType = schema.get("type")
+    if isinstance(schemaType, str):
+        return [schemaType]
+    if isinstance(schemaType, list):
+        return [type for type in schemaType if isinstance(type, str)]
     return []
 
 
-def _matches_json_type(value: Any, schema_type: str) -> bool:
-    if schema_type == "number":
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
-    if schema_type == "integer":
-        if isinstance(value, bool):
-            return False
-        if isinstance(value, int):
-            return True
-        if isinstance(value, float):
-            return math.isfinite(value) and value.is_integer()
-        return False
-    if schema_type == "boolean":
+def _matchesJsonType(value: Any, type: str) -> bool:
+    if type == "number":
+        return isinstance(value, int | float) and not isinstance(value, bool)
+    if type == "integer":
+        return isinstance(value, int | float) and not isinstance(value, bool) and jsIsInteger(value)
+    if type == "boolean":
         return isinstance(value, bool)
-    if schema_type == "string":
+    if type == "string":
         return isinstance(value, str)
-    if schema_type == "null":
+    if type == "null":
         return value is None
-    if schema_type == "array":
+    if type == "array":
         return isinstance(value, list)
-    if schema_type == "object":
+    if type == "object":
         return isinstance(value, Mapping)
     return False
 
 
-def _get_validator(schema: JsonSchemaObject) -> Draft202012Validator:
-    """Cache by content, never by ``id``.
+class _SubSchemaValidator:
+    """MISAKA fork: jsonschema fails a ``$ref`` into the root's ``$defs`` when the sub-schema is checked, not when its
+    validator is built; ``Check`` then answers ``None``, as ``getSubSchemaValidator(...)?.Check(...)`` is ``undefined``
+    upstream when compiling the sub-schema throws."""
 
-    The union-arm coercion below hands this freshly built ``dict(item)`` copies, so an
-    address-keyed cache grew on every tool call *and* could return another schema's
-    validator once CPython reused a freed address.
-    """
+    def __init__(self, validator: Draft202012Validator) -> None:
+        self._validator = validator
+
+    def Check(self, value: Any) -> bool | None:
+        try:
+            self._validator.validate(value)
+        except JsonSchemaValidationError:
+            return False
+        except Unresolvable:
+            return None
+        return True
+
+
+def _getSubSchemaValidator(schema: _JsonSchemaObject) -> _SubSchemaValidator | None:
     try:
-        key = json.dumps(schema, sort_keys=True, default=repr)
-    except (TypeError, ValueError):
-        return Draft202012Validator(schema)          # not serialisable: build it, cache nothing
-    validator = _validator_cache.get(key)
-    if validator is None:
-        if len(_validator_cache) >= _VALIDATOR_CACHE_LIMIT:
-            _validator_cache.clear()
-        validator = Draft202012Validator(schema)
-        _validator_cache[key] = validator
-    return validator
+        return _SubSchemaValidator(_getValidator(schema))
+    except Exception:  # noqa: BLE001 - an invalid sub-schema has no validator, as upstream's catch says
+        return None
 
 
-def _schema_validates(value: Any, schema: JsonSchemaObject) -> bool:
-    try:
-        _get_validator(schema).validate(value)
-    except JsonSchemaValidationError:
-        return False
-    return True
-
-
-def _coerce_primitive_by_type(value: Any, schema_type: str) -> Any:
-    if schema_type == "number":
+def _coercePrimitiveByType(value: Any, type: str) -> Any:
+    if type == "number":
         if value is None:
             return 0
-        if isinstance(value, str) and value.strip():
-            try:
-                parsed = float(value)
-            except ValueError:
-                return value
+        if isinstance(value, str) and jsTrim(value) != "":
+            parsed = jsNumber(value)
             if math.isfinite(parsed):
                 return parsed
-            return value
         if isinstance(value, bool):
             return 1 if value else 0
         return value
-    if schema_type == "integer":
+    if type == "integer":
         if value is None:
             return 0
-        if isinstance(value, str) and value.strip():
-            try:
-                parsed = float(value)
-            except ValueError:
-                return value
-            if parsed.is_integer():
+        if isinstance(value, str) and jsTrim(value) != "":
+            parsed = jsNumber(value)
+            if jsIsInteger(parsed):
                 return int(parsed)
-            return value
         if isinstance(value, bool):
             return 1 if value else 0
         return value
-    if schema_type == "boolean":
+    if type == "boolean":
         if value is None:
             return False
         if isinstance(value, str):
@@ -124,233 +118,265 @@ def _coerce_primitive_by_type(value: Any, schema_type: str) -> Any:
                 return True
             if value == "false":
                 return False
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, int | float) and not isinstance(value, bool):
             if value == 1:
                 return True
             if value == 0:
                 return False
         return value
-    if schema_type == "string":
+    if type == "string":
         if value is None:
             return ""
-        if isinstance(value, bool):
-            return "true" if value else "false"
-        if isinstance(value, (int, float)):
-            return str(value)
+        if isinstance(value, int | float):
+            return jsString(value)
         return value
-    if schema_type == "null":
-        if value in ("", 0, False):
+    if type == "null":
+        if value == "" or (value == 0 and not isinstance(value, bool)) or value is False:
             return None
         return value
     return value
 
 
-def _apply_schema_object_coercion(value: dict[str, Any], schema: JsonSchemaObject) -> None:
+def _applySchemaObjectCoercion(value: dict[str, Any], schema: _JsonSchemaObject) -> None:
     properties = schema.get("properties")
-    defined_keys = set(properties.keys()) if isinstance(properties, Mapping) else set()
+    definedKeys = set(properties.keys()) if isinstance(properties, Mapping) else set()
 
     if isinstance(properties, Mapping):
-        for key, property_schema in properties.items():
-            if key not in value or not _is_json_schema_object(property_schema):
+        for key, propertySchema in properties.items():
+            if key not in value or not isinstance(propertySchema, Mapping):
                 continue
-            value[key] = _coerce_with_json_schema(value[key], dict(property_schema))
+            value[key] = _coerceWithJsonSchema(value[key], dict(propertySchema))
 
-    additional_properties = schema.get("additionalProperties")
-    if isinstance(additional_properties, Mapping):
-        for key, property_value in list(value.items()):
-            if key in defined_keys:
+    additionalProperties = schema.get("additionalProperties")
+    if isinstance(additionalProperties, Mapping):
+        for key, propertyValue in list(value.items()):
+            if key in definedKeys:
                 continue
-            value[key] = _coerce_with_json_schema(property_value, dict(additional_properties))
+            value[key] = _coerceWithJsonSchema(propertyValue, dict(additionalProperties))
 
 
-def _apply_schema_array_coercion(value: list[Any], schema: JsonSchemaObject) -> None:
+def _applySchemaArrayCoercion(value: list[Any], schema: _JsonSchemaObject) -> None:
     items = schema.get("items")
     if isinstance(items, list):
-        for index, item_schema in enumerate(items):
-            if index >= len(value) or not _is_json_schema_object(item_schema):
+        for index in range(len(value)):
+            itemSchema = items[index] if index < len(items) else None
+            if not isinstance(itemSchema, Mapping):
                 continue
-            value[index] = _coerce_with_json_schema(value[index], dict(item_schema))
+            value[index] = _coerceWithJsonSchema(value[index], dict(itemSchema))
         return
 
     if isinstance(items, Mapping):
-        for index, item_value in enumerate(value):
-            value[index] = _coerce_with_json_schema(item_value, dict(items))
+        for index in range(len(value)):
+            value[index] = _coerceWithJsonSchema(value[index], dict(items))
 
 
-def _coerce_with_union_schema(value: Any, schemas: Sequence[JsonSchemaObject]) -> Any:
-    # Keep the value as-is if it already matches an arm; otherwise a nullable
-    # union would coerce null into 0/"" (pi #7328/2e95584da).
+def _coerceWithUnionSchema(value: Any, schemas: list[_JsonSchemaObject]) -> Any:
     for schema in schemas:
-        if _schema_validates(value, schema):
+        validator = _getSubSchemaValidator(schema)
+        if validator is not None and validator.Check(value):
             return value
+
     for schema in schemas:
         candidate = deepcopy(value)
-        coerced = _coerce_with_json_schema(candidate, schema)
-        if _schema_validates(coerced, schema):
+        coerced = _coerceWithJsonSchema(candidate, schema)
+        validator = _getSubSchemaValidator(schema)
+        if validator is not None and validator.Check(coerced):
             return coerced
     return value
 
 
-def _coerce_with_json_schema(value: Any, schema: JsonSchemaObject) -> Any:
-    next_value = value
+def _coerceWithJsonSchema(value: Any, schema: _JsonSchemaObject) -> Any:
+    nextValue = value
 
-    all_of = schema.get("allOf")
-    if isinstance(all_of, list):
-        for nested in all_of:
-            if _is_json_schema_object(nested):
-                next_value = _coerce_with_json_schema(next_value, dict(nested))
+    allOf = schema.get("allOf")
+    if isinstance(allOf, list):
+        for nested in allOf:
+            if isinstance(nested, Mapping):
+                nextValue = _coerceWithJsonSchema(nextValue, dict(nested))
 
-    any_of = schema.get("anyOf")
-    if isinstance(any_of, list):
-        next_value = _coerce_with_union_schema(next_value, [dict(item) for item in any_of if _is_json_schema_object(item)])
+    anyOf = schema.get("anyOf")
+    if isinstance(anyOf, list):
+        nextValue = _coerceWithUnionSchema(nextValue, [dict(item) for item in anyOf if isinstance(item, Mapping)])
 
-    one_of = schema.get("oneOf")
-    if isinstance(one_of, list):
-        next_value = _coerce_with_union_schema(next_value, [dict(item) for item in one_of if _is_json_schema_object(item)])
+    oneOf = schema.get("oneOf")
+    if isinstance(oneOf, list):
+        nextValue = _coerceWithUnionSchema(nextValue, [dict(item) for item in oneOf if isinstance(item, Mapping)])
 
-    schema_types = _get_schema_types(schema)
-    matches_union_member = len(schema_types) > 1 and any(_matches_json_type(next_value, item) for item in schema_types)
-    if schema_types and not matches_union_member:
-        for schema_type in schema_types:
-            candidate = _coerce_primitive_by_type(next_value, schema_type)
-            if candidate is not next_value:
-                next_value = candidate
+    schemaTypes = _getSchemaTypes(schema)
+    matchesUnionMember = len(schemaTypes) > 1 and any(_matchesJsonType(nextValue, type) for type in schemaTypes)
+    if len(schemaTypes) > 0 and not matchesUnionMember:
+        for schemaType in schemaTypes:
+            candidate = _coercePrimitiveByType(nextValue, schemaType)
+            if candidate is not nextValue:
+                nextValue = candidate
                 break
 
-    # Only the same value in another type ("1" for 1) is rescued. Matching on `type()`
-    # alone rewrote *any* out-of-enum string into the first member, so a model asking for
-    # an operation that does not exist silently ran a real one instead of getting the
-    # validation error back. Upstream has no enum branch at all.
-    if "enum" in schema and isinstance(schema["enum"], list) and next_value not in schema["enum"]:
+    # MISAKA fork: stands in for TypeBox's `Value.Convert`, which upstream runs first and which rescues the same value
+    # written in another type ("1" for 1) for literal and enum schemas. Nothing else is rewritten: a model asking for an
+    # operation that does not exist gets the validation error back rather than a real one run in its place.
+    if "enum" in schema and isinstance(schema["enum"], list) and nextValue not in schema["enum"]:
         for candidate in schema["enum"]:
-            if str(candidate) == str(next_value):
-                next_value = candidate
+            if jsString(candidate) == jsString(nextValue):
+                nextValue = candidate
                 break
 
-    if "const" in schema and next_value != schema["const"] and str(next_value) == str(schema["const"]):
-        next_value = schema["const"]
+    if "const" in schema and nextValue != schema["const"] and jsString(nextValue) == jsString(schema["const"]):
+        nextValue = schema["const"]
 
-    if "object" in schema_types and isinstance(next_value, dict):
-        _apply_schema_object_coercion(next_value, schema)
+    if "object" in schemaTypes and isinstance(nextValue, dict):
+        _applySchemaObjectCoercion(nextValue, schema)
 
-    if "array" in schema_types and isinstance(next_value, list):
-        _apply_schema_array_coercion(next_value, schema)
+    if "array" in schemaTypes and isinstance(nextValue, list):
+        _applySchemaArrayCoercion(nextValue, schema)
 
-    return next_value
+    return nextValue
 
 
-def _format_jsonschema_path(error: JsonSchemaValidationError) -> str:
+def _normalizeOptionalNulls(value: Any, schema: Any) -> None:
+    if isinstance(value, list):
+        items = schema.get("items") if isinstance(schema, Mapping) else None
+        if isinstance(items, list):
+            for index in range(len(value)):
+                itemSchema = items[index] if index < len(items) else None
+                if isinstance(itemSchema, Mapping):
+                    _normalizeOptionalNulls(value[index], itemSchema)
+        elif isinstance(items, Mapping):
+            for item in value:
+                _normalizeOptionalNulls(item, items)
+        return
+    if not isinstance(value, dict) or not isinstance(schema, Mapping) or not isinstance(schema.get("properties"), Mapping):
+        return
+
+    # MISAKA fork: `object` (upstream's name) is a builtin here.
+    record = value
+    required = set(schema.get("required") or [])
+    for key, propertySchema in schema["properties"].items():
+        if key not in record:
+            continue
+        validator = _getSubSchemaValidator(dict(propertySchema)) if isinstance(propertySchema, Mapping) else None
+        if (
+            record[key] is None
+            and key not in required
+            and not (isinstance(propertySchema, Mapping) and isinstance(propertySchema.get("$ref"), str))
+            and validator is not None
+            and validator.Check(None) is False
+        ):
+            del record[key]
+        else:
+            _normalizeOptionalNulls(record[key], propertySchema)
+
+
+def _getValidator(schema: _JsonSchemaObject) -> Draft202012Validator:
+    try:
+        key = json.dumps(schema, sort_keys=True, default=repr)
+    except (TypeError, ValueError):
+        return Draft202012Validator(schema)  # not serializable: build it, cache nothing
+    cached = _validatorCache.get(key)
+    if cached is not None:
+        return cached
+    if len(_validatorCache) >= _VALIDATOR_CACHE_LIMIT:
+        _validatorCache.clear()
+    validator = Draft202012Validator(schema)
+    _validatorCache[key] = validator
+    return validator
+
+
+def _formatValidationPath(error: JsonSchemaValidationError) -> str:
+    """MISAKA fork: reads a jsonschema error (``validator``, ``absolute_path``) instead of TypeBox's ``keyword`` and
+    ``instancePath``."""
     if error.validator == "required":
-        required_property = error.message.split("'")[1] if "'" in error.message else None
-        base_path = ".".join(str(part) for part in error.absolute_path)
-        if required_property:
-            return f"{base_path}.{required_property}" if base_path else required_property
+        requiredProperty = error.message.split("'")[1] if "'" in error.message else None
+        if requiredProperty:
+            basePath = ".".join(str(part) for part in error.absolute_path)
+            return f"{basePath}.{requiredProperty}" if basePath else requiredProperty
     path = ".".join(str(part) for part in error.absolute_path)
     return path or "root"
 
 
-def _format_pydantic_path(location: tuple[Any, ...]) -> str:
-    return ".".join(str(part) for part in location) or "root"
+def validateToolCall(tools: list[Tool], toolCall: ToolCall) -> Any:
+    """Finds a tool by name and validates the tool call arguments against its TypeBox schema.
+
+    Returns the validated arguments; raises if the tool is not found or validation fails.
+    """
+    tool = next((t for t in tools if t.name == toolCall.name), None)
+    if tool is None:
+        raise RuntimeError(f'Tool "{toolCall.name}" not found')
+    return validateToolArguments(tool, toolCall)
 
 
-def _format_received_arguments(arguments: Any) -> str:
+def validateToolArguments(tool: Tool, toolCall: ToolCall) -> Any:
+    """Validates tool call arguments against the tool's TypeBox schema.
+
+    Returns the validated (and potentially coerced) arguments; raises with a formatted message if validation fails.
+    """
+    if toolCall.argumentsError:
+        raise ValueError(f'Invalid arguments for tool "{toolCall.name}": {toolCall.argumentsError}')
+    # MISAKA fork: a pydantic model class is the TypeBox schema of a MISAKA tool.
+    if isinstance(tool.parameters, type) and issubclass(tool.parameters, BaseModel):
+        return _validatePydanticToolArguments(tool, toolCall)
+    if not isinstance(tool.parameters, Mapping):
+        raise TypeError("Tool.parameters must be a Pydantic model class or JSON schema mapping")
+
+    args = deepcopy(toolCall.arguments)
+    _normalizeOptionalNulls(args, tool.parameters)
+
+    validator = _getValidator(dict(tool.parameters))
+    coerced = _coerceWithJsonSchema(args, dict(tool.parameters))
+    if coerced is not args:
+        if isinstance(args, dict) and isinstance(coerced, dict):
+            args.clear()
+            args.update(coerced)
+        else:
+            return coerced if not any(True for _ in validator.iter_errors(coerced)) else args
+
+    errorList = sorted(validator.iter_errors(args), key=lambda error: list(error.absolute_path))
+    if not errorList:
+        return args
+
+    errors = "\n".join(f"  - {_formatValidationPath(error)}: {error.message}" for error in errorList) or "Unknown validation error"
+
+    errorMessage = f'Validation failed for tool "{toolCall.name}":\n{errors}\n\nReceived arguments:\n{_receivedArguments(toolCall.arguments)}'
+
+    raise ValueError(errorMessage)
+
+
+def _receivedArguments(arguments: Any) -> str:
+    """MISAKA fork: ``JSON.stringify(toolCall.arguments, null, 2)``; a value that is not JSON is shown as Python
+    shows it."""
     try:
-        return json.dumps(arguments, indent=2, ensure_ascii=False)
-    except TypeError:
+        return jsonStringify(arguments, 2)
+    except Exception:  # noqa: BLE001 - not JSON: show it anyway
         return repr(arguments)
 
 
-def _validate_pydantic_tool_arguments(tool: Tool, tool_call: ToolCall) -> Any:
-    assert isinstance(tool.parameters, type) and issubclass(tool.parameters, BaseModel)
+def _validatePydanticToolArguments(tool: Tool, toolCall: ToolCall) -> Any:
+    """MISAKA fork: the TypeBox branch, for a pydantic model class."""
+    args = deepcopy(toolCall.arguments)
+    schema = typeboxSchema(tool.parameters)
+    _normalizeOptionalNulls(args, schema)
+    Convert(schema, args)        # upstream: `Value.Convert(tool.parameters, args)`, which converts `args` in place
     try:
-        validated = tool.parameters.model_validate(deepcopy(tool_call.arguments))
+        validated = tool.parameters.model_validate(args)
     except PydanticValidationError as error:
-        errors = "\n".join(
-            f"  - {_format_pydantic_path(tuple(item['loc']))}: {item['msg']}"
-            for item in error.errors()
-        ) or "Unknown validation error"
+        errors = (
+            "\n".join(
+                f"  - {'.'.join(str(part) for part in item['loc']) or 'root'}: {item['msg']}" for item in error.errors()
+            )
+            or "Unknown validation error"
+        )
         raise ValueError(
-            f'Validation failed for tool "{tool_call.name}":\n{errors}\n\nReceived arguments:\n{_format_received_arguments(tool_call.arguments)}'
+            f'Validation failed for tool "{toolCall.name}":\n{errors}\n\nReceived arguments:\n{_receivedArguments(toolCall.arguments)}'
         ) from error
+    # Upstream accepts only what `validator.Check(args)` accepts. Pydantic's lax mode also takes values TypeBox's Check
+    # refuses ("yes" for a boolean, which `Value.Convert` leaves as it is), so the converted arguments are checked
+    # against the schema too, with the plain JSON schema branch's error texts.
+    errorList = sorted(_getValidator(schema).iter_errors(args), key=lambda error: list(error.absolute_path))
+    if errorList:
+        errors = "\n".join(f"  - {_formatValidationPath(error)}: {error.message}" for error in errorList)
+        raise ValueError(
+            f'Validation failed for tool "{toolCall.name}":\n{errors}\n\nReceived arguments:\n{_receivedArguments(toolCall.arguments)}'
+        )
     return validated.model_dump(mode="python")
 
 
-def _normalize_optional_nulls(value: Any, schema: Any) -> None:
-    """Drop a ``null`` sent for an optional property that cannot hold one.
-
-    Models emit ``{"limit": null}`` to mean "I am not passing limit". Upstream deletes the
-    key before validating, so the tool sees no ``limit`` at all. Without this the null
-    reaches the coercion pass instead, which turns it into that type's zero value -- a
-    search told ``limit=0`` returns nothing, where the same call in pi would have used the
-    tool's own default. The value is edited in place, as upstream's is.
-
-    Only *optional* properties, and only where the property's own schema rejects null: a
-    field declared nullable keeps its null, and a required one is left to fail validation
-    with a message that names it.
-    """
-    if isinstance(value, list):
-        items = schema.get("items") if _is_json_schema_object(schema) else None
-        if isinstance(items, list):
-            for index, item_schema in enumerate(items):
-                if index < len(value) and _is_json_schema_object(item_schema):
-                    _normalize_optional_nulls(value[index], item_schema)
-        elif _is_json_schema_object(items):
-            for item in value:
-                _normalize_optional_nulls(item, items)
-        return
-
-    if not isinstance(value, dict) or not _is_json_schema_object(schema):
-        return
-    properties = schema.get("properties")
-    if not isinstance(properties, Mapping):
-        return
-
-    required = set(schema.get("required") or [])
-    for key, property_schema in properties.items():
-        if key not in value:
-            continue
-        if (
-            value[key] is None
-            and key not in required
-            and not (_is_json_schema_object(property_schema) and isinstance(property_schema.get("$ref"), str))
-            and _is_json_schema_object(property_schema)
-            and not _schema_validates(None, property_schema)
-        ):
-            del value[key]
-        else:
-            _normalize_optional_nulls(value[key], property_schema)
-
-
-def _validate_json_schema_tool_arguments(tool: Tool, tool_call: ToolCall) -> Any:
-    assert isinstance(tool.parameters, Mapping)
-    schema = tool.parameters
-    args = deepcopy(tool_call.arguments)
-    _normalize_optional_nulls(args, schema)
-    coerced = _coerce_with_json_schema(args, schema)
-    validator = _get_validator(schema)
-    errors = sorted(validator.iter_errors(coerced), key=lambda error: list(error.absolute_path))
-    if not errors:
-        return coerced
-
-    formatted_errors = "\n".join(
-        f"  - {_format_jsonschema_path(error)}: {error.message}"
-        for error in errors
-    ) or "Unknown validation error"
-    raise ValueError(
-        f'Validation failed for tool "{tool_call.name}":\n{formatted_errors}\n\nReceived arguments:\n{_format_received_arguments(tool_call.arguments)}'
-    )
-
-
-def validate_tool_arguments(tool: Tool, tool_call: ToolCall) -> Any:
-    if isinstance(tool.parameters, type) and issubclass(tool.parameters, BaseModel):
-        return _validate_pydantic_tool_arguments(tool, tool_call)
-
-    if isinstance(tool.parameters, Mapping):
-        return _validate_json_schema_tool_arguments(tool, tool_call)
-
-    raise TypeError("Tool.parameters must be a Pydantic model class or JSON schema mapping")
-
-
-__all__ = [
-    "validate_tool_arguments",
-]
+__all__ = ["validateToolArguments", "validateToolCall"]

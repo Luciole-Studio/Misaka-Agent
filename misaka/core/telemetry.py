@@ -41,6 +41,7 @@ def isInstallTelemetryEnabled(
     can pass the variable in without touching the process environment.
     """
     if telemetryEnv is None:
+        # MISAKA fork: the variable carries MISAKA's prefix where pi reads ``PI_TELEMETRY``.
         telemetryEnv = os.environ.get("MISAKA_TELEMETRY")
     if telemetryEnv is not None:
         return _isTruthyEnvFlag(telemetryEnv)

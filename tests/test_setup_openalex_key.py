@@ -1,6 +1,6 @@
 """The setup wizard's Research section stores coverage_scan's optional OpenAlex key in the
 home's .env -- a credential, beside the web vendors' keys -- and Enter keeps what is there."""
-from misaka.cli import setup
+from misaka.cli import setup_wizard as setup
 from misaka.config import env as env_file
 from misaka.extensions import coverage
 

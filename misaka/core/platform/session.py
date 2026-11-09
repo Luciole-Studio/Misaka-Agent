@@ -1,42 +1,20 @@
 """Session adapter for creating, resuming, and driving engine sessions."""
 import asyncio
 import contextvars
-import json
 import os
 import threading
+import time
 from contextlib import asynccontextmanager
 
 from misaka.agent.guards import install_guards
-from misaka.core.platform.vocabulary import BOOKKEEPING_MANAGEMENT_TOOLS
+from misaka.core.platform.vocabulary import NO_PROGRESS_VOCABULARY
 from misaka.utils import loop_watchdog
 from misaka.utils.async_lifecycle import settle
 
-# ``NoProgressGuard``'s vocabulary: the tools a session can call all day without the world
-# changing or one new fact arriving. Assembled here because it is a fact about how this
-# process composes a session (see ``misaka.core.wiring`` for who registers what), not
-# about how the guard counts.
-#
-# Everything absent is work and resets the streak -- edit/write/bash, the web and download
-# tools, ``doc_add`` and ``skill_manage`` (both write), ``coverage_scan`` (it queries
-# OpenAlex), ``Agent`` (delegating is work even though the permission layer files it under
-# management), and every MCP or skill tool this list has never heard of. ``AskUserQuestion``
-# is deliberately absent too: it only exists where a person is watching
-# (``misaka.core.ask_user``), and waiting on a human is not idling.
-BOOKKEEPING_TOOLS = frozenset({
-    # Builtins that only look (misaka.core.tools).
-    "read", "grep", "find", "ls",
-    # The card's own paperwork (misaka.core.network.todo.tools_for).
-    "misaka_todo", "misaka_todo_list", "misaka_my_card", "misaka_card_note", "misaka_card_complete",
-    # Corpus and skill inspection (misaka.core.documents.wiring.documents, .skills).
-    "doc_list", "doc_outline", "doc_read", "doc_find", "doc_verify",
-    "skills_list", "skill_view",
-    # The read-only view of a research run (misaka.core.research.tools).
-    "misaka_research_view",
-    # Inbox and sub-agent management (misaka.core.network.messages, misaka.core.subagent),
-    # spelled as the management vocabulary minus ``Agent`` so the exclusion noted above is
-    # something this set performs rather than something a comment promises.
-    *BOOKKEEPING_MANAGEMENT_TOOLS,
-})
+# Hermes ``gateway/run.py``: how often ``_watch_gateway_turn_inactivity`` looks, and what it
+# calls a turn it stopped.
+IDLE_POLL_SECONDS = 5.0
+IDLE_TIMEOUT_REASON = "Execution timed out (inactivity)"
 
 
 def run_coro(coro):
@@ -93,42 +71,60 @@ def run_coro(coro):
 
 async def open_session(flags, cwd, assembly=None):
     """Open and bind a headless session; return ``(runtime, session, error)``."""
-    from misaka.cli.args import parse_args
-    from misaka.cli.engine import create_runtime_factory, resolve_cli_paths
+    from misaka.cli.args import parseArgs
+    from misaka.cli.engine import createRuntimeFactory, resolveCliPaths
     from misaka.config import get_agent_dir
-    from misaka.core.agent_session_runtime import create_agent_session_runtime
-    from misaka.core.auth_storage import AuthStorage
+    from misaka.core.http_dispatcher import applyHttpProxySettings
+    from misaka.core.settings_manager import SettingsManager
+
+    # A headless session is how its process enters the engine, so it applies the global HTTP proxy first, as pi's
+    # main.ts and harness setups do at startup.
+    applyHttpProxySettings(
+        SettingsManager.create(cwd, get_agent_dir(), {"projectTrusted": False}).getGlobalSettings().get("httpProxy")
+    )
+    from misaka.core.agent_session_runtime import createAgentSessionRuntime
     from misaka.core.session_manager import SessionManager
-    from misaka.utils.paths import normalize_path
+    from misaka.utils.paths import normalizePath
 
     # Every headless MISAKA session runs with the engine's own skill loading off: the skills
     # extension (misaka.core.skills.index) is the one place that decides what a session sees.
-    parsed = parse_args(list(flags))
+    parsed = parseArgs(list(flags))
     errs = [d.message for d in parsed.diagnostics if d.type == "error"]
     if errs:
         return None, None, "; ".join(errs)
-    session_dir = normalize_path(parsed.sessionDir) if parsed.sessionDir else None
+    session_dir = normalizePath(parsed.sessionDir) if parsed.sessionDir else None
     if parsed.noSession:
         sm = SessionManager.inMemory(cwd)
     elif parsed.session:
-        sm = SessionManager.open(normalize_path(parsed.session), session_dir, cwd)
+        sm = SessionManager.open(normalizePath(parsed.session), session_dir, cwd)
     elif parsed.fork:
-        sm = SessionManager.forkFrom(normalize_path(parsed.fork), cwd, session_dir)
+        sm = SessionManager.forkFrom(normalizePath(parsed.fork), cwd, session_dir)
     elif parsed.continue_:
         sm = SessionManager.continueRecent(cwd, session_dir)
     else:
         sm = SessionManager.create(cwd, session_dir)
-    runtime = await create_agent_session_runtime(
-        create_runtime_factory(
-            parsed, AuthStorage.create(),
-            resolved_extension_paths=resolve_cli_paths(cwd, parsed.extensions),
-            resolved_prompt_template_paths=resolve_cli_paths(cwd, parsed.promptTemplates),
-            resolved_theme_paths=resolve_cli_paths(cwd, parsed.themes),
-            extension_factories=list(assembly.extension_factories) if assembly else None,
-            custom_tools=list(assembly.custom_tools) if assembly else None,
+    if parsed.name is not None:
+        # ``--name`` names the session it opens, as pi's main.ts and ``cli.engine`` do.
+        from misaka.cli.args import normalizeSessionName
+
+        name = normalizeSessionName(parsed.name)
+        if name is None:
+            return None, None, "--name requires a non-empty value"
+        try:
+            sm.appendSessionInfo(name)
+        except ValueError as refusal:   # a role's canonical Bot Chat keeps its name
+            return None, None, str(refusal)
+    runtime = await createAgentSessionRuntime(
+        createRuntimeFactory(
+            parsed,
+            resolvedExtensionPaths=resolveCliPaths(cwd, parsed.extensions),
+            resolvedPromptTemplatePaths=resolveCliPaths(cwd, parsed.promptTemplates),
+            resolvedThemePaths=resolveCliPaths(cwd, parsed.themes),
+            extensionFactories=list(assembly.extension_factories) if assembly else None,
+            customTools=list(assembly.custom_tools) if assembly else None,
             parts=list(assembly.parts) if assembly else None,
-            model_profile=assembly.model_profile if assembly else None,
-            model_defaults_read_only=assembly.model_defaults_read_only if assembly else False,
+            modelProfile=assembly.model_profile if assembly else None,
+            modelDefaultsReadOnly=assembly.model_defaults_read_only if assembly else False,
         ),
         {"cwd": sm.getCwd(), "agentDir": get_agent_dir(), "sessionManager": sm},
     )
@@ -137,7 +133,7 @@ async def open_session(flags, cwd, assembly=None):
         return runtime, None, "; ".join(hard)
     if runtime.session.model is None:
         return runtime, None, "No model is available; check provider, model, and credentials."
-    if not runtime.session.modelRegistry.hasConfiguredAuth(runtime.session.model):
+    if not runtime.session.modelRuntime.hasConfiguredAuth(runtime.session.model.provider):
         model = runtime.session.model
         return runtime, None, f"No configured authentication for {model.provider}/{model.id}; use misaka setup."
     try:
@@ -161,8 +157,9 @@ async def dispose(runtime):
 
 def event_line(ev):
     """Serialize an engine event in the existing JSONL wire format."""
-    from misaka.modes.jsonl import to_json_event
-    return json.dumps(to_json_event(ev), ensure_ascii=False, separators=(",", ":"))
+    from misaka.modes.json_event import toJsonEvent
+    from misaka.utils.js import jsonStringify
+    return jsonStringify(toJsonEvent(ev))
 
 
 _ENV_LOCK = threading.Lock()
@@ -232,8 +229,12 @@ async def settle_after_prompt(session):
 
 
 async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
-                      assembly=None):
-    """Run one prompt in a throwaway session and return its final text, timeout flag, error, and token usage.
+                      assembly=None, idle_timeout=None):
+    """Run one prompt in a throwaway session and return its final text, timeout flag, error, token usage and session file.
+
+    ``timeout`` is a wall clock. ``idle_timeout`` is Hermes' gateway turn timeout instead
+    (``HERMES_AGENT_TIMEOUT``): an inactivity limit, so the turn is stopped only once that many
+    seconds pass without a session event. A timed-out run reports ``timed_out`` either way.
 
     The session's identity (role, profile, workspace, usage lease, MCP config) travels through
     ``os.environ`` because the extensions read it there, so two sessions in one process must not
@@ -241,36 +242,60 @@ async def run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
     (nodes, cards) are naturally isolated."""
     async with _env_window():
         return await _run_session(flags, prompt, cwd, on_event=on_event, timeout=timeout, env=env,
-                                  assembly=assembly)
+                                  assembly=assembly, idle_timeout=idle_timeout)
+
+
+async def _until_idle(work, activity, idle_timeout):
+    """Hermes ``_watch_gateway_turn_inactivity``: await ``work`` until ``idle_timeout`` seconds
+    pass with no session event (``activity[0]`` is the last one); None or 0 is unlimited."""
+    if not idle_timeout:
+        return await work
+    task = asyncio.ensure_future(work)
+    try:
+        while not task.done():
+            await asyncio.wait({task}, timeout=IDLE_POLL_SECONDS)
+            if not task.done() and time.monotonic() - activity[0] >= idle_timeout:
+                raise TimeoutError(IDLE_TIMEOUT_REASON)
+        return task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
-                       assembly=None):
+                       assembly=None, idle_timeout=None):
     old_env = {}
     for k, v in (env or {}).items():
         old_env[k] = os.environ.get(k)
         os.environ[k] = v
     runtime = None
     timed_out = False
+    session_file = None
     try:
         runtime, session, err = await open_session(flags, cwd, assembly)
+        if session is not None:
+            session_file = session.sessionManager.getSessionFile()
         if err:
-            return {"text": None, "timed_out": False, "error": err}
+            return {"text": None, "timed_out": False, "error": err, "session_file": session_file}
         # Headless sessions have nobody watching them repeat themselves into their
         # whole budget, or spend it entirely on their own to-do list; the guards are
         # that reader. Every model request is metered where it is sent (metering).
         from misaka.core.platform import metering
         install_guards(session, metering.allowance, wall_seconds=timeout,
-                       bookkeeping_tools=BOOKKEEPING_TOOLS)
+                       no_progress_vocabulary=NO_PROGRESS_VOCABULARY)
         if on_event:
             session.subscribe(lambda ev: on_event(event_line(ev)))
+        activity = [time.monotonic()]
+        if idle_timeout:
+            session.subscribe(lambda _ev: activity.__setitem__(0, time.monotonic()))
 
         async def prompt_and_settle():
             await session.prompt(prompt)
             await settle_after_prompt(session)
 
         try:
-            await asyncio.wait_for(prompt_and_settle(), timeout)
+            await asyncio.wait_for(_until_idle(prompt_and_settle(), activity, idle_timeout), timeout)
         except TimeoutError:
             timed_out = True
             try:
@@ -285,9 +310,9 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
             stop = last.get("stopReason") if isinstance(last, dict) else getattr(last, "stopReason", None)
             if stop in ("error", "aborted", "length") and not timed_out:
                 # A reply cut at the output cap never reached its tool call; callers that
-                # extract JSON would fail on the truncated text anyway, and the research
+                # extract JSON would fail on the truncated text anyway, and a workflow's
                 # driver needs the cause by name to nudge one more turn.
-                from misaka.ai.utils.overflow import output_limit_error
+                from misaka.ai.utils._output_limit import output_limit_error
                 err = (last.get("errorMessage") if isinstance(last, dict)
                        else getattr(last, "errorMessage", None)) or (
                     output_limit_error(last) if stop == "length" else f"request {stop}")
@@ -300,12 +325,14 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
             "text": text,
             "timed_out": timed_out,
             "error": err,
+            "session_file": session_file,
         }
     except Exception as e:  # noqa: BLE001
         return {
             "text": None,
             "timed_out": timed_out,
             "error": f"{type(e).__name__}: {e}",
+            "session_file": session_file,
         }
     finally:
         try:

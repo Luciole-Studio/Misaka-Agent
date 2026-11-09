@@ -45,7 +45,7 @@ async def test_parallel_page_renders_and_bad_document_are_isolated(pdf, tmp_path
 
 @pytest.mark.parametrize("failure", ["missing", "non_pdf", "page", "scale", "nan", "render", "crash", "timeout"])
 async def test_page_failures_are_real_tool_errors(tmp_path, monkeypatch, failure):
-    from misaka.agent.agent_loop import PreparedToolCall, execute_prepared_tool_call
+    from misaka.agent.agent_loop import _executePreparedToolCall, _PreparedToolCall
     from misaka.core.wiring import ToolCollector
 
     source = str(tmp_path / ("source.epub" if failure == "non_pdf" else "source.pdf"))
@@ -72,7 +72,7 @@ async def test_page_failures_are_real_tool_errors(tmp_path, monkeypatch, failure
         return await definition.execute(call_id, args, signal, update, NS(cwd=str(tmp_path)))
 
     call = NS(id="call", name=definition.name, arguments=params)
-    result = await execute_prepared_tool_call(PreparedToolCall("prepared", call, NS(execute=execute), params), None, AsyncMock())
+    result = await _executePreparedToolCall(_PreparedToolCall(call, NS(execute=execute), params), None, AsyncMock())
     assert result.isError is True
     assert result.result.content[0].text
 
@@ -84,7 +84,9 @@ def card(tmp_path, monkeypatch):
 
     for key in ("MISAKA_SISTER_OWNER_TASK_ID", "MISAKA_SISTER_OWNER_GENERATION", "MISAKA_SISTER_OWNER_CLAIM_LOCK",
                 "MISAKA_SUBAGENT_PERMISSION_SETTINGS", "MISAKA_SUBAGENT_PERMISSION_MODE"):
-        monkeypatch.delenv(key, raising=False)
+        # Set first so teardown also removes what the refresh writes (delenv of an absent key records nothing).
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
     monkeypatch.setenv("MISAKA_USAGE_TASK_ID", "fixture-card")
     monkeypatch.setenv("MISAKA_USAGE_GENERATION", "1")
     monkeypatch.setenv("MISAKA_USAGE_CLAIM_LOCK", "fixture-owner")
@@ -107,7 +109,7 @@ def card(tmp_path, monkeypatch):
 
 
 async def test_card_grant_writes_and_is_revoked_without_heartbeats(card, monkeypatch):
-    from misaka.core.tools.write import create_write_tool_definition
+    from misaka.core.tools.write import createWriteToolDefinition
 
     session, con, output = card
     context = RoleContext(role="general", profile_dir="", mcp_role="", workspace=session.cwd,
@@ -123,7 +125,7 @@ async def test_card_grant_writes_and_is_revoked_without_heartbeats(card, monkeyp
     for path in ("outputs/card/nested/result.md", str(output / "absolute.md")):
         args = {"path": path, "content": "Verified output"}
         assert await worker.before_tool({"toolName": "write", "input": args}) is None
-        await create_write_tool_definition(session.cwd).execute("write", args)
+        await createWriteToolDefinition(session.cwd).execute("write", args)
     assert (output / "nested/result.md").read_text(encoding="utf-8") == "Verified output"
     assert con.total_changes == before_changes  # grant lookups never renew ownership
     # The next live refresh, including nested children, must drop a stale grant.

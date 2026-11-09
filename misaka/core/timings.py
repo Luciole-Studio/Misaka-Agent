@@ -16,6 +16,7 @@ import time as _time
 from dataclasses import dataclass, field
 from typing import Literal
 
+# MISAKA fork: the variable carries MISAKA's prefix where pi reads ``PI_TIMING``.
 ENABLED = os.environ.get("MISAKA_TIMING") == "1"
 
 TimingLabel = Literal["main", "extensions"]

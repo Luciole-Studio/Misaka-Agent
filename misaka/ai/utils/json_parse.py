@@ -1,23 +1,26 @@
-"""Helpers for repairing and incrementally parsing provider JSON fragments."""
+"""Translated from pi's ``packages/ai/src/utils/json-parse.ts`` (v1.3.0).
+
+MISAKA fork: ``partial-json``'s ``parse`` is ``misaka.ai.utils._partial_json.parse`` (no Python port of the npm
+package); ``JSON.parse`` is ``misaka.utils.js.jsonParse``; ``parseJsonWithRepair`` has one more step,
+``_escape_stray_quotes``, after pi's repair.
+"""
 
 from __future__ import annotations
 
-import json
-from typing import Any, TypeVar
+from typing import Any, NotRequired, TypedDict
 
-TJson = TypeVar("TJson")
+from misaka.ai.utils._partial_json import parse as partialParse
+from misaka.utils.js import jsonParse, jsTrim
 
-_VALID_JSON_ESCAPES = frozenset({'"', "\\", "/", "b", "f", "n", "r", "t", "u"})
-
-
-def _is_control_character(char: str) -> bool:
-    if not char:
-        return False
-    code_point = ord(char)
-    return 0x00 <= code_point <= 0x1F
+_VALID_JSON_ESCAPES = frozenset({'"', "\\", "/", "b", "f", "n", "r", "t"})
 
 
-def _escape_control_character(char: str) -> str:
+def _isControlCharacter(char: str) -> bool:
+    codePoint = ord(char) if char else None
+    return codePoint is not None and 0x00 <= codePoint <= 0x1F
+
+
+def _escapeControlCharacter(char: str) -> str:
     if char == "\b":
         return "\\b"
     if char == "\f":
@@ -31,43 +34,48 @@ def _escape_control_character(char: str) -> str:
     return f"\\u{ord(char):04x}"
 
 
-def repair_json(json_string: str) -> str:
+def repairJson(json: str) -> str:
+    """Repairs malformed JSON string literals by:
+    - escaping raw control characters inside strings
+    - doubling backslashes before invalid escape characters
+    """
     repaired: list[str] = []
-    in_string = False
+    inString = False
+
+    # MISAKA fork: a while loop, since a Python for loop cannot skip ahead by changing its index.
     index = 0
+    while index < len(json):
+        char = json[index]
 
-    while index < len(json_string):
-        char = json_string[index]
-
-        if not in_string:
+        if not inString:
             repaired.append(char)
             if char == '"':
-                in_string = True
+                inString = True
             index += 1
             continue
 
         if char == '"':
             repaired.append(char)
-            in_string = False
+            inString = False
             index += 1
             continue
 
         if char == "\\":
-            next_char = json_string[index + 1] if index + 1 < len(json_string) else None
-            if next_char is None:
+            nextChar = json[index + 1] if index + 1 < len(json) else None
+            if nextChar is None:
                 repaired.append("\\\\")
                 index += 1
                 continue
 
-            if next_char == "u":
-                unicode_digits = json_string[index + 2 : index + 6]
-                if len(unicode_digits) == 4 and all(digit in "0123456789abcdefABCDEF" for digit in unicode_digits):
-                    repaired.append(f"\\u{unicode_digits}")
+            if nextChar == "u":
+                unicodeDigits = json[index + 2 : index + 6]
+                if len(unicodeDigits) == 4 and all(digit in "0123456789abcdefABCDEF" for digit in unicodeDigits):
+                    repaired.append(f"\\u{unicodeDigits}")
                     index += 6
                     continue
 
-            if next_char in _VALID_JSON_ESCAPES:
-                repaired.append(f"\\{next_char}")
+            if nextChar in _VALID_JSON_ESCAPES:
+                repaired.append(f"\\{nextChar}")
                 index += 2
                 continue
 
@@ -75,13 +83,13 @@ def repair_json(json_string: str) -> str:
             index += 1
             continue
 
-        repaired.append(_escape_control_character(char) if _is_control_character(char) else char)
+        repaired.append(_escapeControlCharacter(char) if _isControlCharacter(char) else char)
         index += 1
 
     return "".join(repaired)
 
 
-def _escape_stray_quotes(json_string: str) -> str:
+def _escape_stray_quotes(json: str) -> str:
     """MISAKA fork: escape a double quote that sits inside a string value.
 
     A relaying gateway delivered Claude tool arguments whose string values held literal
@@ -93,27 +101,27 @@ def _escape_stray_quotes(json_string: str) -> str:
     Only reached after the strict parse and pi's repair have both failed.
     """
     out: list[str] = []
-    in_string = False
+    inString = False
     index = 0
-    length = len(json_string)
+    length = len(json)
     while index < length:
-        char = json_string[index]
-        if not in_string:
+        char = json[index]
+        if not inString:
             if char == '"':
-                in_string = True
+                inString = True
             out.append(char)
             index += 1
             continue
         if char == "\\" and index + 1 < length:
-            out.append(json_string[index:index + 2])
+            out.append(json[index : index + 2])
             index += 2
             continue
         if char == '"':
             after = index + 1
-            while after < length and json_string[after] in " \t\r\n":
+            while after < length and json[after] in " \t\r\n":
                 after += 1
-            if after >= length or json_string[after] in ",:}]":
-                in_string = False
+            if after >= length or json[after] in ",:}]":
+                inString = False
                 out.append(char)
             else:
                 out.append('\\"')
@@ -124,328 +132,70 @@ def _escape_stray_quotes(json_string: str) -> str:
     return "".join(out)
 
 
-def parse_json_with_repair(json_string: str) -> TJson:
+def parseJsonWithRepair(json: str) -> Any:
     try:
-        return json.loads(json_string)
-    except json.JSONDecodeError:
-        repaired_json = repair_json(json_string)
-        if repaired_json != json_string:
+        return jsonParse(json)
+    except ValueError:
+        repairedJson = repairJson(json)
+        if repairedJson != json:
             try:
-                return json.loads(repaired_json)
-            except json.JSONDecodeError:
+                return jsonParse(repairedJson)
+            except ValueError:
                 pass
         # MISAKA fork: see _escape_stray_quotes.
-        requoted = _escape_stray_quotes(repaired_json)
-        if requoted != repaired_json:
-            return json.loads(requoted)
+        requoted = _escape_stray_quotes(repairedJson)
+        if requoted != repairedJson:
+            return jsonParse(requoted)
         raise
 
 
-_PARTIAL_LITERALS = ("true", "false", "null")
+class _ToolCallArguments(TypedDict):
+    """MISAKA fork: ``Pick<ToolCall, "arguments" | "argumentsError">``, named."""
+
+    arguments: dict[str, Any]
+    argumentsError: NotRequired[str]
 
 
-def _unterminated_escape_start(text: str) -> int | None:
-    """Index of a trailing ``\\uXXX`` that never got its fourth hex digit."""
-    start = text.rfind("\\u")
-    if start < 0 or len(text) - start > 5:
-        return None
-    # Only a real escape counts: `\\\\u` is a literal backslash followed by `u`.
-    backslashes = len(text[:start + 1]) - len(text[:start + 1].rstrip("\\"))
-    if backslashes % 2 == 0:
-        return None
-    return start if all(c in "0123456789abcdefABCDEF" for c in text[start + 2:]) else None
+def parseToolCallArguments(json: str | None) -> _ToolCallArguments:
+    """Parses the model's complete arguments text of a finished tool call.
 
-
-def _complete_json_prefix(partial_json: str) -> str | None:
-    """Close a truncated JSON prefix the way ``partial-json`` does, at every depth.
-
-    Three rules, applied uniformly rather than only to the outermost object -- which is
-    what an earlier revision did, leaving nested values wrong:
-
-    * a key with no value yet is dropped (``{"path`` -> ``{}``, ``{"a": {"k`` -> ``{"a": {}}``)
-    * a value that has begun is completed (``{"a": "he`` -> ``{"a": "he"}``)
-    * a truncated bare literal is finished (``"ok": t`` -> ``true``); an ambiguous prefix
-      is dropped instead of guessed
-
-    Returns ``None`` when the text is already complete or does not start a container, so
-    the existing repair chain keeps handling everything this does not cover.
+    Unlike :func:`parseStreamingJson`, this never keeps a partially parsed prefix: once the call is
+    finished, text that is not a valid JSON object means the model sent malformed arguments. In that
+    case `arguments` is `{}` and `argumentsError` describes the problem, including the text the
+    model sent, so tool validation can report it back to the model.
     """
-    text = partial_json.strip()
-    if not text:
-        return None
-
-    out: list[str] = []
-    stack: list[str] = []
-    in_string = False
-    escaped = False
-    index = 0
-    # Index in `out` just past the last element/pair that is safe to keep, per container.
-    safe: list[int] = []
-
-    while index < len(text):
-        char = text[index]
-        if in_string:
-            out.append(char)
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-                if stack and stack[-1] == "value":
-                    stack.pop()
-                    safe[-1] = len(out)
-                elif stack and stack[-1] == "[":
-                    # An array has elements, not keys: a finished string is complete.
-                    safe[-1] = len(out)
-            index += 1
-            continue
-
-        if char == '"':
-            in_string = True
-            out.append(char)
-        elif char in "{[":
-            out.append(char)
-            stack.append(char)
-            safe.append(len(out))
-        elif char in "}]":
-            out.append(char)
-            if stack and stack[-1] in "{[":
-                stack.pop()
-                safe.pop()
-                # The container that just closed *was* the pending value, so that slot is
-                # filled too. Leaving the marker makes the unwind close one bracket twice.
-                if stack and stack[-1] == "value":
-                    stack.pop()
-                if safe:
-                    safe[-1] = len(out)
-        elif char == ":":
-            out.append(char)
-            stack.append("value")
-        elif char == ",":
-            if stack and stack[-1] == "value":
-                stack.pop()
-            out.append(char)
-            if safe:
-                safe[-1] = len(out) - 1
-        elif char.isspace():
-            out.append(char)
-        else:
-            # A bare literal or number: consume the whole run so it can be judged at once.
-            run_end = index
-            while run_end < len(text) and (text[run_end].isalnum() or text[run_end] in "+-.eE"):
-                run_end += 1
-            if run_end == index:
-                # Reject unknown syntax; skipping it would silently change the value.
-                return None
-            token = text[index:run_end]
-            completed = _complete_bare_token(token, run_end >= len(text))
-            if completed is None:
-                index = run_end
-                continue
-            out.append(completed)
-            if stack and stack[-1] == "value":
-                stack.pop()
-            if safe:
-                safe[-1] = len(out)
-            index = run_end
-            continue
-        index += 1
-
-    if not stack and not in_string:
-        # Nothing is open. Either the text was already well-formed -- leave it to the
-        # caller's ordinary parse -- or a bare top-level token was completed (`tru`).
-        produced = "".join(out)
-        return None if produced == text or not produced else produced
-
-    # Unwind: cut each open container back to its last safe point and close it.
-    if in_string:
-        # An escape cut in half (`"a \\` or `"a \\u00e`) cannot be closed -- appending the
-        # quote would escape it, or leave a short \\u. Upstream keeps the text before it.
-        text_so_far = "".join(out)
-        trailing = len(text_so_far) - len(text_so_far.rstrip("\\"))
-        if trailing % 2:
-            del out[len(out) - 1:]
-        else:
-            short = _unterminated_escape_start(text_so_far)
-            if short is not None:
-                del out[short:]
-        if not stack:
-            # A bare top-level string (`"q\\`): there is no container, just the string.
-            out.append('"')
-        elif stack[-1] == "value":
-            # A value that had begun gets closed -- upstream keeps what streamed so far.
-            out.append('"')
-            stack.pop()
-            if safe:
-                safe[-1] = len(out)
-        elif stack and stack[-1] == "[":
-            # Inside an array the streaming string is an element, so it is completed the
-            # same way a value is.
-            out.append('"')
-            if safe:
-                safe[-1] = len(out)
-        # A *key* that is still streaming needs no branch: it has no value yet, so the
-        # container unwind below cuts back past it anyway -- closing its quote here would
-        # only leave `{"p"}`, which the same cut then removes.
-    while stack:
-        opener = stack.pop()
-        if opener not in "{[":
-            continue  # a pending value marker: nothing to close, the pair is cut instead
-        cut = safe.pop()
-        del out[cut:]
-        out.append("}" if opener == "{" else "]")
-        if safe:
-            safe[-1] = len(out)
-    return "".join(out)
-
-
-def _complete_bare_token(token: str, at_end: bool) -> str | None:
-    """A finished literal/number stays; a truncated one is completed or dropped."""
-    if not at_end:
-        return token
-    for literal in _PARTIAL_LITERALS:
-        if literal == token:
-            return token
-    matches = [literal for literal in _PARTIAL_LITERALS if literal.startswith(token)]
-    if len(matches) == 1:
-        return matches[0]
-    if matches:
-        return None  # ambiguous prefix: drop rather than guess
+    if not json or not jsTrim(json):
+        return {"arguments": {}}
     try:
-        json.loads(token)
-    except ValueError:
-        # Only a half-written *exponent* is recoverable: upstream yields -2 for `-2e` and
-        # 1.2 for `1.2e-`, but drops `1.` and `0.` entirely -- a fraction with no digits
-        # invalidates the number rather than truncating it.
-        mantissa, marker, _ = token.partition("e") if "e" in token else token.partition("E")
-        if not marker:
-            return None
-        try:
-            json.loads(mantissa)
-        except ValueError:
-            return None
-        return mantissa
-    return token
+        parsed = parseJsonWithRepair(json)
+        if not isinstance(parsed, dict):
+            raise ValueError("Tool arguments must be a JSON object")  # noqa: TRY004 - upstream's `throw new Error`
+        return {"arguments": parsed}
+    except Exception as error:  # noqa: BLE001 - a parse error normally, RecursionError when nesting is pathological
+        return {"arguments": {}, "argumentsError": f"{error}\n\nReceived arguments:\n{json}"}
 
 
-def _or_empty(value: Any) -> TJson:
-    """Upstream's completion path ends in ``?? {}``: a completed *top-level* null is
-    indistinguishable from "nothing parsed", so both become the empty object.
+def parseStreamingJson(partialJson: str | None) -> Any:
+    """Attempts to parse potentially incomplete JSON during streaming.
+    Always returns a valid object, even if the JSON is incomplete.
 
-    Only the top level, and only on this path: a null nested inside a container is a real
-    value and survives, and a document that is already complete keeps its own null.
+    Returns the parsed object, or an empty object if parsing fails.
     """
-    return {} if value is None else value
-
-
-def parse_streaming_json(partial_json: str | None) -> TJson:
-    if partial_json is None or partial_json.strip() == "":
+    if not partialJson or jsTrim(partialJson) == "":
         return {}
 
     try:
-        # A complete document parses as itself, null included -- the coalescing below
-        # belongs to the completion path only.
-        return parse_json_with_repair(partial_json)
-    except Exception:  # noqa: BLE001 - JSONDecodeError normally, RecursionError when nesting is pathological
-        trimmed = _complete_json_prefix(partial_json)
-        if trimmed is not None:
+        return parseJsonWithRepair(partialJson)
+    except Exception:  # noqa: BLE001 - a parse error normally, RecursionError when nesting is pathological
+        try:
+            result = partialParse(partialJson)
+            return {} if result is None else result
+        except Exception:  # noqa: BLE001 - as above
             try:
-                # No post-trimming: the completer already decided, escape-aware, how much
-                # of each string survives. Re-clipping by raw character count would cut
-                # `"line\n` back to `line`.
-                return _or_empty(json.loads(trimmed))
-            except ValueError:
-                pass
-        # Nothing recoverable. Upstream's parser also yields the empty object for a
-        # prefix that has not produced a single complete value yet (`3.`, `-`).
-        return {}
+                result = partialParse(repairJson(partialJson))
+                return {} if result is None else result
+            except Exception:  # noqa: BLE001 - as above
+                return {}
 
 
-STREAMING_PARSE_THRESHOLD_BYTES = 2048
-
-
-class StreamingArgs:
-    """A tool call's arguments while they stream in: kept raw, parsed sparingly.
-
-    Providers deliver tool arguments as JSON fragments, and every adapter used to hand
-    ``parse_streaming_json`` the *whole* accumulated buffer again on every fragment.
-    That parse is two to three full scans of the buffer (``json.loads``, a
-    character-by-character repair pass, then ``json_repair``), so a 38KB Write argument
-    arriving in 20-character fragments was parsed ~1950 times over growing prefixes --
-    measured at 31s of loop-thread CPU for one tool call.
-
-    The raw string is the durable half and is always exact: the fragments are appended
-    verbatim, and ``finish()`` parses the complete buffer at the end of the block, which
-    is the value the tool actually runs with. ``arguments`` is the *live view* in
-    between, refreshed often enough for the UI and rarely enough to stay cheap.
-    """
-
-    __slots__ = ("_parsed_length", "_raw", "_value")
-
-    def __init__(self, initial: str = "") -> None:
-        self._raw = initial
-        self._parsed_length = -1  # nothing parsed yet: -1 so an initial buffer still earns one
-        self._value: Any = {}
-
-    @property
-    def raw(self) -> str:
-        """Every fragment seen so far, concatenated and unaltered."""
-        return self._raw
-
-    def append(self, delta: str) -> None:
-        if delta:
-            self._raw += delta
-
-    @property
-    def arguments(self) -> Any:
-        """The last parsed value, re-parsed first if enough new bytes have arrived."""
-        if self._is_stale():
-            self._parse()
-        return self._value
-
-    def finish(self) -> Any:
-        """MISAKA fork: final arguments require a complete object, never prefix recovery.
-
-        Keep the existing complete-string escape repair and empty/no-argument convention.
-        Incremental UI previews still use the permissive parser in arguments.
-        """
-        value = parse_json_with_repair(self._raw) if self._raw.strip() else {}
-        if not isinstance(value, dict):
-            raise ValueError("Final tool arguments must be a JSON object")  # noqa: TRY004 - malformed wire value, same contract as JSONDecodeError
-        self._value = value
-        self._parsed_length = len(self._raw)
-        return self._value
-
-    def finish_into(self, tool_call) -> None:
-        """Keep malformed calls in the batch, but return an error receipt instead of executing."""
-        try:
-            tool_call.arguments = self.finish()
-            tool_call.argumentsError = None
-        except (ValueError, RecursionError):
-            tool_call.arguments = {}
-            tool_call.argumentsError = "Invalid final tool arguments; resend a complete JSON object."
-
-    def _is_stale(self) -> bool:
-        total = len(self._raw)
-        pending = total - self._parsed_length
-        if pending <= 0:
-            return False
-        if total <= STREAMING_PARSE_THRESHOLD_BYTES:
-            # Parsing a buffer this small costs microseconds, and the TUI renders tool
-            # arguments while they stream -- a tool call under the threshold (nearly all
-            # of them) must keep showing its path the moment it is spelled out.
-            return True
-        # Above it, wait for a fixed slice *and* for a fraction of what is already there.
-        # The fixed slice alone would still parse len/slice prefixes of average len/2,
-        # which is the same quadratic with a smaller constant; the fraction is what keeps
-        # the total work proportional to the argument's length.
-        return pending >= max(STREAMING_PARSE_THRESHOLD_BYTES, total // 8)
-
-    def _parse(self) -> None:
-        self._value = parse_streaming_json(self._raw)
-        self._parsed_length = len(self._raw)
-
-
-__all__ = [
-    ]
+__all__ = ["parseJsonWithRepair", "parseStreamingJson", "parseToolCallArguments", "repairJson"]

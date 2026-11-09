@@ -9,6 +9,7 @@ import os
 
 import pytest
 
+from misaka.ai.auth.types import ApiKeyCredential
 from misaka.core.auth_storage import AuthStorage, FileAuthStorageBackend
 
 KEY = {"type": "api_key", "key": "sk-test"}
@@ -19,7 +20,14 @@ def _seed(path):
     os.chmod(path, 0o600)
 
 
-def test_a_symlinked_store_is_read_and_written_through_the_link(tmp_path):
+async def _store(storage, provider, credential):
+    async def replace(_current):
+        return credential
+
+    await storage.modify(provider, replace)
+
+
+async def test_a_symlinked_store_is_read_and_written_through_the_link(tmp_path):
     real = tmp_path / "dotfiles" / "auth.json"
     real.parent.mkdir()
     _seed(real)
@@ -28,22 +36,23 @@ def test_a_symlinked_store_is_read_and_written_through_the_link(tmp_path):
     link.symlink_to(real)
 
     storage = AuthStorage.create(str(link))
-    assert storage.get("anthropic") == KEY
-    storage.set("openai", {"type": "api_key", "key": "sk-other"})
+    assert (await storage.read("anthropic")).key == KEY["key"]
+    await _store(storage, "openai", ApiKeyCredential(key="sk-other"))
 
-    assert link.is_symlink() and os.readlink(link) == str(real)
+    # Compared resolved: Windows reports an absolute link's target in its `\\?\` form.
+    assert link.is_symlink() and link.resolve() == real.resolve()
     assert json.loads(real.read_text(encoding="utf-8"))["openai"]["key"] == "sk-other"
-    assert AuthStorage.create(str(link)).get("openai")["key"] == "sk-other"
+    assert (await AuthStorage.create(str(link)).read("openai")).key == "sk-other"
 
 
-def test_a_hard_linked_store_is_read_and_written(tmp_path):
+async def test_a_hard_linked_store_is_read_and_written(tmp_path):
     path = tmp_path / "auth.json"
     _seed(path)
     os.link(path, tmp_path / "auth.json.backup")
 
     storage = AuthStorage.create(str(path))
-    assert storage.get("anthropic") == KEY
-    storage.set("openai", {"type": "api_key", "key": "sk-other"})
+    assert (await storage.read("anthropic")).key == KEY["key"]
+    await _store(storage, "openai", ApiKeyCredential(key="sk-other"))
     assert json.loads(path.read_text(encoding="utf-8"))["openai"]["key"] == "sk-other"
 
 

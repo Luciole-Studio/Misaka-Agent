@@ -37,12 +37,10 @@ def _query_terminal_background(in_fd=0, out_fd=1, timeout=0.25):
     match = _re.search(rb"\x1b\]11;[^\x07\x1b]*(?:\x07|\x1b\\)", buf)
     if not match:
         return None
-    from misaka.ui.tui.terminal_colors import (
-        parse_osc11_background_color,
-        theme_for_rgb_color,
-    )
-    rgb = parse_osc11_background_color(match.group(0).decode("ascii", "replace"))
-    return theme_for_rgb_color(rgb) if rgb else None
+    from misaka.ui.tui.terminal_colors import getThemeForRgbColor, parseOscColorResponse
+    reply = parseOscColorResponse(match.group(0).decode("ascii", "replace"))
+    rgb = reply["rgb"] if reply is not None else None
+    return getThemeForRgbColor(rgb) if rgb else None
 
 
 def _query_tty(in_fd, out_fd, request, timeout):
@@ -94,8 +92,8 @@ def theme_variant():
             live = None
         if live is None:
             try:
-                from misaka.ui.tui.interactive.theme.theme import get_default_theme
-                live = get_default_theme()
+                from misaka.modes.interactive.theme.theme import getTerminalTheme
+                live = getTerminalTheme()
             except Exception:  # noqa: BLE001 - if detection fails, assume dark (MISAKA's primary palette)
                 live = "dark"
         _VARIANT = live

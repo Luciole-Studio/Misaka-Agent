@@ -136,11 +136,11 @@ def atomic_json_write(path, value, **options):
 
 def session_is_branch_of(session_id, parent_session_id):
     from misaka.core.session_catalog import list_entries
-    from misaka.core.session_manager import read_session_header
+    from misaka.core.session_manager import readSessionHeader
     for entry in list_entries(None):
         if entry['id'] == session_id and entry.get('path'):
-            parent = read_session_header(entry['path']).get('parentSession')
-            return bool(parent and read_session_header(parent).get('id') == parent_session_id)
+            parent = readSessionHeader(entry['path']).get('parentSession')
+            return bool(parent and readSessionHeader(parent).get('id') == parent_session_id)
     return False
 
 

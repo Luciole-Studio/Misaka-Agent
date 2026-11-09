@@ -14,18 +14,19 @@ not be quietly editing the cache other callers are about to read.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
-from misaka.ai.types import Model
-from misaka.utils.values import signal_aborted
+from misaka.ai.types import AnyModel
+from misaka.utils.js import throwIfAborted
 
 
 class ModelsStoreEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    models: list[Model]
+    # Persisted models of every type.
+    models: list[AnyModel]
     # Unix timestamp from the remote catalog's Last-Modified header.
     lastModified: int | None = None
     # Unix timestamp of the last completed remote check.
@@ -40,9 +41,23 @@ class ModelsStoreOperationOptions(BaseModel):
     signal: Any | None = None
 
 
+class ModelsStore(Protocol):
+    """Persistent model catalogs keyed by provider ID."""
+
+    async def read(
+        self, providerId: str, options: ModelsStoreOperationOptions | None = None
+    ) -> ModelsStoreEntry | None: ...
+
+    async def write(
+        self, providerId: str, entry: ModelsStoreEntry, options: ModelsStoreOperationOptions | None = None
+    ) -> None: ...
+
+    async def delete(self, providerId: str, options: ModelsStoreOperationOptions | None = None) -> None: ...
+
+
 def _throwIfAborted(options: ModelsStoreOperationOptions | None) -> None:
-    if options is not None and signal_aborted(options.signal):
-        raise RuntimeError("Request was aborted")
+    if options is not None:
+        throwIfAborted(options.signal)
 
 
 class InMemoryModelsStore:
@@ -74,4 +89,4 @@ class InMemoryModelsStore:
         self._entries.pop(providerId, None)
 
 
-__all__ = ["InMemoryModelsStore", "ModelsStoreEntry", "ModelsStoreOperationOptions"]
+__all__ = ["InMemoryModelsStore", "ModelsStore", "ModelsStoreEntry", "ModelsStoreOperationOptions"]

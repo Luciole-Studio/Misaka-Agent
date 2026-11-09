@@ -1,4 +1,10 @@
-"""Ripgrep-backed content search tool."""
+"""Translated from pi's ``packages/coding-agent/src/core/tools/grep.ts`` (v1.1.0).
+
+MISAKA forks:
+- MISAKA's credentials and the web evidence vault are out of the tools' reach: the search path is checked, and a match
+  inside a credential store is passed over.
+- ripgrep is never downloaded (``tools_manager``); a missing one says how to install it.
+"""
 
 from __future__ import annotations
 
@@ -8,8 +14,8 @@ import os
 import stat
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, fields
-from pathlib import Path
-from typing import Any, Protocol, TypeVar
+from types import SimpleNamespace
+from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -17,29 +23,31 @@ from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.types import TextContent
 from misaka.core.extensions.types import ToolDefinition
 from misaka.core.tools._common import abort_race
-from misaka.core.tools.path_utils import resolve_to_cwd
-from misaka.core.tools.render_utils import (
-    get_text_output,
-    invalid_arg_text,
-    shorten_path,
-    str_value,
-)
-from misaka.core.tools.tool_definition_wrapper import wrap_tool_definition
+from misaka.core.tools.path_utils import resolveToCwd
+from misaka.core.tools.renderers.grep import grepRenderers
+from misaka.core.tools.tool_definition_wrapper import wrapToolDefinition
 from misaka.core.tools.truncate import (
     DEFAULT_MAX_BYTES,
     GREP_MAX_LINE_LENGTH,
     TruncationOptions,
     TruncationResult,
-    format_size,
-    truncate_head,
-    truncate_line,
+    formatSize,
+    truncateHead,
+    truncateLine,
 )
-from misaka.ui.tui import Text
-from misaka.utils.streams import STREAM_LIMIT
-from misaka.utils.tools_manager import find_tool, missing_tool_message
+from misaka.utils import node_path
+from misaka.utils.js import formatNumber, jsTrim
+from misaka.utils.tools_manager import ensureTool, missingToolMessage
 from misaka.utils.values import maybe_await, read_field, signal_aborted
 
-T = TypeVar("T")
+# `Type.Number`: the schema says number; the value is read as an integer.
+_NUMBER = {"type": "number"}
+
+
+grepToolSystemPromptContribution = {
+    "snippet": "Search file contents for patterns (respects .gitignore)",
+    "guidelines": [],
+}
 
 
 class GrepToolInput(BaseModel):
@@ -47,28 +55,11 @@ class GrepToolInput(BaseModel):
 
     pattern: str = Field(description="Search pattern (regex or literal string)")
     path: str | None = Field(default=None, description="Directory or file to search (default: current directory)")
-    glob: str | None = Field(
-        default=None,
-        description="Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'",
-    )
+    glob: str | None = Field(default=None, description="Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'")
     ignoreCase: bool | None = Field(default=None, description="Case-insensitive search (default: false)")
-    literal: bool | None = Field(
-        default=None,
-        description="Treat pattern as literal string instead of regex (default: false)",
-    )
-    context: int | None = Field(
-        default=None,
-        description="Number of lines to show before and after each match (default: 0)",
-    )
-    limit: int | None = Field(default=None, description="Maximum number of matches to return (default: 100)")
-
-
-grep_tool_system_prompt_contribution = {
-    "snippet": "Search file contents for patterns (respects .gitignore)",
-    "guidelines": [],
-}
-grepToolSystemPromptContribution = grep_tool_system_prompt_contribution
-
+    literal: bool | None = Field(default=None, description="Treat pattern as literal string instead of regex (default: false)")
+    context: int | None = Field(default=None, description="Number of lines to show before and after each match (default: 0)", json_schema_extra=_NUMBER)
+    limit: int | None = Field(default=None, description="Maximum number of matches to return (default: 100)", json_schema_extra=_NUMBER)
 
 DEFAULT_LIMIT = 100
 
@@ -78,386 +69,298 @@ class GrepToolDetails:
     truncation: TruncationResult | None = None
     matchLimitReached: int | None = None
     linesTruncated: bool | None = None
-    # The search gave up part way through because a file has a line past STREAM_LIMIT.
-    # It is a detail, not only a tail note, because the collapsed result renders 15 lines
-    # and then reads the warnings from here: without it the one notice that says the
-    # result is incomplete is exactly the line the clip drops.
-    searchStoppedEarly: bool | None = None
 
 
 class GrepOperations(Protocol):
+    """Pluggable operations for the grep tool.
+    Override these to delegate search to remote systems (for example SSH).
+    """
+
+    # Check if path is a directory. Throws if path does not exist.
     isDirectory: Callable[[str], Awaitable[bool] | bool]
+    # Read file contents for context lines
     readFile: Callable[[str], Awaitable[str] | str]
+
+
+async def _isDirectory(p: str) -> bool:
+    return stat.S_ISDIR((await asyncio.to_thread(os.stat, p)).st_mode)
+
+
+def _readBytes(p: str) -> bytes:
+    with open(p, "rb") as file:
+        return file.read()
+
+
+async def _readFile(p: str) -> str:
+    # `readFile(p, "utf-8")`: bytes that are not UTF-8 become U+FFFD, line endings stay as they are.
+    return (await asyncio.to_thread(_readBytes, p)).decode("utf-8", errors="replace")
+
+
+defaultGrepOperations: GrepOperations = SimpleNamespace(  # type: ignore[assignment]
+    isDirectory=_isDirectory,
+    readFile=_readFile,
+)
 
 
 @dataclass(slots=True)
 class GrepToolOptions:
+    # Custom operations for grep. Default: local filesystem plus ripgrep
     operations: GrepOperations | None = None
 
 
-@dataclass(slots=True)
-class _DefaultGrepOperations:
-    async def isDirectory(self, absolute_path: str) -> bool:
-        path_stat = await asyncio.to_thread(Path(absolute_path).stat)
-        return stat.S_ISDIR(path_stat.st_mode)
-
-    async def readFile(self, absolute_path: str) -> str:
-        return await asyncio.to_thread(
-            Path(absolute_path).read_text,
-            encoding="utf-8",
-            errors="replace",
-        )
-
-
-def _coerce_options(options: GrepToolOptions | Mapping[str, Any] | None) -> GrepToolOptions:
-    if options is None:
-        return GrepToolOptions()
-    if isinstance(options, GrepToolOptions):
+def _coerce_options(options: GrepToolOptions | Mapping[str, Any] | None) -> GrepToolOptions | None:
+    """An option bag passed as a mapping, as JavaScript callers pass an object literal."""
+    if options is None or isinstance(options, GrepToolOptions):
         return options
     return GrepToolOptions(operations=options.get("operations"))
 
 
-def _format_grep_call(args: Mapping[str, Any] | None, theme_obj: Any) -> str:
-    pattern = str_value(read_field(args, "pattern"))
-    raw_path = str_value(read_field(args, "path"))
-    path_value = shorten_path(raw_path or ".") if raw_path is not None else None
-    glob_value = str_value(read_field(args, "glob"))
-    limit = read_field(args, "limit")
-    invalid_arg = invalid_arg_text(theme_obj)
-
-    text = (
-        theme_obj.fg("toolTitle", theme_obj.bold("grep"))
-        + " "
-        + (invalid_arg if pattern is None else theme_obj.fg("accent", f"/{pattern or ''}/"))
-        + theme_obj.fg("toolOutput", f" in {invalid_arg if path_value is None else path_value}")
-    )
-    if glob_value:
-        text += theme_obj.fg("toolOutput", f" ({glob_value})")
-    if limit is not None:
-        text += theme_obj.fg("toolOutput", f" limit {limit}")
-    return text
-
-
-def _format_grep_result(result: Any, options: Any, theme_obj: Any, show_images: bool) -> str:
-    from misaka.ui.tui.interactive.components.keybinding_hints import key_hint
-
-    output = get_text_output(result, show_images).strip()
-    text = ""
-    if output:
-        lines = output.split("\n")
-        max_lines = len(lines) if bool(read_field(options, "expanded")) else 15
-        display_lines = lines[:max_lines]
-        remaining = len(lines) - max_lines
-        text += "\n" + "\n".join(theme_obj.fg("toolOutput", line) for line in display_lines)
-        if remaining > 0:
-            more_lines_text = theme_obj.fg("muted", f"\n... ({remaining} more lines,")
-            text += f"{more_lines_text} {key_hint('app.tools.expand', 'to expand')})"
-
-    details = read_field(result, "details")
-    match_limit = read_field(details, "matchLimitReached")
-    truncation = read_field(details, "truncation")
-    lines_truncated = read_field(details, "linesTruncated")
-    stopped_early = read_field(details, "searchStoppedEarly")
-    if match_limit or bool(read_field(truncation, "truncated")) or lines_truncated or stopped_early:
-        warnings: list[str] = []
-        if match_limit:
-            warnings.append(f"{match_limit} matches limit")
-        if bool(read_field(truncation, "truncated")):
-            warnings.append(f"{format_size(read_field(truncation, 'maxBytes') or DEFAULT_MAX_BYTES)} limit")
-        if lines_truncated:
-            warnings.append("some lines truncated")
-        if stopped_early:
-            warnings.append("search stopped at an overlong line")
-        warning_text = f"[Truncated: {', '.join(warnings)}]"
-        text += "\n" + theme_obj.fg("warning", warning_text)
-    return text
-
-
-def _format_match_path(file_path: str, search_path: str, is_directory: bool) -> str:
-    if is_directory:
-        relative = os.path.relpath(file_path, search_path)
-        if relative and not relative.startswith(".."):
-            return relative.replace(os.sep, "/")
-    return os.path.basename(file_path)
-
-
-def _details_or_none(details: GrepToolDetails) -> GrepToolDetails | None:
-    if any(getattr(details, field.name) is not None for field in fields(details)):
-        return details
-    return None
-
-
-async def _read_stderr(stream: asyncio.StreamReader | None) -> str:
+async def _readAll(stream: asyncio.StreamReader | None) -> str:
     if stream is None:
         return ""
-    chunks: list[str] = []
-    while True:
-        chunk = await stream.read(4096)
-        if not chunk:
-            break
-        chunks.append(chunk.decode("utf-8", errors="replace"))
-    return "".join(chunks)
+    return (await stream.read()).decode("utf-8", errors="replace")
 
 
-def create_grep_tool_definition(
+def createGrepToolDefinition(
     cwd: str,
     options: GrepToolOptions | Mapping[str, Any] | None = None,
 ) -> ToolDefinition[GrepToolInput | dict[str, Any], GrepToolDetails | None]:
-    configured_operations = _coerce_options(options).operations
-    operations = (
-        configured_operations
-        if configured_operations is not None
-        else _DefaultGrepOperations()
-    )
+    options = _coerce_options(options)
+    customOps = options.operations if options else None
 
     async def execute(
-        _tool_call_id: str,
+        _toolCallId: str,
         params: GrepToolInput | dict[str, Any],
         signal: Any | None = None,
-        _on_update: Callable[[AgentToolResult], None] | None = None,
-        _ctx: Any = None,
+        _onUpdate: Callable[[AgentToolResult], None] | None = None,
+        ctx: Any = None,
     ) -> AgentToolResult:
         if signal_aborted(signal):
             raise RuntimeError("Operation aborted")
-
         parsed = GrepToolInput.model_validate(params)
-        rg_path = find_tool("rg")
-        if not rg_path:
-            raise RuntimeError(missing_tool_message("rg"))
+        pattern, searchDir, glob = parsed.pattern, parsed.path, parsed.glob
+        ignoreCase, literal, context, limit = parsed.ignoreCase, parsed.literal, parsed.context, parsed.limit
 
-        search_path = resolve_to_cwd(parsed.path or ".", cwd)
-        from misaka.core.web.evidence import check_material_read, is_credential_store
-        check_material_read(search_path)
+        rgPath = await ensureTool("rg")
+        if not rgPath:
+            # MISAKA fork: never downloaded, so the error says how to install it.
+            raise RuntimeError(missingToolMessage("rg"))
+
+        searchPath = resolveToCwd(searchDir or ".", read_field(ctx, "cwd") or cwd)
+        # MISAKA fork: MISAKA's credentials and the web evidence vault are out of the tools' reach.
+        from misaka.core.web.evidence import (
+            check_material_read,
+            is_credential_store,
+            is_skills_hub_cache,
+        )
+        check_material_read(searchPath)
+        ops = customOps or defaultGrepOperations
         try:
-            is_directory = await maybe_await(operations.isDirectory(search_path))
+            isDirectory = await maybe_await(ops.isDirectory(searchPath))
         except Exception:  # noqa: BLE001 - any lookup failure reads as 'path not found'
-            raise RuntimeError(f"Path not found: {search_path}") from None
+            raise RuntimeError(f"Path not found: {searchPath}") from None
 
-        context_value = parsed.context if parsed.context and parsed.context > 0 else 0
-        limit_value = parsed.limit if parsed.limit is not None else DEFAULT_LIMIT
-        effective_limit = max(1, limit_value)
+        contextValue = context if context and context > 0 else 0
+        effectiveLimit = max(1, limit if limit is not None else DEFAULT_LIMIT)
 
-        def format_path(file_path: str) -> str:
-            return _format_match_path(file_path, search_path, bool(is_directory))
+        def formatPath(filePath: str) -> str:
+            if isDirectory:
+                relative = node_path.relative(searchPath, filePath)
+                if relative and not relative.startswith(".."):
+                    return relative.replace("\\", "/")
+            return node_path.basename(filePath)
 
-        file_cache: dict[str, list[str]] = {}
+        fileCache: dict[str, list[str]] = {}
 
-        async def get_file_lines(file_path: str) -> list[str]:
-            cached = file_cache.get(file_path)
-            if cached is not None:
-                return cached
-            try:
-                content = await maybe_await(operations.readFile(file_path))
-                lines = str(content).replace("\r\n", "\n").replace("\r", "\n").split("\n")
-            except Exception:  # noqa: BLE001 - an unreadable file searches as empty
-                lines = []
-            file_cache[file_path] = lines
+        async def getFileLines(filePath: str) -> list[str]:
+            lines = fileCache.get(filePath)
+            if lines is None:
+                try:
+                    content = await maybe_await(ops.readFile(filePath))
+                    lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+                except Exception:  # noqa: BLE001 - an unreadable file shows as unreadable
+                    lines = []
+                fileCache[filePath] = lines
             return lines
 
         args: list[str] = ["--json", "--line-number", "--color=never", "--hidden"]
-        if parsed.ignoreCase:
+        if ignoreCase:
             args.append("--ignore-case")
-        if parsed.literal:
+        if literal:
             args.append("--fixed-strings")
-        if parsed.glob:
-            args.extend(["--glob", parsed.glob])
-        args.extend(["--", parsed.pattern, search_path])
+        if glob:
+            args.extend(["--glob", glob])
+        args.extend(["--", pattern, searchPath])
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                rg_path,
+            child = await asyncio.create_subprocess_exec(
+                rgPath,
                 *args,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                limit=STREAM_LIMIT,
             )
         except Exception as error:  # noqa: BLE001 - any spawn failure is reported as 'failed to run ripgrep'
             raise RuntimeError(f"Failed to run ripgrep: {error}") from None
 
-        stderr_task = asyncio.create_task(_read_stderr(process.stderr))
-        match_count = 0
-        match_limit_reached = False
-        lines_truncated = False
+        stderrTask = asyncio.create_task(_readAll(child.stderr))
+        matchCount = 0
+        matchLimitReached = False
+        linesTruncated = False
         aborted = False
-        killed_due_to_limit = False
-        long_line_skipped = False
+        killedDueToLimit = False
+        outputLines: list[str] = []
+
+        def stopChild(dueToLimit: bool = False) -> None:
+            nonlocal killedDueToLimit
+            if child.returncode is None:
+                killedDueToLimit = dueToLimit
+                child.kill()
+
+        async def formatBlock(filePath: str, lineNumber: int) -> list[str]:
+            nonlocal linesTruncated
+            relativePath = formatPath(filePath)
+            lines = await getFileLines(filePath)
+            if not len(lines):
+                return [f"{relativePath}:{lineNumber}: (unable to read file)"]
+            block: list[str] = []
+            start = max(1, lineNumber - contextValue) if contextValue > 0 else lineNumber
+            end = min(len(lines), lineNumber + contextValue) if contextValue > 0 else lineNumber
+            for current in range(start, end + 1):
+                lineText = lines[current - 1] if 0 <= current - 1 < len(lines) else ""
+                sanitized = lineText.replace("\r", "")
+                isMatchLine = current == lineNumber
+                # Truncate long lines so grep output stays compact.
+                truncated = truncateLine(sanitized)
+                if truncated["wasTruncated"]:
+                    linesTruncated = True
+                if isMatchLine:
+                    block.append(f"{relativePath}:{current}: {truncated['text']}")
+                else:
+                    block.append(f"{relativePath}-{current}- {truncated['text']}")
+            return block
+
+        # Collect matches during streaming, then format them after rg exits.
         matches: list[tuple[str, int, str | None]] = []
 
-        def stop_process(due_to_limit: bool = False) -> None:
-            nonlocal killed_due_to_limit
-            if process.returncode is None:
-                killed_due_to_limit = due_to_limit
-                process.kill()
+        def onLine(line: str) -> None:
+            nonlocal matchCount, matchLimitReached
+            if not jsTrim(line) or matchCount >= effectiveLimit:
+                return
+            try:
+                event = json.loads(line)
+            except ValueError:
+                return
+            if isinstance(event, dict) and event.get("type") == "match":
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                filePath = (data.get("path") or {}).get("text") if isinstance(data.get("path"), dict) else None
+                # MISAKA fork: a search over the home passes its credential stores and skills hub caches by.
+                if isinstance(filePath, str) and (is_credential_store(filePath) or is_skills_hub_cache(filePath)):
+                    return
+                matchCount += 1
+                lineNumber = data.get("line_number")
+                lineText = (data.get("lines") or {}).get("text") if isinstance(data.get("lines"), dict) else None
+                if filePath and isinstance(lineNumber, int | float) and not isinstance(lineNumber, bool):
+                    matches.append((filePath, int(lineNumber), lineText))
+                if matchCount >= effectiveLimit:
+                    matchLimitReached = True
+                    stopChild(True)
 
-        async with abort_race(signal) as abort_task:
-            assert process.stdout is not None
+        async def readLines() -> None:
+            # readline over the child's stdout: no line-length limit, as Node's readline has none.
+            assert child.stdout is not None
+            pending = b""
             while True:
-                line_task = asyncio.create_task(process.stdout.readline())
-                wait_tasks: set[asyncio.Task[Any]] = {line_task}
-                if abort_task is not None:
-                    wait_tasks.add(abort_task)
+                chunk = await child.stdout.read(65536)
+                if not chunk:
+                    break
+                pending += chunk
+                *complete, pending = pending.split(b"\n")
+                for raw in complete:
+                    onLine(raw.removesuffix(b"\r").decode("utf-8", errors="replace"))
+            if pending:
+                onLine(pending.removesuffix(b"\r").decode("utf-8", errors="replace"))
 
-                done, _pending = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
-                if abort_task is not None and abort_task in done:
+        readTask = asyncio.create_task(readLines())
+        try:
+            async with abort_race(signal) as abortTask:
+                waitTasks: set[asyncio.Task[Any]] = {readTask}
+                if abortTask is not None:
+                    waitTasks.add(abortTask)
+                done, _pending = await asyncio.wait(waitTasks, return_when=asyncio.FIRST_COMPLETED)
+                if abortTask is not None and abortTask in done and readTask not in done:
                     aborted = True
-                    stop_process()
-                    line_task.cancel()
-                    await asyncio.gather(line_task, return_exceptions=True)
-                    break
-
-                try:
-                    raw_line = await line_task
-                except ValueError:
-                    # readline() raises ValueError for a line past STREAM_LIMIT, and it
-                    # drops the buffered part of that line first: up to the newline when
-                    # the newline is already buffered, otherwise the entire buffer. So the
-                    # reader stays usable, but reading on would resume at an arbitrary
-                    # byte -- usually mid-line, with an unknown number of match events
-                    # already discarded -- and the results after it could not be trusted.
-                    # One minified file must not cost the caller every match already found
-                    # in the other files either, so stop here and say why.
-                    long_line_skipped = True
-                    stop_process(True)
-                    break
-                if not raw_line:
-                    break
-
-                line = raw_line.decode("utf-8", errors="replace")
-                if not line.strip() or match_count >= effective_limit:
-                    continue
-
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                if event.get("type") != "match":
-                    continue
-
-                data = event.get("data") or {}
-                path_data = data.get("path") or {}
-                file_path = path_data.get("text")
-                if isinstance(file_path, str) and is_credential_store(file_path):
-                    continue                    # a search over the home passes its credentials by
-                match_count += 1
-                line_number = data.get("line_number")
-                line_text = ((data.get("lines") or {}).get("text")) if isinstance(data.get("lines"), dict) else None
-                if isinstance(file_path, str) and isinstance(line_number, int):
-                    matches.append((file_path, line_number, line_text))
-
-                if match_count >= effective_limit:
-                    match_limit_reached = True
-                    stop_process(True)
-                    break
-
-        return_code = await process.wait()
-        stderr_text = (await stderr_task).strip()
+                    stopChild()
+                await readTask
+            code = await child.wait()
+        except asyncio.CancelledError:
+            stopChild()
+            readTask.cancel()
+            stderrTask.cancel()
+            await asyncio.gather(readTask, stderrTask, child.wait(), return_exceptions=True)
+            raise
+        stderr = await stderrTask
 
         if aborted or signal_aborted(signal):
             raise RuntimeError("Operation aborted")
+        if not killedDueToLimit and code != 0 and code != 1:
+            errorMsg = jsTrim(stderr) or f"ripgrep exited with code {code}"
+            raise RuntimeError(errorMsg)
+        if matchCount == 0:
+            return AgentToolResult(content=[TextContent(text="No matches found")], details=None)
 
-        if not killed_due_to_limit and return_code not in {0, 1}:
-            raise RuntimeError(stderr_text or f"ripgrep exited with code {return_code}")
+        # Format matches after streaming finishes so custom readFile() backends can be async.
+        for filePath, lineNumber, lineText in matches:
+            if contextValue == 0 and lineText is not None:
+                relativePath = formatPath(filePath)
+                sanitized = lineText.replace("\r\n", "\n").replace("\r", "").removesuffix("\n")
+                truncated = truncateLine(sanitized)
+                if truncated["wasTruncated"]:
+                    linesTruncated = True
+                outputLines.append(f"{relativePath}:{lineNumber}: {truncated['text']}")
+            else:
+                block = await formatBlock(filePath, lineNumber)
+                outputLines.extend(block)
 
-        long_line_notice = (
-            f"Search stopped early: a file has a line longer than {format_size(STREAM_LIMIT)} "
-            "(minified or single-line dump); anything after it was not searched"
-            if long_line_skipped
-            else None
-        )
-
-        if match_count == 0:
-            no_matches = "No matches found"
-            if long_line_notice:
-                no_matches += f"\n\n[{long_line_notice}]"
-            return AgentToolResult(content=[TextContent(text=no_matches)], details=None)
-
-        output_lines: list[str] = []
-        for file_path, line_number, line_text in matches:
-            if context_value == 0 and line_text is not None:
-                relative_path = format_path(file_path)
-                sanitized = line_text.replace("\r\n", "\n").replace("\r", "").removesuffix("\n")
-                truncated = truncate_line(sanitized)
-                lines_truncated = lines_truncated or bool(truncated["wasTruncated"])
-                output_lines.append(f"{relative_path}:{line_number}: {truncated['text']}")
-                continue
-
-            relative_path = format_path(file_path)
-            lines = await get_file_lines(file_path)
-            if not lines:
-                output_lines.append(f"{relative_path}:{line_number}: (unable to read file)")
-                continue
-            start = max(1, line_number - context_value)
-            end = min(len(lines), line_number + context_value)
-            for current in range(start, end + 1):
-                line_text_value = lines[current - 1] if current - 1 < len(lines) else ""
-                sanitized = line_text_value.replace("\r", "")
-                truncated = truncate_line(sanitized)
-                lines_truncated = lines_truncated or bool(truncated["wasTruncated"])
-                if current == line_number:
-                    output_lines.append(f"{relative_path}:{current}: {truncated['text']}")
-                else:
-                    output_lines.append(f"{relative_path}-{current}- {truncated['text']}")
-
-        raw_output = "\n".join(output_lines)
-        truncation = truncate_head(raw_output, TruncationOptions(maxLines=2**31 - 1))
+        rawOutput = "\n".join(outputLines)
+        # Apply byte truncation. There is no line limit here because the match limit already capped rows.
+        truncation = truncateHead(rawOutput, TruncationOptions(maxLines=2**53 - 1))
         output = truncation.content
         details = GrepToolDetails()
+        # Build actionable notices for truncation and match limits.
         notices: list[str] = []
-        if long_line_notice:
-            notices.append(long_line_notice)
-            details.searchStoppedEarly = True
-        if match_limit_reached:
+        if matchLimitReached:
             notices.append(
-                f"{effective_limit} matches limit reached. Use limit={effective_limit * 2} for more, or refine pattern"
+                f"{effectiveLimit} matches limit reached. Use limit={effectiveLimit * 2} for more, or refine pattern"
             )
-            details.matchLimitReached = effective_limit
+            details.matchLimitReached = effectiveLimit
         if truncation.truncated:
-            notices.append(f"{format_size(DEFAULT_MAX_BYTES)} limit reached")
+            notices.append(f"{formatSize(DEFAULT_MAX_BYTES)} limit reached")
             details.truncation = truncation
-        if lines_truncated:
+        if linesTruncated:
             notices.append(f"Some lines truncated to {GREP_MAX_LINE_LENGTH} chars. Use read tool to see full lines")
             details.linesTruncated = True
-        if notices:
+        if len(notices) > 0:
             output += f"\n\n[{'. '.join(notices)}]"
-
         return AgentToolResult(
             content=[TextContent(text=output)],
-            details=_details_or_none(details),
+            details=details if any(getattr(details, field.name) is not None for field in fields(details)) else None,
         )
-
-    def render_call(args: Mapping[str, Any] | None, theme_obj: Any, context: Any) -> Text:
-        text = context.lastComponent if isinstance(context.lastComponent, Text) else Text("", 0, 0)
-        text.setText(_format_grep_call(args, theme_obj))
-        return text
-
-    def render_result(result: Any, options_obj: Any, theme_obj: Any, context: Any) -> Text:
-        text = context.lastComponent if isinstance(context.lastComponent, Text) else Text("", 0, 0)
-        text.setText(_format_grep_result(result, options_obj, theme_obj, bool(context.showImages)))
-        return text
 
     return ToolDefinition(
         name="grep",
         label="grep",
-        description=(
-            "Search file contents for a pattern. Returns matching lines with file paths and line numbers. "
-            "Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is hit first). "
-            f"Long lines are truncated to {GREP_MAX_LINE_LENGTH} chars."
-        ),
-        promptSnippet=grep_tool_system_prompt_contribution["snippet"],
+        description=f"Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to {DEFAULT_LIMIT} matches or {formatNumber(DEFAULT_MAX_BYTES / 1024)}KB (whichever is hit first). Long lines are truncated to {GREP_MAX_LINE_LENGTH} chars.",
+        promptSnippet=grepToolSystemPromptContribution["snippet"],
         parameters=GrepToolInput,
         execute=execute,
-        renderCall=render_call,
-        renderResult=render_result,
+        **grepRenderers,
     )
 
 
-def create_grep_tool(cwd: str, options: GrepToolOptions | Mapping[str, Any] | None = None) -> AgentTool:
-    return wrap_tool_definition(create_grep_tool_definition(cwd, options))
+def createGrepTool(cwd: str, options: GrepToolOptions | Mapping[str, Any] | None = None) -> AgentTool:
+    return wrapToolDefinition(createGrepToolDefinition(cwd, options))
 
-
-createGrepTool = create_grep_tool
-createGrepToolDefinition = create_grep_tool_definition
 
 __all__ = [
     "GrepOperations",

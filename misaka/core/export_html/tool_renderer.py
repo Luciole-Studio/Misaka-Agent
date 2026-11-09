@@ -1,52 +1,51 @@
-"""HTML renderer for custom tool components."""
+"""Tool HTML renderer for custom tools in HTML export.
+
+Renders custom tool calls and results to HTML by invoking their TUI renderers
+and converting the ANSI output to HTML.
+
+Translated from pi's ``packages/coding-agent/src/core/export-html/tool-renderer.ts`` (v1.1.0).
+"""
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol
 
-from misaka.core.export_html.ansi_to_html import ansi_lines_to_html
+from misaka.core.export_html.ansi_to_html import ansiLinesToHtml
+from misaka.utils.js import jsTrim
+from misaka.utils.values import read_field
 
-ANSI_ESCAPE_REGEX = re.compile(r"\x1b\[[0-9;]*m")
 
-
-class RenderableComponent(Protocol):
+class _Component(Protocol):
     def render(self, width: int) -> list[str]: ...
 
 
 @dataclass(slots=True)
 class ToolHtmlRendererDeps:
-    getToolDefinition: Any
+    # Renderers of calls to a tool, as resolved by extensions and the registered tool
+    getToolRenderers: Callable[[str], Any]
+    # Theme for styling
     theme: Any
+    # Working directory for render context
     cwd: str
+    # Terminal width for rendering (default: 100)
     width: int = 100
 
 
 @dataclass(slots=True)
-class ToolRenderContext:
-    args: Any
-    toolCallId: str
-    invalidate: Any
-    lastComponent: RenderableComponent | None
-    state: dict[str, Any]
-    cwd: str
-    executionStarted: bool
-    argsComplete: bool
-    isPartial: bool
-    expanded: bool
-    showImages: bool
-    isError: bool
-
-
-@dataclass(slots=True)
 class ToolHtmlResult:
+    """MISAKA fork: upstream's `{ collapsed?, expanded? }` object."""
+
     collapsed: str | None = None
     expanded: str | None = None
 
 
 class ToolHtmlRenderer(Protocol):
-    def renderCall(self, toolCallId: str, toolName: str, args: Any) -> str | None: ...
+    def renderCall(self, toolCallId: str, toolName: str, args: Any) -> str | None:
+        """Render a tool call to HTML. Returns None if tool has no custom renderer."""
+        ...
 
     def renderResult(
         self,
@@ -55,83 +54,114 @@ class ToolHtmlRenderer(Protocol):
         result: list[dict[str, Any]],
         details: Any,
         isError: bool,
-    ) -> ToolHtmlResult | None: ...
+    ) -> ToolHtmlResult | None:
+        """Render a tool result to collapsed/expanded HTML. Returns None if tool has no custom renderer."""
+        ...
 
 
-def is_blank_rendered_line(line: str) -> bool:
-    return len(ANSI_ESCAPE_REGEX.sub("", line).strip()) == 0
+@dataclass(slots=True)
+class _ToolRenderContext:
+    """The `ToolRenderContext` the export hands to renderers (the protocol in `extensions/types.py`)."""
+
+    args: Any
+    toolCallId: str
+    invalidate: Callable[[], None]
+    lastComponent: Any
+    state: Any
+    cwd: str
+    executionStarted: bool
+    argsComplete: bool
+    isPartial: bool
+    expanded: bool
+    showImages: bool
+    isError: bool
+    durationMs: int | None
+    outputPad: int
 
 
-def trim_rendered_result_lines(lines: list[str]) -> list[str]:
+# Create a tool HTML renderer.
+#
+# The renderer looks up tool definitions and invokes their renderCall/renderResult
+# methods, converting the resulting TUI Component output (ANSI) to HTML.
+_ANSI_ESCAPE_REGEX = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def isBlankRenderedLine(line: str) -> bool:
+    return len(jsTrim(_ANSI_ESCAPE_REGEX.sub("", line))) == 0
+
+
+def trimRenderedResultLines(lines: list[str]) -> list[str]:
     start = 0
     end = len(lines)
-    while start < end and is_blank_rendered_line(lines[start]):
+    while start < end and isBlankRenderedLine(lines[start]):
         start += 1
-    while end > start and is_blank_rendered_line(lines[end - 1]):
+    while end > start and isBlankRenderedLine(lines[end - 1]):
         end -= 1
     return lines[start:end]
 
 
-@dataclass(slots=True)
-class _ToolHtmlRenderer:
-    deps: ToolHtmlRendererDeps
-    rendered_call_components: dict[str, RenderableComponent] = field(default_factory=dict)
-    rendered_result_components: dict[str, RenderableComponent] = field(default_factory=dict)
-    rendered_states: dict[str, dict[str, Any]] = field(default_factory=dict)
-    rendered_args: dict[str, Any] = field(default_factory=dict)
+class _Renderer:
+    """MISAKA fork: the object literal `createToolHtmlRenderer` returns, with the closure state as attributes."""
 
-    def _get_state(self, tool_call_id: str) -> dict[str, Any]:
-        state = self.rendered_states.get(tool_call_id)
+    def __init__(self, deps: ToolHtmlRendererDeps) -> None:
+        self._getToolRenderers = deps.getToolRenderers
+        self._theme = deps.theme
+        self._cwd = deps.cwd
+        self._width = deps.width
+        self._renderedCallComponents: dict[str, _Component] = {}
+        self._renderedResultComponents: dict[str, _Component] = {}
+        self._renderedStates: dict[str, Any] = {}
+        self._renderedArgs: dict[str, Any] = {}
+
+    def _getState(self, toolCallId: str) -> Any:
+        state = self._renderedStates.get(toolCallId)
         if state is None:
             state = {}
-            self.rendered_states[tool_call_id] = state
+            self._renderedStates[toolCallId] = state
         return state
 
-    def _create_render_context(
+    def _createRenderContext(
         self,
-        tool_call_id: str,
-        last_component: RenderableComponent | None,
+        toolCallId: str,
+        lastComponent: _Component | None,
         expanded: bool,
-        is_partial: bool,
-        is_error: bool,
-    ) -> ToolRenderContext:
-        return ToolRenderContext(
-            args=self.rendered_args.get(tool_call_id),
-            toolCallId=tool_call_id,
+        isPartial: bool,
+        isError: bool,
+    ) -> _ToolRenderContext:
+        return _ToolRenderContext(
+            args=self._renderedArgs.get(toolCallId),
+            toolCallId=toolCallId,
             invalidate=lambda: None,
-            lastComponent=last_component,
-            state=self._get_state(tool_call_id),
-            cwd=self.deps.cwd,
+            lastComponent=lastComponent,
+            state=self._getState(toolCallId),
+            cwd=self._cwd,
             executionStarted=True,
             argsComplete=True,
-            isPartial=is_partial,
+            isPartial=isPartial,
             expanded=expanded,
             showImages=False,
-            isError=is_error,
+            isError=isError,
+            durationMs=None,
+            outputPad=1,
         )
 
     def renderCall(self, toolCallId: str, toolName: str, args: Any) -> str | None:
         try:
-            self.rendered_args[toolCallId] = args
-            tool_def = self.deps.getToolDefinition(toolName)
-            render_call = getattr(tool_def, "renderCall", None)
-            if not callable(render_call):
+            self._renderedArgs[toolCallId] = args
+            toolDef = self._getToolRenderers(toolName)
+            renderCall = read_field(toolDef, "renderCall")
+            if not renderCall:
                 return None
 
-            component = render_call(
+            component = renderCall(
                 args,
-                self.deps.theme,
-                self._create_render_context(
-                    toolCallId,
-                    self.rendered_call_components.get(toolCallId),
-                    False,
-                    True,
-                    False,
-                ),
+                self._theme,
+                self._createRenderContext(toolCallId, self._renderedCallComponents.get(toolCallId), False, True, False),
             )
-            self.rendered_call_components[toolCallId] = component
-            return ansi_lines_to_html(component.render(self.deps.width))
-        except Exception:  # noqa: BLE001 - a renderer that fails falls back to the plain result
+            self._renderedCallComponents[toolCallId] = component
+            lines = component.render(self._width)
+            return ansiLinesToHtml(lines)
+        except Exception:  # noqa: BLE001 - On error, return None so HTML export can fall back to structured result rendering
             return None
 
     def renderResult(
@@ -143,61 +173,48 @@ class _ToolHtmlRenderer:
         isError: bool,
     ) -> ToolHtmlResult | None:
         try:
-            tool_def = self.deps.getToolDefinition(toolName)
-            render_result = getattr(tool_def, "renderResult", None)
-            if not callable(render_result):
+            toolDef = self._getToolRenderers(toolName)
+            renderResult = read_field(toolDef, "renderResult")
+            if not renderResult:
                 return None
 
-            agent_tool_result = {
+            # Build AgentToolResult from content array
+            agentToolResult = {
                 "content": result,
                 "details": details,
                 "isError": isError,
             }
 
-            collapsed_component = render_result(
-                agent_tool_result,
+            # Render collapsed
+            collapsedComponent = renderResult(
+                agentToolResult,
                 {"expanded": False, "isPartial": False},
-                self.deps.theme,
-                self._create_render_context(
-                    toolCallId,
-                    self.rendered_result_components.get(toolCallId),
-                    False,
-                    False,
-                    isError,
-                ),
+                self._theme,
+                self._createRenderContext(toolCallId, self._renderedResultComponents.get(toolCallId), False, False, isError),
             )
-            self.rendered_result_components[toolCallId] = collapsed_component
-            collapsed_html = ansi_lines_to_html(trim_rendered_result_lines(collapsed_component.render(self.deps.width)))
+            self._renderedResultComponents[toolCallId] = collapsedComponent
+            collapsed = ansiLinesToHtml(trimRenderedResultLines(collapsedComponent.render(self._width)))
 
-            expanded_component = render_result(
-                agent_tool_result,
+            # Render expanded
+            expandedComponent = renderResult(
+                agentToolResult,
                 {"expanded": True, "isPartial": False},
-                self.deps.theme,
-                self._create_render_context(
-                    toolCallId,
-                    self.rendered_result_components.get(toolCallId),
-                    True,
-                    False,
-                    isError,
-                ),
+                self._theme,
+                self._createRenderContext(toolCallId, self._renderedResultComponents.get(toolCallId), True, False, isError),
             )
-            self.rendered_result_components[toolCallId] = expanded_component
-            expanded_html = ansi_lines_to_html(trim_rendered_result_lines(expanded_component.render(self.deps.width)))
+            self._renderedResultComponents[toolCallId] = expandedComponent
+            expanded = ansiLinesToHtml(trimRenderedResultLines(expandedComponent.render(self._width)))
 
             return ToolHtmlResult(
-                collapsed=collapsed_html if collapsed_html and collapsed_html != expanded_html else None,
-                expanded=expanded_html,
+                collapsed=collapsed if collapsed and collapsed != expanded else None,
+                expanded=expanded,
             )
-        except Exception:  # noqa: BLE001 - a renderer that fails falls back to the plain result
+        except Exception:  # noqa: BLE001 - On error, return None so HTML export can fall back to structured result rendering
             return None
 
 
-def create_tool_html_renderer(deps: ToolHtmlRendererDeps | dict[str, Any]) -> ToolHtmlRenderer:
-    resolved = deps if isinstance(deps, ToolHtmlRendererDeps) else ToolHtmlRendererDeps(**deps)
-    return _ToolHtmlRenderer(resolved)
+def createToolHtmlRenderer(deps: ToolHtmlRendererDeps) -> ToolHtmlRenderer:
+    return _Renderer(deps)
 
 
-__all__ = [
-    "ToolHtmlRenderer",
-    "ToolHtmlRendererDeps",
-]
+__all__ = ["ToolHtmlRenderer", "ToolHtmlRendererDeps", "ToolHtmlResult", "createToolHtmlRenderer"]

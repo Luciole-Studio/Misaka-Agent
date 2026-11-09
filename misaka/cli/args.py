@@ -9,6 +9,8 @@ from typing import Literal, TextIO
 from misaka.ai.types import ModelThinkingLevel
 from misaka.config import APP_NAME, home
 from misaka.core.extensions.types import ExtensionFlag
+from misaka.core.settings_manager import getToolListError
+from misaka.utils.js import jsTrim
 
 Mode = Literal["text", "json"]
 
@@ -46,6 +48,7 @@ class Args:
     noBuiltinTools: bool = False
     extensions: list[str] | None = None
     noExtensions: bool = False
+    noMcp: bool = False
     print: bool = False
     export: str | None = None
     promptTemplates: list[str] | None = None
@@ -55,6 +58,7 @@ class Args:
     noThemes: bool = False
     noContextFiles: bool = False
     listModels: str | bool | None = None
+    offline: bool = False
     verbose: bool = False
     projectTrustOverride: bool | None = None
     messages: list[str] = field(default_factory=list)
@@ -68,8 +72,13 @@ VALID_THINKING_LEVELS: tuple[ModelThinkingLevel, ...] = (
 )
 
 
-def is_valid_thinking_level(level: str) -> bool:
+def isValidThinkingLevel(level: str) -> bool:
     return level in VALID_THINKING_LEVELS
+
+
+def normalizeSessionName(value: str) -> str | None:
+    name = jsTrim(value)
+    return name if len(name) > 0 else None
 
 
 # Long flags whose own branch below is guarded by `has_next`, so they need this list to be
@@ -82,7 +91,7 @@ _FLAGS_REQUIRING_A_VALUE = frozenset({
 })
 
 
-def parse_args(args: list[str]) -> Args:
+def parseArgs(args: list[str]) -> Args:
     result = Args()
 
     index = 0
@@ -94,6 +103,8 @@ def parse_args(args: list[str]) -> Args:
             # End of options. A message is prose the author wrote -- a card contract whose
             # body opens with "-" or "---" is the case that forced this -- so past the
             # terminator nothing is read as a flag again.
+            # MISAKA fork: pi still reads an `@path` argument after `--` as a file; here it stays
+            # message text, since a contract opening with "@" would otherwise be opened as a file.
             result.messages.extend(args[index + 1:])
             break
         if arg in {"--help", "-h"}:
@@ -172,21 +183,26 @@ def parse_args(args: list[str]) -> Args:
             result.sessionDir = args[index + 1]
             index += 1
         elif arg == "--models" and has_next:
-            result.models = [item.strip() for item in args[index + 1].split(",")]
+            result.models = [pattern for pattern in (item.strip() for item in args[index + 1].split(",")) if len(pattern) > 0]
             index += 1
         elif arg in {"--no-tools", "-nt"}:
             result.noTools = True
         elif arg in {"--no-builtin-tools", "-nbt"}:
             result.noBuiltinTools = True
         elif arg in {"--tools", "-t"} and has_next:
-            result.tools = [item.strip() for item in args[index + 1].split(",") if item.strip()]
+            tools = [name for name in (item.strip() for item in args[index + 1].split(",")) if len(name) > 0]
+            error = getToolListError(tools)
+            if error:
+                result.diagnostics.append(ArgDiagnostic(type="error", message=f"{arg}: {error}"))
+            else:
+                result.tools = tools
             index += 1
         elif arg in {"--exclude-tools", "-xt"} and has_next:
             result.excludeTools = [item.strip() for item in args[index + 1].split(",") if item.strip()]
             index += 1
         elif arg == "--thinking" and has_next:
             level = args[index + 1]
-            if is_valid_thinking_level(level):
+            if isValidThinkingLevel(level):
                 result.thinking = level
             else:
                 result.diagnostics.append(
@@ -219,6 +235,8 @@ def parse_args(args: list[str]) -> Args:
             index += 1
         elif arg in {"--no-extensions", "-ne"}:
             result.noExtensions = True
+        elif arg == "--no-mcp":
+            result.noMcp = True
         elif arg == "--prompt-template" and has_next:
             result.promptTemplates = result.promptTemplates or []
             result.promptTemplates.append(args[index + 1])
@@ -249,6 +267,8 @@ def parse_args(args: list[str]) -> Args:
                 result.listModels = True
         elif arg == "--verbose":
             result.verbose = True
+        elif arg == "--offline":
+            result.offline = True
         elif arg.startswith("@"):
             result.fileArgs.append(arg[1:])
         elif arg.startswith("--"):
@@ -281,7 +301,7 @@ def parse_args(args: list[str]) -> Args:
     return result
 
 
-def print_help(extension_flags: list[ExtensionFlag] | None = None, stream: TextIO | None = None) -> None:
+def printHelp(extension_flags: list[ExtensionFlag] | None = None, stream: TextIO | None = None) -> None:
     output = stream or sys.stdout
     extension_flags_text = ""
     if extension_flags:
@@ -299,7 +319,7 @@ Usage:
   {APP_NAME} [options] [@files...] [messages...]
 
 Options:
-  --provider <name>              Provider name (default: anthropic, or your configured default)
+  --provider <name>              Provider to search for --model (requires --model)
   --model <pattern>              Model pattern or ID (supports "provider/id" and optional ":<thinking>")
   --api-key <key>                API key (defaults to env vars)
   --system-prompt <text>         System prompt (default: coding assistant prompt)
@@ -309,6 +329,7 @@ Options:
   --continue, -c                 Continue previous session
   --approve, -a                  Trust project-local settings and resources for this run
   --no-approve, -na              Ignore project-local settings and resources for this run
+  --offline                      Disable startup network operations (same as MISAKA_OFFLINE=1)
   --resume, -r                   Select a session to resume
   --session <path|id>            Use specific session file or partial UUID
   --session-id <id>              Use exact project session ID, creating it if missing
@@ -321,13 +342,15 @@ Options:
                                  Supports globs (anthropic/*, *sonnet*) and fuzzy matching
   --no-tools, -nt                Disable all tools by default (built-in and extension)
   --no-builtin-tools, -nbt       Disable built-in tools by default but keep extension/custom tools enabled
-  --tools, -t <tools>            Comma-separated allowlist of tool names to enable
-                                 Applies to built-in, extension, and custom tools
-  --exclude-tools, -xt <tools>   Comma-separated denylist of tool names to disable
-                                 Applies to built-in, extension, and custom tools
+  --tools, -t <tools>            Comma-separated allowlist of tool names or patterns (*) to enable
+                                 Keeps MCP tools unless an entry starts with mcp__
+                                 Only +name/-name entries add to or remove from the defaults
+  --exclude-tools, -xt <tools>   Comma-separated denylist of tool names or patterns (*) to disable
+                                 Applies to all tools, MCP tools included
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh, max
-  --extension, -e <path>         Load an extension file (can be used multiple times)
-  --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)
+  --extension, -e <path>         Load an extension file or builtin:<name> (can be used multiple times)
+  --no-extensions, -ne           Disable extension discovery and built-in extensions (explicit -e paths still work)
+  --no-mcp                       Disable built-in MCP support: no servers connect and no MCP tools
   --prompt-template <path>       Load a prompt template file or directory (can be used multiple times)
   --no-prompt-templates, -np     Disable prompt template discovery and loading
   --theme <path>                 Load a theme file or directory (can be used multiple times)
@@ -386,6 +409,12 @@ Examples:
   # Read-only mode (no file modifications possible)
   {APP_NAME} --tools read,grep,find,ls -p "Review the code in src/"
 
+  # Add codemode to the default tools
+  {APP_NAME} --tools +codemode
+
+  # Codemode with only the tools of one MCP server
+  {APP_NAME} --tools read,bash,codemode,'mcp__radius__*'
+
   # Export a session file to HTML
   {APP_NAME} --export {home.display(home.path('sessions'))}/last-order/--path--/session.jsonl
   {APP_NAME} --export session.jsonl output.html
@@ -441,10 +470,10 @@ Built-in Tool Names:
     )
 
 
-isValidThinkingLevel = is_valid_thinking_level
 
 __all__ = [
     "Args",
     "Mode",
     "isValidThinkingLevel",
+    "normalizeSessionName",
     ]

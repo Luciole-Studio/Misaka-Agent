@@ -19,7 +19,7 @@ from pathlib import Path
 from misaka.config import home
 from misaka.core.web.config import provider_env, redact_secrets
 from misaka.core.web.scope import current_scope
-from misaka.utils.ansi import strip_ansi
+from misaka.utils.ansi import stripAnsi
 from misaka.utils.atomic import write_bytes
 from misaka.utils.values import read_field
 
@@ -53,7 +53,7 @@ def find_op(binary_path=""):
 
 
 def scrub_ansi(text):
-    return strip_ansi(text or "").replace("\x1b", "")
+    return stripAnsi(text or "").replace("\x1b", "")
 
 
 def _scrub(text):

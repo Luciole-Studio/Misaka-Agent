@@ -7,7 +7,7 @@ import pytest
 from misaka.core.documents.office import soffice
 from misaka.core.tools import _office
 from misaka.core.tools._office import _intent
-from misaka.core.tools.office import create_office_tool_definition
+from misaka.core.tools.office import createOfficeToolDefinition
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ def pdf_converter(monkeypatch):
 
 
 async def test_failed_batch_is_a_tool_error(tmp_path):
-    tool = create_office_tool_definition(str(tmp_path))
+    tool = createOfficeToolDefinition(str(tmp_path))
     with pytest.raises(RuntimeError, match="STOPPED"):
         await tool.execute("call", {"path": "x.docx", "ops": [{"teleport": {}}]})
     assert not (tmp_path / "x.docx").exists()
@@ -83,7 +83,7 @@ def test_recalc_zero_exit_without_new_output_is_not_success(tmp_path, monkeypatc
 async def test_relative_image_paths_use_tool_workspace(tmp_path):
     from PIL import Image
     Image.new("RGB", (2, 2)).save(tmp_path / "image.png")
-    tool = create_office_tool_definition(str(tmp_path))
+    tool = createOfficeToolDefinition(str(tmp_path))
     receipt = await tool.execute("call", {"path": "image.docx", "ops": [
         {"create": {"blocks": [{"type": "image", "path": "image.png"}]}}]})
     assert receipt.content[0].text.startswith("✓")
@@ -124,7 +124,7 @@ def test_legacy_raw_rows_are_readable():
 async def test_read_legacy_file_uses_conversion(tmp_path, monkeypatch):
     from docx import Document
 
-    from misaka.core.tools.read import create_read_tool_definition
+    from misaka.core.tools.read import createReadToolDefinition
     path = tmp_path / "old.doc"
     path.write_bytes(b"legacy")
     before = path.read_bytes()
@@ -136,7 +136,7 @@ async def test_read_legacy_file_uses_conversion(tmp_path, monkeypatch):
         return str(target)
     monkeypatch.setattr(soffice, "binary", lambda: "soffice")
     monkeypatch.setattr(soffice, "convert", convert)
-    result = await create_read_tool_definition(str(tmp_path)).execute("read", {"path": "old.doc"})
+    result = await createReadToolDefinition(str(tmp_path)).execute("read", {"path": "old.doc"})
     assert "converted legacy content" in result.content[0].text
     assert path.read_bytes() == before
 
@@ -184,7 +184,7 @@ async def test_cancelled_save_retains_mutation_lock_until_thread_finishes(tmp_pa
     import asyncio
     import threading
 
-    from misaka.core.tools.file_mutation_queue import with_file_mutation_queue
+    from misaka.core.tools.file_mutation_queue import withFileMutationQueue
     entered, release = threading.Event(), threading.Event()
     real_run = _office.run_ops
     def slow_run(*args, **kwargs):
@@ -193,7 +193,7 @@ async def test_cancelled_save_retains_mutation_lock_until_thread_finishes(tmp_pa
         return real_run(*args, **kwargs)
     monkeypatch.setattr(_office, "run_ops", slow_run)
     path = tmp_path / "x.txt"
-    call = asyncio.create_task(create_office_tool_definition(str(tmp_path)).execute(
+    call = asyncio.create_task(createOfficeToolDefinition(str(tmp_path)).execute(
         "call", {"path": str(path), "content": "saved"}))
     second_entered = asyncio.Event()
     async def second():
@@ -202,7 +202,7 @@ async def test_cancelled_save_retains_mutation_lock_until_thread_finishes(tmp_pa
     try:
         assert await asyncio.to_thread(entered.wait, 5)
         call.cancel()
-        other = asyncio.create_task(with_file_mutation_queue(str(path), second))
+        other = asyncio.create_task(withFileMutationQueue(str(path), second))
         await asyncio.sleep(0.02)
         assert not second_entered.is_set()
         release.set()

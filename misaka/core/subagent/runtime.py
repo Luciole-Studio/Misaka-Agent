@@ -120,8 +120,6 @@ class RoleContext:
     host_hooks: str | None = None
     memory_dir: str | None = None
     critical_system_reminder: str | None = None
-    # The pinned skill snapshot (a card's read-only copies); every nested agent inherits it.
-    skill_sandbox: str | None = field(default_factory=lambda: os.environ.get("MISAKA_SKILL_SANDBOX") or None)
 
     @classmethod
     def capture(
@@ -1090,6 +1088,8 @@ class SubagentManager:
         # The session this manager serves; None until the part that owns it is attached.
         self.session = session
         self.role_context = role_context or RoleContext.capture()
+        # Applies what a child's permission dialog here saved (the session's own policy), if any.
+        self.permission_updates: Any = None
         from misaka.config.product import setting
 
         limit = max(1, setting("subagents", "max_concurrent", DEFAULT_MAX_CONCURRENCY, int))
@@ -1211,16 +1211,17 @@ class SubagentManager:
             return
 
         specific = [spec for spec in definition.mcp_servers if isinstance(spec, str)]
-        specific.extend(name for name, _ in agent_roster.inline_mcp_entries(definition.mcp_servers))
-        from misaka.core import mcp
-
-        configured = list(mcp.servers_for(self.role_context.profile_dir))
+        # MISAKA fork: configured servers count, as before the MCP extension, as well as registered ones.
+        available = [
+            *agent_roster.configured_mcp_servers(self.role_context.profile_dir),
+            *agent_roster.available_mcp_servers(self.session),
+        ]
         missing_config = [
             pattern
             for pattern in required
             if not any(
-                pattern.casefold() in server.casefold()
-                for server in [*configured, *specific]
+                agent_roster.mcp_server_matches(pattern, server)
+                for server in [*available, *specific]
             )
         ]
         if missing_config:
@@ -1250,7 +1251,10 @@ class SubagentManager:
         )
         selected = registry.find(provider, normalize_model_for_api(model_id))
         if selected is None:
-            raise ValueError(f"Unknown sub-agent model: {provider}/{model_id}")
+            from misaka.core.model_runtime import personalizedCatalogHint
+
+            hint = personalizedCatalogHint(provider)
+            raise ValueError(f"Unknown sub-agent model: {provider}/{model_id}" + (f".{hint}" if hint else ""))
         if not registry.hasConfiguredAuth(selected):
             raise ValueError(f"No configured authentication for sub-agent model: {provider}/{model_id}")
         return provider, model_id
@@ -2132,10 +2136,7 @@ class SubagentManager:
             )
         else:
             env.pop("MISAKA_SUBAGENT_CLI_TOOL_RULES", None)
-        if config_path := self._agent_mcp_config(task):
-            env["MISAKA_MCP_CONFIG"] = config_path
-        else:
-            env.pop("MISAKA_MCP_CONFIG", None)
+        self._warn_inline_mcp_servers(task)
         if task._stop_requested:
             raise AgentCancelled()
         task.hook_environ = dict(env)
@@ -2423,28 +2424,24 @@ class SubagentManager:
             except Exception:  # noqa: BLE001 - notification can still be delivered
                 return False
 
-        context = task.permission_context
+        from misaka.core.subagent import policy as subagent_policy
+        from misaka.core.subagent.permission_suggestions import ask_in_ui
+
+        suggestions = event.get("suggestions") if isinstance(event.get("suggestions"), list) else []
         try:
-            if context is not None and bool(getattr(context, "hasUI", False)):
-                ui = getattr(context, "ui", None)
-                confirm = getattr(ui, "confirm", None)
-                if callable(confirm):
-                    tool_name = str(event.get("toolName") or "tool")
-                    rendered = json.dumps(
-                        event.get("toolInput") or {},
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    )
-                    value = confirm(
-                        f"Agent {task.id} permission",
-                        f"Allow {tool_name}?\n{rendered[:4000]}",
-                    )
-                    return bool(await value) if inspect.isawaitable(value) else bool(value)
+            choice = await ask_in_ui(
+                task.permission_context, f"Agent {task.id} permission",
+                str(event.get("toolName") or "tool"), event.get("toolInput"),
+                event.get("suggestionLabel") if suggestions else None)
+            if choice is not None:
+                # CCB: what the parent's dialog saves is the parent's; the child reads it back
+                # through its next permission refresh.
+                if choice == "always" and callable(self.permission_updates):
+                    self.permission_updates(suggestions)
+                return choice != "no"
 
             # This manager may itself live in a headless child.  Relay through
             # that child's JSONL broker until the request reaches the root UI.
-            from misaka.core.subagent import policy as subagent_policy
-
             return await subagent_policy.request_permission(
                 {
                     "toolName": event.get("toolName"),
@@ -2453,6 +2450,8 @@ class SubagentManager:
                     "mode": event.get("mode"),
                     "reason": event.get("reason"),
                     "agentId": task.id,
+                    "suggestions": suggestions,
+                    "suggestionLabel": event.get("suggestionLabel"),
                 }
             )
         except Exception:  # noqa: BLE001 - a failed permission bubble reads as denied
@@ -2520,8 +2519,8 @@ class SubagentManager:
                 del task.stderr[:100]
 
     async def _initial_message(self, task: AgentTask, prompt: str, *, roots=None) -> str:
-        # CCB runAgent preloads skills for every invocation, including resume.
-        # MISAKA resolves the same sealed role/project snapshot each time.
+        # CCB runAgent preloads skills for every invocation, including resume, from
+        # where they live (Hermes build_preloaded_skills_prompt).
         if task.forked:
             from misaka.core.subagent.fork import child_message
             message = child_message(prompt)
@@ -2576,7 +2575,7 @@ class SubagentManager:
         # general-purpose child this file is the SOUL plus the whole persona.
         tmp_path = prompt_dir / f".{task.id}.md.{secrets.token_hex(6)}.tmp"
         try:
-            with tmp_path.open("x", encoding="utf-8") as handle:
+            with tmp_path.open("x", encoding="utf-8", newline="\n") as handle:
                 handle.write(system_prompt)
             tmp_path.chmod(0o600)
             os.replace(tmp_path, prompt_path)
@@ -2744,18 +2743,14 @@ class SubagentManager:
             return []
         from misaka.core.skills import index as skill_index
         from misaka.core.skills import layers as skill_layers
-        from misaka.core.skills.sandbox import execution_entry
         from misaka.core.skills.wiring.skills import build_skill_message
 
-        sandbox = self.child_env_extra(task).get("MISAKA_SKILL_SANDBOX")
         if roots is None:  # older protocol peers/direct callers do not report roots
-            roots = [("sandbox", sandbox)] if sandbox else skill_layers.skill_roots(
-                self.role_context.profile_dir or None, cwd=task.cwd)
-        pinned = any(layer == "sandbox" for layer, _ in roots)
+            roots = skill_layers.skill_roots(self.role_context.profile_dir or None, cwd=task.cwd)
         loaded: list[str] = []
         seen: set[Path] = set()
         for value in task.definition.skills:
-            entry, _ = skill_index.resolve_definition(roots, value, task.definition.base_dir if not pinned else None)
+            entry, _ = skill_index.resolve_definition(roots, value, task.definition.base_dir)
             if entry is None:
                 _log_warning(f"Agent {task.id}: requested skill {value!r} is unavailable")
                 continue
@@ -2764,11 +2759,7 @@ class SubagentManager:
                 continue
             seen.add(path)
             try:
-                # Like transcripts, these copies are task artifacts: stable across
-                # child restarts/continuations, not unowned temporary directories.
-                # Snapshot children already have a complete pinned collection.
-                if not pinned:
-                    entry = await run_in_thread(execution_entry, entry, task.metadata_path.with_suffix(".skills"))
+                # As Hermes preloads a child's skills: from where they live (build_preloaded_skills_prompt).
                 content = await run_in_thread(build_skill_message, entry, session_id=task.id,
                                               activation_note=f"Skill {entry['name']} (preloaded):", profile_dir=self.role_context.profile_dir)
             except OSError as error:
@@ -2784,35 +2775,24 @@ class SubagentManager:
         this session belongs to). Hermes raises its hook of the same name in the parent when it
         starts a subagent. The core names no extension: without one, nothing is added."""
         runner = getattr(self.session, "extensionRunner", None)
-        if runner is None or not runner.has_handlers("subagent_start"):
+        if runner is None or not runner.hasHandlers("subagent_start"):
             return
         await runner.emit({"type": "subagent_start", "subagentId": task.id, "cwd": task.cwd, "env": env})
 
     def child_env_extra(self, _task: AgentTask) -> dict[str, str]:
-        """Extra child environment. The pinned skill snapshot travels to every nested agent, so a
-        card's children index the same read-only copies as the card itself (a Sister manager
-        overrides this with the sandbox it built)."""
-        if self.role_context.skill_sandbox:
-            return {"MISAKA_SKILL_SANDBOX": self.role_context.skill_sandbox}
+        """Extra child environment (a Sister manager adds its card's workflow context)."""
         return {}
 
-    def _agent_mcp_config(self, task: AgentTask) -> str | None:
-        if not task.definition.mcp_servers:
-            return None
-        from misaka.core import mcp
-
-        available = mcp.servers_for(self.role_context.profile_dir)
-        # Everything available, then whatever the definition spells out inline. A
-        # definition's `mcpServers` can only add: the child's own `mcp.servers_for()`
-        # unions the injected file with its profile's `mcp_servers`, so a name left out
-        # here still reaches the child through its profile. Naming an available server by
-        # its string is therefore a no-op -- it is in `selected` already -- and only the
-        # inline `{name: {...}}` form carries a server this side did not have.
-        selected: dict[str, Any] = dict(available)
-        selected.update(agent_roster.inline_mcp_entries(task.definition.mcp_servers, on_invalid=_log_warning))
-        path = task.metadata_path.parent / ".mcp" / f"{task.id}.json"
-        _atomic_json(path, {"mcpServers": selected})
-        return str(path)
+    def _warn_inline_mcp_servers(self, task: AgentTask) -> None:
+        """A sub-agent reaches its parent's MCP servers and no others, as a Hermes child inherits its parent's
+        toolsets and never gains one the parent lacks: the child loads the same role's `mcp.json` itself, and a
+        definition's inline `{name: {...}}` servers are not started."""
+        inline = [name for name, _ in agent_roster.inline_mcp_entries(task.definition.mcp_servers, on_invalid=_log_warning)]
+        if inline:
+            _log_warning(
+                f"Agent '{task.definition.name}' declares MCP servers inline ({', '.join(inline)}); a sub-agent "
+                "reaches only its parent's MCP servers, so they are not started"
+            )
 
     def _memory_enabled(self, task: AgentTask | None = None) -> bool:
         from misaka.core.subagent.configuration import settings_layers
@@ -2966,31 +2946,65 @@ class SubagentManager:
 
         task._receipt_job = self._schedule_callback(persist_receipt())
 
-    async def _notify_task(self, task: AgentTask) -> None:
+    async def _notify_task(self, task: AgentTask, *, recovered: bool = False) -> None:
         async with self._notification_lock:
             if task.notified:
                 return
             notification_id = task.notification_id
             details = task.notification_data()
+            message = {
+                "customType": "task-notification",
+                "content": build_task_notification(details),
+                "display": True,
+                "details": details,
+            }
+            receipt = {
+                "_deliveryId": f"subagent:{task.parent_session_id}:{task.id}:{notification_id}",
+                "_onPersist": lambda: self._acknowledge_task(task, notification_id),
+            }
             try:
-                self.session.moments.send_message(
-                    {
-                        "customType": "task-notification",
-                        "content": build_task_notification(details),
-                        "display": True,
-                        "details": details,
-                    },
-                    {
-                        "deliverAs": "followUp",
-                        "triggerTurn": True,
-                        "_deliveryId": f"subagent:{task.parent_session_id}:{task.id}:{notification_id}",
-                        "_onPersist": lambda: self._acknowledge_task(task, notification_id),
-                    },
-                )
+                if recovered:
+                    # Awaited, not scheduled: it must be queued before the session's first run
+                    # prepares its opening messages (``recover_notices``).
+                    await self.session.sendCustomMessage(message, {"deliverAs": "nextTurn", **receipt})
+                else:
+                    self.session.moments.send_message(message, {"deliverAs": "followUp", "triggerTurn": True, **receipt})
             except RuntimeError:
                 # Enqueueing is not delivery. Leave the receipt pending when
                 # the parent is gone, and let its durable delivery ID deduplicate retries.
                 return
+
+    async def recover_notices(self, context: Any) -> int:
+        """Tell a reopened session about its background agents whose ends it never heard; returns how many.
+
+        A notice waits in the process's own queue until it lands in the transcript, and only then
+        does its receipt mark the agent ``notified``. pi's loop ends a run on an error reply without
+        taking follow-ups, so card M2, failing on 503s while its agents failed too, still held
+        their notices when it was stopped, and twelve of fourteen agents were never reported
+        (2026-10-25, R34). Their metadata said so, but was read only when an agent was looked up.
+
+        Each background agent that ended unreported is reported with the notice and delivery id it
+        would have had (one that did land, its receipt lost, is acknowledged and not repeated), and
+        so is each that was still running: its child fences itself within a second of its parent
+        dying, and the transcript lets SendMessage resume it. The notice joins the next run's
+        opening messages rather than starting one, so a resumed card reads it with its contract.
+        """
+        from misaka.config.sessions import subagent_session_dir
+
+        owner = context.sessionManager
+        parent_id = _safe_component(str(owner.getSessionId()))
+        if not Path(subagent_session_dir(parent_id, owner.getSessionFile())).is_dir():
+            return 0
+        self._session_dir(context)
+        nobody = "\0"                                          # no agent's name or id: read them all
+        loaded = await asyncio.to_thread(self._scan_metadata, nobody, nobody)
+        self._adopt_scanned(nobody, nobody, loaded)
+        unreported = sorted((task for task in loaded if task.background and not task.notified
+                             and self._tasks.get(task.id) is task),
+                            key=lambda task: (task.end_time_ms or task.start_time_ms, task.id))
+        for task in unreported:
+            await self._notify_task(task, recovered=True)
+        return len(unreported)
 
     def start_shell(self, command: str, *, context: Any, spawn_context: Any = None,
                     operations: Any = None, timeout: float | None = None,
@@ -3060,7 +3074,7 @@ class SubagentManager:
         # Readers observe the published result, not cleanup or a metadata write.
         # Only send_message (continuation) waits for the _settled fence.
         if block and task.status not in TERMINAL_STATUSES and timeout_ms > 0:
-            from misaka.ai.utils.abort import wait_for_abort
+            from misaka.utils._abort_signal import wait_for_abort
             from misaka.utils.values import signal_aborted
 
             if signal_aborted(signal):

@@ -131,11 +131,11 @@ async def test_x_retry_contract(monkeypatch, status, attempts):
 async def test_rejected_named_account_refreshes_only_its_grant_and_rotates(monkeypatch, isolated):
     oauth(isolated, A='account-A', B='account-B')
     seen_refreshes = []
-    from misaka.ai.utils.oauth import xai as oauth_module
-    async def fail(refresh, signal=None, **kw):
+    from misaka.ai.auth.oauth import xai as oauth_module
+    async def fail(refresh, signal):
         seen_refreshes.append(refresh)
         raise RuntimeError('invalid grant')
-    monkeypatch.setattr(oauth_module, 'refresh_xai_token', fail)
+    monkeypatch.setattr(oauth_module, '_refreshXaiToken', fail)
     requests, clients = net(monkeypatch, lambda r: httpx.Response(
         401 if r.headers['authorization'] == 'Bearer account-A' else 200,
         json={'output': [], 'citations': ['https://x.com/a/status/1']}))
@@ -154,7 +154,7 @@ async def test_rejected_named_account_refreshes_only_its_grant_and_rotates(monke
 async def test_logout_wins_before_rejected_refresh(monkeypatch, isolated):
     oauth(isolated, A='account-A')
     token, account = await xai._resolve_credentials()
-    AuthStorage.create(str(isolated / 'auth.json')).remove('xai:A')
+    await AuthStorage.create(str(isolated / 'auth.json')).delete('xai:A')
     assert await xai._force_refresh_oauth_token(account, token) == ''
     assert json.loads((isolated / 'auth.json').read_text(encoding='utf-8')) == {}
 

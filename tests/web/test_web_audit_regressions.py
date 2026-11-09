@@ -341,51 +341,61 @@ async def test_keyless_firecrawl_enforces_the_same_final_policy_gate(monkeypatch
 
 
 
+async def _put(store, provider, record):
+    """Write one auth.json record through the store's CredentialStore ``modify``."""
+    from misaka.core.auth_storage import _to_runtime_credential
+
+    async def replace(_current):
+        return _to_runtime_credential(record, resolve_api_key=False)
+
+    await store.modify(provider, replace)
+
+
 @pytest.mark.parametrize("replacement", [None, "new-login"])
 async def test_xai_rejected_refresh_rechecks_latest_credential(monkeypatch, tmp_path, replacement):
-    from misaka.ai.utils.oauth import OAuthCredentials
+    from misaka.ai.auth.oauth import xai as xai_oauth
+    from misaka.ai.auth.types import OAuthCredential
     from misaka.core import auth_storage
     from misaka.core.web.backends import xai
 
     path = str(tmp_path / "auth.json")
     stale = auth_storage.AuthStorage.create(path)
     grant = {"type": "oauth", "access": "old-access", "refresh": "old-refresh", "expires": 9999999999999}
-    stale.set("xai", grant)
+    await _put(stale, "xai", grant)
     writer = auth_storage.AuthStorage.create(path)
     if replacement is None:
-        writer.logout("xai")
+        await writer.delete("xai")
     else:
-        writer.set("xai", {**grant, "access": replacement, "refresh": "new-refresh"})
+        await _put(writer, "xai", {**grant, "access": replacement, "refresh": "new-refresh"})
     calls = []
-    async def refresh(credentials):
-        calls.append(credentials)
-        return OAuthCredentials(access="resurrected", refresh="rotated", expires=9999999999999)
-    monkeypatch.setattr(auth_storage, "getOAuthProvider", lambda _: SimpleNamespace(
-        refreshToken=refresh, getApiKey=lambda c: c.access))
+    async def refresh(refreshToken, signal):
+        calls.append(refreshToken)
+        return OAuthCredential(type="oauth", access="resurrected", refresh="rotated", expires=9999999999999)
+    monkeypatch.setattr(xai_oauth, "_refreshXaiToken", refresh)
     assert await xai._force_refresh_oauth_token(xai.OAuthAccount(stale, None), "old-access") == (replacement or "")
     assert calls == []
-    assert stale.get("xai") == writer.get("xai")
-    assert auth_storage.AuthStorage.create(path).get("xai") == writer.get("xai")
+    assert stale.readState.data.get("xai") == writer.readState.data.get("xai")
+    assert auth_storage.AuthStorage.create(path).readState.data.get("xai") == writer.readState.data.get("xai")
 
 
 async def test_xai_concurrent_401s_refresh_once_under_store_lock(monkeypatch, tmp_path):
-    from misaka.ai.utils.oauth import OAuthCredentials
+    from misaka.ai.auth.oauth import xai as xai_oauth
+    from misaka.ai.auth.types import OAuthCredential
     from misaka.core import auth_storage
     from misaka.core.web.backends import xai
 
     path = str(tmp_path / "auth.json")
     first = auth_storage.AuthStorage.create(path)
-    first.set("xai", {"type": "oauth", "access": "old", "refresh": "refresh", "expires": 9999999999999})
+    await _put(first, "xai", {"type": "oauth", "access": "old", "refresh": "refresh", "expires": 9999999999999})
     second = auth_storage.AuthStorage.create(path)
     calls = []
-    async def refresh(credentials):
-        calls.append(credentials.access)
+    async def refresh(refreshToken, signal):
+        calls.append(refreshToken)
         await asyncio.sleep(0.01)
-        return OAuthCredentials(access="new", refresh="rotated", expires=9999999999999)
-    monkeypatch.setattr(auth_storage, "getOAuthProvider", lambda _: SimpleNamespace(
-        refreshToken=refresh, getApiKey=lambda c: c.access))
+        return OAuthCredential(type="oauth", access="new", refresh="rotated", expires=9999999999999)
+    monkeypatch.setattr(xai_oauth, "_refreshXaiToken", refresh)
     results = await asyncio.gather(*(xai._force_refresh_oauth_token(xai.OAuthAccount(s, None), "old") for s in (first, second)))
-    assert results == ["new", "new"] and calls == ["old"]
+    assert results == ["new", "new"] and calls == ["refresh"]
 
 
 @pytest.mark.parametrize("stage", ["extract_dns", "fetch_connect", "download_connect"])

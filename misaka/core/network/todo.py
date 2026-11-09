@@ -1,11 +1,12 @@
 """Per-card tools: nested, durable to-do items, and a line in the card's log."""
 import asyncio
-import json
+import logging
 import os
 import secrets
 import time
 from pathlib import Path
 
+from misaka.ai.utils.typebox_helpers import typeboxSchema
 from misaka.utils.paths import posix_relpath
 
 STATUSES = ("open", "doing", "done", "blocked")
@@ -151,13 +152,14 @@ def _turn_failure(event):
         if stop == "error":
             return "error", str(_field(message, "errorMessage", "") or "request error")
         if stop == "length":
-            from misaka.ai.utils.overflow import output_limit_error
+            from misaka.ai.utils._output_limit import output_limit_error
             return "length", output_limit_error(message)
         return None
     return None
 
 
 PROGRESS_SECONDS = 60     # how often a busy Sister stamps progress on its card
+UNSETTLED_GRACE_SECONDS = 30   # how long a card told it is still running may sit with nothing to wake it
 
 
 def _review_record(submission):
@@ -177,10 +179,12 @@ def _review_record(submission):
 class TodoPart:
     """The ``misaka_todo`` tools and reminder nudges for one task card."""
 
+    _consultation = None                  # (run_id, lock) while a finished card answers in this session
+
     def __init__(self, task_id, sender):
         from typing import Literal
 
-        from pydantic import BaseModel, Field
+        from pydantic import BaseModel, Field, create_model
 
         from misaka.config import CFG
         from misaka.core.extensions.types import ToolDefinition
@@ -204,6 +208,8 @@ class TodoPart:
         self._turn_clean = False          # the last agent_end was a plain stop (not error/aborted/length)
         self._failure = None              # (stop, reason) when the last agent_end was an error or a cut reply
         self._continued_generation = None # the generation already given its one turn after a cut reply
+        self._idle_watch = None           # the wait that ends an attempt left idle after that notice
+        self._refusal = None              # what misaka_card_complete last refused with
         self._touched = 0.0
         self._in_flight = 0               # tool calls started and not yet answered
         self._stamper = None              # the task that stamps progress while one is
@@ -269,11 +275,10 @@ class TodoPart:
                 lines += ["log:", *(f"  {line}" for line in log[-20:])]
             return _text("\n".join(lines))
 
-        from misaka.core.research import runs
-        from misaka.core.research.commands import Alternative, Issue
-        from misaka.core.research.ledger import Finding
+        from misaka.core.network.card_contract import Finding
+        from misaka.core.platform import owners
 
-        class NoteParams(BaseModel):
+        class BaseNoteParams(BaseModel):
             # A field the tool does not know is refused, never dropped: findings sent flat beside
             # `text` were ignored and every declaration of a run was lost (2026-09-27).
             model_config = {"extra": "forbid"}
@@ -282,12 +287,13 @@ class TodoPart:
                 "Findings, each with its own text, claim_type and source. Append declarations; corrections do "
                 "not erase earlier notes."))
             uncertain: list[str] = Field(default_factory=list, description="Concrete uncertainties, one per item.")
-            issues: list[Issue] | None = Field(
-                None, description="Red-team cards: complete issue list for your node Last Order; [] means no issues."
-            )
-            alternatives: list[Alternative] | None = Field(
-                None, description="Divergence-review cards: the complete list of alternatives; [] means none."
-            )
+
+        # The fields of the workflows that own cards (a red team's issues, a divergence review's
+        # alternatives), each answered by the owner that declared it.
+        owned_fields = {name: (owner, spec) for owner in owners.registered()
+                        for name, spec in owner.note_fields().items()}
+        NoteParams = create_model("NoteParams", __base__=BaseNoteParams,
+                                  **{name: spec for name, (_owner, spec) in owned_fields.items()})
 
         async def note_exec(tool_call_id, raw, signal, on_update, ctx):
             from misaka.core.platform import cards
@@ -298,31 +304,26 @@ class TodoPart:
                 "findings": [item.model_dump(exclude_none=True) for item in p.findings],
                 "uncertain": [item.strip() for item in p.uncertain if item.strip()],
             }
-            link = None
-            if (p.findings or p.issues is not None or p.alternatives is not None) and c.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_run_tasks'"
-            ).fetchone():
-                link = c.execute("SELECT run_id,kind FROM research_run_tasks WHERE task_id=?", (task_id,)).fetchone()
-            if p.issues is not None:
-                if not link or link["kind"] not in runs.CRITIQUE_KINDS:
-                    raise ValueError("Only this node's red-team card may record critique issues.")
+
+            def record(kind, payload):
                 generation, claim_lock = self._ownership()
-                if generation is None or not bdb.add_event(
-                    c, task_id, "research_critique",
-                    {"issues": [item.model_dump() for item in p.issues], "claim_lock": claim_lock},
-                    generation=generation, claim_lock=claim_lock,
-                ):
-                    raise ValueError("Card ownership changed before its review was recorded.")
-            if p.alternatives is not None:
-                if not link or link["kind"] != "divergence":
-                    raise ValueError("Only this node's divergence-review card may record alternatives.")
-                generation, claim_lock = self._ownership()
-                if generation is None or not bdb.add_event(
-                    c, task_id, "research_divergence",
-                    {"alternatives": [item.model_dump() for item in p.alternatives], "claim_lock": claim_lock},
-                    generation=generation, claim_lock=claim_lock,
-                ):
-                    raise ValueError("Card ownership changed before its alternatives were recorded.")
+                if generation is not None and claim_lock is None:
+                    # A review's issues or alternatives are its round's answer; changing them
+                    # after the card finished is a re-review, which Last Order asks for.
+                    raise ValueError("This card is finished: its review is not revised in an answer to a "
+                                     "message. Say what you would change with SendMessage; Last Order "
+                                     "asks for a re-review if it should be recorded.")
+                return generation is not None and bdb.add_event(
+                    c, task_id, kind, {**payload, "claim_lock": claim_lock},
+                    generation=generation, claim_lock=claim_lock)
+
+            given = {name: getattr(p, name) for name in owned_fields if getattr(p, name) is not None}
+            owner_records = []
+            if given:
+                card_owner, context = owners.card(c, task_id)
+                for owner in dict.fromkeys(owner for name, (owner, _spec) in owned_fields.items() if name in given):
+                    mine = {name: value for name, value in given.items() if owned_fields[name][0] is owner}
+                    owner_records += owner.note(c, task_id, context if card_owner is owner else None, mine, record)
             if {"findings", "uncertain"} & p.model_fields_set:
                 generation, claim_lock = self._ownership()
                 # A finished card whose session works on -- a Sister's question, a note from Last
@@ -334,17 +335,16 @@ class TodoPart:
                 if generation is None or not bdb.add_event(
                     c,
                     task_id,
-                    "research_evidence",
+                    "card_evidence",
                     evidence,
                     generation=generation,
                     claim_lock=None if finished else claim_lock,
                 ):
-                    raise ValueError("Card ownership changed before its research evidence was recorded.")
+                    raise ValueError("Card ownership changed before its evidence was recorded.")
             cards.append_log(row["workspace"], task_id, sender, p.text)
             recorded = [f"{len(evidence['findings'])} finding(s)" if evidence["findings"] else "",
                         f"{len(evidence['uncertain'])} uncertainty(ies)" if evidence["uncertain"] else "",
-                        f"{len(p.issues)} issue(s)" if p.issues is not None else "",
-                        f"{len(p.alternatives)} alternative(s)" if p.alternatives is not None else ""]
+                        *owner_records]
             recorded = ", ".join(item for item in recorded if item)
             return _text("Logged on the card" + (f"; recorded {recorded}." if recorded else "; nothing declared."))
 
@@ -356,6 +356,10 @@ class TodoPart:
             from misaka.core.network import worker
             p = raw if isinstance(raw, CompleteParams) else CompleteParams(**(raw or {}))
             row = self._owned_row()
+            if row is None and (self._consultation is not None or worker.consult_env(task_id)[1] is not None):
+                return _text("This card is already finished and stays so: there is nothing to complete. "
+                             "Files you changed and findings you noted are declared again when this turn "
+                             "ends; answer the message with SendMessage.")
             if row is None:
                 raise ValueError("This card is not running under this session; nothing to complete.")
             missing = worker.missing_deliverable(row)
@@ -390,7 +394,7 @@ class TodoPart:
                             "is what Last Order will read. The card is submitted when the turn then ends. A turn that "
                             "ends without this call leaves the card running: use that for replies to Last Order and "
                             "progress reports.",
-                parameters=CompleteParams.model_json_schema(), execute=complete_exec,
+                parameters=typeboxSchema(CompleteParams), execute=complete_exec,
                 promptSnippet="Declare the card finished and submit it",
                 promptGuidelines=[
                     ("Call `misaka_card_complete` only when the contract deliverable exists in the card's output "
@@ -401,7 +405,7 @@ class TodoPart:
             ToolDefinition(
                 name="misaka_todo", label="Update task to-do list",
                 description="Add, assign, and update the task card's nested to-do items; progress appears in the global execution tree.",
-                parameters=TodoParams.model_json_schema(), execute=todo_exec,
+                parameters=typeboxSchema(TodoParams), execute=todo_exec,
                 promptSnippet="Create or update this task card's to-do list",
                 promptGuidelines=[
                     "Before substantial work, create a short to-do list and mark one or two immediate items doing.",
@@ -413,21 +417,21 @@ class TodoPart:
             ToolDefinition(
                 name="misaka_todo_list", label="View task to-do list",
                 description="Show this task card's nested to-do items, owners, statuses, and blocker notes.",
-                parameters=ListParams.model_json_schema(), execute=list_exec,
+                parameters=typeboxSchema(ListParams), execute=list_exec,
                 promptSnippet='Check the list of sub-tasks for this card',
                 promptGuidelines=["After context compaction, use `misaka_todo_list` to recover the task's current work state."]),
             ToolDefinition(
                 name="misaka_my_card", label="View my card",
                 description="This card as the board sees it: status, dependencies and whether they are done, the reviewer "
                             "if one is named, a block reason, and the last lines of the card's log.",
-                parameters=MyCardParams.model_json_schema(), execute=my_card_exec,
+                parameters=typeboxSchema(MyCardParams), execute=my_card_exec,
                 promptSnippet="Check this card's status, dependencies, and log",
                 promptGuidelines=["Check the card before waiting on something: a blocked dependency or a named reviewer changes what to do next."]),
             ToolDefinition(
                 name="misaka_card_note", label="Log a note on the card",
                 description="Append one line to this card's log (its `## log` section in the card file): a decision, a change "
-                            "of course, or a dead end. Research cards attach findings and uncertainty; red-team cards attach issues; "
-                            "divergence-review cards attach alternatives.",
+                            "of course, or a dead end. Findings and uncertainty attach here too, and a workflow's card "
+                            "attaches the fields its workflow adds.",
                 parameters=NoteParams, execute=note_exec,
                 promptSnippet="Log a decision or change of course on this card",
                 promptGuidelines=["Append findings and uncertainty as work progresses; explain corrections in new notes. Earlier declarations remain visible for review."]),
@@ -445,7 +449,7 @@ class TodoPart:
 
     def _ownership(self):
         from misaka.core.network import worker
-        return worker.claim_env(self.task_id)
+        return worker.attempt_env(self.task_id)
 
     def _owned_row(self):
         from misaka.core.network import worker
@@ -472,54 +476,26 @@ class TodoPart:
         return row
 
     async def _redeclare_if_done(self):
-        """A finished card whose session went on working declares its outputs again.
-
-        Completion does not end the session: a note from Last Order that crossed the
-        completion, or a Sister's DM, starts more turns in it, and the deliverables they
-        change stayed declared under the old digests. The run's settle then saw bytes that
-        did not match the declaration and, until 2026-09-24, failed the whole run (18 changed
-        paths on 6 cards). The declaration follows the work instead: the same submission the
-        completion built, rebuilt from the output folder and the findings recorded since, as a
-        newer ``submitted`` row for this generation, and indexed again. No model turn is spent on it."""
+        """A finished card whose session went on working declares its outputs again
+        (``dispatch.redeclare``)."""
         row = self._completed_row()
         if row is None:
             return False
-        from misaka.core.network import dispatch, worker
-        con = self.con()
-        generation = int(row["generation"])
-        try:
-            last = json.loads(self._bdb.latest_payload(con, self.task_id, "submitted", generation=generation) or "{}")
-        except (TypeError, ValueError):
-            last = {}
-        if not isinstance(last, dict):
-            last = {}
-        try:
-            submission = worker.build_submission(con, row, str(last.get("summary") or ""))
-            prepared = await asyncio.to_thread(dispatch.prepare_submission, row, submission)
-        except Exception as error:  # noqa: BLE001 - a declaration that cannot be rebuilt is noted, not fatal
-            self._bdb.add_event(con, self.task_id, "redeclare_failed", {"reason": str(error)[:200]},
-                                generation=generation)
-            return False
-        payload = prepared.payload
-        # Findings recorded after the completion change the declaration as much as a file does.
-        if all(payload.get(key) == last.get(key)
-               for key in ("artifact_digests", "artifacts", "findings", "uncertain")):
-            return False
-        with self._bdb.write_txn(con):
-            self._bdb.add_event(con, self.task_id, "submitted", payload, generation=generation)
-            self._bdb.add_event(con, self.task_id, "redeclared",
-                                {"artifacts": len(payload.get("artifacts") or [])}, generation=generation)
-        await asyncio.to_thread(dispatch.accept_side_effects, con, row, submission, generation=generation)
-        return True
+        from misaka.core.network import dispatch
+        return await asyncio.to_thread(dispatch.redeclare, self.con(), row)
 
     def get_permission_settings(self):
-        """Delegate only this live card's output writes, never a workspace-wide grant."""
+        """Delegate only this live card's output writes, never a workspace-wide grant. A finished
+        card answering a consultation in this session keeps her own folder."""
         generation, claim_lock = self._ownership()
         if generation is None or self.session is None:
             return {}
         row = self._bdb.get(self.con(), self.task_id)
-        if (row is None or row["status"] != "running" or int(row["generation"]) != generation
-                or row["claim_lock"] != claim_lock or not row["output_dir"]):
+        if row is None or int(row["generation"]) != generation or not row["output_dir"]:
+            return {}
+        running = row["status"] == "running" and row["claim_lock"] == claim_lock
+        consulting = self._consultation is not None and row["status"] in self._bdb.CONSULTABLE
+        if not (running or consulting):
             return {}
         workspace = Path(self._bdb.workspace_for(row)).resolve()
         output = Path(row["output_dir"]).resolve()
@@ -531,6 +507,7 @@ class TodoPart:
         return {"writeDirectories": {name: [str(output)] for name in ("write", "edit") if name in tools}}
 
     async def agent_start(self, event=None, ctx=None):
+        self._cancel_idle_watch()
         self._summary = None
         self._summary_token = None
         row = self._owned_row()
@@ -538,6 +515,58 @@ class TodoPart:
             from misaka.core.network import worker
 
             worker.record_output_baseline(self.con(), row)
+        else:
+            self._begin_consultation()
+
+    def _begin_consultation(self):
+        """A finished card's session starting a turn is answering a consultation: the one the
+        daemon opened for the message that woke her (``pane.consult_card``), or -- a person
+        typing in her window -- one of her own, so that what she changes is checked and
+        declared like any answer. The card itself is not touched (``tasks.start_consultation``)."""
+        if self._consultation is not None:
+            run = self._bdb.get_run(self.con(), self._consultation[0])
+            if run is not None and run["status"] == "running":
+                return
+            self._consultation = None
+        generation, _claim = self._ownership()
+        if generation is None:
+            return
+        con = self.con()
+        row = self._bdb.get(con, self.task_id)
+        if row is None or row["status"] not in self._bdb.CONSULTABLE or int(row["generation"]) != generation:
+            return
+        import socket
+
+        from misaka.core.network import worker
+        from misaka.core.platform import processes
+        pid = os.getpid()
+        _gen, run_id, lock = worker.consult_env(self.task_id)
+        if run_id is not None:
+            run = self._bdb.get_run(con, run_id)
+            if run is not None and run["status"] == "running" and run["claim_lock"] == lock:
+                self._consultation = (run_id, lock)
+                return
+        live = self._bdb.live_consultation(con, self.task_id)
+        if live is not None:
+            # The daemon opens the consultation for a message to her open window before the
+            # message reaches this session; the pane's process is this one.
+            if int(live["generation"]) == generation and live["pid"] in (None, pid):
+                if live["pid"] is None:
+                    self._bdb.bind_consultation(con, live["id"], live["claim_lock"], pid,
+                                                processes.identity(pid))
+                self._consultation = (live["id"], live["claim_lock"])
+            return
+        lock = f"consult:{socket.gethostname()}:{pid}:{secrets.token_hex(4)}"
+        run = self._bdb.start_consultation(con, self.task_id, generation=generation, lock=lock, pid=pid,
+                                           identity=processes.identity(pid), reason="typed in her window")
+        if run is not None and run["claim_lock"] == lock:
+            self._consultation = (run["id"], lock)
+
+    def _end_consultation(self, status, reason=None):
+        consultation, self._consultation = self._consultation, None
+        if consultation is not None:
+            from misaka.core.network import messages
+            messages.settle_consultation(self.con(), *consultation, status, reason=reason)
 
     async def agent_end(self, event, ctx=None):
         reason, text = _assistant_end(event)
@@ -564,6 +593,10 @@ class TodoPart:
             if self._turn_clean and not self._declared():
                 self._hold_if_running()
                 await self._redeclare_if_done()
+            if self._consultation is not None:
+                # Esc in her window is the only unclean end that is not a failure (_turn_failure).
+                await asyncio.to_thread(self._end_consultation, *(
+                    ("done",) if self._turn_clean else ("stopped", "interrupted in her window")))
             return
         from misaka.core.subagent import extension as subagent
 
@@ -633,15 +666,21 @@ class TodoPart:
         (pi's retries and recovery are behind ``agent_settled``). A pane used to sit on it with
         the card running, its claim heartbeated and nobody to type -- a headless card fails the
         same attempt. A cut reply gets one more turn in this session first, told what happened,
-        as the research driver gives Last Order; the second cut fails like an error. The board's
+        as a workflow's driver gives Last Order; the second cut fails like an error. The board's
         failure model decides the rest: a backoff and a retry, or a card that stays failed."""
         row = self._owned_row()
         if row is None:
+            if self._consultation is not None:
+                from misaka.core.network import worker
+                if worker.stopped_at_cap(reason):
+                    self._end_consultation("stopped", "the run's token budget is spent")
+                else:
+                    self._end_consultation("failed", reason)
             return
         generation = int(row["generation"])
         from misaka.core.network import worker
         if worker.stopped_at_cap(reason):
-            # The research run's token cap, not this card: it waits, ready, for a resume.
+            # The run's token cap, not this card: it waits, ready, for a resume.
             if self._bdb.back_to_ready(self.con(), self.task_id, generation=generation,
                                        claim_lock=row["claim_lock"]):
                 self._bdb.add_event(self.con(), self.task_id, "budget_stop", {"reason": reason},
@@ -663,9 +702,13 @@ class TodoPart:
         supposed to end this way -- and said once per attempt so a long card is not nagged
         on every turn. The notice starts one more turn: a card nobody will write to again
         would otherwise wait for ever (2026-09-27: a red team wrote its critique, ended the turn
-        without ``misaka_card_complete``, and its node waited forty minutes)."""
+        without ``misaka_card_complete``, and its node waited forty minutes). After it, the
+        same end is watched (``_watch_idle``)."""
         row = self._owned_row()
-        if row is None or self._held_generation == int(row["generation"]):
+        if row is None:
+            return
+        if self._held_generation == int(row["generation"]):
+            self._watch_idle(int(row["generation"]))
             return
         from misaka.core.network import worker
         self._held_generation = int(row["generation"])
@@ -674,6 +717,40 @@ class TodoPart:
                   if missing else "the turn ended without `misaka_card_complete`")
         self._hold(f"The card is still running: {detail}. Call `misaka_card_complete` when the work "
                    "is done; if this turn only answered a message, keep working.")
+
+    def _watch_idle(self, generation):
+        """A clean end without ``misaka_card_complete`` after the notice: only a message would
+        ever wake the card again, and a card whose completion was refused sat running for good
+        (2026-10-27). If nothing does within ``UNSETTLED_GRACE_SECONDS`` -- no turn starts, and
+        no background agent or shell is left to report back -- the attempt ends unsettled, as
+        when a card's process exits without settling (the daemon's ``mark_unsettled``): one
+        failure, the next attempt goes on in this conversation told why, and the last one
+        leaves the card failed for Last Order to decide."""
+        self._cancel_idle_watch()
+        self._idle_watch = asyncio.ensure_future(self._unsettle_if_idle(generation))
+
+    def _cancel_idle_watch(self):
+        if self._idle_watch is not None:
+            self._idle_watch.cancel()
+            self._idle_watch = None
+
+    async def _unsettle_if_idle(self, generation):
+        from misaka.core.network import worker
+        from misaka.core.subagent import extension as subagent
+
+        await asyncio.sleep(UNSETTLED_GRACE_SECONDS)
+        while subagent.has_background_tasks() or subagent.has_async_hooks():
+            await asyncio.sleep(UNSETTLED_GRACE_SECONDS)     # their notices start her next turn
+        if self.session.isStreaming:
+            return
+        try:
+            row = self._owned_row()
+            if row is None or int(row["generation"]) != generation:
+                return
+            self._bdb.mark_unsettled(self.con(), self.task_id, generation=generation, claim_lock=row["claim_lock"],
+                                     reason=worker.unsettled_reason(row, self._refusal))
+        except Exception:  # logged; the card stays running, as it did before this watch
+            logging.getLogger(__name__).warning("Could not end idle card %s unsettled", self.task_id, exc_info=True)
 
     def _record_artifact(self, value):
         row = self._owned_row()
@@ -763,6 +840,10 @@ class TodoPart:
         self._in_flight = max(0, self._in_flight - 1)
         self._touch()
         name = str(_field(event, "toolName", "") or "")
+        if name == "misaka_card_complete":      # what a refusal said, for the reason an idle attempt ends on
+            said = " ".join(str(_field(block, "text", "")) for block in (_field(event, "content", []) or [])
+                            if _field(block, "type") == "text")
+            self._refusal = _flat(said, 300) if _field(event, "isError", False) else None
         if not _field(event, "isError", False):
             raw = _field(event, "input", {}) or {}
             details = _field(event, "details", {}) or {}
@@ -798,6 +879,9 @@ class TodoPart:
 
     async def session_shutdown(self, event=None, ctx=None):
         self._calls_settled()
+        self._cancel_idle_watch()
+        if self._consultation is not None:
+            self._end_consultation("stopped", "her session ended before she answered")
         if self._con is not None:
             self._con.close()
             self._con = None
