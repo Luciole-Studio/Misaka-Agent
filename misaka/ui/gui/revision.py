@@ -14,6 +14,7 @@ def source_revision(source: Path | None = None) -> str:
     paths = [*gui.rglob("*.py"),
              *(gui / "static" / name for name in ("index.html", "app.js", "style.css")),
              source / "misaka" / "core" / "session_control.py",
+             source / "misaka" / "core" / "model_preferences.py",
              source / "misaka" / "core" / "network" / "roster.py",
              *((source / "misaka" / "core" / "skills" / name) for name in skill_runtime)]
     digest = hashlib.sha256()

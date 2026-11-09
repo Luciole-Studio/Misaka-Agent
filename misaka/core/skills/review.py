@@ -11,16 +11,17 @@ _DIFF_LIMIT = 20000
 def pending_items(*, with_diff=False):
     """One row per staged write: the source directories and any startup copies."""
     from . import write as skill_write
-    from .sandbox import copies_of
+    from .sandbox import copies_of_many
 
-    rows = []
+    records = []
     for record in skill_write.list_pending():
         payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
         bases = payload.get("bases") if isinstance(payload.get("bases"), dict) else {}
-        sources = [str(Path(path)) for path in bases]
-        copies = []
-        for path in sources:
-            copies.extend(copies_of(path))
+        records.append((record, [str(Path(path)) for path in bases]))
+    copies_by_source = copies_of_many({source for _, sources in records for source in sources})
+    rows = []
+    for record, sources in records:
+        copies = [copy for source in sources for copy in copies_by_source.get(source, ())]
         row = {
             "id": record.get("_pending_file_id") or record.get("id") or "",
             "summary": record.get("summary") or "",
@@ -30,7 +31,11 @@ def pending_items(*, with_diff=False):
             "copies": copies,
         }
         if with_diff and not row["error"] and row["id"]:
-            diff = skill_write.pending_diff(record)
+            try:
+                diff = skill_write.pending_diff(record)
+            except (OSError, ValueError) as error:
+                row["error"] = str(error) or type(error).__name__
+                diff = ""
             if isinstance(diff, str) and len(diff) > _DIFF_LIMIT:
                 diff = diff[:_DIFF_LIMIT] + "\n…（差异过长，已截断）"
             row["diff"] = diff or ""

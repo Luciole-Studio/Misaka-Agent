@@ -25,6 +25,8 @@ from misaka.config import sisters
 # client's cursor forces a full replay ("reset"), which rebuilds identical state.
 RING_LIMIT = 6000
 REQUEST_TIMEOUT = 25.0
+CLOSED_GRACE = 30.0
+MAX_CLOSED_CHANNELS = 32
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
@@ -43,6 +45,7 @@ class ChatChannel:
         self.next_seq = 0
         self.request_counter = itertools.count(1)
         self.status = "starting"
+        self.finished_at: float | None = None
         self.condition = threading.Condition(self.lock)
         self.pending: dict[int, dict] = {}   # request id -> {"event": threading.Event, "reply": dict}
         self.write_lock = threading.Lock()
@@ -134,7 +137,19 @@ class ChatManager:
 
     # ---- lifecycle ----
 
+    def _prune_closed(self):
+        """Retain final events briefly, then release closed runners and their rings."""
+        with self.lock:
+            closed = sorted((c for c in self.channels.values() if c.finished_at is not None),
+                            key=lambda c: c.finished_at)
+            cutoff = time.monotonic() - CLOSED_GRACE
+            excess = max(0, len(closed) - MAX_CLOSED_CHANNELS)
+            for index, channel in enumerate(closed):
+                if index < excess or channel.finished_at <= cutoff:
+                    self.channels.pop(channel.id, None)
+
     def create(self, spec: dict) -> dict:
+        self._prune_closed()
         workspace = os.path.realpath(spec.get("workspace") or self.workspace)
         if not os.path.isdir(workspace):
             raise ValueError("项目文件夹不存在")
@@ -173,7 +188,8 @@ class ChatManager:
                     creationflags=_CREATE_NO_WINDOW,
                     **({} if os.name == "nt" else {"start_new_session": True}))
         except OSError as error:
-            self.channels.pop(chat_id, None)
+            with self.lock:
+                self.channels.pop(chat_id, None)
             raise ValueError(f"会话进程启动失败：{error}") from error
         threading.Thread(target=self._pump, args=(channel,), daemon=True,
                          name=f"chat-{chat_id}").start()
@@ -195,7 +211,11 @@ class ChatManager:
         except (ValueError, OSError):
             pass
         finally:
-            code = proc.wait(timeout=15) if proc.poll() is None else proc.poll()
+            try:
+                code = proc.wait(timeout=15) if proc.poll() is None else proc.poll()
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                code = proc.wait(timeout=5)
             proc.stdout.close()
             if proc.stdin:
                 proc.stdin.close()
@@ -208,13 +228,17 @@ class ChatManager:
                 channel.events.append((channel.next_seq, {"type": "closed", "code": code}))
                 channel.next_seq += 1
                 channel.condition.notify_all()
+            channel.finished_at = time.monotonic()
+            self._prune_closed()
 
     # ---- browser API ----
 
     def _channel(self, chat_id) -> ChatChannel:
         if not isinstance(chat_id, str) or len(chat_id) > 64:
             raise ValueError("会话标识无效")
-        channel = self.channels.get(chat_id)
+        self._prune_closed()
+        with self.lock:
+            channel = self.channels.get(chat_id)
         if channel is None:
             raise ValueError("会话不存在或已关闭，请刷新页面")
         return channel
@@ -318,7 +342,7 @@ class ChatManager:
 
     def set_thinking(self, data: dict) -> dict:
         level = data.get("level")
-        if level not in ("off", "minimal", "low", "medium", "high", "xhigh"):
+        if not isinstance(level, str) or not level.strip() or len(level) > 32:
             raise ValueError("未知思考等级")
         return self.request(data, "set_thinking", {"level": level, "persist": bool(data.get("persist"))})
 
@@ -349,6 +373,8 @@ class ChatManager:
         with channel.condition:
             channel.status = "closed"
             channel.condition.notify_all()
+        with self.lock:
+            self.channels.pop(chat_id, None)
         return {"closed": True}
 
     def close_all(self) -> None:
@@ -361,9 +387,12 @@ class ChatManager:
                 pass
 
     def list(self) -> list[dict]:
+        self._prune_closed()
         with self.lock:
             channels = list(self.channels.values())
         return [channel.summary() for channel in channels]
 
     def alive_count(self) -> int:
-        return sum(1 for channel in self.channels.values() if channel.status in ("starting", "ready"))
+        self._prune_closed()
+        with self.lock:
+            return sum(1 for channel in self.channels.values() if channel.status in ("starting", "ready"))

@@ -191,6 +191,7 @@ class ChatHost:
         self.ui = GuiUIContext()
         self.input_queue = None
         self.sides: dict[str, dict] = {}
+        self._operations: set[asyncio.Task] = set()
 
     # ---- assembly (the engine.main skeleton, minus every terminal concern) ----
 
@@ -407,7 +408,7 @@ class ChatHost:
     async def op_models(self, _params: dict) -> dict:
         await self.registry.refresh({"allowNetwork": False})
         models = []
-        from misaka.ui.gui.model_preferences import visible_models
+        from misaka.core.model_preferences import visible_models
         for model in visible_models(self.registry.getAvailable()):
             models.append({**_model_summary(model), "providerName": self.registry.getProviderDisplayName(model.provider), "configured": self.registry.hasConfiguredAuth(model)})
         return {"models": models, "shortlisted": True, "current": _model_summary(self.session.model)}
@@ -621,7 +622,9 @@ class ChatHost:
         if not isinstance(params, dict):
             emit({"type": "result", "id": request.get("id"), "ok": False, "error": "params 必须是对象"})
             return True
-        asyncio.get_running_loop().create_task(self._execute(request, entry, params))
+        task = asyncio.get_running_loop().create_task(self._execute(request, entry, params))
+        self._operations.add(task)
+        task.add_done_callback(self._operations.discard)
         return True
 
     async def serve(self):
@@ -650,6 +653,11 @@ class ChatHost:
             await self._dispose()
 
     async def _dispose(self):
+        pending = tuple(self._operations)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         if self.input_queue is not None:
             self.input_queue.clear()
         for side in self.sides.values():

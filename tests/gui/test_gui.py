@@ -219,12 +219,14 @@ class NativeChatManagerTests(unittest.TestCase):
         chat_id = self._start()
         self.wait_for(chat_id, lambda ev: ev["type"] == "ready")
         self.assertTrue(self.manager.close(chat_id)["closed"])
-        self.assertEqual(self.manager.list()[0]["status"], "closed")
+        self.assertNotIn(chat_id, self.manager.channels)
+        with self.assertRaisesRegex(ValueError, "已关闭"):
+            self.manager.events({"chat_id": chat_id, "cursor": 0})
 
 
 @contextmanager
 def running_server():
-    bridge = Mock()
+    bridge = Mock(workspace=str(Path.cwd()))
     bridge.dispatch.return_value = {"message": "中文成功"}
     server = GUIServer(("127.0.0.1", 0), bridge)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -249,7 +251,8 @@ class HTTPTests(unittest.TestCase):
 
     def request(self, method="POST", path="/api/state", data=b"{}", headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
-        conn.request(method, path, body=data, headers={"Content-Type": "application/json", **(headers or {})})
+        conn.request(method, path, body=None if method == "GET" else data,
+                     headers={"Content-Type": "application/json", **(headers or {})})
         response = conn.getresponse()
         status, body, response_headers = response.status, response.read(), dict(response.getheaders())
         conn.close()

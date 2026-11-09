@@ -196,7 +196,7 @@ class SessionControl:
         if operation == "models":
             registry = self.session._modelRegistry
             await registry.refresh({"allowNetwork": False})
-            from misaka.ui.gui.model_preferences import visible_models
+            from misaka.core.model_preferences import visible_models
             return {"models": [{"provider": m.provider, "providerName": registry.getProviderDisplayName(m.provider), "id": m.id, "name": m.name,
                                 "reasoning": bool(m.reasoning), "contextWindow": m.contextWindow,
                                 "configured": registry.hasConfiguredAuth(m)} for m in visible_models(registry.getAvailable())],

@@ -54,7 +54,9 @@ def healthy(url, workspace):
         # startup snapshot after a local edit. Match the actual GUI sources too.
         return (health.get("version") is not None and health.get("native_chat") is True
                 and health.get("project_gui") == 14
-                and health.get("source_revision") == source_revision(SOURCE))
+                and health.get("source_revision") == source_revision(SOURCE)
+                and isinstance(health.get("workspace"), str)
+                and os.path.normcase(os.path.realpath(health["workspace"])) == os.path.normcase(os.path.realpath(workspace)))
     except (OSError, ValueError, urllib.error.URLError):
         return False
 

@@ -35,12 +35,14 @@ class SessionLibrary:
         with FileLock(str(self.path) + ".lock"):
             data = self.read()  # Strictly confirm existing encoding before writing.
             key = path_key(session["path"])
-            entry = {**session, **data.get(key, {}), "path": session["path"],
+            entry = {**{k: v for k, v in session.items() if k != "title"}, **data.get(key, {}), "path": session["path"],
                      "workspace": session["workspace"], "updated": time.time()}
+            entry["display_title"] = entry.get("title") or session.get("title") or entry.get("display_title") or "未命名会话"
             if operation == "pin":
                 entry["pinned_at"] = (entry.get("pinned_at") or time.time()) if value else 0
             elif operation == "rename":
                 entry["title"] = value
+                entry["display_title"] = value
             elif operation == "delete":
                 entry["deleted_at"] = time.time()
             elif operation == "restore":

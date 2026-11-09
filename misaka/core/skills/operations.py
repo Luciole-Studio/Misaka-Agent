@@ -85,9 +85,18 @@ def org_edit_notes(operations, profile, workspace):
     from .vendor.skill_manager_guards import _maybe_auto_propose_org_edit
     scope = scope_for(profile, workspace)
     notes = []
+    role_root = (Path(profile) / "skills").resolve()
+    seen = set()
     with using_scope(scope):
-        for name in dict.fromkeys(op['name'] for op in operations if op['action'] != 'delete'):
-            if note := _maybe_auto_propose_org_edit(name, Path(profile) / 'skills' / name):
+        for op in operations:
+            if op["action"] == "delete":
+                continue
+            target = Path(op.get("live_dir") or role_root / op["name"]).resolve()
+            if not target.is_relative_to(role_root) or target in seen:
+                continue
+            seen.add(target)
+            name = target.relative_to(role_root).as_posix()
+            if note := _maybe_auto_propose_org_edit(name, target):
                 notes.append(note)
     return notes
 
@@ -113,7 +122,7 @@ def flush_usage(profile, workspace):
             if event in applied:
                 continue
             with using_scope(scope, event=event):
-                action, name = op["action"], op["name"]
+                action, name = op["action"], op.get("usage_key") or op["name"]
                 if action == "create":
                     skill_usage.record_created(name, agent_created=evidence.get("write_origin") == "background_review")
                 elif action in ("patch", "edit", "write_file", "remove_file"):
@@ -142,7 +151,8 @@ def relocate(src, dest, skill_name, action):
     # publish in the SAME journal, including archive origin and suppression aliases.
     import shutil
     try:
-        write._safe_parents(src); write._safe_parents(dest.parent)
+        write._safe_parents(src)
+        write._safe_parents(dest.parent)
         if dest.exists() or not src.is_dir():
             return False, "Archive destination exists or source disappeared."
         was_bundled = skill_usage.is_bundled(skill_name)

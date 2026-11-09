@@ -704,6 +704,7 @@ def _bind_operations(profile_dir, operations, visible_roots):
     inside the install are refused.
     """
     from . import index
+    from .operations import usage_key
     role_root = _skills_root(profile_dir).absolute()
     created = {}
     destinations = {}
@@ -712,6 +713,7 @@ def _bind_operations(profile_dir, operations, visible_roots):
         op = dict(original)
         name = op["name"]
         layer_root = None
+        entry = None
         if op["action"] == "create":
             if op.get("source"):
                 return None, "source selects an existing indexed skill; it cannot set a create destination."
@@ -747,6 +749,7 @@ def _bind_operations(profile_dir, operations, visible_roots):
             return None, err
         op["name"] = rel
         op["live_dir"] = str(Path(checked).resolve())
+        op["usage_key"] = usage_key(entry, profile_dir) if entry is not None else rel
         # Staging uses relative skill names. Never collapse two independent
         # host copies into one staged tree and publish one copy over the other.
         if rel in destinations and destinations[rel] != op["live_dir"]:
@@ -811,7 +814,7 @@ def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
                 err = _precheck(a, Path(op["live_dir"]), op["name"], op.get("content", ""), op.get("file_path", ""), op.get("file_content"), op.get("old_string", ""), op.get("new_string"))
                 if err:
                     return {"success": False, "error": err}
-            if err := _validate_operations(bound, extra={"live_dir"}):
+            if err := _validate_operations(bound, extra={"live_dir", "usage_key"}):
                 return {"success": False, "error": err}
             from .vendor.skill_provenance import is_background_review
             curator_archive = is_background_review() and any(op['action'] == 'delete' for op in bound)
@@ -851,12 +854,15 @@ def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
                     from .sandbox import copies_of
                     copies = [copy for path in paths for copy in copies_of(path)]
                     shown = [str(Path(path)) for path in paths]
-                    detail = "将写入：\n" + "\n".join(shown)
+                    detail = "Will write to:\n" + "\n".join(shown)
                     if copies:
-                        detail += "\n启动时的副本：\n" + "\n".join(copies)
+                        detail += "\nStartup copies:\n" + "\n".join(copies)
                     return {"success": True, "staged": True, "pending_id": staged["id"], "gist": gist,
                             "destinations": shown, "copies": copies,
-                            "message": note + "\n" + detail + "\n批准或拒绝的卡片就在这条对话里。技能库页面也能处理同一条。"}
+                            "message": note + "\n" + detail + f"\nPending review: {staged['id']}. "
+                            "Run `misaka skills pending` to inspect it, then "
+                            f"`misaka skills approve {staged['id']}` or `misaka skills reject {staged['id']}`. "
+                            "The GUI skill library can also review this change."}
             from .vendor.skill_provenance import get_current_write_origin
             evidence = {"profile_dir": profile_dir, "workspace": workspace,
                         "operations": canonical, "bound_operations": bound, "write_origin": payload["write_origin"],

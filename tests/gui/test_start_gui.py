@@ -80,14 +80,20 @@ class ServerReuseTests(unittest.TestCase):
     def test_current_source_snapshot_is_reused(self):
         self.assertTrue(self.healthy({"version": "0.18.5", "native_chat": True,
                                      "project_gui": 14,
+                                     "workspace": str(Path.cwd()),
                                      "source_revision": start_gui.source_revision(start_gui.SOURCE)}))
+
+    def test_matching_revision_in_a_different_workspace_is_not_reused(self):
+        self.assertFalse(self.healthy({"version": "0.18.5", "native_chat": True, "project_gui": 14,
+                                       "workspace": str(Path.cwd().parent),
+                                       "source_revision": start_gui.source_revision(start_gui.SOURCE)}))
 
     def test_frontend_and_model_handler_edits_change_the_revision(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             names = ["misaka/ui/gui/server.py", "misaka/ui/gui/static/index.html",
                      "misaka/ui/gui/static/app.js", "misaka/ui/gui/static/style.css",
-                     "misaka/core/session_control.py", "misaka/core/network/roster.py",
+                     "misaka/core/session_control.py", "misaka/core/model_preferences.py", "misaka/core/network/roster.py",
                      "misaka/core/skills/write.py", "misaka/core/skills/manage.py",
                      "misaka/core/skills/review.py", "misaka/core/skills/sandbox.py",
                      "misaka/core/skills/operations.py"]

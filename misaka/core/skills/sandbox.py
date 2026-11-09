@@ -34,6 +34,12 @@ def _tree_size(path):
     return total
 
 
+def _ignore_copies(src, names):
+    """Use identical exclusions for initial copies and later refreshes."""
+    return set(shutil.ignore_patterns(".git", "__pycache__")(src, names)) | {
+        name for name in names if os.path.islink(os.path.join(src, name))}
+
+
 def _strip_write(path):
     entries = [path]
     for root, dirs, files in os.walk(path):
@@ -121,7 +127,6 @@ def readonly_copies(skill_dirs, dest_root, *, bundle_records=None, category_desc
     backup = None
     copies = []
     used = set()
-    skip = shutil.ignore_patterns(".git", "__pycache__")
     try:
         manifest_entries = []
         for entry in entries:
@@ -132,12 +137,7 @@ def readonly_copies(skill_dirs, dest_root, *, bundle_records=None, category_desc
                 name, n = f"{base}-{n}", n + 1
             used.add(name.casefold())
 
-            def _ignore(src, names):
-                # Exclude symlinks so copies cannot escape the size check or sandbox.
-                return set(skip(src, names)) | {
-                    item for item in names if os.path.islink(os.path.join(src, item))}
-
-            shutil.copytree(d, os.path.join(stage, name), symlinks=False, ignore=_ignore)
+            shutil.copytree(d, os.path.join(stage, name), symlinks=False, ignore=_ignore_copies)
             copies.append(os.path.join(dest_root, name))
             copied_file = str(Path(entry["path"]).relative_to(d))
             if not Path(stage, name, copied_file).is_file():
@@ -307,18 +307,36 @@ def _snapshot_roots():
     root = home.path("tasks_root")
     if not root.is_dir():
         return
-    for path in root.rglob(".misaka-skill-snapshot.json"):
-        if path.is_file() and not path.is_symlink():
+    for folder, dirs, files in os.walk(root, followlinks=False):
+        # A refresh keeps sealed before/after images beside the published tree.
+        # Those internal images must never become refresh targets themselves.
+        dirs[:] = [name for name in dirs
+                   if not (name.startswith(".") and any(marker in name for marker in (".new-", ".old-", ".refresh-")))
+                   and not os.path.islink(os.path.join(folder, name))
+                   and not os.path.isjunction(os.path.join(folder, name))]
+        path = Path(folder) / ".misaka-skill-snapshot.json"
+        if path.name in files and path.is_file() and not path.is_symlink():
             yield path.parent
 
 
 def copies_of(origin_dir):
     """Sandbox directories copied from ``origin_dir`` and still on disk."""
-    try:
-        origin = Path(origin_dir).resolve()
-    except OSError:
-        return []
-    found = []
+    return copies_of_many([origin_dir]).get(str(origin_dir), [])
+
+
+def copies_of_many(origins):
+    """Scan manifests once and map each supplied source path to its copies."""
+    found, wanted = {}, {}
+    for origin in origins:
+        key = str(origin)
+        found[key] = []
+        try:
+            resolved = Path(origin).resolve()
+        except (OSError, RuntimeError):
+            continue
+        wanted.setdefault(resolved, []).append(key)
+    if not wanted:
+        return found
     for root in _snapshot_roots():
         manifest = root / ".misaka-skill-snapshot.json"
         try:
@@ -334,14 +352,15 @@ def copies_of(origin_dir):
             copied = entry.get("copied_dir")
             if not isinstance(source, str) or not isinstance(copied, str):
                 continue
-            if Path(copied).name != copied or copied in {".", ".."}:
+            if not copied or Path(copied).name != copied or copied in {".", ".."}:
                 continue
             try:
-                if Path(source).resolve() != origin:
-                    continue
-            except OSError:
+                aliases = wanted.get(Path(source).resolve(), ())
+                destination = str((root / copied).resolve())
+            except (OSError, RuntimeError):
                 continue
-            found.append(str((root / copied).resolve()))
+            for alias in aliases:
+                found[alias].append(destination)
     return found
 
 
@@ -373,29 +392,64 @@ def refresh_copies(origin_dir):
     updated, errors = [], []
     for dest_s in copies_of(origin):
         dest = Path(dest_s)
-        root = dest.parent
         try:
-            _make_writable(root)
-            if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(origin, dest, symlinks=False, ignore=lambda _src, names: {
-                name for name in names if os.path.islink(os.path.join(_src, name))})
-            _reseal_hashes(root)
+            _refresh_copy(origin, dest)
             updated.append(str(dest))
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, RuntimeError) as error:
             errors.append(f"{dest}: {error}")
     return updated, errors
 
 
+def _refresh_copy(origin, destination):
+    """Publish content and its sealed manifest together, retaining a rollback tree."""
+    from filelock import FileLock
+
+    root = destination.parent
+    _ensure_real_directory(root, create=False)
+    with FileLock(str(root) + ".refresh.lock"):
+        if read_manifest(root, verify_files=True) is None:
+            raise ValueError(f"Skill snapshot manifest is missing: {root}")
+        _file_digests(root)
+        temporary = Path(tempfile.mkdtemp(prefix=f".{root.name}.refresh-", dir=root.parent))
+        stage, backup = temporary / "replacement", temporary / "previous"
+        moved, published = False, False
+        try:
+            shutil.copytree(root, stage, symlinks=False, ignore=_ignore_copies)
+            _make_writable(stage)
+            cleanup(stage / destination.name)
+            shutil.copytree(origin, stage / destination.name, symlinks=False, ignore=_ignore_copies)
+            if _tree_size(stage) > size_cap_mb() * 1024 * 1024:
+                raise ValueError(f"Refreshed Skill copies exceed the {size_cap_mb()} MB owner limit.")
+            _reseal_hashes(stage)
+            _make_writable(root)
+            os.replace(root, backup)
+            moved = True
+            try:
+                os.replace(stage, root)
+            except BaseException:
+                os.replace(backup, root)
+                moved = False
+                raise
+            published = True
+        finally:
+            if root.exists():
+                _strip_write(root)
+            # If rollback itself fails, keep the before-image for recovery.
+            if published or not moved:
+                cleanup(temporary)
+
+
 def _reseal_hashes(root):
-    path = Path(root) / ".misaka-skill-snapshot.json"
-    raw = json.loads(path.read_text(encoding="utf-8-sig"))
-    if raw.get("state") == "sealed":
-        raw["files"] = _file_digests(root)
-        raw["digest"] = _manifest_digest(raw)
-        from misaka.utils import atomic
-        atomic.write_text(path, json.dumps(raw, ensure_ascii=False), mode=0o644)
-    _strip_write(root)
+    try:
+        path = Path(root) / ".misaka-skill-snapshot.json"
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+        if raw.get("state") == "sealed":
+            raw["files"] = _file_digests(root)
+            raw["digest"] = _manifest_digest(raw)
+            from misaka.utils import atomic
+            atomic.write_text(path, json.dumps(raw, ensure_ascii=False), mode=0o644)
+    finally:
+        _strip_write(root)
 
 
 def snapshot_stack(profile_dir, workspace, destination):

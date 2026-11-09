@@ -349,7 +349,7 @@ class CustomModelSettingsTests(unittest.TestCase):
 
         self.reset_routes()
         self.route("/v1/models", 302, b"", {"Location": "http://example.com/v1/models"})
-        with self.assertRaisesRegex(ValueError, "另一个主机"):
+        with self.assertRaisesRegex(ValueError, "另一个服务地址"):
             op_probe_custom({"api": "openai-completions", "base_url": self.origin + "/v1", "api_key": secret})
 
         self.reset_routes()

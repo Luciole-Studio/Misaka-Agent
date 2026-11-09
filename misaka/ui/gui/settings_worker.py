@@ -153,7 +153,7 @@ def op_models_overview(_params: dict) -> dict:
                           "source": "自定义服务" if provider in custom_ids else (status.source or ""),
                           "extras": extras, "extras_install": _extras_command(extras) if extras else None,
                           "custom": provider in custom_ids})
-    from misaka.ui.gui.model_preferences import preferences, initial_refs, selection
+    from misaka.core.model_preferences import preferences, initial_refs, selection
     stored, refs = preferences(), initial_refs()
     for item in providers:
         chosen = selection(item["id"], registry.getAll(), stored=stored, refs=refs)
@@ -179,7 +179,7 @@ def op_models(params: dict) -> dict:
     if params.get("configured_only"):
         models = [m for m in registry.getAll() if registry.hasConfiguredAuth(m)]
     if params.get("configured_only") or params.get("enabled_only"):
-        from misaka.ui.gui.model_preferences import visible_models
+        from misaka.core.model_preferences import visible_models
         if params.get("enabled_only"):
             models = [m for m in registry.getAll() if m.provider == provider]
         models = visible_models(models)
@@ -276,7 +276,7 @@ def _provider_catalog(registry, provider: str) -> list[dict]:
                       "maxTokens": m.maxTokens, "reasoning": bool(m.reasoning), "input": list(m.input)}
                for m in registry.getAll() if m.provider == provider}
     if isinstance(cached, list) and cached:
-        from misaka.ui.gui.model_preferences import selection
+        from misaka.core.model_preferences import selection
         selected = set(selection(provider, registry.getAll())["models"])
         catalog = {key: value for key, value in catalog.items() if key in selected}
     for item in cached if isinstance(cached, list) else []:
@@ -286,7 +286,7 @@ def _provider_catalog(registry, provider: str) -> list[dict]:
 
 
 def op_provider_models(params: dict) -> dict:
-    from misaka.ui.gui.model_preferences import selection
+    from misaka.core.model_preferences import selection
     provider = str(params.get("provider") or "")
     registry = _runtime().registry
     if provider not in {m.provider for m in registry.getAll()}:
@@ -302,7 +302,7 @@ def _provider_auth(provider: str, model_id: str = ""):
     if not models:
         raise ValueError("未知的服务商")
     if not model_id:
-        from misaka.ui.gui.model_preferences import selection
+        from misaka.core.model_preferences import selection
         model_id = next(iter(selection(provider, models)["models"]), "")
     model = next((m for m in models if m.id == model_id), models[0])
     auth = asyncio.run(registry.getApiKeyAndHeaders(model))
@@ -363,7 +363,7 @@ def op_fetch_provider_models(params: dict) -> dict:
     chosen = op_provider_models(params)
     # A successful refresh is authoritative for available choices. Keep already
     # selected entries visible so users can explicitly remove retired models.
-    from misaka.ui.gui.model_preferences import selection
+    from misaka.core.model_preferences import selection
     selection_data = selection(provider, registry.getAll())
     selected_ids = set(selection_data["models"])
     missing = [m for m in chosen["models"] if m["id"] in selected_ids and m["id"] not in {c["id"] for c in catalog}]
@@ -696,12 +696,14 @@ def _fetch_one(url: str, headers: dict[str, str], key: str) -> tuple[int, object
                     nxt = urljoin(current, response.headers.get("location") or "")
                     _check_base_url(nxt)
                     target = urlsplit(nxt)
-                    # A catalogue request carries the key. Leaving the host, or leaving
-                    # https, would hand that key to somewhere the user did not name.
-                    if (target.hostname or "").lower() != (origin.hostname or "").lower():
-                        raise ValueError("服务把请求重定向到了另一个主机，已中止")
-                    if origin.scheme == "https" and target.scheme != "https":
-                        raise ValueError("服务把请求从 https 重定向到了不安全的地址，已中止")
+                    # Credentials stay on the exact service origin, including its
+                    # scheme and effective port. An omitted default port is equal.
+                    def service_origin(parsed):
+                        port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+                        return parsed.scheme.lower(), (parsed.hostname or "").lower(), port
+
+                    if service_origin(target) != service_origin(origin):
+                        raise ValueError("服务把请求重定向到了另一个服务地址，已中止")
                     current = nxt.rstrip("/")
                     continue
                 body = response.content
@@ -1025,7 +1027,9 @@ def _role_file(params: dict) -> str:
         raise ValueError("只能编辑 DESCRIBE.md、SOUL.md 或共享身份")
     if name == "SHARED_SOUL":
         return profiles.shared_soul()
-    role = str(params.get("role") or "")
+    role = params.get("role")
+    if not isinstance(role, str) or not role.strip():
+        raise ValueError("请选择要编辑的角色")
     if role == "last_order":
         if name != "SOUL.md":
             raise ValueError("Last Order 只有 SOUL.md")

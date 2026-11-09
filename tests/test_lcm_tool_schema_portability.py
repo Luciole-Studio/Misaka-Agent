@@ -74,3 +74,23 @@ def test_scalar_unions_and_other_tools_are_unchanged_and_copies_are_independent(
     for schema in LCMEngine.get_tool_schemas():
         if schema["name"] != "lcm_retrieve":
             assert _portable_json_schema(schema["parameters"]) == schema["parameters"]
+
+
+@pytest.mark.parametrize("keyword", ["const", "enum", "default", "examples"])
+def test_schema_looking_literal_values_remain_unchanged(keyword):
+    literal = {"type": "object", "properties": {"name": {"type": "string"}}, "anyOf": [{"required": ["name"]}]}
+    value = [literal] if keyword in {"enum", "examples"} else literal
+    source = {"type": "object", "properties": {"payload": {keyword: value}}, "required": ["payload"]}
+    before = deepcopy(source)
+    adapted = _portable_json_schema(source)
+    assert adapted["properties"]["payload"][keyword] == value
+    assert Draft202012Validator(adapted).is_valid({"payload": literal})
+    assert source == before
+
+
+def test_child_schemas_are_still_visited_in_definitions_and_schema_named_properties():
+    union = {"type": "object", "properties": {"name": {"type": "string"}}, "anyOf": [{"required": ["name"]}]}
+    source = {"type": "object", "$defs": {"entry": union}, "properties": {"const": union}}
+    adapted = _portable_json_schema(source)
+    for child in (adapted["$defs"]["entry"], adapted["properties"]["const"]):
+        assert child["anyOf"][0]["properties"] == {"name": {"type": "string"}}

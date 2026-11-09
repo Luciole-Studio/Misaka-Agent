@@ -20,28 +20,29 @@ class ComposerFiles:
         key = os.path.normcase(str(root))
         with self.lock:
             cached = self.cache.get(key)
-            if not cached or time.monotonic() - cached[0] > 15:
-                files, truncated = [], False
-                started = time.monotonic()
-                for folder, dirs, names in os.walk(root, followlinks=False):
-                    dirs[:] = sorted(d for d in dirs if d.casefold() not in IGNORED_DIRS
-                                     and not Path(folder, d).is_symlink()
-                                     and not Path(folder, d).is_junction())
-                    for name in sorted(names):
-                        path = Path(folder, name)
-                        try:
-                            if not path.is_file() or not path.resolve().is_relative_to(root):
-                                continue
-                        except OSError:
+        if not cached or time.monotonic() - cached[0] > 15:
+            files, truncated = [], False
+            started = time.monotonic()
+            for folder, dirs, names in os.walk(root, followlinks=False):
+                dirs[:] = sorted(d for d in dirs if d.casefold() not in IGNORED_DIRS
+                                 and not Path(folder, d).is_symlink()
+                                 and not Path(folder, d).is_junction())
+                for name in sorted(names):
+                    path = Path(folder, name)
+                    try:
+                        if not path.is_file() or not path.resolve().is_relative_to(root):
                             continue
-                        files.append({"path": path.relative_to(root).as_posix(), "name": name})
-                        if len(files) >= 40000 or time.monotonic() - started > 3:
-                            truncated = True
-                            break
+                    except OSError:
+                        continue
+                    files.append({"path": path.relative_to(root).as_posix(), "name": name})
                     if len(files) >= 40000 or time.monotonic() - started > 3:
                         truncated = True
                         break
-                cached = (time.monotonic(), files, truncated)
+                if len(files) >= 40000 or time.monotonic() - started > 3:
+                    truncated = True
+                    break
+            cached = (time.monotonic(), files, truncated)
+            with self.lock:
                 self.cache[key] = cached
                 if len(self.cache) > 16:
                     self.cache.pop(next(iter(self.cache)))

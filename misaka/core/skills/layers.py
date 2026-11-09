@@ -325,16 +325,20 @@ def _linked_skill_targets(root):
     than a tool call should, so the answer is kept until a directory in the root changes."""
     if not root.is_dir():
         return set()
-    stamps, links = [], []
+    stamps, links, complete = [], [], True
     for here, dirs, _files in os.walk(root):
-        stamps.append((here, os.stat(here).st_mtime_ns))
+        try:
+            stamps.append((here, os.stat(here).st_mtime_ns))
+        except OSError:
+            complete = False
         links.extend(Path(here) / name for name in dirs if (Path(here) / name).is_symlink())
     key = str(root)
     cached = _LINKED_TARGETS.get(key)
-    if cached is not None and cached[0] == stamps:
+    if complete and cached is not None and cached[0] == stamps:
         return cached[1]
     targets = {os.path.realpath(link) for link in links}
-    _LINKED_TARGETS[key] = (stamps, targets)
+    if complete:
+        _LINKED_TARGETS[key] = (stamps, targets)
     return targets
 
 

@@ -1,16 +1,18 @@
-"""The GUI shortlist, independent of credentials and the runtime model catalogue."""
+"""User model shortlists shared by session control and the graphical interface."""
 from __future__ import annotations
 
 import os
 
 
 def preferences() -> dict:
+    """Read the saved provider enablement and selected model IDs."""
     from misaka.config.product import setting
     value = setting("gui", "modelSelection", {})
     return value if isinstance(value, dict) else {}
 
 
 def initial_refs() -> set[str]:
+    """Seed an unset shortlist from global and role-specific defaults."""
     from misaka.config import current_config, profiles
     from misaka.core.network import roster
     cfg = current_config()
@@ -22,6 +24,7 @@ def initial_refs() -> set[str]:
 
 
 def selection(provider: str, models, *, stored=None, refs=None) -> dict:
+    """Use explicit selections, including an empty list, before saved defaults."""
     stored = preferences() if stored is None else stored
     entry = stored.get(provider)
     if isinstance(entry, dict):
@@ -34,6 +37,7 @@ def selection(provider: str, models, *, stored=None, refs=None) -> dict:
 
 
 def visible_models(models):
+    """Keep selected models from enabled providers without changing their order."""
     models = list(models)
     stored, refs = preferences(), initial_refs()
     choices = {p: selection(p, models, stored=stored, refs=refs) for p in {m.provider for m in models}}

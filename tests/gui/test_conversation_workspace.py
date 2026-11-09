@@ -55,7 +55,7 @@ class Session:
 class QueueTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.session = Session()
-        chosen = patch("misaka.ui.gui.model_preferences.preferences", return_value={"test": {"enabled": True, "models": ["first"]}})
+        chosen = patch("misaka.core.model_preferences.preferences", return_value={"test": {"enabled": True, "models": ["first"]}})
         chosen.start()
         self.addCleanup(chosen.stop)
         self.errors, self.settled = [], []

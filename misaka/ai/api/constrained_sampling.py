@@ -161,8 +161,21 @@ def _portable_json_schema(parameters: dict[str, Any]) -> dict[str, Any]:
                     if isinstance(required, list) and required and all(isinstance(key, str) and key in properties for key in required):
                         branch["type"] = "object"
                         branch["properties"] = {key: deepcopy(properties[key]) for key in required}
-            for value in node.values():
-                visit(value)
+            # Only schema-bearing keywords contain child schemas. Annotation and
+            # assertion values such as const/enum/default are ordinary JSON data.
+            for key in ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"):
+                children = node.get(key)
+                if isinstance(children, dict):
+                    for value in children.values():
+                        if isinstance(value, dict):
+                            visit(value)
+            for key in ("allOf", "anyOf", "oneOf", "prefixItems"):
+                children = node.get(key)
+                if isinstance(children, list):
+                    visit(children)
+            for key in ("items", "additionalItems", "additionalProperties", "unevaluatedProperties",
+                        "unevaluatedItems", "contains", "propertyNames", "not", "if", "then", "else", "contentSchema"):
+                visit(node.get(key))
 
     visit(result)
     return result

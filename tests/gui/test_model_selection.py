@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from misaka.ui.gui import settings_worker as worker
-from misaka.ui.gui.model_preferences import visible_models
+from misaka.core.model_preferences import visible_models
 
 
 class ModelSelectionTests(unittest.TestCase):
@@ -95,7 +95,7 @@ class ModelSelectionTests(unittest.TestCase):
 
     def test_unset_preferences_keep_only_existing_defaults_and_pins(self):
         registry = worker._runtime().registry
-        with patch("misaka.ui.gui.model_preferences.initial_refs", return_value={"sample/old"}):
+        with patch("misaka.core.model_preferences.initial_refs", return_value={"sample/old"}):
             self.assertEqual([m.id for m in visible_models(registry.getAvailable())], ["old"])
 
     def test_catalog_pagination_and_non_chat_models(self):

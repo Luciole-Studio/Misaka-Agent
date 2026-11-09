@@ -20,6 +20,7 @@ import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
+from typing import ClassVar
 
 from misaka.config import CFG, VERSION, current_config, home, sisters
 from misaka.ui.gui.chats import ChatManager
@@ -110,7 +111,7 @@ class Bridge:
             return client.ensure(timeout=15)
 
     def launch(self, data, args, title):
-        cwd = workspace_path(data.get("workspace", self.workspace))
+        cwd = self._cwd(data)
         self.ensure()
         return self.request("pane.create", {
             "argv": [sys.executable, "-m", "misaka", *args], "cwd": cwd,
@@ -118,18 +119,20 @@ class Bridge:
         })
 
     def _research(self, data, args, title):
-        cwd = workspace_path(data.get("workspace", self.workspace))
+        cwd = self._cwd(data)
+        warning = ""
         try:
             # Node conversations (where plans are approved) are listed through the session
             # service; start it so they can be opened, but a research run does not need it.
             self.ensure()
-        except Exception:  # noqa: BLE001
-            pass
+        except (ConnectionError, OSError, RuntimeError) as error:
+            warning = "会话服务未能连接，节点对话暂时无法列出：" + (str(error) or type(error).__name__)
         result = self.research_runs.start(cwd, args, title)
-        return {**result, "message": "研究已在后台启动"}
+        return {**result, "message": "研究已在后台启动" + ("；" + warning if warning else ""),
+                **({"warning": warning} if warning else {})}
 
     def state(self, data):
-        cwd = workspace_path(data.get("workspace", self.workspace))
+        cwd = self._cwd(data)
         cfg = current_config()
         result = {"workspace": cwd, "version": VERSION, "platform": sys.platform,
                   "model": cfg.get("lo_model") or cfg.get("default_model", ""), "provider": cfg.get("provider", ""),
@@ -170,7 +173,7 @@ class Bridge:
             return self._native_chat(data)
 
     def _native_chat(self, data):
-        spec = {"workspace": workspace_path(data.get("workspace", self.workspace))}
+        spec = {"workspace": self._cwd(data)}
         if data.get("role"):
             role = required_text(data, "role", 128)
             if role not in sisters():
@@ -220,7 +223,7 @@ class Bridge:
             role = data.get("role") or None
             if role and role not in sisters():
                 raise ValueError("未知的 Sister；请从协作成员列表选择")
-            workspace = workspace_path(data.get("workspace", self.workspace))
+            workspace = self._cwd(data)
             source = self._saved_session(required_text(data, "path", 1024), role, workspace)
             from misaka.ui.gui.branching import fork_file
             path = fork_file(source, timestamp=data.get("timestamp"), name=name)
@@ -236,7 +239,7 @@ class Bridge:
         import asyncio
         from misaka.config import sessions as sessions_cfg
         from misaka.core.session_manager import SessionManager
-        cwd = workspace_path(data.get("workspace", self.workspace))
+        cwd = self._cwd(data)
         role = data.get("role") or None
         if role and role not in sisters():
             raise ValueError("未知的 Sister")
@@ -313,7 +316,7 @@ class Bridge:
         if not self.picker_lock.acquire(blocking=False):
             raise ValueError("文件夹选择窗口已打开，请先完成选择")
         try:
-            initial = workspace_path(data.get("workspace", self.workspace))
+            initial = self._cwd(data)
             result = subprocess.run([sys.executable, "-X", "utf8", "-m", "misaka.ui.gui.folder_picker", initial],
                                     capture_output=True, text=True, encoding="utf-8", timeout=300,
                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -330,7 +333,7 @@ class Bridge:
             self.picker_lock.release()
 
     def project_sessions(self, data):
-        cwd = workspace_path(data.get("workspace", self.workspace))
+        cwd = self._cwd(data)
         if os.path.normcase(cwd) not in {os.path.normcase(p) for p in self.projects.read()}:
             raise ValueError("请先添加这个项目")
         result = {"workspace": cwd, "saved": self.saved_chat_sessions({"workspace": cwd, "all_roles": True})["sessions"],
@@ -343,7 +346,7 @@ class Bridge:
         return result
 
     def session_update(self, data):
-        cwd = workspace_path(data.get("workspace", self.workspace))
+        cwd = self._cwd(data)
         path = required_text(data, "path", 4096)
         key = path_key(path)
         op = required_text(data, "op", 32)
@@ -384,7 +387,7 @@ class Bridge:
         return {"preferences": self.session_library.preferences(cwd)}
 
     def composer_skills(self, data):
-        cwd = workspace_path(data.get("workspace", self.workspace))
+        cwd = self._cwd(data)
         role = skill_role(data.get("role"))
         if role and role not in sisters():
             raise ValueError("未知的 Sister")
@@ -402,138 +405,518 @@ class Bridge:
                 return skill_catalogue(cwd, channel.meta.get("role"))
         return skill_catalogue(cwd, role)
 
+    def _cwd(self, data):
+        """Resolve the requested workspace using the bridge default consistently."""
+        return workspace_path(data.get("workspace", self.workspace))
+
+    ACTION_HANDLERS: ClassVar[dict[str, str]] = {
+        'open_terminal': '_action_open_terminal',
+        'open_path': '_action_open_path',
+        'git_changes': '_action_git_changes',
+        'git_diff': '_action_git_diff',
+        'session_update': '_action_session_update',
+        'session_trash': '_action_session_trash',
+        'composer_skills': '_action_composer_skills',
+        'skill_reviews': '_action_skill_reviews',
+        'skill_decide': '_action_skill_decide',
+        'composer_files': '_action_composer_files',
+        'projects': '_action_projects',
+        'pick_folder': '_action_pick_folder',
+        'project_sessions': '_action_project_sessions',
+        'job': '_action_job',
+        'settings': '_action_settings',
+        'login_start': '_action_login_start',
+        'login_status': '_action_login_status',
+        'login_answer': '_action_login_answer',
+        'login_cancel': '_action_login_cancel',
+        'research_jobs': '_action_research_jobs',
+        'research_log': '_action_research_log',
+        'command_output': '_action_command_output',
+        'session_input': '_action_session_control',
+        'session_models': '_action_session_control',
+        'session_pause': '_action_session_control',
+        'session_resume': '_action_session_control',
+        'session_send_now': '_action_session_control',
+        'session_set_model': '_action_session_control',
+        'session_set_thinking': '_action_session_control',
+        'session_snapshot': '_action_session_control',
+        'session_withdraw': '_action_session_control',
+        'chat_native': '_action_chat_native',
+        'chat_sessions': '_action_chat_sessions',
+        'chat_snapshot': '_action_chat_snapshot',
+        'chat_fork': '_action_chat_fork',
+        'chat_events': '_action_chat_proxy',
+        'chat_send': '_action_chat_proxy',
+        'chat_stop': '_action_chat_proxy',
+        'chat_compact': '_action_chat_proxy',
+        'chat_models': '_action_chat_proxy',
+        'chat_set_model': '_action_chat_proxy',
+        'chat_set_thinking': '_action_chat_proxy',
+        'chat_rename': '_action_chat_proxy',
+        'chat_ui_response': '_action_chat_proxy',
+        'chat_send_now': '_action_chat_proxy',
+        'chat_withdraw': '_action_chat_proxy',
+        'chat_rewind': '_action_chat_proxy',
+        'chat_restore': '_action_chat_proxy',
+        'chat_side': '_action_chat_proxy',
+        'chat_side_stop': '_action_chat_proxy',
+        'chat_side_close': '_action_chat_proxy',
+        'chat_close': '_action_chat_close',
+        'chat_replay': '_action_chat_replay',
+        'state': '_action_state',
+        'connect': '_action_connect',
+        'folders': '_action_folders',
+        'chat': '_action_chat',
+        'research': '_action_research',
+        'research_list': '_action_research_run',
+        'research_resume': '_action_research_run',
+        'research_stop': '_action_research_run',
+        'setup': '_action_setup',
+        'command': '_action_command',
+        'session': '_action_session',
+        'close': '_action_pane',
+        'input': '_action_pane',
+        'key': '_action_pane',
+        'resize': '_action_pane',
+        'screen': '_action_pane',
+        'scroll': '_action_pane',
+        'send': '_action_pane',
+        'card': '_action_card',
+        'roster': '_action_roster',
+        'documents': '_action_documents',
+        'files': '_action_files',
+    }
+
     def dispatch(self, action, data):
-        if action == "open_terminal":
-            return open_terminal(workspace_path(data.get("workspace", self.workspace)))
-        if action == "open_path":
-            return open_path(workspace_path(data.get("workspace", self.workspace)), str(data.get("path", ".")), bool(data.get("reveal")))
-        if action == "git_changes":
-            return git_changes(workspace_path(data.get("workspace", self.workspace)))
-        if action == "git_diff":
-            return git_diff(workspace_path(data.get("workspace", self.workspace)), required_text(data, "path", 4096))
-        if action == "session_update":
-            return self.session_update(data)
-        if action == "session_trash":
-            cwd = workspace_path(data.get("workspace", self.workspace))
-            return {"sessions": sorted([s for s in self.session_library.preferences(cwd).values()
-                                       if s.get("deleted_at")], key=lambda s: s["deleted_at"], reverse=True)}
-        if action == "composer_skills":
-            return self.composer_skills(data)
-        if action == "skill_reviews":
-            from misaka.core.skills.review import pending_items
-            return {"items": pending_items(with_diff=bool(data.get("diff")))}
-        if action == "skill_decide":
-            from misaka.core.skills.review import decide
-            decision = data.get("decision")
-            if decision not in {"approve", "reject"}:
-                raise ValueError("只能批准或拒绝")
-            return decide(str(data.get("id") or ""), decision)
-        if action == "composer_files":
-            cwd = workspace_path(data.get("workspace", self.workspace))
-            query = data.get("query", "")
-            if not isinstance(query, str) or len(query) > 1024:
-                raise ValueError("文件搜索词格式有误")
-            return self.composer_files.search(cwd, query)
-        if action == "projects":
-            return self.project_list(data)
-        if action == "pick_folder":
-            return self.pick_project_folder(data)
-        if action == "project_sessions":
-            return self.project_sessions(data)
-        if action == "job":
-            return self.jobs.get(required_text(data, "job_id", 64), workspace_path(data.get("workspace", self.workspace)))
-        if action == "settings":
-            op = required_text(data, "op", 64)
-            if op not in SETTINGS_OPS:
-                raise ValueError("未知设置操作")
-            params = data.get("params") or {}
-            if not isinstance(params, dict):
-                raise ValueError("参数格式不正确")
-            return self.settings.call(op, params, workspace_path(data.get("workspace", self.workspace)))
-        if action == "login_start":
-            return self.settings.login_start(required_text(data, "provider", 128), workspace_path(data.get("workspace", self.workspace)))
-        if action == "login_status":
-            return self.settings.login_status(data.get("login_id"))
-        if action == "login_answer":
-            value = data.get("value")
-            if value is not None and (not isinstance(value, str) or len(value) > 16384):
-                raise ValueError("回答过长")
-            return self.settings.login_answer(data.get("login_id"), str(data.get("prompt_id", "")), value)
-        if action == "login_cancel":
-            return self.settings.login_cancel(data.get("login_id"))
-        if action == "research_jobs":
-            return {"jobs": self.research_runs.listing(workspace_path(data.get("workspace", self.workspace)))}
-        if action == "research_log":
-            return self.research_runs.log(workspace_path(data.get("workspace", self.workspace)),
-                                          data.get("job_id"), data.get("run_id"))
-        if action == "command_output":
-            args = data.get("args")
-            # Noninteractive commands only: output is shown when they finish, nothing waits for a key.
-            allowed = {("doc", "add"), ("doc", "find"), ("doc", "tree"), ("doc", "verify"), ("doc", "scan"),
-                       ("doc", "list"), ("skills", "list"), ("skills", "pending"), ("skills", "scan"),
-                       ("skills", "curator-status"), ("skills", "approve"), ("skills", "reject"),
-                       ("skills", "usage"), ("skills", "ledger"), ("bundles", "list"), ("auth", "check"),
-                       ("web", "status"), ("web", "providers"), ("web", "accounts"), ("web", "login"),
-                       ("web", "logout"), ("web", "setup"), ("web", "browser-install"), ("web", "browser-status"),
-                       ("web", "gateway-status"), ("moa", "list")}
-            if (not isinstance(args, list) or len(args) < 2 or len(args) > 30
-                    or any(not isinstance(a, str) or len(a) > 16384 or "\0" in a for a in args)
-                    or tuple(args[:2]) not in allowed
-                    or (args[0] == "web" and args[1] == "setup" and args[2:] != ["ddgs", "--install", "--yes"])):
-                raise ValueError("这个命令需要交互，图形界面不支持；请使用设置页中的对应功能")
-            return self.jobs.start(workspace_path(data.get("workspace", self.workspace)), args, str(data.get("title", "操作结果"))[:80])
-        if action in {"session_snapshot", "session_input", "session_pause", "session_resume",
-                      "session_models", "session_set_model", "session_set_thinking", "session_send_now", "session_withdraw"}:
-            import asyncio
-            from misaka.core.session_catalog import owner_record, _object
-            from misaka.core.session_control import request
-            from misaka.core.session_manager import sessionEntryToContextMessages as session_entry_to_context_messages
-            from misaka.modes.json_event import to_jsonable
-            cwd = workspace_path(data.get("workspace", self.workspace))
-            listing = self.request("cards.list", {"workspace": cwd})["sessions"]
-            entry = next((s for s in listing if s["id"] == data.get("session_id")), None)
-            if entry is None:
-                raise ValueError("当前项目没有这条会话，请刷新列表")
-            path = entry.get("path")
-            owner = owner_record(path) if path else _object(entry["catalog_file"])
-            if action == "session_snapshot" and (not owner.get("control") or entry.get("state") == "saved"):
-                return {**self.chat_snapshot({"path": path}), "state": "saved", "readonly": True}
-            if not owner.get("control"):
-                raise ValueError("会话已结束，无法发送消息；记录仍可查看")
-            operation = {"session_snapshot": "snapshot", "session_input": "input",
-                         "session_pause": "pause", "session_resume": "resume", "session_models": "models",
-                         "session_set_model": "set_model", "session_set_thinking": "set_thinking",
-                         "session_send_now": "send_now", "session_withdraw": "withdraw"}[action]
-            params = {key: data.get(key) for key in ("provider", "model", "level", "message_id")}
-            if operation == "input":
-                params = {"text": referenced_message(required_text(data, "text"), data.get("files"), cwd),
-                          "display_text": data.get("text"), "streamingBehavior": data.get("streamingBehavior", "steer"),
-                          "message_id": data.get("message_id"), "files": data.get("files") or []}
+        """Dispatch only registered actions; native routes never enter the daemon path."""
+        method = self.ACTION_HANDLERS.get(action)
+        if method is None:
+            raise ValueError("未知操作")
+        return getattr(self, method)(data, action)
+
+    def _action_open_terminal(self, data, action):
+        'Handle open_terminal.'
+        return open_terminal(self._cwd(data))
+
+    def _action_open_path(self, data, action):
+        'Handle open_path.'
+        return open_path(self._cwd(data), str(data.get("path", ".")), bool(data.get("reveal")))
+
+    def _action_git_changes(self, data, action):
+        'Handle git_changes.'
+        return git_changes(self._cwd(data))
+
+    def _action_git_diff(self, data, action):
+        'Handle git_diff.'
+        return git_diff(self._cwd(data), required_text(data, "path", 4096))
+
+    def _action_session_update(self, data, action):
+        'Handle session_update.'
+        return self.session_update(data)
+
+    def _action_session_trash(self, data, action):
+        'Handle session_trash.'
+        cwd = self._cwd(data)
+        return {"sessions": sorted([{**s, "title": s.get("title") or s.get("display_title") or "未命名会话"}
+                                   for s in self.session_library.preferences(cwd).values()
+                                   if s.get("deleted_at")], key=lambda s: s["deleted_at"], reverse=True)}
+
+    def _action_composer_skills(self, data, action):
+        'Handle composer_skills.'
+        return self.composer_skills(data)
+
+    def _action_skill_reviews(self, data, action):
+        'Handle skill_reviews.'
+        from misaka.core.skills.review import pending_items
+        return {"items": pending_items(with_diff=bool(data.get("diff")))}
+
+    def _action_skill_decide(self, data, action):
+        'Handle skill_decide.'
+        from misaka.core.skills.review import decide
+        decision = data.get("decision")
+        if decision not in {"approve", "reject"}:
+            raise ValueError("只能批准或拒绝")
+        return decide(str(data.get("id") or ""), decision)
+
+    def _action_composer_files(self, data, action):
+        'Handle composer_files.'
+        cwd = self._cwd(data)
+        query = data.get("query", "")
+        if not isinstance(query, str) or len(query) > 1024:
+            raise ValueError("文件搜索词格式有误")
+        return self.composer_files.search(cwd, query)
+
+    def _action_projects(self, data, action):
+        'Handle projects.'
+        return self.project_list(data)
+
+    def _action_pick_folder(self, data, action):
+        'Handle pick_folder.'
+        return self.pick_project_folder(data)
+
+    def _action_project_sessions(self, data, action):
+        'Handle project_sessions.'
+        return self.project_sessions(data)
+
+    def _action_job(self, data, action):
+        'Handle job.'
+        return self.jobs.get(required_text(data, "job_id", 64), self._cwd(data))
+
+    def _action_settings(self, data, action):
+        'Handle settings.'
+        op = required_text(data, "op", 64)
+        if op not in SETTINGS_OPS:
+            raise ValueError("未知设置操作")
+        params = data.get("params") or {}
+        if not isinstance(params, dict):
+            raise ValueError("参数格式不正确")
+        return self.settings.call(op, params, self._cwd(data))
+
+    def _action_login_start(self, data, action):
+        'Handle login_start.'
+        return self.settings.login_start(required_text(data, "provider", 128), self._cwd(data))
+
+    def _action_login_status(self, data, action):
+        'Handle login_status.'
+        return self.settings.login_status(data.get("login_id"))
+
+    def _action_login_answer(self, data, action):
+        'Handle login_answer.'
+        value = data.get("value")
+        if value is not None and (not isinstance(value, str) or len(value) > 16384):
+            raise ValueError("回答过长")
+        return self.settings.login_answer(data.get("login_id"), str(data.get("prompt_id", "")), value)
+
+    def _action_login_cancel(self, data, action):
+        'Handle login_cancel.'
+        return self.settings.login_cancel(data.get("login_id"))
+
+    def _action_research_jobs(self, data, action):
+        'Handle research_jobs.'
+        return {"jobs": self.research_runs.listing(self._cwd(data))}
+
+    def _action_research_log(self, data, action):
+        'Handle research_log.'
+        return self.research_runs.log(self._cwd(data),
+                                      data.get("job_id"), data.get("run_id"))
+
+    def _action_command_output(self, data, action):
+        'Handle command_output.'
+        args = data.get("args")
+        # Noninteractive commands only: output is shown when they finish, nothing waits for a key.
+        allowed = {("doc", "add"), ("doc", "find"), ("doc", "tree"), ("doc", "verify"), ("doc", "scan"),
+                   ("doc", "list"), ("skills", "list"), ("skills", "pending"), ("skills", "scan"),
+                   ("skills", "curator-status"), ("skills", "approve"), ("skills", "reject"),
+                   ("skills", "usage"), ("skills", "ledger"), ("bundles", "list"), ("auth", "check"),
+                   ("web", "status"), ("web", "providers"), ("web", "accounts"), ("web", "login"),
+                   ("web", "logout"), ("web", "setup"), ("web", "browser-install"), ("web", "browser-status"),
+                   ("web", "gateway-status"), ("moa", "list")}
+        if (not isinstance(args, list) or len(args) < 2 or len(args) > 30
+                or any(not isinstance(a, str) or len(a) > 16384 or "\0" in a for a in args)
+                or tuple(args[:2]) not in allowed
+                or (args[0] == "web" and args[1] == "setup" and args[2:] != ["ddgs", "--install", "--yes"])):
+            raise ValueError("这个命令需要交互，图形界面不支持；请使用设置页中的对应功能")
+        return self.jobs.start(self._cwd(data), args, str(data.get("title", "操作结果"))[:80])
+
+    def _action_session_control(self, data, action):
+        'Handle session_input, session_models, session_pause, session_resume, session_send_now, session_set_model, session_set_thinking, session_snapshot, session_withdraw.'
+        import asyncio
+        from misaka.core.session_catalog import owner_record, _object
+        from misaka.core.session_control import request
+        from misaka.core.session_manager import sessionEntryToContextMessages as session_entry_to_context_messages
+        from misaka.modes.json_event import to_jsonable
+        cwd = self._cwd(data)
+        listing = self.request("cards.list", {"workspace": cwd})["sessions"]
+        entry = next((s for s in listing if s["id"] == data.get("session_id")), None)
+        if entry is None:
+            raise ValueError("当前项目没有这条会话，请刷新列表")
+        path = entry.get("path")
+        owner = owner_record(path) if path else _object(entry["catalog_file"])
+        if action == "session_snapshot" and (not owner.get("control") or entry.get("state") == "saved"):
+            return {**self.chat_snapshot({"path": path}), "state": "saved", "readonly": True}
+        if not owner.get("control"):
+            raise ValueError("会话已结束，无法发送消息；记录仍可查看")
+        operation = {"session_snapshot": "snapshot", "session_input": "input",
+                     "session_pause": "pause", "session_resume": "resume", "session_models": "models",
+                     "session_set_model": "set_model", "session_set_thinking": "set_thinking",
+                     "session_send_now": "send_now", "session_withdraw": "withdraw"}[action]
+        params = {key: data.get(key) for key in ("provider", "model", "level", "message_id")}
+        if operation == "input":
+            params = {"text": referenced_message(required_text(data, "text"), data.get("files"), cwd),
+                      "display_text": data.get("text"), "streamingBehavior": data.get("streamingBehavior", "steer"),
+                      "message_id": data.get("message_id"), "files": data.get("files") or []}
+        try:
+            result = asyncio.run(request(owner, operation, **params))
+        except ValueError as error:
+            if "Unknown session operation:" in str(error):
+                raise ValueError("这个会话由旧版进程运行，尚不支持模型、思考深度或消息队列操作。请等任务结束并关闭原进程后，再用新版继续保存的会话；重开网页不会更新原进程。") from error
+            raise
+        if operation == "snapshot":
+            messages = [to_jsonable(m) for entry in result.pop("entries", []) or []
+                        for m in session_entry_to_context_messages(entry)]
+            messages = [m for m in messages if m.get("role") != "system"]
+            if result.get("streaming"):
+                messages.append(result["streaming"])
+            return {**result, "capabilities": result.get("capabilities", []),
+                    "messages": messages, "readonly": False}
+        if operation in {"models", "set_model", "set_thinking", "send_now", "withdraw"}:
+            return result
+        return {**(result if isinstance(result, dict) else {}), "message": "已发送到原会话" if operation == "input" else "已请求暂停" if operation == "pause" else "已恢复"}
+
+    def _action_chat_native(self, data, action):
+        'Handle chat_native through the native conversation host.'
+        return self.native_chat(data)
+
+    def _action_chat_sessions(self, data, action):
+        'Handle chat_sessions through the native conversation host.'
+        return self.saved_chat_sessions(data)
+
+    def _action_chat_snapshot(self, data, action):
+        'Handle chat_snapshot through the native conversation host.'
+        return self.chat_snapshot(data)
+
+    def _action_chat_fork(self, data, action):
+        'Handle chat_fork through the native conversation host.'
+        return self.fork_chat(data)
+
+    def _action_chat_close(self, data, action):
+        'Handle chat_close.'
+        return self.chats.close(data.get("chat_id"))
+
+    def _action_chat_replay(self, data, action):
+        'Handle chat_replay.'
+        return self.chats.request(data, "snapshot")
+
+    def _action_state(self, data, action):
+        'Handle state.'
+        return self.state(data)
+
+    def _action_connect(self, data, action):
+        'Handle connect.'
+        self.ensure()
+        return self.state(data)
+
+    def _action_folders(self, data, action):
+        'Handle folders.'
+        folder = Path(workspace_path(data.get("path") or data.get("workspace", self.workspace)))
+        entries = []
+        for path in sorted(folder.iterdir(), key=lambda p: p.name.casefold()):
             try:
-                result = asyncio.run(request(owner, operation, **params))
-            except ValueError as error:
-                if "Unknown session operation:" in str(error):
-                    raise ValueError("这个会话由旧版进程运行，尚不支持模型、思考深度或消息队列操作。请等任务结束并关闭原进程后，再用新版继续保存的会话；重开网页不会更新原进程。") from error
-                raise
-            if operation == "snapshot":
-                messages = [to_jsonable(m) for entry in result.pop("entries", []) or []
-                            for m in session_entry_to_context_messages(entry)]
-                messages = [m for m in messages if m.get("role") != "system"]
-                if result.get("streaming"):
-                    messages.append(result["streaming"])
-                return {**result, "capabilities": result.get("capabilities", []),
-                        "messages": messages, "readonly": False}
-            if operation in {"models", "set_model", "set_thinking", "send_now", "withdraw"}:
-                return result
-            return {**(result if isinstance(result, dict) else {}), "message": "已发送到原会话" if operation == "input" else "已请求暂停" if operation == "pause" else "已恢复"}
-        # Native chats first: they never touch the daemon, so they work before
-        # "连接" and cannot be broken by it.
-        native = {"chat_native": self.native_chat,
-                  "chat_sessions": self.saved_chat_sessions,
-                  "chat_snapshot": self.chat_snapshot,
-                  "chat_fork": self.fork_chat}
-        if action in native:
-            return native[action](data)
+                if path.is_dir() and not path.name.startswith("."):
+                    entries.append({"name": path.name, "path": str(path.resolve())})
+            except OSError:
+                continue
+        return {"path": str(folder), "parent": str(folder.parent), "entries": entries[:500]}
+
+    def _action_chat(self, data, action):
+        'Handle chat.'
+        args = ["chat"]
+        if data.get("role"):
+            args += ["--as", required_text(data, "role", 128)]
+        if data.get("continue"):
+            args += ["--continue"]
+        return self.launch(data, args, "Last Order" if not data.get("role") else f"Sister {data['role']}")
+
+    def _action_research(self, data, action):
+        'Handle research.'
+        return self._research(data, research_args(data), "研究 · " + data["goal"][:36])
+
+    def _action_research_run(self, data, action):
+        'Handle research_list, research_resume, research_stop.'
+        from contextlib import closing
+        from misaka.core.platform import tasks
+        from misaka.core.research import runs
+        if not Path(CFG["db"]).exists():
+            if action == "research_list":
+                return {"runs": []}
+            raise ValueError("研究记录不存在")
+        cwd = tasks.canonical_workspace(self._cwd(data))
+        if action == "research_list":
+            with closing(sqlite3.connect(Path(CFG["db"]).resolve().as_uri() + "?mode=ro", uri=True)) as con:
+                con.row_factory = sqlite3.Row
+                if not con.execute("SELECT 1 FROM sqlite_master WHERE name='research_runs'").fetchone():
+                    return {"runs": []}
+                items = con.execute("SELECT * FROM research_runs WHERE workspace=? ORDER BY created_at DESC", (cwd,)).fetchall()
+                return {"runs": [{**dict(r), "nodes": [dict(n) for n in runs.nodes(con, r["id"])],
+                                  "edges": [dict(e) for e in runs.edges(con, r["id"])]} for r in items]}
+        with closing(tasks.connect(CFG["db"])) as con:
+            items = runs.listing(con, workspace=cwd)
+            run_id = required_text(data, "run_id", 128)
+            if not any(r["id"] == run_id for r in items):
+                raise ValueError("当前项目没有这项研究")
+            if action == "research_stop":
+                run = next(r for r in items if r["id"] == run_id)
+                if run["status"] not in {"active", "waiting_input", "stopping"}:
+                    raise ValueError("这项研究已经结束，无需停止")
+                runs.request_stop(con, run_id)
+                return {"message": "已请求停止研究；原生工作流将收尾并生成阶段性报告"}
+        return self._research(data, ["research", "--resume", run_id], "恢复研究")
+
+    def _action_setup(self, data, action):
+        'Handle setup.'
+        section = data.get("section", "")
+        if section and section not in SETUP_SECTIONS:
+            raise ValueError("未知设置项")
+        return self.launch(data, ["setup", *([section] if section else [])], "设置向导")
+
+    def _action_command(self, data, action):
+        'Handle command.'
+        args = data.get("args")
+        if (not isinstance(args, list) or not args or args[0] not in COMMANDS
+                or len(args) > 80 or any(not isinstance(a, str) or "\0" in a or len(a) > 16384 for a in args)):
+            raise ValueError("不支持的命令或参数；请使用页面列出的 MISAKA 命令")
+        return self.launch(data, args, data.get("title", "MISAKA 命令")[:80])
+
+    def _action_session(self, data, action):
+        'Handle session.'
+        self.ensure()
+        cwd = self._cwd(data)
+        sessions = self.request("cards.list", {"workspace": cwd})["sessions"]
+        entry = next((s for s in sessions if s["id"] == data.get("session_id")), None)
+        if entry is None:
+            raise ValueError("会话已不存在，请刷新列表")
+        # Attach to the original owner when it is live; never start a second writer.
+        for pane in self.request("panes.list")["panes"]:
+            argv = pane.get("argv", [])
+            source_path = next((argv[argv.index(flag) + 1] for flag in ("--session", "--catalog") if flag in argv[:-1]), None)
+            path = entry.get("path") or entry.get("catalog_file")
+            if pane["alive"] and path and path in {(pane.get("reported") or {}).get("session"), source_path}:
+                return {"pane_id": pane["id"]}
+        source = ["--session", entry["path"]] if entry.get("path") else ["--catalog", entry["catalog_file"]]
+        from misaka.config import sisters
+        role = entry.get("role")
+        resumable = (entry.get("kind") == "foreground" and entry.get("state") == "saved"
+                     and (role == "last-order" or role in sisters()))
+        if not data.get("read_only", True) and resumable:
+            args = ["chat", *source, *(["--as", role] if role != "last-order" else [])]
+        else:
+            # Task/node/DM runtimes keep their own lifecycle even after exiting.
+            mode = "--attach" if not data.get("read_only", True) and entry.get("control") else "--read-only"
+            args = ["chat", *source, mode]
+        return self.launch({"workspace": entry.get("cwd") or cwd}, args, "历史会话")
+
+    def _action_pane(self, data, action):
+        'Handle close, input, key, resize, screen, scroll, send.'
+        pane_id = required_text(data, "id", 64)
+        if action == "screen":
+            from misaka.ui.panel.screen import cells_from_ansi
+            screen = self.request("pane.screen", {"id": pane_id})
+            # Coalesce styled cells into runs; text is always inserted with textContent.
+            lines = []
+            for line in screen["rows"]:
+                runs = []
+                for char, style in cells_from_ansi(line):
+                    if runs and runs[-1][1] == style:
+                        runs[-1][0] += char
+                    else:
+                        runs.append([char, style])
+                lines.append(runs)
+            return {**screen, "rows": lines}
+        if action in {"key", "input", "send"}:
+            if action == "key":
+                if data.get("key") not in KEYS:
+                    raise ValueError("未知按键")
+                from misaka.ui.panel.host_input import CTRL, Key
+                from misaka.ui.panel.pane_input import encode_key
+                mode = self.request("pane.screen", {"id": pane_id}).get("input", {})
+                name = data["key"]
+                key = Key("c", CTRL) if name == "interrupt" else Key("esc" if name == "escape" else name)
+                value = encode_key(key, mode).decode("utf-8")
+            else:
+                value = required_text(data, "text", 65536) if action == "send" else data.get("text", "")
+                if not isinstance(value, str) or len(value) > 65536:
+                    raise ValueError("输入过长")
+                if action == "send":
+                    # Native setup prompts do not always enable bracketed paste.
+                    # Respect the program's mode instead of typing escape codes into a wizard.
+                    mode = self.request("pane.screen", {"id": pane_id}).get("input", {})
+                    value = value.replace("\x1b", "")
+                    if mode.get("bracketed_paste"):
+                        value = "\x1b[200~" + value + "\x1b[201~"
+                    else:
+                        value = value.replace("\r\n", "\n").replace("\n", "\r")
+            result = self.request("pane.input", {"id": pane_id, "data": base64.b64encode(value.encode()).decode()})
+            if action == "send" and data.get("enter", True):
+                self.request("pane.input", {"id": pane_id, "data": "DQ=="})
+            return result
+        if action == "resize":
+            rows, cols = int(data.get("rows", 30)), int(data.get("cols", 100))
+            return self.request("pane.resize", {"id": pane_id, "rows": max(8, min(rows, 100)), "cols": max(40, min(cols, 240))})
+        if action == "scroll":
+            return self.request("pane.scroll", {"id": pane_id, "delta": max(-200, min(int(data.get("delta", 0)), 200)), "to": "bottom" if data.get("bottom") else None})
+        return self.request("pane.close", {"id": pane_id})
+
+    def _action_card(self, data, action):
+        'Handle card.'
+        self.ensure()
+        cwd = self._cwd(data)
+        if not any(c["id"] == data.get("task_id") for c in self.request("cards.list", {"workspace": cwd}).get("cards", [])):
+            raise ValueError("当前项目没有这张任务卡")
+        methods = {"run": "pane.run_card", "open": "pane.open_card_session", "stop": "card.stop", "continue": "pane.continue_card"}
+        if data.get("operation") not in methods:
+            raise ValueError("未知任务操作")
+        params = {"task_id": required_text(data, "task_id", 128)}
+        if data["operation"] == "continue":
+            params["say"] = required_text(data, "text")
+        return self.request(methods[data["operation"]], params)
+
+    def _action_roster(self, data, action):
+        'Handle roster.'
+        from misaka.core.network import roster
+        from misaka.config import profiles
+        members = []
+        for sid in roster.roster_names():
+            directory = Path(roster.ROOT) / sid
+            path = directory / "DESCRIBE.md"
+            desc = path.read_text(encoding="utf-8-sig") if path.exists() else "尚未填写专长"
+            members.append({"id": sid, "description": desc, "model": profiles.pinned_model(str(directory))})
+        return {"members": members}
+
+    def _action_documents(self, data, action):
+        'Handle documents.'
+        from misaka.core.documents import index
+        cwd = self._cwd(data)
+        return {"documents": index.docs(workspace=cwd)}
+
+    def _action_files(self, data, action):
+        'Handle files.'
+        cwd = Path(self._cwd(data))
+        relative = str(data.get("path", "."))
+        target = (cwd / relative).resolve()
+        if not target.is_relative_to(cwd):
+            raise ValueError("只能浏览当前项目内的文件")
+        if target.is_dir():
+            entries = []
+            for p in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.casefold())):
+                if p.name.startswith(".") or not p.resolve().is_relative_to(cwd):
+                    continue
+                try:
+                    info = p.stat()
+                except OSError:
+                    continue
+                entries.append({"name": p.name, "path": p.relative_to(cwd).as_posix(), "directory": p.is_dir(),
+                                "size": None if p.is_dir() else info.st_size, "modified": info.st_mtime})
+                if len(entries) >= 500:
+                    break
+            return {"entries": entries, "path": target.relative_to(cwd).as_posix(), "truncated": len(entries) >= 500}
+        image_types = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}
+        if target.suffix.lower() not in image_types and target.suffix.lower() not in PREVIEW_TEXT and target.name not in PREVIEW_NAMES:
+            raise ValueError("此格式暂不支持预览，请用本机应用打开")
+        info = target.stat()
+        if info.st_size > 2 * 1024 * 1024:
+            raise ValueError("文件超过 2 MB，请用本机应用打开")
+        raw = target.read_bytes()
+        meta = {"path": target.relative_to(cwd).as_posix(), "size": info.st_size, "modified": info.st_mtime}
+        if target.suffix.lower() in image_types:
+            return {"image": "data:" + image_types[target.suffix.lower()] + ";base64," + base64.b64encode(raw).decode("ascii"), **meta}
+        try:
+            content = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            raise ValueError("文件不是 UTF-8，已停止预览以避免乱码；原文件未修改") from None
+        return {"content": content, **meta}
+
+    def _action_chat_proxy(self, data, action):
+        'Forward native chat operations without connecting to the pane daemon.'
         if action == "chat_send" or (action == "chat_send_now" and data.get("text")):
             channel = self.chats._channel(data.get("chat_id"))
             data = {**data, "display_text": data.get("text"), "text": referenced_message(required_text(data, "text", 262144), data.get("files"), channel.meta["workspace"])}
@@ -545,213 +928,8 @@ class Bridge:
                   "chat_withdraw": self.chats.withdraw, "chat_rewind": self.chats.rewind,
                   "chat_restore": self.chats.restore, "chat_side": self.chats.side,
                   "chat_side_stop": self.chats.side_stop, "chat_side_close": self.chats.side_close}
-        if action in proxied:
-            return proxied[action](data)
-        if action == "chat_close":
-            return self.chats.close(data.get("chat_id"))
-        if action == "chat_replay":
-            return self.chats.request(data, "snapshot")
-        if action == "state":
-            return self.state(data)
-        if action == "connect":
-            self.ensure()
-            return self.state(data)
-        if action == "folders":
-            folder = Path(workspace_path(data.get("path") or data.get("workspace", self.workspace)))
-            entries = []
-            for path in sorted(folder.iterdir(), key=lambda p: p.name.casefold()):
-                try:
-                    if path.is_dir() and not path.name.startswith("."):
-                        entries.append({"name": path.name, "path": str(path.resolve())})
-                except OSError:
-                    continue
-            return {"path": str(folder), "parent": str(folder.parent), "entries": entries[:500]}
-        if action == "chat":
-            args = ["chat"]
-            if data.get("role"):
-                args += ["--as", required_text(data, "role", 128)]
-            if data.get("continue"):
-                args += ["--continue"]
-            return self.launch(data, args, "Last Order" if not data.get("role") else f"Sister {data['role']}")
-        if action == "research":
-            return self._research(data, research_args(data), "研究 · " + data["goal"][:36])
-        if action in {"research_list", "research_stop", "research_resume"}:
-            from contextlib import closing
-            from misaka.core.platform import tasks
-            from misaka.core.research import runs
-            if not Path(CFG["db"]).exists():
-                if action == "research_list":
-                    return {"runs": []}
-                raise ValueError("研究记录不存在")
-            cwd = tasks.canonical_workspace(workspace_path(data.get("workspace", self.workspace)))
-            if action == "research_list":
-                with closing(sqlite3.connect(Path(CFG["db"]).resolve().as_uri() + "?mode=ro", uri=True)) as con:
-                    con.row_factory = sqlite3.Row
-                    if not con.execute("SELECT 1 FROM sqlite_master WHERE name='research_runs'").fetchone():
-                        return {"runs": []}
-                    items = con.execute("SELECT * FROM research_runs WHERE workspace=? ORDER BY created_at DESC", (cwd,)).fetchall()
-                    return {"runs": [{**dict(r), "nodes": [dict(n) for n in runs.nodes(con, r["id"])],
-                                      "edges": [dict(e) for e in runs.edges(con, r["id"])]} for r in items]}
-            with closing(tasks.connect(CFG["db"])) as con:
-                items = runs.listing(con, workspace=cwd)
-                run_id = required_text(data, "run_id", 128)
-                if not any(r["id"] == run_id for r in items):
-                    raise ValueError("当前项目没有这项研究")
-                if action == "research_stop":
-                    run = next(r for r in items if r["id"] == run_id)
-                    if run["status"] not in {"active", "waiting_input", "stopping"}:
-                        raise ValueError("这项研究已经结束，无需停止")
-                    runs.request_stop(con, run_id)
-                    return {"message": "已请求停止研究；原生工作流将收尾并生成阶段性报告"}
-            return self._research(data, ["research", "--resume", run_id], "恢复研究")
-        if action == "setup":
-            section = data.get("section", "")
-            if section and section not in SETUP_SECTIONS:
-                raise ValueError("未知设置项")
-            return self.launch(data, ["setup", *([section] if section else [])], "设置向导")
-        if action == "command":
-            args = data.get("args")
-            if (not isinstance(args, list) or not args or args[0] not in COMMANDS
-                    or len(args) > 80 or any(not isinstance(a, str) or "\0" in a or len(a) > 16384 for a in args)):
-                raise ValueError("不支持的命令或参数；请使用页面列出的 MISAKA 命令")
-            return self.launch(data, args, data.get("title", "MISAKA 命令")[:80])
-        if action == "session":
-            self.ensure()
-            cwd = workspace_path(data.get("workspace", self.workspace))
-            sessions = self.request("cards.list", {"workspace": cwd})["sessions"]
-            entry = next((s for s in sessions if s["id"] == data.get("session_id")), None)
-            if entry is None:
-                raise ValueError("会话已不存在，请刷新列表")
-            # Attach to the original owner when it is live; never start a second writer.
-            for pane in self.request("panes.list")["panes"]:
-                argv = pane.get("argv", [])
-                source_path = next((argv[argv.index(flag) + 1] for flag in ("--session", "--catalog") if flag in argv[:-1]), None)
-                path = entry.get("path") or entry.get("catalog_file")
-                if pane["alive"] and path and path in {(pane.get("reported") or {}).get("session"), source_path}:
-                    return {"pane_id": pane["id"]}
-            source = ["--session", entry["path"]] if entry.get("path") else ["--catalog", entry["catalog_file"]]
-            from misaka.config import sisters
-            role = entry.get("role")
-            resumable = (entry.get("kind") == "foreground" and entry.get("state") == "saved"
-                         and (role == "last-order" or role in sisters()))
-            if not data.get("read_only", True) and resumable:
-                args = ["chat", *source, *(["--as", role] if role != "last-order" else [])]
-            else:
-                # Task/node/DM runtimes keep their own lifecycle even after exiting.
-                mode = "--attach" if not data.get("read_only", True) and entry.get("control") else "--read-only"
-                args = ["chat", *source, mode]
-            return self.launch({"workspace": entry.get("cwd") or cwd}, args, "历史会话")
-        if action in {"screen", "input", "key", "send", "resize", "scroll", "close"}:
-            pane_id = required_text(data, "id", 64)
-            if action == "screen":
-                from misaka.ui.panel.screen import cells_from_ansi
-                screen = self.request("pane.screen", {"id": pane_id})
-                # Coalesce styled cells into runs; text is always inserted with textContent.
-                lines = []
-                for line in screen["rows"]:
-                    runs = []
-                    for char, style in cells_from_ansi(line):
-                        if runs and runs[-1][1] == style:
-                            runs[-1][0] += char
-                        else:
-                            runs.append([char, style])
-                    lines.append(runs)
-                return {**screen, "rows": lines}
-            if action in {"key", "input", "send"}:
-                if action == "key":
-                    if data.get("key") not in KEYS:
-                        raise ValueError("未知按键")
-                    from misaka.ui.panel.host_input import CTRL, Key
-                    from misaka.ui.panel.pane_input import encode_key
-                    mode = self.request("pane.screen", {"id": pane_id}).get("input", {})
-                    name = data["key"]
-                    key = Key("c", CTRL) if name == "interrupt" else Key("esc" if name == "escape" else name)
-                    value = encode_key(key, mode).decode("utf-8")
-                else:
-                    value = required_text(data, "text", 65536) if action == "send" else data.get("text", "")
-                    if not isinstance(value, str) or len(value) > 65536:
-                        raise ValueError("输入过长")
-                    if action == "send":
-                        # Native setup prompts do not always enable bracketed paste.
-                        # Respect the program's mode instead of typing escape codes into a wizard.
-                        mode = self.request("pane.screen", {"id": pane_id}).get("input", {})
-                        value = value.replace("\x1b", "")
-                        if mode.get("bracketed_paste"):
-                            value = "\x1b[200~" + value + "\x1b[201~"
-                        else:
-                            value = value.replace("\r\n", "\n").replace("\n", "\r")
-                result = self.request("pane.input", {"id": pane_id, "data": base64.b64encode(value.encode()).decode()})
-                if action == "send" and data.get("enter", True):
-                    self.request("pane.input", {"id": pane_id, "data": "DQ=="})
-                return result
-            if action == "resize":
-                rows, cols = int(data.get("rows", 30)), int(data.get("cols", 100))
-                return self.request("pane.resize", {"id": pane_id, "rows": max(8, min(rows, 100)), "cols": max(40, min(cols, 240))})
-            if action == "scroll":
-                return self.request("pane.scroll", {"id": pane_id, "delta": max(-200, min(int(data.get("delta", 0)), 200)), "to": "bottom" if data.get("bottom") else None})
-            return self.request("pane.close", {"id": pane_id})
-        if action == "card":
-            self.ensure()
-            cwd = workspace_path(data.get("workspace", self.workspace))
-            if not any(c["id"] == data.get("task_id") for c in self.request("cards.list", {"workspace": cwd}).get("cards", [])):
-                raise ValueError("当前项目没有这张任务卡")
-            methods = {"run": "pane.run_card", "open": "pane.open_card_session", "stop": "card.stop", "continue": "pane.continue_card"}
-            if data.get("operation") not in methods:
-                raise ValueError("未知任务操作")
-            params = {"task_id": required_text(data, "task_id", 128)}
-            if data["operation"] == "continue":
-                params["say"] = required_text(data, "text")
-            return self.request(methods[data["operation"]], params)
-        if action == "roster":
-            from misaka.core.network import roster
-            from misaka.config import profiles
-            members = []
-            for sid in roster.roster_names():
-                directory = Path(roster.ROOT) / sid
-                path = directory / "DESCRIBE.md"
-                desc = path.read_text(encoding="utf-8-sig") if path.exists() else "尚未填写专长"
-                members.append({"id": sid, "description": desc, "model": profiles.pinned_model(str(directory))})
-            return {"members": members}
-        if action == "documents":
-            from misaka.core.documents import index
-            cwd = workspace_path(data.get("workspace", self.workspace))
-            return {"documents": index.docs(workspace=cwd)}
-        if action == "files":
-            cwd = Path(workspace_path(data.get("workspace", self.workspace)))
-            relative = str(data.get("path", "."))
-            target = (cwd / relative).resolve()
-            if not target.is_relative_to(cwd):
-                raise ValueError("只能浏览当前项目内的文件")
-            if target.is_dir():
-                entries = []
-                for p in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.casefold())):
-                    if p.name.startswith(".") or not p.resolve().is_relative_to(cwd):
-                        continue
-                    try:
-                        info = p.stat()
-                    except OSError:
-                        continue
-                    entries.append({"name": p.name, "path": p.relative_to(cwd).as_posix(), "directory": p.is_dir(),
-                                    "size": None if p.is_dir() else info.st_size, "modified": info.st_mtime})
-                    if len(entries) >= 500:
-                        break
-                return {"entries": entries, "path": target.relative_to(cwd).as_posix(), "truncated": len(entries) >= 500}
-            image_types = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}
-            if target.suffix.lower() not in image_types and target.suffix.lower() not in PREVIEW_TEXT and target.name not in PREVIEW_NAMES:
-                raise ValueError("此格式暂不支持预览，请用本机应用打开")
-            info = target.stat()
-            if info.st_size > 2 * 1024 * 1024:
-                raise ValueError("文件超过 2 MB，请用本机应用打开")
-            raw = target.read_bytes()
-            meta = {"path": target.relative_to(cwd).as_posix(), "size": info.st_size, "modified": info.st_mtime}
-            if target.suffix.lower() in image_types:
-                return {"image": "data:" + image_types[target.suffix.lower()] + ";base64," + base64.b64encode(raw).decode("ascii"), **meta}
-            try:
-                content = raw.decode("utf-8-sig")
-            except UnicodeDecodeError:
-                raise ValueError("文件不是 UTF-8，已停止预览以避免乱码；原文件未修改") from None
-            return {"content": content, **meta}
-        raise ValueError("未知操作")
+        return proxied[action](data)
+
 
 
 class GUIServer(ThreadingHTTPServer):
@@ -841,11 +1019,12 @@ class Handler(BaseHTTPRequestHandler):
                 # native_chat lets the launcher detect and replace a pre-refactor
                 # server process that would otherwise pass the version check.
                 self.reply(200, {"version": VERSION, "pid": os.getpid(), "native_chat": True, "project_gui": 14,
-                                 "source_revision": self.server.source_revision})
+                                 "source_revision": self.server.source_revision, "workspace": self.server.bridge.workspace})
                 return
             if self.path == "/api/shutdown":
-                self.reply(200, {"message": "网页服务已关闭；网页对话已停止并保存，独立研究进程继续运行"})
+                self.reply(200, {"message": "网页服务已关闭；网页对话已停止并保存，网页操作已终止，独立研究进程继续运行"})
                 self.server.bridge.chats.close_all()
+                self.server.bridge.jobs.close_all()
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
                 return
             result = self.server.bridge.dispatch(self.path[5:], data)
@@ -870,6 +1049,7 @@ def serve(*, port=0, open_browser=True, workspace=None):
         pass
     finally:
         server.bridge.chats.close_all()
+        server.bridge.jobs.close_all()
         server.server_close()
     return 0
 

@@ -26,12 +26,14 @@ class Projects:
         with FileLock(str(self.path) + ".lock"):
             saved = self.read()
             keys = {os.path.normcase(p) for p in saved}
+            changed = False
             for path in paths:
                 key = os.path.normcase(path)
                 if key not in keys:
                     saved.append(path)
                     keys.add(key)
-            if saved == self.read() and self.path.exists():
+                    changed = True
+            if not changed and self.path.exists():
                 return saved
             # Strictly decode above before replacement; retain an existing UTF-8 BOM.
             encoding = "utf-8-sig" if self.path.exists() and self.path.read_bytes().startswith(b"\xef\xbb\xbf") else "utf-8"

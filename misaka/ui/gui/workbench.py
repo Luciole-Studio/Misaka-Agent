@@ -16,7 +16,7 @@ MAX_PATCH = 400_000
 MAX_UNTRACKED = 200_000
 # A click in the side panel must never run a program the agent just wrote.
 RUNNABLE = {".exe", ".bat", ".cmd", ".com", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh",
-            ".msi", ".msp", ".scr", ".lnk", ".url", ".hta", ".cpl", ".jar", ".reg", ".sh", ".command", ".app", ".py", ".pyw"}
+            ".msi", ".msp", ".scr", ".lnk", ".url", ".hta", ".cpl", ".jar", ".reg", ".sh", ".command", ".app", ".py", ".pyw", ".desktop"}
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 STATUS = {"M": "modified", "A": "added", "D": "deleted", "R": "renamed", "C": "copied", "U": "conflict", "T": "modified"}
 
@@ -33,7 +33,8 @@ def project_target(workspace, relative) -> tuple[Path, Path]:
 
 def open_path(workspace, relative, reveal=False) -> dict:
     root, target = project_target(workspace, relative)
-    if not reveal and target.is_file() and target.suffix.lower() in RUNNABLE:
+    if (not reveal and target.suffix.lower() in RUNNABLE
+            and (target.is_file() or (sys.platform == "darwin" and target.suffix.lower() == ".app"))):
         raise ValueError("为安全起见，可执行文件和脚本不会从这里直接打开；可以在文件夹中显示后自行处理")
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if sys.platform == "win32":
