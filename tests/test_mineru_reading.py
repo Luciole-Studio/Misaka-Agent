@@ -463,12 +463,29 @@ def test_a_stuck_page_is_read_again_turned(judged, stand_in):
 def test_no_tesseract_leaves_every_page_as_it_is(judged, monkeypatch):
     book, answer, runs = judged
     answer(**{"2-270": UPRIGHT})
-    real = mineru.shutil.which
-    monkeypatch.setattr(mineru.shutil, "which", lambda name: None if name == mineru.TESSERACT else real(name))
+    monkeypatch.setattr(mineru, "find_tool", lambda name: None)
 
     mineru.read(book, [1, 2, 3], "basic")
 
     assert len(runs()) == 1 and runs()[0]["argv"][1] == book
+
+
+def test_a_tesseract_off_the_path_is_run_from_where_it_was_found(judged, stand_in, tmp_path, monkeypatch):
+    """Windows 11, 2026-11-10: the installer the wizard names leaves tesseract off PATH, so a machine
+    that had it never ran it."""
+    book, answer, runs = judged
+    order, _runs = stand_in
+    order(reads_at=270)
+    answer(**{"2-90": UPRIGHT})
+    elsewhere = tmp_path / "Tesseract-OCR"
+    elsewhere.mkdir()
+    program = (tmp_path / "bin" / mineru.TESSERACT).rename(elsewhere / mineru.TESSERACT)
+    assert mineru.shutil.which(mineru.TESSERACT) != str(program)        # PATH no longer leads to it
+    monkeypatch.setattr(mineru, "find_tool", lambda name: str(program) if name == mineru.TESSERACT else None)
+
+    mineru.read(book, [1, 2, 3], "advanced")
+
+    assert final(runs)["turned"] == [0, 270, 0]
 
 
 def test_a_tesseract_that_fails_leaves_every_page_as_it_is(judged):
@@ -481,7 +498,7 @@ def test_a_tesseract_that_fails_leaves_every_page_as_it_is(judged):
 
 
 def test_a_file_that_cannot_be_rendered_is_read_as_it_is(tmp_path, monkeypatch):
-    monkeypatch.setattr(mineru.shutil, "which", lambda name: "/usr/bin/tesseract")
+    monkeypatch.setattr(mineru, "find_tool", lambda name: "/usr/bin/tesseract")
     broken = tmp_path / "broken.pdf"
     broken.write_bytes(b"not a pdf")
     assert mineru._turns(str(broken), [1, 2]) == {}

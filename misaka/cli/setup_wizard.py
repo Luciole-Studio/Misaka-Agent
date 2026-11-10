@@ -54,7 +54,7 @@ from misaka.cli.setup_ui import (
 from misaka.config import home
 from misaka.core.provider_attribution import CLIENT_NAME
 from misaka.utils.open_browser import openBrowser
-from misaka.utils.tools_manager import find_tool
+from misaka.utils.tools_manager import find_tool, install_command
 
 OPENALEX_KEY_URL = "https://openalex.org/rest-api"
 SECTIONS = ("environment", "model", "sisters", "skills", "documents", "web", "research", "project")
@@ -76,23 +76,8 @@ FEATURED_PROVIDERS = ("anthropic", "openai", "github-copilot", "xai", "openroute
                       "google", "mistral", "amazon-bedrock", "ollama")
 
 
-def _install_command(binary: str) -> str:
-    """The package manager line for a missing binary on this OS."""
-    brew = {"git": "xcode-select --install", "rg": "brew install ripgrep", "fd": "brew install fd",
-            "pdftotext": "brew install poppler", "ocrmypdf": "brew install ocrmypdf tesseract-lang",
-            "tesseract": "brew install tesseract"}
-    apt = {"git": "sudo apt install git", "rg": "sudo apt install ripgrep", "fd": "sudo apt install fd-find",
-           "pdftotext": "sudo apt install poppler-utils",
-           # The chi_sim and jpn packs: documents.ocr_langs defaults to eng+chi_sim+jpn.
-           "ocrmypdf": "sudo apt install ocrmypdf tesseract-ocr-chi-sim tesseract-ocr-jpn",
-           "tesseract": "sudo apt install tesseract-ocr"}
-    # OCRmyPDF has no Windows package: it needs Tesseract and Ghostscript first, then pip.
-    winget = {"git": "winget install Git.Git", "rg": "winget install BurntSushi.ripgrep.MSVC",
-              "fd": "winget install sharkdp.fd", "pdftotext": "winget install oschwartz10612.Poppler",
-              "ocrmypdf": "see https://ocrmypdf.readthedocs.io/en/latest/installation.html#installing-on-windows",
-              "tesseract": "winget install UB-Mannheim.TesseractOCR"}
-    table = brew if sys.platform == "darwin" else winget if sys.platform == "win32" else apt
-    return {**table, "mineru-kit": "uv tool install mineru"}.get(binary, f"install {binary}")
+# The package manager line for a missing binary on this OS: one table with the tools' own messages.
+_install_command = install_command
 
 
 class Wizard:
@@ -847,8 +832,11 @@ def model_saved() -> bool:
 
 def run(section: str | None = None) -> int:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        # The line a shell on this OS takes: `export` is an error in PowerShell and in cmd.
+        key = ('$env:ANTHROPIC_API_KEY = "..."   (in cmd: set ANTHROPIC_API_KEY=...; or another provider\'s key)'
+               if sys.platform == "win32" else "export ANTHROPIC_API_KEY=...   (or another provider's key)")
         print("misaka setup needs a terminal. Without one, configure by hand:\n"
-              "  export ANTHROPIC_API_KEY=...   (or another provider's key)\n"
+              f"  {key}\n"
               "  misaka create 10032           (a Sister)\n"
               "  misaka init                   (inside the project folder)\n"
               "  misaka auth check", file=sys.stderr)
