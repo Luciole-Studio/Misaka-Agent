@@ -881,7 +881,8 @@ def _cmd_doc(args):
         for h in hits:
             printed = f" (printed p. {h['printed']})" if h.get("printed") else ""
             print(f"  {h['doc_id']} p{h['page']}{printed}  {h['s'][:90]}")
-        print(f"{len(hits)} match(es). Use `misaka doc verify` before citing a quotation.")
+        # One line a page, at its first occurrence, and every such page: the count is of pages.
+        print(f"{len(hits)} page(s) hold a match. Use `misaka doc verify` before citing a quotation.")
     elif args.action == "verify":
         if not args.arg or not args.doc:
             sys.exit("Usage: misaka doc verify <quote> --doc <doc-id>")
@@ -902,7 +903,7 @@ def _cmd_doc(args):
         print(f"{st['title']} ({st['mode']})")
         for line in _doc_tree_lines(st.get("tree")):
             print(line)
-        for pg in (st.get("pages") or [])[:40]:
+        for pg in st.get("pages") or []:
             print(f"  p{pg['page']:<4} {pg['head']}")
 
 def _cmd_setup(args):

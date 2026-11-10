@@ -14,7 +14,7 @@ index must be inside the project too.
 misaka doc scan sources/            # index every readable file in a folder
 misaka doc add sources/report.pdf   # index one file
 misaka doc list                     # indexed documents and their IDs
-misaka doc find "exact words"       # where a phrase occurs (the first 10 matches)
+misaka doc find "exact words"       # every page a phrase occurs on
 misaka doc verify "a quotation" --doc DOC_ID
 misaka doc tree DOC_ID              # a document's outline
 ```

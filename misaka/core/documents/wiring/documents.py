@@ -76,7 +76,7 @@ def _printed(hit):
 
 
 def _find(query, doc_id, ctx):
-    return corpus.search_literal(query, limit=None, doc_id=doc_id, workspace=_workspace(ctx))
+    return corpus.search_literal(query, doc_id=doc_id, workspace=_workspace(ctx))
 
 
 # -- what a page is made of -----------------------------------------------------------------------
@@ -235,8 +235,8 @@ def _source(doc_id, ctx):
 # sits under the PNG size of a text page at 2000 px, so the resize's candidate list falls
 # through to JPEG (quality 80 first) for those and keeps PNG for small line art.
 OUTLINE_MAX_BYTES = 200 * 1024
-# A search lists every match: stopping at ten looked the same as there being ten. This only stops a
-# word found on nearly every page of a large library from filling one prompt turn.
+# A search lists every page that matches: stopping at ten looked the same as there being ten. This
+# only stops a word found on nearly every page of a large library from filling one prompt turn.
 FIND_MAX_BYTES = 200 * 1024
 PAGE_IMAGE_MAX_SCALE = 2.0
 PAGE_IMAGE_MAX_SIDE = 2000
@@ -488,7 +488,13 @@ def register(harn):
         st = await _off_loop(corpus.structure, params.doc_id, workspace=workspace)
         if not st:
             return _text("Document not found. Use doc_list to find its document ID.")
-        heads = "\n".join(f"  p{p['page']}  {p['head']}" for p in st.get("pages", [])[:80])
+        # Every page, under the guard the heading tree has: eighty lines of a 120-page deck read
+        # as an eighty-page deck.
+        heads = "\n".join(f"  p{p['page']}  {p['head']}" for p in st.get("pages", []))
+        cut = truncateHead(heads, TruncationOptions(maxLines=2**31 - 1, maxBytes=OUTLINE_MAX_BYTES))
+        tail = "" if not cut.truncated else (
+            f"[{formatSize(OUTLINE_MAX_BYTES)} limit reached: {cut.outputLines} of {cut.totalLines} pages "
+            "shown. Read the rest with doc_read(doc_id, pages=<range>); doc_find locates text beyond the cut.]\n")
         # Why there is no outline is our note, not the document's, so it stays outside the fence.
         # Silence here reads as "this document has no structure", which for a book is a lie.
         why = "" if await _off_loop(corpus.pageindex_available) else (
@@ -496,7 +502,7 @@ def register(harn):
             "every document here is page-navigable only. Report that rather than concluding the "
             "document is unstructured.\n")
         return _text(note + why + untrusted(
-            params.doc_id, f"# {st['title']} (no structure tree; navigate by page)\n{heads}"))
+            params.doc_id, f"# {st['title']} (no structure tree; navigate by page)\n{cut.content}") + tail)
 
     class ReadParams(BaseModel):
         doc_id: str = Field(description="Document ID, or the path of an indexed file in the workspace.")
@@ -681,7 +687,7 @@ def register(harn):
         found = "\n".join(f"{h['doc_id']} p{h['page']}{_printed(h)}  {h['s'][:100]}" for h in hits)
         cut = truncateHead(found, TruncationOptions(maxLines=2**31 - 1, maxBytes=FIND_MAX_BYTES))
         tail = "" if not cut.truncated else (
-            f"[{formatSize(FIND_MAX_BYTES)} limit reached: {cut.outputLines} of {cut.totalLines} matches shown. "
+            f"[{formatSize(FIND_MAX_BYTES)} limit reached: {cut.outputLines} of {cut.totalLines} matching pages shown. "
             "Search a longer phrase, or one document with doc_id.]\n")
         return _text(untrusted(f"doc-search:{params.query}", cut.content) + tail)
 
