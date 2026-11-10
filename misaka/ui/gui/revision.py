@@ -10,7 +10,7 @@ def source_revision(source: Path | None = None) -> str:
     gui = source / "misaka" / "ui" / "gui"
     # Skill approval runs inside this server. A write.py edit must start a new
     # process; otherwise the shortcut keeps the process that still has the old check.
-    skill_runtime = ("write.py", "manage.py", "review.py", "sandbox.py", "operations.py")
+    skill_runtime = ("write.py", "manage.py", "review.py", "sandbox.py", "operations.py", "layers.py")
     paths = [*gui.rglob("*.py"),
              *(gui / "static" / name for name in ("index.html", "app.js", "style.css")),
              source / "misaka" / "core" / "session_control.py",

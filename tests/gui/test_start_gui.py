@@ -96,7 +96,7 @@ class ServerReuseTests(unittest.TestCase):
                      "misaka/core/session_control.py", "misaka/core/model_preferences.py", "misaka/core/network/roster.py",
                      "misaka/core/skills/write.py", "misaka/core/skills/manage.py",
                      "misaka/core/skills/review.py", "misaka/core/skills/sandbox.py",
-                     "misaka/core/skills/operations.py"]
+                     "misaka/core/skills/operations.py", "misaka/core/skills/layers.py"]
             for name in names:
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,6 +110,9 @@ class ServerReuseTests(unittest.TestCase):
             self.assertNotEqual(after_frontend, after_model)
             (root / "misaka/core/skills/write.py").write_bytes(b"new skill check")
             self.assertNotEqual(after_model, start_gui.source_revision(root))
+            before_layers = start_gui.source_revision(root)
+            (root / "misaka/core/skills/layers.py").write_bytes(b"new skill roots")
+            self.assertNotEqual(before_layers, start_gui.source_revision(root))
 
 
 if __name__ == "__main__":

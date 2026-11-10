@@ -5,6 +5,10 @@ import asyncio
 import uuid
 
 
+class InputNotAccepted(ValueError):
+    """The session explicitly rejected a prompt before accepting delivery."""
+
+
 class GuiInputQueue:
     def __init__(self, session, deliver, changed=lambda: None, failed=lambda error: None, settled=lambda: None):
         self.session = session
@@ -69,6 +73,9 @@ class GuiInputQueue:
                 await asyncio.sleep(0)
                 await self.session.waitForIdle()
             except Exception as error:  # noqa: BLE001 - retain visible delivery errors
+                if isinstance(error, InputNotAccepted):
+                    self.pending.insert(0, item)
+                    self.pause()
                 self.failed(error)
         self.settled()
 

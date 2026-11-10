@@ -333,10 +333,23 @@ class ChatHost:
         )
 
     async def _deliver_prompt(self, params):
-        await self.session.prompt(params["text"], {
-            "images": params.get("images") or None,
-            "streamingBehavior": params.get("streamingBehavior") or "followUp",
-        })
+        from misaka.core.gui_input_queue import InputNotAccepted
+        accepted = False
+
+        def preflight(disposition):
+            nonlocal accepted
+            accepted = bool(disposition)
+
+        try:
+            await self.session.prompt(params["text"], {
+                "images": params.get("images") or None,
+                "streamingBehavior": params.get("streamingBehavior") or "followUp",
+                "preflightResult": preflight,
+            })
+        except Exception as error:
+            if not accepted:
+                raise InputNotAccepted(str(error)) from error
+            raise
 
     def _session_status(self) -> dict:
         model = self.session.model

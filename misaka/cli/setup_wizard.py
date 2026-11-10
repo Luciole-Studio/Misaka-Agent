@@ -473,12 +473,13 @@ class Wizard:
         ui.print_header("Skills")
         roles_root = os.path.expanduser(CFG["roles_root"])
         shared = skill_layers.shared_skills_dir()
-        shown = ((f"{ui.tilde(roles_root)}/<role>/skills/", "that role alone"),
+        shown = (("<project>/skills/ and <project>/.agents/skills/", "the current project, loaded first"),
+                 (f"{ui.tilde(roles_root)}/<role>/skills/", "that role alone"),
                  (ui.tilde(shared), "every role"),
                  ("~/.agents/skills", "shared with your other agent tools; an approved edit is written back here when the skill was loaded from here"))
         column = max(len(path) for path, _purpose in shown)
         ui.print_info("A skill is a folder with a SKILL.md a role reads when the work calls for it.",
-                      "Three layers, in the order a role sees them:",
+                      "Skill sources, in the order a role sees them:",
                       *[f"  {path:<{column}}   {purpose}" for path, purpose in shown], "")
         external = os.path.expanduser("~/.agents/skills")
         if os.path.isdir(external):

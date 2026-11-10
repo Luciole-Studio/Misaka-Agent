@@ -13,10 +13,13 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
+from pathlib import Path
+
+import psutil
+from filelock import FileLock
 
 from misaka.ui.gui.settings_worker import MARK
 
@@ -140,15 +143,66 @@ RUN_LINE = re.compile(r"Research run (\S+?):")
 
 
 class ResearchProcesses:
-    """``misaka research`` without a terminal; one log per process, kept in the temp folder."""
+    """Detached research processes with durable receipts and PID creation identities."""
 
-    def __init__(self):
+    def __init__(self, directory=None):
+        from misaka.config import home
+        self.directory = Path(directory) if directory is not None else home.home() / "state" / "gui-research"
+        self.directory.mkdir(parents=True, exist_ok=True)
         self.items: dict[str, dict] = {}
         self.lock = threading.Lock()
+        self._load()
+
+    def _load(self):
+        """Recover receipts without replacing process handles owned by this server."""
+        with self.lock:
+            for path in self.directory.glob("*.json"):
+                item = json.loads(path.read_bytes().decode("utf-8"))
+                if (not isinstance(item, dict) or item.get("id") != path.stem
+                        or not all(key in item for key in ("workspace", "title", "log", "pid", "identity", "started", "run_id"))):
+                    raise ValueError("研究进程记录格式有误，请保留记录后检查")
+                self.items.setdefault(item["id"], item)
+
+    def _save(self, item):
+        """Atomically store process identity and log location, excluding live handles."""
+        from misaka.utils.atomic import write_bytes
+        path = self.directory / (item["id"] + ".json")
+        if path.exists():
+            path.read_bytes().decode("utf-8")
+        write_bytes(path, json.dumps({k: v for k, v in item.items() if k != "proc"},
+                                    ensure_ascii=False).encode("utf-8"), mode=0o600)
+
+    def _status(self, item):
+        """A reused PID cannot make a finished research job appear alive."""
+        if item.get("proc") is not None:
+            code = item["proc"].poll()
+            if code is not None and item.get("exit_code") != code:
+                item["exit_code"] = code
+                self._save(item)
+            return code is None, code
+        try:
+            proc = psutil.Process(item["pid"])
+            running = proc.create_time() == item["identity"] and proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            running = False
+        except psutil.AccessDenied:
+            raise ValueError("无法核实原研究进程状态，暂不能启动重复研究") from None
+        return running, item.get("exit_code")
 
     def start(self, workspace: str, args: list[str], title: str) -> dict:
+        """Serialize launches across GUI restarts and reuse a live resume owner."""
+        with FileLock(str(self.directory / "launch.lock"), timeout=5):
+            if "--resume" in args:
+                run_id = args[args.index("--resume") + 1]
+                existing = next((row for row in self.listing(workspace) if row["run_id"] == run_id and row["running"]), None)
+                if existing:
+                    return {"job_id": existing["id"]}
+            return self._start(workspace, args, title)
+
+    def _start(self, workspace, args, title):
+        """Launch one process and retain its receipt before returning to the UI."""
         key = uuid.uuid4().hex[:12]
-        log_path = os.path.join(tempfile.gettempdir(), f"misaka-gui-research-{key}.log")
+        log_path = str(self.directory / (key + ".log"))
         with open(log_path, "ab") as log:
             proc = subprocess.Popen(
                 [sys.executable, "-u", "-X", "utf8", "-m", "misaka", *args], cwd=workspace,
@@ -157,8 +211,16 @@ class ResearchProcesses:
                 **({} if os.name == "nt" else {"start_new_session": True}))
         item = {"id": key, "workspace": workspace, "title": title, "log": log_path, "proc": proc,
                 "run_id": args[args.index("--resume") + 1] if "--resume" in args else None, "started": time.time()}
+        try:
+            item.update(pid=proc.pid, identity=psutil.Process(proc.pid).create_time())
+        except psutil.NoSuchProcess:
+            item.update(pid=proc.pid, identity=None, exit_code=proc.poll())
         with self.lock:
             self.items[key] = item
+        try:
+            self._save(item)
+        except OSError as error:
+            return {"job_id": key, "warning": f"研究已启动，但进程记录保存失败；请保持网页服务运行以查看日志：{error}"}
         return {"job_id": key}
 
     def _tail(self, path: str, limit: int = 60000) -> str:
@@ -172,6 +234,7 @@ class ResearchProcesses:
             return ""
 
     def listing(self, workspace: str) -> list[dict]:
+        self._load()
         rows = []
         with self.lock:
             items = list(self.items.values())
@@ -179,21 +242,31 @@ class ResearchProcesses:
             if os.path.normcase(item["workspace"]) != os.path.normcase(workspace):
                 continue
             if item["run_id"] is None:
-                match = RUN_LINE.search(self._tail(item["log"], 4000))
+                # The run banner precedes potentially long logs; a tail alone
+                # loses it when a server restarts after the first output burst.
+                try:
+                    with open(item["log"], "rb") as log:
+                        banner = log.read(65536).decode("utf-8", errors="replace")
+                except OSError:
+                    banner = ""
+                match = RUN_LINE.search(banner)
                 if match:
                     item["run_id"] = match.group(1)
-            code = item["proc"].poll()
+                    self._save(item)
+            running, code = self._status(item)
             rows.append({"id": item["id"], "title": item["title"], "run_id": item["run_id"], "started": item["started"],
-                         "running": code is None, "exit_code": code})
+                         "running": running, "exit_code": code})
         return rows
 
     def log(self, workspace: str, key: str | None = None, run_id: str | None = None) -> dict:
+        self.listing(workspace)
         with self.lock:
             candidates = [i for i in self.items.values()
                           if os.path.normcase(i["workspace"]) == os.path.normcase(workspace)
                           and (i["id"] == key or (run_id and i["run_id"] == run_id))]
         if not candidates:
-            raise ValueError("这次启动的日志不在本次网页服务中；研究进度仍可在研究记录里查看")
+            raise ValueError("没有找到这项研究的启动日志；研究进度仍可在研究记录里查看")
         item = max(candidates, key=lambda i: i["started"])
-        return {"title": item["title"], "running": item["proc"].poll() is None, "exit_code": item["proc"].poll(),
+        running, code = self._status(item)
+        return {"title": item["title"], "running": running, "exit_code": code,
                 "output": self._tail(item["log"])}

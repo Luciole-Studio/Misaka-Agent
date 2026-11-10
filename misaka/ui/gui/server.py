@@ -128,6 +128,7 @@ class Bridge:
         except (ConnectionError, OSError, RuntimeError) as error:
             warning = "会话服务未能连接，节点对话暂时无法列出：" + (str(error) or type(error).__name__)
         result = self.research_runs.start(cwd, args, title)
+        warning = "；".join(filter(None, (warning, result.get("warning"))))
         return {**result, "message": "研究已在后台启动" + ("；" + warning if warning else ""),
                 **({"warning": warning} if warning else {})}
 
@@ -750,6 +751,9 @@ class Bridge:
                     raise ValueError("这项研究已经结束，无需停止")
                 runs.request_stop(con, run_id)
                 return {"message": "已请求停止研究；原生工作流将收尾并生成阶段性报告"}
+            run = next(r for r in items if r["id"] == run_id)
+            if not runs.driverless(run):
+                raise ValueError("这项研究仍由原进程运行，请查看进度或日志，无需重复恢复")
         return self._research(data, ["research", "--resume", run_id], "恢复研究")
 
     def _action_setup(self, data, action):

@@ -264,7 +264,8 @@ class SessionControl:
                 except Exception as error:  # noqa: BLE001 - failed background turns must remain visible
                     self.error = str(error)
                     if not accepted.done():
-                        accepted.set_exception(error)
+                        from misaka.core.gui_input_queue import InputNotAccepted
+                        accepted.set_exception(InputNotAccepted(str(error)))
                 finally:
                     preflight(False)
 
@@ -273,5 +274,6 @@ class SessionControl:
             self.inputs.add(task)
             task.add_done_callback(self.inputs.discard)
             if not await asyncio.shield(accepted):
-                raise ValueError(self.error or "The session did not accept the input.")
+                from misaka.core.gui_input_queue import InputNotAccepted
+                raise InputNotAccepted(self.error or "The session did not accept the input.")
         return "Delivered to the original session; its reply appears below once its turn runs."
