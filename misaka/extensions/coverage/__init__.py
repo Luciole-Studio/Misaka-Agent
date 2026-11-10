@@ -31,7 +31,10 @@ from misaka.ai.utils.typebox_helpers import typeboxSchema
 BUILTIN = True
 SESSION_KINDS = {"foreground", "dm", "card", "bare"}
 API = "https://api.openalex.org"
-LIMIT = 8
+# The most groups OpenAlex puts in one answer, those with most works first. A scan asks for that
+# many and lists every one it gets: the first eight of fifty-five languages, unmarked, read as the
+# eight there were, and the scholarship in the other forty-seven was what the scan was run to find.
+GROUPS = 200
 MAX_FACETS = 6
 MAX_TERMS = 16
 SKILLS = os.path.join(os.path.dirname(__file__), "skills")
@@ -39,7 +42,9 @@ SKILLS = os.path.join(os.path.dirname(__file__), "skills")
 # the index holds (language), and what kind of publication carries it (type).
 FACET_GROUPS = (("Subfields", "primary_topic.subfield.id"), ("Topics", "primary_topic.id"),
                 ("Languages", "language"), ("Types", "type"))
-ALL_GROUPS = (*FACET_GROUPS, ("Keywords", "keywords.keyword"))
+# ``keywords.id``: OpenAlex stopped taking ``keywords.keyword`` (HTTP 400, "not a valid field"), and
+# every scan of two facets or more then printed its keywords as a failed request.
+ALL_GROUPS = (*FACET_GROUPS, ("Keywords", "keywords.id"))
 KEY_ENV = "OPENALEX_API_KEY"
 # OpenAlex holds a search with more than five boolean operators to one request a second per client,
 # five with an API key. A scan's pairs and its "all together" are such searches (2026-09-27: eight
@@ -111,10 +116,24 @@ def _facet_query(terms):
 def _works(query, group=None):
     params = {"filter": f"title_and_abstract.search:{query}"}
     if group:
-        params.update(group_by=group, per_page=LIMIT)
+        params.update(group_by=group, per_page=GROUPS)
     else:
         params.update(per_page=1, select="id")
     return _get("/works", **params)
+
+
+def _group_name(group):
+    """OpenAlex has no name for some keys (``https://openalex.org/languages/cmn``): the key's last
+    part says which it is, where "None" said nothing."""
+    return group.get("key_display_name") or str(group.get("key") or "unknown").rstrip("/").rsplit("/", 1)[-1]
+
+
+def _page(data):
+    """The page OpenAlex says it filled, where that is smaller than the one asked for. Its paging
+    reference calls a ``per_page`` above 100 deprecated: a hundred groups held against the two
+    hundred asked for would pass as every group there was."""
+    size = (data.get("meta") or {}).get("per_page")
+    return size if isinstance(size, int) and 0 < size < GROUPS else GROUPS
 
 
 def scan(facets):
@@ -173,8 +192,12 @@ def scan(facets):
             if data is None:
                 lines.append(f"{label}: (request failed: unknown, not zero)")
                 continue
-            items = [f"{g['key_display_name']} {g['count']:,}" for g in data["group_by"][:LIMIT]]
-            lines.append(f"{label}: " + (" · ".join(items) if items else "none"))
+            items = [f"{_group_name(g)} {g['count']:,}" for g in data["group_by"]]
+            # A full page is where one answer stops, not where the groups ran out: OpenAlex pages
+            # past it by key, not by count, so the scan says there are that many or more.
+            count = len(items)
+            size = f"{count}+, the {count} with most works" if count >= _page(data) else str(count)
+            lines.append(f"{label} ({size}): " + " · ".join(items) if items else f"{label}: none")
         return lines
 
     lines = [("OpenAlex, titles and abstracts. A facet counts works matching any of its terms; "
