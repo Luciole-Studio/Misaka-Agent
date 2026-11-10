@@ -29,6 +29,8 @@ import sys
 import tempfile
 from collections import Counter
 
+from misaka.utils.tools_manager import find_tool
+
 BINARY = "mineru-kit"
 MISSING = "mineru-kit is not installed (uv tool install mineru)"
 # Its strongest reading, and the only one that reads what it takes for a picture: a handwritten
@@ -108,10 +110,13 @@ def _turns(path, numbers):
     """``{page: clockwise degrees}`` for the pages of ``numbers`` lying on their side. tesseract says
     which they are and basic which way up: the way that reads more. Nothing here is worth failing a
     reading over, and a page that cannot be judged is read as it lies."""
-    if numbers is None or not shutil.which(TESSERACT):
+    # ``find_tool``: on Windows its installer leaves it off PATH, and the path found is the one run.
+    tesseract = None if numbers is None else find_tool(TESSERACT)
+    if not tesseract:
         return {}
     try:
-        lying = [number for start in range(0, len(numbers), BATCH) for number in _lying(path, numbers[start:start + BATCH])]
+        lying = [number for start in range(0, len(numbers), BATCH)
+                 for number in _lying(path, numbers[start:start + BATCH], tesseract)]
     except (OSError, ValueError, subprocess.SubprocessError):
         return {}
     if not lying:
@@ -125,24 +130,24 @@ def _turns(path, numbers):
     return turns
 
 
-def _lying(path, numbers):
+def _lying(path, numbers, tesseract):
     """Which of ``numbers`` tesseract finds surer of on their side than as they lie."""
     with tempfile.TemporaryDirectory(prefix="misaka-turns-") as tmp:
         subprocess.run([sys.executable, "-c", _RENDER_CHILD, path, tmp, json.dumps(numbers)],
                        capture_output=True, timeout=TIMEOUT, check=True)
         lying = []
         for number in numbers:
-            sure = {turn: _upright(os.path.join(tmp, f"{number}-{turn}.png")) for turn in (0, *SIDEWAYS)}
+            sure = {turn: _upright(tesseract, os.path.join(tmp, f"{number}-{turn}.png")) for turn in (0, *SIDEWAYS)}
             sideways = max(sure[turn] for turn in SIDEWAYS)
             if sideways >= TURN_CONFIDENCE and sideways > sure[0]:
                 lying.append(number)
     return lying
 
 
-def _upright(image):
+def _upright(tesseract, image):
     """How sure tesseract is that ``image`` stands the right way up: 0 when it says otherwise, or
     finds too little to say."""
-    out = subprocess.run([TESSERACT, image, "stdout", "--psm", "0"], capture_output=True,
+    out = subprocess.run([tesseract, image, "stdout", "--psm", "0"], capture_output=True,
                          text=True, encoding="utf-8", errors="replace", timeout=TURN_TIMEOUT, check=False)
     turn = re.search(r"^Rotate: (\d+)", out.stdout, flags=re.MULTILINE)
     sure = re.search(r"^Orientation confidence: ([\d.]+)", out.stdout, flags=re.MULTILINE)

@@ -1683,7 +1683,7 @@ function drawScreen(screen) {
 }
 
 /* ---------- 其他视图 ---------- */
-$('#research-form').onsubmit=e=>{e.preventDefault();guard(async()=>{const data=Object.fromEntries(new FormData(e.target));for(const k of Object.keys(data))if(k!=='goal')data[k]=Number(data[k]);await api('research',data);toast('研究已在后台启动，进度会出现在下方');e.target.reset();await loadResearch();refreshState();},$('button[type=submit]',e.target));};
+$('#research-form').onsubmit=e=>{e.preventDefault();guard(async()=>{const data=Object.fromEntries(new FormData(e.target));for(const k of Object.keys(data))if(k!=='goal')data[k]=Number(data[k]);const result=await api('research',data);toast('研究已在后台启动，进度会出现在下方');if(result.warning)toast(result.warning,true);e.target.reset();await loadResearch();refreshState();},$('button[type=submit]',e.target));};
 function waitingNode(r) {return (r.nodes||[]).find(n=>n.status==='waiting_input')||((r.status==='waiting_input')?(r.nodes||[])[0]:null);}
 async function openNode(node) {
   await refreshState();
@@ -1715,7 +1715,7 @@ async function loadResearch() {
     actions.append(button('复制研究 ID',()=>copyIdentifier(r.id,'研究 ID'),'btn ghost sm','copy'));
     const job=jobs.jobs.filter(j=>j.run_id===r.id).sort((a,b)=>b.started-a.started)[0];
     if (job) actions.append(button('日志',()=>showResearchLog({run_id:r.id},r.question),'btn ghost sm','terminal'));
-    if (!job?.running&&r.status!=='done') actions.append(button('继续运行',async()=>{await api('research_resume',{run_id:r.id});toast('研究已在后台恢复');await loadResearch();},'btn sm','play'));
+    if (!job?.running&&r.status!=='done') actions.append(button('继续运行',async()=>{const result=await api('research_resume',{run_id:r.id});toast('研究已在后台恢复');if(result.warning)toast(result.warning,true);await loadResearch();},'btn sm','play'));
     if (['active','waiting_input','stopping'].includes(r.status)) actions.append(button('停止',()=>confirmAction('停止研究','停止继续展开研究，并由原生工作流整理阶段性报告。',async()=>{const result=await api('research_stop',{run_id:r.id});toast(result.message);await loadResearch();},{label:'停止研究',danger:true}),'btn ghost sm danger','stop'));
     top.append(info,actions);card.append(top);
     const waiting=waitingNode(r);

@@ -1,12 +1,32 @@
 """Explicit operator entry points; never open a runtime engine before a dry run."""
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
 COMMANDS = {"import": "scripts.import_lossless_claw",
             "externalize-backfill": "scripts.backfill_externalized_tool_outputs",
             "state-embedding-backfill": "benchmarking.state_embedding_backfill"}
+
+# The dispatcher is upstream's and writes its slash command. At a terminal the same words follow
+# `misaka lcm`. A path is not the command: `.misaka/lcm/lcm.db`, or a project folder named `lcm`.
+_SLASH = re.compile(r"""(?<![^\s`"'(])/lcm(?= [a-z])""")
+_HELP = "LCM command help"
+# What this file adds to upstream's commands, which its help cannot know of.
+_OWN_HELP = """\
+Only at the command line:
+- misaka lcm clear: remove this project's LCM cache; session files are untouched
+- misaka lcm repair [--apply]: report, or with --apply name, the summaries older checkpoints show as things you typed
+- misaka lcm import | externalize-backfill | state-embedding-backfill: operator scripts; each takes --help"""
+
+
+def _for_terminal(text):
+    """Upstream's reply as a terminal reads it: `misaka lcm ...` for `/lcm ...`, and this file's
+    own commands under the help."""
+    # Bare `misaka lcm` prints the help, where bare `/lcm` is the status.
+    text = _SLASH.sub("misaka lcm", text.replace("- /lcm or /lcm status:", "- /lcm status:"))
+    return f"{text}\n\n{_OWN_HELP}" if _HELP in text else text
 
 
 def _owned_option(options, name, value):
@@ -27,6 +47,10 @@ def main(argv=None):
     from . import config_bridge, context_engine, operations, storage
 
     args = list(sys.argv[1:] if argv is None else argv)
+    # Nothing here knew a help flag: `misaka lcm --help` was "Unknown subcommand: --help", and
+    # `misaka lcm clear --help` cleared. The operator scripts have a help of their own.
+    if ("--help" in args or "-h" in args) and args[0] not in COMMANDS:
+        args = ["help"]
     if args[:1] == ["clear"]:
         workspace = storage.project()
         if storage.clear(workspace):
@@ -64,7 +88,7 @@ def main(argv=None):
             return module.main(options)
         finally:
             context_engine.release_project()
-    print(operations.command(" ".join(args) or "help"))
+    print(_for_terminal(operations.command(" ".join(args) or "help")))
     return 0
 
 

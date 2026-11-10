@@ -13,6 +13,7 @@ the node budget, persistence and artifact integrity; models make the judgements.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import hashlib
 import json
@@ -770,6 +771,36 @@ DERIVED_BUNDLE_NAMES = frozenset({"SOURCES.md", "sources"})
 ARTIFACT_KINDS = {"red_team": "critique", "final_review": "final_critique", "divergence": "divergence"}
 
 
+_DIGEST_CHUNK = 1024 * 1024
+
+
+def _digest_and_kind(source):
+    """``(sha256, binary)`` of a submitted file, read a piece at a time.
+
+    A card may declare files of any size. Reading each one whole made the node's Last Order
+    hold it, and its decoded text beside it: a card that declared 361 scratch databases of
+    400-560 MB took her process from 170 MB to 8 GB (2026-11-10). ``binary`` is what
+    ``bytes.decode("utf-8")`` over the whole file says, a character cut by the end of the file
+    included."""
+    digest = hashlib.sha256()
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    binary = False
+    with source.open("rb") as handle:
+        while chunk := handle.read(_DIGEST_CHUNK):
+            digest.update(chunk)
+            if not binary:
+                try:
+                    decoder.decode(chunk)
+                except UnicodeDecodeError:
+                    binary = True
+    if not binary:
+        try:
+            decoder.decode(b"", final=True)
+        except UnicodeDecodeError:
+            binary = True
+    return digest.hexdigest(), binary
+
+
 def _register_task_artifacts(con, run, task, submitted):
     """Register submitted project files at their original location. Nothing is copied or moved.
 
@@ -825,21 +856,15 @@ def _register_task_artifacts(con, run, task, submitted):
             refuse(rel, derived)
             continue
         try:
-            raw = source.read_bytes()
+            # Binary deliverables are kept by identity. Document tools read their content;
+            # registration neither decodes them as prose nor certifies any quotation.
+            digest, binary = _digest_and_kind(source)
         except OSError:
             refuse(rel, derived)
             continue
-        digest = hashlib.sha256(raw).hexdigest()
         if digests.get(str(rel)) != digest:
             refuse(rel, derived)
             continue
-        try:
-            raw.decode("utf-8")
-            binary = False
-        except UnicodeDecodeError:
-            # Keep binary deliverables by identity. Document tools read their content;
-            # registration neither decodes them as prose nor certifies any quotation.
-            binary = True
         accepted.append((rel, source, digest, binary, derived))
     if drifted:
         raise ArtifactDrift(task["id"], drifted)

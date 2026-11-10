@@ -2312,14 +2312,12 @@ def read_page(doc_id, page, workspace=None):
         return f.read()
 
 
-def page_heads(doc_id, limit=200, workspace=None):
-    """Return the first nonempty line of each page as a fallback outline."""
+def page_heads(doc_id, workspace=None):
+    """Return the first nonempty line of every page as a fallback outline."""
     out = []
     for page, text in _iter_pages(doc_id, workspace=workspace):
         first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
         out.append({"page": page, "head": first[:60]})
-        if len(out) >= limit:
-            break
     return out
 
 
@@ -2476,13 +2474,14 @@ def _locate(text, needle):
     return None
 
 
-def search_literal(q, limit=10, doc_id=None, workspace=None):
+def search_literal(q, doc_id=None, workspace=None):
     """Find exact text across indexed pages (scoped to ``workspace`` when given and no ``doc_id``).
 
     Matching follows ``normalize_for_quote_match``, so this agrees with ``verify_quote``: a search
     that reported "no matches" for a passage verification then confirmed used to send the model
-    away from material that was there. Snippets are cut from the raw page. ``limit=None`` finds
-    every match.
+    away from material that was there. Snippets are cut from the raw page. Every page holding the
+    text is returned, once, at its first occurrence: a list that stops early reads the same as
+    there being no more.
     """
     needle = normalize_for_quote_match(q)
     if not needle:
@@ -2500,8 +2499,6 @@ def search_literal(q, limit=10, doc_id=None, workspace=None):
                     labels = page_labels(did, workspace=workspace)[0]
                 hits.append({"doc_id": did, "page": page, "printed": labels.get(page, ""),
                              "s": snip.replace("\n", " ")})
-                if limit is not None and len(hits) >= limit:
-                    return hits
     return hits
 
 
@@ -2686,4 +2683,4 @@ def structure(doc_id, workspace=None):
         mode += (f": the pageindex extra is not installed. {INSTALL_HINT}, "
                  "then re-run `misaka doc add <file>` to build it")
     return {"mode": mode, "title": m["title"],
-            "pages": page_heads(doc_id, limit=10000, workspace=workspace)}
+            "pages": page_heads(doc_id, workspace=workspace)}
