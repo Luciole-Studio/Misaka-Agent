@@ -14,7 +14,7 @@ import stat
 import tempfile
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from misaka.config import home
 from misaka.utils import atomic
@@ -154,6 +154,21 @@ def _safe_parents(path, *, create=False):
             raise ValueError(f"Skill directory ancestry is not a real directory: {component}")
 
 
+def _snapshot_path(path):
+    """Snapshot paths are POSIX text. ``Path`` on Windows rewrites ``/`` to ``\\``."""
+    if not isinstance(path, str) or not path or "\\" in path:
+        raise ValueError("Duplicate or invalid path in skill snapshot.")
+    rel = PurePosixPath(path)
+    text = rel.as_posix()
+    if text in ("", ".") or rel.is_absolute() or any(part in ("", ".", "..") for part in rel.parts):
+        raise ValueError("Duplicate or invalid path in skill snapshot.")
+    return text
+
+
+def _snapshot_parents(path):
+    return [parent.as_posix() for parent in PurePosixPath(path).parents if parent.as_posix() not in ("", ".")]
+
+
 def _checked_snapshot(before):
     """Validate ALL paths/blobs before touching live data; never follow snapshot links."""
     from .manage import lookup_path_error
@@ -163,12 +178,12 @@ def _checked_snapshot(before):
     for item in before:
         if not isinstance(item, dict) or lookup_path_error(item.get("path")):
             raise ValueError("Invalid path in skill snapshot.")
-        rel = Path(item["path"])
-        if str(rel) in ("", ".") or "\\" in str(rel) or str(rel) in paths:
+        rel = _snapshot_path(item["path"])
+        if rel in paths:
             raise ValueError("Duplicate or invalid path in skill snapshot.")
-        if any(str(parent) in paths for parent in rel.parents):
+        if any(parent in paths for parent in _snapshot_parents(rel)):
             raise ValueError("A snapshot file is another file's parent.")
-        paths.add(str(rel))
+        paths.add(rel)
         mode = item.get("mode", 0o644)
         if type(mode) is not int or mode < 0 or mode > 0o777:
             raise ValueError("Invalid mode in skill snapshot.")
@@ -186,7 +201,7 @@ def _checked_snapshot(before):
         if hashlib.sha256(data).hexdigest() != sha:
             raise ValueError(f"Corrupt rollback blob: {sha}")
     for rel in paths:
-        if any(str(parent) in paths for parent in Path(rel).parents):
+        if any(parent in paths for parent in _snapshot_parents(rel)):
             raise ValueError("A snapshot file is another file's parent.")
 
 
@@ -223,9 +238,13 @@ def _materialize(root, image):
     if not isinstance(directories, dict):
         raise TypeError("Invalid snapshot directories.")
     for rel, mode in directories.items():
-        if lookup_path_error(rel) or str(Path(rel)) == "." or type(mode) is not int or not 0 <= mode <= 0o777:
+        try:
+            text = "" if lookup_path_error(rel) else _snapshot_path(rel)
+        except ValueError:
+            text = ""
+        if not text or type(mode) is not int or not 0 <= mode <= 0o777:
             raise ValueError("Invalid directory in skill snapshot.")
-        if any(str(Path(rel)) == item["path"] or Path(rel).is_relative_to(item["path"]) for item in image["files"]):
+        if any(text == item["path"] or PurePosixPath(text).is_relative_to(item["path"]) for item in image["files"]):
             raise ValueError("Snapshot directory is beneath a file or symlink.")
     if not image["exists"]:
         if image["files"] or directories:

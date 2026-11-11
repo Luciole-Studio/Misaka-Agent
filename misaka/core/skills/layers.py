@@ -1,6 +1,6 @@
 """Skill discovery: the layers a role sees and the rules for walking them.
 
-Layers, in precedence order: the project folder's ``skills/``, the role's
+Layers, in precedence order: the project's skill folders, the role's
 ``skills/``, the home's shared ``skills/``, then the read-only external
 directories listed under ``skills.external_dirs`` in settings.json (hermes).
 Turning them into an index (one entry per name, the system-prompt section,
@@ -211,12 +211,12 @@ def project_skill_tree_fingerprint(root):
 
 
 def external_skills_dirs():
-    """The read-only external directories: ``~/.agents/skills`` (the cross-harness global
-    location pi mounts, always on when it exists) followed by whatever ``external_dirs``
-    in the ``skills`` section of settings.json lists (hermes get_external_skills_dirs): ``~`` and ``$VAR`` expanded, a
-    relative path taken from ``~/.misaka``, only directories that exist, duplicates and the
-    shared layer dropped. They appear in the index; new skills are always written to the
-    role's own layer."""
+    """External skill directories. ``~/.agents/skills`` (the cross-harness global
+    location, always on when it exists) is followed by ``external_dirs`` in the
+    ``skills`` section of settings.json: ``~`` and ``$VAR`` expanded, a relative path
+    taken from ``~/.misaka``, only directories that exist, duplicates and the shared
+    layer dropped. They appear in the index. An approved edit is written back to the
+    directory the skill was loaded from. New skills are created in the role's own layer."""
     raw = load_skills_config().get("external_dirs") or []
     if isinstance(raw, str):
         raw = [raw]
@@ -244,9 +244,24 @@ def shared_skills_dir():
 PERSONAL_LAYERS = frozenset(("role", "shared"))   # the layers the user edits: snapshotted (hermes "local")
 
 
+PROJECT_SKILL_DIRS = ("skills", ".agents/skills", ".claude/skills", ".codex/skills", ".grok/skills")
+
+
+def project_skills_dirs(cwd=None):
+    """Project-owned roots, including absent ones for mutation protection.
+
+    Host directories stay in the project; this never adds a host's global skills.
+    Every discovered root uses the same project quarantine and source identity.
+    """
+    workspace = Path(cwd or os.getcwd()).expanduser().absolute()
+    roles = Path(os.path.expanduser(CFG["roles_root"])).resolve()
+    return [workspace / relative for relative in PROJECT_SKILL_DIRS
+            if not (workspace / relative).resolve().is_relative_to(roles)]
+
+
 def skill_roots(profile_dir, cwd=None, *, extension_paths=()):
     """The layer roots a role sees, as ``(layer, root)`` in precedence order: the project
-    folder's ``skills/`` (the folder MISAKA runs in is the project; never a directory under
+    skill folders (the folder MISAKA runs in is the project; never a directory under
     the profiles tree), the role's ``skills/``, the home's shared ``skills/``, the external
     directories. Only directories that exist are listed, each once."""
     out, seen = [], set()
@@ -257,11 +272,9 @@ def skill_roots(profile_dir, cwd=None, *, extension_paths=()):
             seen.add(key)
             out.append((layer, str(root)))
 
-    roles_root = Path(os.path.expanduser(CFG["roles_root"]))
     try:
-        cand = (Path(cwd or os.getcwd()).expanduser() / "skills").resolve()
-        if cand.is_dir() and roles_root.resolve() not in (cand, *cand.parents):
-            add("project", cand)
+        for root in project_skills_dirs(cwd):
+            add("project", root)
     except OSError:
         pass
     if profile_dir:
@@ -272,6 +285,61 @@ def skill_roots(profile_dir, cwd=None, *, extension_paths=()):
     for layer, root in extension_roots(extension_paths):
         add(layer, root)
     return out
+
+
+def protected_skill_roots(profile_dir, cwd=None, *, extension_paths=(), linked=True):
+    """Workflow protection includes absent and other-role Skill and bundle roots.
+
+    With ``linked`` the real locations of symlinked skills are included too: the file tools
+    resolve their target and would otherwise write a live skill through its link. The shell
+    guard passes ``linked=False``: it can only refuse a command that *names* a root, reads
+    included, and a skill kept in a library is used from there (its runtime, its documented
+    entry) far more often than written."""
+    roles = Path(os.path.expanduser(CFG["roles_root"]))
+    roots = [Path(shared_skills_dir())]
+    if profile_dir:
+        roots.append(Path(profile_dir) / "skills")
+    # Profiles may be nested (Sisters); the nearest existing role ancestors are
+    # covered by their expected skills root, regardless of whether it exists yet.
+    if roles.is_dir():
+        for here, dirs, files in os.walk(roles):
+            dirs[:] = [d for d in dirs if d not in {"skills", "skill-bundles", ".git", "sessions", "cache"}]
+            roots.extend((Path(here) / "skills", Path(here) / "skill-bundles"))
+    roots.extend(project_skills_dirs(cwd))
+    roots.extend(Path(root) for _, root in skill_roots(profile_dir, cwd, extension_paths=extension_paths))
+    protected = {str(p) for root in roots for p in (root.absolute(), root.resolve())}
+    # A skill kept as a symlink (a library elsewhere, linked into a root) really lives where the
+    # link points; the file tools compare real paths, so that place must be protected too.
+    if linked:
+        for root in roots:
+            protected.update(_linked_skill_targets(root))
+    return protected
+
+
+_LINKED_TARGETS = {}     # root -> (directory mtimes seen, real locations): the guard asks on every tool call
+
+
+def _linked_skill_targets(root):
+    """Real locations of the symlinked directories inside a skills root (any nesting level;
+    the walk does not enter the links themselves). Resolving a few hundred links costs more
+    than a tool call should, so the answer is kept until a directory in the root changes."""
+    if not root.is_dir():
+        return set()
+    stamps, links, complete = [], [], True
+    for here, dirs, _files in os.walk(root):
+        try:
+            stamps.append((here, os.stat(here).st_mtime_ns))
+        except OSError:
+            complete = False
+        links.extend(Path(here) / name for name in dirs if (Path(here) / name).is_symlink())
+    key = str(root)
+    cached = _LINKED_TARGETS.get(key)
+    if complete and cached is not None and cached[0] == stamps:
+        return cached[1]
+    targets = {os.path.realpath(link) for link in links}
+    if complete:
+        _LINKED_TARGETS[key] = (stamps, targets)
+    return targets
 
 
 def extension_resources(loader):

@@ -26,10 +26,9 @@ def _runtime():
 
 def model_choices(runtime):
     """The pinning menu: the global default, then what the sessions' own runtime can run on the
-    product provider (builtin catalog plus models.json) as ``provider/id`` references -- the
+    configured providers (builtin catalog plus models.json) as ``provider/id`` references -- the
     shape a pin is stored in -- then a free-form reference."""
-    provider = current_config()["provider"]
-    mine = sorted({f"{m.provider}/{m.id}" for m in runtime.getAvailableSnapshot() if m.provider == provider})
+    mine = sorted({f"{m.provider}/{m.id}" for m in runtime.getAvailableSnapshot()})
     return [DEFAULT_CHOICE, *mine, CUSTOM_CHOICE]
 
 

@@ -148,7 +148,8 @@ def parse_skill_invocation_message(text):
 
 class SkillsPart:
     """Everything skills for one session, against these layer roots; writes (``skill_manage``,
-    ``/learn``) go to the role's own ``skills/`` under ``profile_dir``. ``cwd`` is the
+    ``/learn``) update an existing skill's indexed source; creates go to the role's
+    own ``skills/`` under ``profile_dir``. ``cwd`` is the
     workspace the coding posture is judged in (misaka.core.skills.coding_context)."""
 
     def __init__(self, roots, profile_dir, cwd=None, kind="foreground", *, platform="cli", startup_skills=(), runtime=None):
@@ -252,7 +253,7 @@ class SkillsPart:
             args = raw if isinstance(raw, ListParams) else ListParams(**(raw or {}))
             from misaka.core.skills.vendor.view import skills_list
             rows = [{"name": _runtime_name(e), "description": e["list_description"], "category": e["category"],
-                     **({"source": e["source"]} if e.get("source") else {})} for e in entries()]
+                     "source": e.get("origin_path", e["path"])} for e in self._entries(include_sources=True)]
             payload = json.loads(skills_list(rows, args.category or None))
             return {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
                     "details": {"count": len(payload.get("skills", [])), **payload},
@@ -260,7 +261,7 @@ class SkillsPart:
 
         self.tools.append(ToolDefinition(
             name="skills_list", label="List skills",
-            description="List available skills (name + description). Use skill_view(name) to load full content.",
+            description="List available skills with descriptions and exact source paths, including independent copies with the same name. Pass source to skill_view or skill_manage to select a copy.",
             parameters=typeboxSchema(ListParams), execute=list_execute,
             promptSnippet="List the available skills"))
 
@@ -330,6 +331,12 @@ class SkillsPart:
             for key in ("gist", "description_preview", "hint", "lint_hint"):
                 if result.get(key):
                     lines.append(str(result[key]))
+            if result.get("written_paths"):
+                lines.append("Written skill source directories:\n" + "\n".join(result["written_paths"]))
+            if result.get("updated_copies"):
+                lines.append("Updated MISAKA startup copies:\n" + "\n".join(result["updated_copies"]))
+            if result.get("copy_errors"):
+                lines.append("Some MISAKA startup copies could not be refreshed: " + str(result["copy_errors"]))
             for warning in result.get("lint_warnings") or []:
                 lines.append(f"  ⚠ [{warning['rule']}] {warning['message']}")
             return {"content": [{"type": "text", "text": "\n".join(x for x in lines if x)}],
@@ -338,13 +345,14 @@ class SkillsPart:
 
         self.tools.append(ToolDefinition(
             name="skill_manage", label="Manage skills",
-            description="Create, update, or delete a reusable skill; every change goes through approval, validation, the security scan, and the rollback ledger.",
+            description="Create, update, or delete a reusable skill. Existing skills are written back to their indexed source, including project host folders and configured external roots; use each operation's source to select a particular copy. Creates use this role's skills folder. Every change goes through approval, validation, the security scan, and the rollback ledger.",
             parameters=MANAGE_PARAMETERS,
             prepareArguments=prepare_arguments,
             execute=manage_execute,
             promptSnippet="Create or update a reusable skill",
             promptGuidelines=[
                 f"New skill descriptions must be one sentence of at most {skill_index.SKILL_PROMPT_DESC_LIMIT} characters; put detail in the body.",
+                "For a project Skill, use its indexed project source. source selects an existing copy; it does not export or sync independent host copies. Report the written_paths returned by the tool.",
                 "Keep reasoning Skills Markdown-only: no code, executable helpers, validators or scoring gates.",
                 "When the user-controlled gate blocks a write, report it and do not seek a bypass.",
             ]))
@@ -637,7 +645,7 @@ class SkillsPart:
         except Exception:  # noqa: BLE001 - old host contexts can omit tool info
             return None
 
-    def _entries(self, *, prompt=False):
+    def _entries(self, *, prompt=False, include_sources=False):
         self._refresh_roots()
         active = self._active_tools()
         tools, toolsets = visibility.capabilities(active)
@@ -645,7 +653,8 @@ class SkillsPart:
         if prompt:
             return skill_index.build(self._roots, platform=self._platform, available_tools=tools,
                                      available_toolsets=toolsets, detect=detect)
-        return skill_index.runtime_build(self._roots, platform=self._platform, detect=detect)
+        return skill_index.runtime_build(self._roots, platform=self._platform, detect=detect,
+                                         include_sources=include_sources)
 
     def _bundles(self):
         if self._base_roots is None:

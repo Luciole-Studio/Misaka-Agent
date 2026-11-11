@@ -142,9 +142,48 @@ def makeStrictJsonSchema(
     return cloned  # type: ignore[no-any-return]
 
 
+def _portable_json_schema(parameters: dict[str, Any]) -> dict[str, Any]:
+    """Give required-only object alternatives their own property definitions."""
+    result = deepcopy(parameters)
+
+    def visit(node):
+        if isinstance(node, list):
+            for item in node:
+                visit(item)
+        elif isinstance(node, dict):
+            properties = node.get("properties")
+            alternatives = node.get("anyOf")
+            if node.get("type") == "object" and isinstance(properties, dict) and isinstance(alternatives, list):
+                for branch in alternatives:
+                    if not isinstance(branch, dict) or set(branch) != {"required"}:
+                        continue
+                    required = branch["required"]
+                    if isinstance(required, list) and required and all(isinstance(key, str) and key in properties for key in required):
+                        branch["type"] = "object"
+                        branch["properties"] = {key: deepcopy(properties[key]) for key in required}
+            # Only schema-bearing keywords contain child schemas. Annotation and
+            # assertion values such as const/enum/default are ordinary JSON data.
+            for key in ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"):
+                children = node.get(key)
+                if isinstance(children, dict):
+                    for value in children.values():
+                        if isinstance(value, dict):
+                            visit(value)
+            for key in ("allOf", "anyOf", "oneOf", "prefixItems"):
+                children = node.get(key)
+                if isinstance(children, list):
+                    visit(children)
+            for key in ("items", "additionalItems", "additionalProperties", "unevaluatedProperties",
+                        "unevaluatedItems", "contains", "propertyNames", "not", "if", "then", "else", "contentSchema"):
+                visit(node.get(key))
+
+    visit(result)
+    return result
+
+
 def getJsonSchemaToolParameters(tool: Tool, strict: bool | None) -> Any:
     parameters = tool.parameters_json_schema()
-    return makeStrictJsonSchema(parameters) if strict is True else parameters
+    return makeStrictJsonSchema(parameters) if strict is True else _portable_json_schema(parameters)
 
 
 class GrammarConstrainedSampling(SchemaModel):
