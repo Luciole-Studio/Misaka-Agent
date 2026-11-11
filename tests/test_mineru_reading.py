@@ -87,6 +87,11 @@ print("Script: Han")
 
 @pytest.fixture
 def stand_in(tmp_path, monkeypatch):
+    if os.name == "nt":
+        # MinerU is looked for and started by its name, and by name Windows finds and starts only
+        # an .exe. A ``#!`` script is not one: where MinerU is installed the real program ran in
+        # the stand-in's place (2026-11-10: 39 of these failed and 6 passed for that reason alone).
+        pytest.skip("a `#!` script cannot stand in for mineru-kit on Windows")
     folder = tmp_path / "bin"
     folder.mkdir()
     program = folder / mineru.BINARY

@@ -4,6 +4,7 @@ import asyncio
 import pytest
 
 from misaka.core.platform.home_guard import HomeGuard
+from misaka.utils.tools_manager import find_tool
 
 
 def _write(tmp_path, kind, path):
@@ -65,25 +66,35 @@ def test_last_order_and_ordinary_files_are_untouched(tmp_path, kind, path):
 
 # -- M1: MISAKA's own credentials through the file tools ----------------------------------------------------
 
-def test_the_file_tools_do_not_read_misakas_credentials(tmp_path, monkeypatch):
+def _home_with_credentials(tmp_path, monkeypatch):
     from misaka.config import home
-    from misaka.core.tools.grep import createGrepTool
-    from misaka.core.web.evidence import CREDENTIALS_REFUSED, check_material_read
     monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
     auth = home.path("auth")
     auth.parent.mkdir(parents=True)
     auth.write_text('{"deepseek": {"key": "sk-secret-value"}}', encoding="utf-8")
     (tmp_path / "home" / ".env").write_text("EXA_API_KEY=exa-secret-value\n", encoding="utf-8")
     (tmp_path / "home" / "notes.md").write_text("secret-value is a phrase here\n", encoding="utf-8")
+    return auth
+
+
+def test_the_file_tools_do_not_read_misakas_credentials(tmp_path, monkeypatch):
+    from misaka.core.web.evidence import CREDENTIALS_REFUSED, check_material_read
+    auth = _home_with_credentials(tmp_path, monkeypatch)
     for path in (auth, tmp_path / "home" / ".env", auth.parent):
         with pytest.raises(ValueError, match="not read through file tools"):
             check_material_read(str(path))
     check_material_read(str(tmp_path / "home" / "notes.md"))
+    assert CREDENTIALS_REFUSED.startswith("MISAKA's credentials")
+
+
+@pytest.mark.skipif(find_tool("rg") is None, reason="ripgrep is not on the PATH")
+def test_grep_does_not_show_misakas_credentials(tmp_path, monkeypatch):
+    from misaka.core.tools.grep import createGrepTool
+    _home_with_credentials(tmp_path, monkeypatch)
     grep = createGrepTool(str(tmp_path))
     found = asyncio.run(grep.execute("g", {"pattern": "secret-value", "path": str(tmp_path / "home")}, None, None))
     text = found.content[0].text
     assert "notes.md" in text and "sk-secret" not in text and "exa-secret" not in text
-    assert CREDENTIALS_REFUSED.startswith("MISAKA's credentials")
 
 
 def test_credentials_are_refused_in_any_case_and_only_where_the_home_loads_them(tmp_path, monkeypatch):
