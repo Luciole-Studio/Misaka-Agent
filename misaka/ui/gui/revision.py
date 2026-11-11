@@ -6,11 +6,13 @@ from pathlib import Path
 
 
 def source_revision(source: Path | None = None) -> str:
+    """Hash GUI assets and shared runtime sources to detect stale server processes."""
     source = source or Path(__file__).resolve().parents[3]
     gui = source / "misaka" / "ui" / "gui"
     # Skill approval runs inside this server. A write.py edit must start a new
     # process; otherwise the shortcut keeps the process that still has the old check.
-    skill_runtime = ("write.py", "manage.py", "review.py", "sandbox.py", "operations.py", "layers.py")
+    skill_runtime = ("write.py", "manage.py", "review.py", "sandbox.py", "operations.py", "layers.py",
+                     "index.py", "wiring/skills.py")
     paths = [*gui.rglob("*.py"),
              *(gui / "static" / name for name in ("index.html", "app.js", "style.css")),
              source / "misaka" / "core" / "session_control.py",

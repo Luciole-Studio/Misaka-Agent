@@ -45,6 +45,7 @@ class SessionComposerTests(unittest.TestCase):
         self.assertEqual(self.bridge.session_library.preferences(self.other), {})
 
     def test_delete_requires_confirmation_and_only_closes_gui_owner(self):
+        """Verify delete requires confirmation and only closes gui owner."""
         self.bridge.chats.list = Mock(return_value=[{"id": "gui1", "workspace": str(self.project), "sessionFile": str(self.transcript), "status": "ready"}])
         self.bridge.chats.close = Mock()
         with self.assertRaisesRegex(ValueError, "确认"):
@@ -83,6 +84,7 @@ class SessionComposerTests(unittest.TestCase):
         self.assertTrue(store.path.read_bytes().startswith(b"\xef\xbb\xbf"))
 
     def test_old_saved_sessions_are_not_capped_and_deleted_entries_are_filtered(self):
+        """Verify old saved sessions are not capped and deleted entries are filtered."""
         original_listing = Bridge.saved_chat_sessions.__get__(self.bridge)
         rows = [SimpleNamespace(id=str(i), path=str(self.root / f"{i}.jsonl"), name=f"对话 {i}", firstMessage="", modified=SimpleNamespace(timestamp=lambda: 1), messageCount=1) for i in range(105)]
         # A normal comparable datetime is used for sorting.
@@ -97,6 +99,7 @@ class SessionComposerTests(unittest.TestCase):
             self.assertNotIn(rows[0].path, [s["path"] for s in visible])
 
     def test_files_search_handles_unicode_spaces_and_excludes_generated_directories(self):
+        """Verify files search handles unicode spaces and excludes generated directories."""
         (self.project / "资料").mkdir()
         (self.project / "资料" / "中文 笔记.md").write_text("正文", encoding="utf-8")
         (self.project / "node_modules").mkdir()
@@ -107,6 +110,7 @@ class SessionComposerTests(unittest.TestCase):
         self.assertEqual(ComposerFiles().search(self.other)["files"], [])
 
     def test_file_references_cannot_escape_project_and_reach_native_prompt(self):
+        """Verify file references cannot escape project and reach native prompt."""
         note = self.project / "中文 笔记.md"
         note.write_text("正文", encoding="utf-8")
         for bad in ["../transcript.jsonl", str(self.transcript), "missing.md"]:

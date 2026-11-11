@@ -31,6 +31,7 @@ def _pin(root: str, sid: str) -> dict:
 
 
 def test_the_menu_offers_provider_qualified_references(product_provider):
+    """Verify the menu offers provider qualified references."""
     runtime = roster._runtime()
     choices = roster.model_choices(runtime)
     assert choices[0] == roster.DEFAULT_CHOICE and choices[-1] == roster.CUSTOM_CHOICE

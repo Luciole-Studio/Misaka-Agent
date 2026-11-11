@@ -19,6 +19,7 @@ class ProjectLibraryTests(unittest.TestCase):
         self.bridge.projects = Projects(self.root / "state" / "projects.json")
 
     def test_more_than_one_hundred_projects_survive_a_new_instance(self):
+        """Verify more than one hundred projects survive a new instance."""
         paths = []
         for i in range(101):
             path = self.root / f"项目 {i}"
@@ -77,6 +78,7 @@ class ProjectLibraryTests(unittest.TestCase):
             self.bridge.picker_lock.release()
 
     def test_project_sessions_preserve_workspace_and_exclude_foreign_chats(self):
+        """Verify project sessions preserve workspace and exclude foreign chats."""
         path = str(self.root.resolve())
         self.bridge.project_list({"paths": [path]})
         self.bridge.chats.list = Mock(return_value=[{"workspace": path, "id": "a"}, {"workspace": path + "2", "id": "b"}])

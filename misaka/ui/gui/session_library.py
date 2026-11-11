@@ -19,6 +19,7 @@ class SessionLibrary:
         self.path = Path(path)
 
     def read(self):
+        """Load validated session preferences while preserving malformed files for inspection."""
         if not self.path.exists():
             return {}
         data = json.loads(self.path.read_bytes().decode("utf-8-sig", errors="strict"))
@@ -27,10 +28,12 @@ class SessionLibrary:
         return data
 
     def preferences(self, workspace):
+        """Return saved session preferences restricted to the requested workspace."""
         key = path_key(workspace)
         return {k: v for k, v in self.read().items() if path_key(v.get("workspace", "")) == key}
 
     def update(self, session, operation, value=None):
+        """Atomically apply a pin, rename or trash change under the preference-file lock."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(str(self.path) + ".lock"):
             data = self.read()  # Strictly confirm existing encoding before writing.

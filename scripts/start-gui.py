@@ -29,6 +29,7 @@ source_revision = runpy.run_path(str(SOURCE / "misaka" / "ui" / "gui" / "revisio
 
 
 def url_in_log(path):
+    """Find the local GUI capability URL recorded by a previous server launch."""
     if not path.exists():
         return None
     text = path.read_bytes().decode("utf-8", errors="strict")
@@ -37,6 +38,7 @@ def url_in_log(path):
 
 
 def healthy(url, workspace):
+    """Verify that a running server matches this source revision and requested workspace."""
     origin, fragment = url.split("/#token=", 1)
     request = urllib.request.Request(origin + "/api/health",
         data=json.dumps({"workspace": str(workspace)}).encode(),
@@ -62,6 +64,7 @@ def healthy(url, workspace):
 
 
 def interpreter(env):
+    """Choose an available Python interpreter suitable for launching the GUI source tree."""
     suffix = "Scripts/python.exe" if os.name == "nt" else "bin/python"
     candidates = [SOURCE / ".venv" / suffix]
     if uv := shutil.which("uv"):
@@ -83,6 +86,7 @@ def interpreter(env):
 
 
 def remembered_workspace():
+    """Read the previously selected project directory from launcher state."""
     try:
         text = REMEMBERED.read_text(encoding="utf-8").strip().strip('"')
     except OSError:
@@ -115,6 +119,7 @@ def pick_folder():
 
 
 def resolve_workspace(explicit):
+    """Resolve and remember an explicit project or reuse a valid stored selection."""
     if explicit:
         path = Path(explicit).expanduser().resolve()
     else:
@@ -138,6 +143,7 @@ def runtime_logs():
 
 
 def main():
+    """Reuse a matching GUI server or launch a fresh one for the selected workspace."""
     parser = argparse.ArgumentParser(description="启动 MISAKA 中文界面")
     parser.add_argument("--workspace", default=None)
     parser.add_argument("--no-browser", action="store_true")

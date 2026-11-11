@@ -32,6 +32,7 @@ def _check_google_required(node):
 
 
 def test_registration_and_both_request_paths_have_independent_object_branches():
+    """Verify registration and both request paths have independent object branches."""
     before = deepcopy(LCMEngine.get_tool_schemas())
     tools = []
     for schema in LCMEngine.get_tool_schemas():
@@ -66,6 +67,7 @@ def test_original_operand_acceptance_and_rejection_are_preserved(operand):
 
 
 def test_scalar_unions_and_other_tools_are_unchanged_and_copies_are_independent():
+    """Verify scalar unions and other tools are unchanged and copies are independent."""
     source = LCM_RETRIEVE["parameters"]
     adapted = _portable_json_schema(source)
     assert _operand(adapted)["properties"]["value"] == _operand(source)["properties"]["value"]
@@ -78,6 +80,7 @@ def test_scalar_unions_and_other_tools_are_unchanged_and_copies_are_independent(
 
 @pytest.mark.parametrize("keyword", ["const", "enum", "default", "examples"])
 def test_schema_looking_literal_values_remain_unchanged(keyword):
+    """Verify schema looking literal values remain unchanged."""
     literal = {"type": "object", "properties": {"name": {"type": "string"}}, "anyOf": [{"required": ["name"]}]}
     value = [literal] if keyword in {"enum", "examples"} else literal
     source = {"type": "object", "properties": {"payload": {keyword: value}}, "required": ["payload"]}
@@ -89,6 +92,7 @@ def test_schema_looking_literal_values_remain_unchanged(keyword):
 
 
 def test_child_schemas_are_still_visited_in_definitions_and_schema_named_properties():
+    """Verify child schemas are still visited in definitions and schema named properties."""
     union = {"type": "object", "properties": {"name": {"type": "string"}}, "anyOf": [{"required": ["name"]}]}
     source = {"type": "object", "$defs": {"entry": union}, "properties": {"const": union}}
     adapted = _portable_json_schema(source)

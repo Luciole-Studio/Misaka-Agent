@@ -35,6 +35,7 @@ def _env() -> dict:
 
 
 def _marked(line: str):
+    """Extract the structured worker response from output carrying the protocol marker."""
     if not line.startswith(MARK):
         return None
     try:
@@ -50,6 +51,7 @@ class Settings:
         self.lock = threading.Lock()
 
     def call(self, op: str, params: dict, workspace: str) -> dict:
+        """Run one settings operation in an isolated worker with a bounded wait."""
         request = json.dumps({"op": op, "params": params, "workspace": workspace}, ensure_ascii=False)
         try:
             done = subprocess.run(WORKER, input=request + "\n", capture_output=True, text=True,
@@ -69,6 +71,7 @@ class Settings:
     # ---- browser / device sign-in: a worker that talks back ----
 
     def login_start(self, provider: str, workspace: str) -> dict:
+        """Launch an interactive authentication worker and retain its browser-visible prompts."""
         key = uuid.uuid4().hex[:12]
         proc = subprocess.Popen(WORKER, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 text=True, encoding="utf-8", errors="replace", cwd=workspace, env=_env(),
@@ -83,6 +86,7 @@ class Settings:
         proc.stdin.flush()
 
         def pump():
+            """Consume authentication worker messages and update the associated login receipt."""
             for line in proc.stdout:
                 payload = _marked(line.rstrip("\n"))
                 if payload is None:
@@ -107,17 +111,20 @@ class Settings:
         return {"login_id": key}
 
     def _job(self, key) -> dict:
+        """Resolve an active login ID or explain that its login session has ended."""
         job = self.logins.get(key) if isinstance(key, str) else None
         if job is None:
             raise ValueError("登录已结束，请重新开始")
         return job
 
     def login_status(self, key) -> dict:
+        """Return a login receipt without exposing its subprocess handle."""
         with self.lock:
             job = self._job(key)
             return {k: v for k, v in job.items() if k != "proc"}
 
     def login_answer(self, key, prompt_id, value) -> dict:
+        """Send the browser's answer to a prompt owned by a running login worker."""
         with self.lock:
             job = self._job(key)
             if job["status"] != "running":
@@ -128,6 +135,7 @@ class Settings:
         return {"sent": True}
 
     def login_cancel(self, key) -> dict:
+        """Mark a login cancelled and terminate its owned worker process."""
         with self.lock:
             job = self._job(key)
             if job["status"] == "running":
@@ -151,29 +159,53 @@ class ResearchProcesses:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.items: dict[str, dict] = {}
         self.lock = threading.Lock()
+        self.receipt_lock = threading.RLock()
+        self.receipt_errors: dict[str, str] = {}
         self._load()
 
     def _load(self):
         """Recover receipts without replacing process handles owned by this server."""
-        with self.lock:
+        with self.receipt_lock:
             for path in self.directory.glob("*.json"):
-                item = json.loads(path.read_bytes().decode("utf-8"))
-                if (not isinstance(item, dict) or item.get("id") != path.stem
-                        or not all(key in item for key in ("workspace", "title", "log", "pid", "identity", "started", "run_id"))):
-                    raise ValueError("研究进程记录格式有误，请保留记录后检查")
-                self.items.setdefault(item["id"], item)
+                try:
+                    item = json.loads(path.read_bytes().decode("utf-8"))
+                    if (not isinstance(item, dict) or item.get("id") != path.stem
+                            or not all(isinstance(item.get(key), str) for key in ("workspace", "title", "log"))
+                            or not isinstance(item.get("pid"), int) or item["pid"] <= 0
+                            or not isinstance(item.get("started"), (int, float))
+                            or "identity" not in item or "run_id" not in item
+                            or item["identity"] is not None and not isinstance(item["identity"], (int, float))
+                            or item["run_id"] is not None and not isinstance(item["run_id"], str)):
+                        raise ValueError("研究进程记录格式有误")
+                except (OSError, ValueError) as error:
+                    self.receipt_errors[path.name] = f"{path.name}: {error}"
+                    continue
+                self.receipt_errors.pop(path.name, None)
+                with self.lock:
+                    self.items.setdefault(item["id"], item)
+
+    def warning(self):
+        """Describe preserved unreadable receipts without hiding healthy jobs."""
+        with self.receipt_lock:
+            return "；".join(self.receipt_errors.values())
 
     def _save(self, item):
         """Atomically store process identity and log location, excluding live handles."""
         from misaka.utils.atomic import write_bytes
-        path = self.directory / (item["id"] + ".json")
-        if path.exists():
-            path.read_bytes().decode("utf-8")
-        write_bytes(path, json.dumps({k: v for k, v in item.items() if k != "proc"},
-                                    ensure_ascii=False).encode("utf-8"), mode=0o600)
+        with self.receipt_lock:
+            path = self.directory / (item["id"] + ".json")
+            if path.exists():
+                path.read_bytes().decode("utf-8")
+            write_bytes(path, json.dumps({k: v for k, v in item.items() if k != "proc"},
+                                        ensure_ascii=False).encode("utf-8"), mode=0o600)
 
     def _status(self, item):
         """A reused PID cannot make a finished research job appear alive."""
+        with self.receipt_lock:
+            return self._status_locked(item)
+
+    def _status_locked(self, item):
+        """Update the exit receipt while its state lock is held by the caller."""
         if item.get("proc") is not None:
             code = item["proc"].poll()
             if code is not None and item.get("exit_code") != code:
@@ -197,7 +229,11 @@ class ResearchProcesses:
                 existing = next((row for row in self.listing(workspace) if row["run_id"] == run_id and row["running"]), None)
                 if existing:
                     return {"job_id": existing["id"]}
-            return self._start(workspace, args, title)
+            result = self._start(workspace, args, title)
+            warning = self.warning()
+            if warning:
+                result["warning"] = "；".join(filter(None, (result.get("warning"), warning)))
+            return result
 
     def _start(self, workspace, args, title):
         """Launch one process and retain its receipt before returning to the UI."""
@@ -224,6 +260,7 @@ class ResearchProcesses:
         return {"job_id": key}
 
     def _tail(self, path: str, limit: int = 60000) -> str:
+        """Read a bounded UTF-8 log tail, tolerating unavailable log files."""
         try:
             with open(path, "rb") as f:
                 f.seek(0, os.SEEK_END)
@@ -234,6 +271,12 @@ class ResearchProcesses:
             return ""
 
     def listing(self, workspace: str) -> list[dict]:
+        """Recover and snapshot job state under the receipt lock, outside the map lock."""
+        with self.receipt_lock:
+            return self._listing_locked(workspace)
+
+    def _listing_locked(self, workspace: str) -> list[dict]:
+        """Refresh run banners and process status while receipt mutations are serialized."""
         self._load()
         rows = []
         with self.lock:
@@ -259,6 +302,7 @@ class ResearchProcesses:
         return rows
 
     def log(self, workspace: str, key: str | None = None, run_id: str | None = None) -> dict:
+        """Return the latest matching research log with its current process status."""
         self.listing(workspace)
         with self.lock:
             candidates = [i for i in self.items.values()

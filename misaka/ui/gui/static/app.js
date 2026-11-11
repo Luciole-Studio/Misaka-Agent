@@ -1702,6 +1702,7 @@ async function loadResearch() {
   const [result, jobs]=await Promise.all([api('research_list'), api('research_jobs').catch(()=>({jobs:[]}))]);
   root.replaceChildren();
   const known=new Set(result.runs.map(r=>r.id));
+  if(jobs.warning)root.append(el('p','muted',jobs.warning));
   for (const j of jobs.jobs.filter(j=>!known.has(j.run_id)&&(j.running||Date.now()/1000-j.started<600))) {
     const card=el('article','card run-card pending-run'), top=el('div','run-top'), info=el('div');
     const meta=el('small');meta.append(j.running?el('span','spinner'):icon('alert'),j.running?'  正在初始化…':'  进程已退出（代码 '+j.exit_code+'），请查看日志');

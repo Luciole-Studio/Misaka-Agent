@@ -20,6 +20,7 @@ def windows_folder(initial):
         return c.WINFUNCTYPE(c.c_long, c.c_void_p, *types)(table[slot])
 
     def check(result):
+        """Raise an operating-system error for a failed Windows dialog HRESULT."""
         if result < 0:
             raise OSError(f"系统文件夹选择失败 (0x{result & 0xffffffff:08x})")
 
@@ -75,6 +76,7 @@ def windows_folder(initial):
 
 
 def choose(initial):
+    """Open the platform folder picker and return a selected directory or None."""
     if os.name == "nt":
         return windows_folder(initial)
     from tkinter import Tk, filedialog

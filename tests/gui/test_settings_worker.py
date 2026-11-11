@@ -77,6 +77,7 @@ class SettingsWorkerTests(unittest.TestCase):
         self.assertEqual(models["data"]["targets"][0]["label"], "全局默认")
 
     def test_create_sister_and_plan_approval_roundtrip(self):
+        """Verify create sister and plan approval roundtrip."""
         empty = self.call("sisters")
         self.assertTrue(empty["ok"], empty)
         self.assertEqual(empty["data"]["sisters"], [])
@@ -95,6 +96,7 @@ class SettingsWorkerTests(unittest.TestCase):
         self.assertTrue(saved["research"]["plan_approval"])
 
     def test_sister_model_pin_crosses_providers_and_can_follow_global_again(self):
+        """Verify sister model pin crosses providers and can follow global again."""
         before = self.call("models_overview")["data"]["global"]
         created = self.call("create_sister", {"id": "10087", "model": "anthropic/claude-opus-5"})
         self.assertTrue(created["ok"], created)
@@ -244,6 +246,7 @@ class CustomModelSettingsTests(unittest.TestCase):
         )
 
     def test_save_update_and_remove_keep_the_rest_of_the_file(self):
+        """Verify save update and remove keep the rest of the file."""
         self.seed()
         saved = op_save_custom({
             "provider": "ollama", "name": "本机 Ollama", "api": "openai-completions",
@@ -326,6 +329,7 @@ class CustomModelSettingsTests(unittest.TestCase):
         self.assertNotIn("secret-from-command", json.dumps(service))
 
     def test_catalog_auth_redirects_and_provider_headers(self):
+        """Verify catalog auth redirects and provider headers."""
         secret = "secret-token-value"
         self.route("/v1/models", 200, {"data": [{"id": "llama3"}]})
         with mock.patch.dict(os.environ, {"HTTP_PROXY": "http://127.0.0.1:1", "HTTPS_PROXY": "http://127.0.0.1:1",

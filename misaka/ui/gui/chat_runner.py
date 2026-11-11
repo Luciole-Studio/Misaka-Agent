@@ -54,6 +54,7 @@ def fatal(message: str) -> None:
 
 
 def _image_content(value: dict) -> dict:
+    """Validate a browser image attachment before creating runtime image content."""
     if not isinstance(value, dict):
         raise ValueError("图片附件格式不正确")
     data = value.get("data")
@@ -66,6 +67,7 @@ def _image_content(value: dict) -> dict:
 
 
 def _field(value, key):
+    """Read a named field from mapping-backed or typed runtime values."""
     return value.get(key) if isinstance(value, dict) else getattr(value, key, None)
 
 
@@ -100,6 +102,7 @@ def _without_side_note(message):
 
 
 def _model_summary(model) -> dict | None:
+    """Return the model fields needed by the browser, tolerating no selected model."""
     if model is None:
         return None
     return {"provider": model.provider, "id": model.id, "name": model.name,
@@ -138,6 +141,7 @@ class GuiUIContext:
             emit({"type": "ui_resolved", "id": key})
 
     def resolve(self, key: str, value) -> bool:
+        """Complete the pending browser interaction identified by a response ID."""
         future = self._pending.get(key)
         if future is None or future.done():
             return False
@@ -145,22 +149,27 @@ class GuiUIContext:
         return True
 
     def cancel_all(self) -> None:
+        """Release pending GUI interactions when their owning conversation closes."""
         for future in list(self._pending.values()):
             if not future.done():
                 future.set_result(None)
 
     async def select(self, title, options, opts=None):
+        """Ask the browser to select one of the supplied choices."""
         value = await self._ask("select", title=str(title), options=[str(o) for o in options or []])
         return value if isinstance(value, str) else None
 
     async def confirm(self, title, message, opts=None):
+        """Ask the browser for a confirmation and return its boolean result."""
         return bool(await self._ask("confirm", title=str(title), message=str(message or "")))
 
     async def input(self, title, placeholder=None, opts=None):
+        """Request a short text answer through the browser interaction channel."""
         value = await self._ask("input", title=str(title), placeholder=str(placeholder or ""))
         return value if isinstance(value, str) else None
 
     async def editor(self, title, prefill=None):
+        """Request an editable text value through the browser interaction channel."""
         value = await self._ask("editor", title=str(title), prefill=str(prefill or ""))
         return value if isinstance(value, str) else None
 
@@ -174,6 +183,7 @@ class GuiUIContext:
         return None
 
     def notify(self, message, type=None):
+        """Forward a runtime notification to the browser without opening a terminal."""
         emit({"type": "ui_notify", "message": str(message), "level": type or "info"})
 
 
@@ -196,6 +206,7 @@ class ChatHost:
     # ---- assembly (the engine.main skeleton, minus every terminal concern) ----
 
     def _prepare_environment(self):
+        """Establish the runner workspace and role from a new or saved conversation."""
         from misaka.cli import chat as chat_cli
 
         who = self.spec.get("role") or None
@@ -213,6 +224,7 @@ class ChatHost:
         return who, prof
 
     async def start(self):
+        """Assemble the native session runtime and connect it to GUI event delivery."""
         from misaka.cli.bootstrap import install
         from misaka.cli.args import parseArgs as parse_args
         from misaka.config import get_agent_dir, sessions
@@ -285,6 +297,7 @@ class ChatHost:
     # ---- session binding and event flow ----
 
     async def _bind(self):
+        """Replace the event subscription when the host changes its active session."""
         def on_event(event) -> None:
             try:
                 emit({"type": "event", "event": to_json_event(event)})
@@ -333,6 +346,7 @@ class ChatHost:
         )
 
     async def _deliver_prompt(self, params):
+        """Deliver one input and distinguish rejection from errors after acceptance."""
         from misaka.core.gui_input_queue import InputNotAccepted
         accepted = False
 
@@ -352,6 +366,7 @@ class ChatHost:
             raise
 
     def _session_status(self) -> dict:
+        """Describe the current session, model, queue and runtime capabilities for the UI."""
         model = self.session.model
         return {
             "sessionId": self.session.sessionId,
@@ -370,6 +385,7 @@ class ChatHost:
         }
 
     def _history(self) -> list:
+        """Serialize the active conversation history into browser-visible messages."""
         messages = []
         for message in self.session.messages:
             role = message.get("role") if isinstance(message, dict) else getattr(message, "role", None)
@@ -395,6 +411,7 @@ class ChatHost:
         return result
 
     async def op_send_now(self, params):
+        """Promote an existing queued message, submitting supplied text first when needed."""
         if params.get("text"):
             params = {**params, "message_id": self.op_prompt(params)["message_id"]}
         return await self.input_queue.send_now(params.get("message_id"))
@@ -403,6 +420,7 @@ class ChatHost:
         return self.input_queue.withdraw(params.get("message_id"))
 
     def op_ui_response(self, params: dict) -> dict:
+        """Resolve the browser's answer to a pending runtime interaction."""
         if not self.ui.resolve(str(params.get("id", "")), params.get("value")):
             raise ValueError("这个对话框已经关闭")
         return {"resolved": True}
@@ -414,11 +432,13 @@ class ChatHost:
         return {"stopped": True}
 
     async def op_compact(self, params: dict) -> dict:
+        """Request native context compaction with the supplied optional instructions."""
         instructions = params.get("instructions")
         await self.session.compact(instructions if isinstance(instructions, str) else None)
         return {"compacted": True}
 
     async def op_models(self, _params: dict) -> dict:
+        """Refresh local model metadata and return the user's configured shortlist."""
         await self.registry.refresh({"allowNetwork": False})
         models = []
         from misaka.core.model_preferences import visible_models
@@ -427,12 +447,14 @@ class ChatHost:
         return {"models": models, "shortlisted": True, "current": _model_summary(self.session.model)}
 
     def op_skills(self, _params: dict) -> dict:
+        """List slash-command skills from the running session's own assembled skill parts."""
         from misaka.core.skills.wiring.skills import SkillsPart, _runtime_name, _slash_entries
         return {"skills": [{"name": _runtime_name(e), "description": e.get("list_description") or e.get("description", "")}
                            for part in self.session.moments.parts if isinstance(part, SkillsPart)
                            for e in _slash_entries(part._entries())]}
 
     async def op_set_model(self, params: dict) -> dict:
+        """Select a runtime model and optionally persist the user's preference."""
         await self.registry.refresh({"allowNetwork": False})
         model = self.registry.find(str(params.get("provider", "")), str(params.get("id", "")))
         if model is None:
@@ -442,6 +464,7 @@ class ChatHost:
         return self._session_status()
 
     async def op_set_thinking(self, params: dict) -> dict:
+        """Apply a thinking level through the session's own capability validation."""
         level = params.get("level")
         if level not in self.session.getAvailableThinkingLevels():
             raise ValueError("当前模型不支持这个思考等级")
@@ -450,6 +473,7 @@ class ChatHost:
         return self._session_status()
 
     async def op_rename(self, params: dict) -> dict:
+        """Validate and save the conversation name through its native session."""
         name = str(params.get("name", "")).strip()
         if not name or len(name) > 120:
             raise ValueError("会话名称不能为空，且不能超过 120 个字符")
@@ -460,6 +484,7 @@ class ChatHost:
         return self._session_status()
 
     def op_snapshot(self, _params: dict) -> dict:
+        """Return replayable conversation state together with current session metadata."""
         return {"messages": self._history(), "meta": self._session_status(),
                 "sides": [{"id": side_id, "streaming": side["agent"].state.isStreaming,
                            "messages": [_without_side_note(to_jsonable(m))
@@ -470,6 +495,7 @@ class ChatHost:
     # ---- branches: fork a turn into a new chat, take back the last turn, restore it ----
 
     def op_fork(self, params: dict) -> dict:
+        """Create a new conversation branch at a selected completed reply."""
         from misaka.ui.gui.branching import fork_file, turn_end
         manager = self.session.sessionManager
         leaf = turn_end(manager.getBranch(), params.get("timestamp"))
@@ -530,6 +556,7 @@ class ChatHost:
     # ---- side conversations ----
 
     def _side_agent(self):
+        """Build a side-conversation agent with the restricted tool access it requires."""
         from misaka.agent.agent import Agent
         from misaka.agent.types import BeforeToolCallResult
 
@@ -551,6 +578,7 @@ class ChatHost:
         })
 
     def op_side(self, params: dict) -> dict:
+        """Create or reuse a side conversation and schedule its next prompt."""
         text = params.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > 262144:
             raise ValueError("问题不能为空，且不能超过 262144 个字符")
@@ -573,6 +601,7 @@ class ChatHost:
         return {"side_id": side_id}
 
     def _side_listener(self, side_id: str):
+        """Build an event listener that identifies events from one side conversation."""
         def on_event(event, _signal=None) -> None:
             try:
                 payload = to_json_event(event)
@@ -584,12 +613,14 @@ class ChatHost:
         return on_event
 
     async def _run_side(self, side_id: str, agent, text: str) -> None:
+        """Execute a side prompt and report its completion or visible failure."""
         try:
             await agent.prompt(text)
         except Exception as error:  # noqa: BLE001 - the browser shows the failure in the side panel
             emit({"type": "side_error", "side": side_id, "message": str(error) or type(error).__name__})
 
     async def op_side_stop(self, params: dict) -> dict:
+        """Abort a running side conversation while retaining its existing messages."""
         side = self.sides.get(params.get("side_id"))
         if side is not None:
             side["agent"].abort()
@@ -597,6 +628,7 @@ class ChatHost:
         return {"stopped": side is not None}
 
     def op_side_close(self, params: dict) -> dict:
+        """Stop and release the selected side conversation if it exists."""
         side = self.sides.pop(params.get("side_id"), None)
         if side is not None:
             side["agent"].abort()
@@ -611,6 +643,7 @@ class ChatHost:
                 "side": op_side, "side_close": op_side_close}
 
     async def _execute(self, request: dict, handler, params: dict) -> None:
+        """Invoke an IPC operation and send one success or failure response."""
         try:
             value = handler(self, params)
             if asyncio.iscoroutine(value):
@@ -641,10 +674,12 @@ class ChatHost:
         return True
 
     async def serve(self):
+        """Consume IPC requests until shutdown, then dispose the owned runtime resources."""
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
 
         def read_stdin() -> None:
+            """Read incoming IPC lines off the event loop and forward them to the dispatcher."""
             for line in sys.stdin:
                 line = line.strip()
                 if not line:
@@ -666,6 +701,7 @@ class ChatHost:
             await self._dispose()
 
     async def _dispose(self):
+        """Cancel outstanding operations and release queues, side agents and the runtime."""
         pending = tuple(self._operations)
         for task in pending:
             task.cancel()
@@ -689,6 +725,7 @@ async def _amain(spec: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Read the runner specification and serve the native chat IPC lifecycle."""
     argv = sys.argv[1:] if argv is None else argv
     try:
         spec = json.loads(argv[0]) if argv else {}

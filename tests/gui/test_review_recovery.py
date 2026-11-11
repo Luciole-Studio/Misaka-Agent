@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from misaka.core.gui_input_queue import GuiInputQueue
+from misaka.core.gui_input_queue import GuiInputQueue, InputNotAccepted
 from misaka.ui.gui.chat_runner import ChatHost
 from misaka.ui.gui.services import ResearchProcesses
 from misaka.ui.gui.server import Bridge
@@ -97,3 +97,49 @@ def test_resume_refuses_an_existing_driver_lease(tmp_path, monkeypatch):
         with pytest.raises(ValueError, match="原进程"):
             bridge.dispatch("research_resume", {"run_id": "fixture"})
     bridge._research.assert_not_called()
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+async def test_send_now_never_replays_an_accepted_turn(accepted):
+    """Only a confirmed rejection restores an immediately steered message."""
+    async def deliver(_item):
+        raise RuntimeError("accepted failure") if accepted else InputNotAccepted("rejected")
+
+    queue = GuiInputQueue(Mock(isStreaming=True), deliver)
+    item = {"message_id": "fixture", "text": "fixture", "images": ["image"]}
+    queue.pending.append(item)
+    with pytest.raises((RuntimeError, InputNotAccepted)):
+        await queue.send_now("fixture")
+    assert queue.pending == ([] if accepted else [item])
+
+
+def test_corrupt_receipts_do_not_hide_healthy_jobs(tmp_path):
+    """Keep damaged files intact, report their names, and load the valid receipt."""
+    bad = tmp_path / "broken.json"
+    bad.write_bytes(b"not json")
+    good = {"id": "healthy", "workspace": str(tmp_path), "title": "fixture", "log": "fixture.log",
+            "pid": 123, "identity": 0, "started": 0, "run_id": "fixture-run"}
+    (tmp_path / "healthy.json").write_text(json.dumps(good), encoding="utf-8")
+    manager = ResearchProcesses(tmp_path)
+    with patch.object(manager, "_status", return_value=(False, 0)):
+        assert manager.listing(str(tmp_path))[0]["id"] == "healthy"
+    assert "broken.json" in manager.warning()
+    assert bad.read_bytes() == b"not json"
+
+
+def test_receipt_mutation_and_save_share_a_lock(tmp_path):
+    """Concurrent exit and run-banner updates leave a complete JSON receipt."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    manager = ResearchProcesses(tmp_path)
+    log = tmp_path / "fixture.log"
+    log.write_text("Research run fixture-run:\n", encoding="utf-8")
+    item = {"id": "fixture", "workspace": str(tmp_path), "title": "fixture", "log": str(log),
+            "pid": 123, "identity": 0, "started": 0, "run_id": None, "proc": Mock()}
+    item["proc"].poll.return_value = 0
+    manager.items["fixture"] = item
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda n: manager.listing(str(tmp_path)) if n % 2 else manager._status(item), range(40)))
+    saved = json.loads((tmp_path / "fixture.json").read_text(encoding="utf-8"))
+    assert saved["run_id"] == "fixture-run" and saved["exit_code"] == 0
+    assert "proc" not in saved

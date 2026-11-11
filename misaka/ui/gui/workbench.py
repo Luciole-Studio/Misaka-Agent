@@ -22,6 +22,7 @@ STATUS = {"M": "modified", "A": "added", "D": "deleted", "R": "renamed", "C": "c
 
 
 def project_target(workspace, relative) -> tuple[Path, Path]:
+    """Resolve an existing target and reject paths outside the selected project."""
     root = Path(workspace).expanduser().resolve(strict=True)
     target = (root / str(relative or ".")).resolve()
     if not target.is_relative_to(root):
@@ -32,6 +33,7 @@ def project_target(workspace, relative) -> tuple[Path, Path]:
 
 
 def open_path(workspace, relative, reveal=False) -> dict:
+    """Open or reveal a project path while blocking direct execution of launchable files."""
     root, target = project_target(workspace, relative)
     if (not reveal and target.suffix.lower() in RUNNABLE
             and (target.is_file() or (sys.platform == "darwin" and target.suffix.lower() == ".app"))):
@@ -56,6 +58,7 @@ def open_path(workspace, relative, reveal=False) -> dict:
 
 
 def _git(root: Path, *args, timeout=15) -> subprocess.CompletedProcess:
+    """Run a bounded Git command in the project without invoking a command shell."""
     git = shutil.which("git")
     if not git:
         raise FileNotFoundError("git")
@@ -69,6 +72,7 @@ def _text(raw: bytes) -> str:
 
 
 def _repository(workspace):
+    """Resolve the workspace's repository-relative prefix or explain why Git is unavailable."""
     root = Path(workspace).expanduser().resolve(strict=True)
     try:
         top = _git(root, "rev-parse", "--show-toplevel")
@@ -84,10 +88,12 @@ def _repository(workspace):
 
 
 def _base(root: Path) -> str:
+    """Use HEAD as the comparison base, or the empty tree for an unborn repository."""
     return "HEAD" if _git(root, "rev-parse", "--verify", "--quiet", "HEAD").returncode == 0 else EMPTY_TREE
 
 
 def _is_binary(path: Path) -> bool:
+    """Detect a NUL byte in the file's initial sample without reading the entire file."""
     try:
         with path.open("rb") as handle:
             return b"\0" in handle.read(8000)
@@ -96,6 +102,7 @@ def _is_binary(path: Path) -> bool:
 
 
 def _line_count(path: Path):
+    """Count lines in a small readable text file, returning None for unsupported files."""
     try:
         if path.stat().st_size > MAX_UNTRACKED:
             return None
@@ -108,6 +115,7 @@ def _line_count(path: Path):
 
 
 def git_changes(workspace) -> dict:
+    """Return a bounded workspace-scoped status list with staged flags and change counts."""
     root, prefix, reason = _repository(workspace)
     if prefix is None:
         return {"repo": False, "reason": reason, "files": []}
@@ -148,6 +156,7 @@ def git_changes(workspace) -> dict:
 
 
 def git_diff(workspace, relative) -> dict:
+    """Return a bounded patch for a confined tracked or small untracked project file."""
     root, prefix, reason = _repository(workspace)
     if prefix is None:
         raise ValueError(reason)

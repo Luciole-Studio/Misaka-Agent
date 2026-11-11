@@ -60,6 +60,7 @@ KEYS = {"enter": "\r", "escape": "\x1b", "up": "\x1b[A", "down": "\x1b[B",
 
 
 def required_text(data, name, limit=16384):
+    """Validate a required text field and enforce its request-specific length limit."""
     value = data.get(name)
     if not isinstance(value, str) or not value.strip() or len(value) > limit or "\0" in value:
         raise ValueError(f"{name} 不能为空，且不能超过 {limit} 个字符")
@@ -67,6 +68,7 @@ def required_text(data, name, limit=16384):
 
 
 def workspace_path(value):
+    """Resolve an existing workspace directory or raise a browser-visible validation error."""
     if not isinstance(value, str) or not value.strip():
         raise ValueError("请填写项目文件夹")
     path = Path(value).expanduser().resolve(strict=True)
@@ -76,6 +78,7 @@ def workspace_path(value):
 
 
 def research_args(data):
+    """Build validated research command arguments from the browser form fields."""
     goal = required_text(data, "goal")
     limits = {"depth": (0, 10, 3), "parallel": (1, 32, 4),
               "sister_parallel": (1, 32, 4), "followups": (0, 6, 2),
@@ -119,6 +122,7 @@ class Bridge:
         })
 
     def _research(self, data, args, title):
+        """Start detached research and retain any session-service or receipt warnings."""
         cwd = self._cwd(data)
         warning = ""
         try:
@@ -133,6 +137,7 @@ class Bridge:
                 **({"warning": warning} if warning else {})}
 
     def state(self, data):
+        """Collect workspace-scoped GUI state and available backend information."""
         cwd = self._cwd(data)
         cfg = current_config()
         result = {"workspace": cwd, "version": VERSION, "platform": sys.platform,
@@ -174,6 +179,7 @@ class Bridge:
             return self._native_chat(data)
 
     def _native_chat(self, data):
+        """Reuse the owner of a selected saved session, or start a new native channel."""
         spec = {"workspace": self._cwd(data)}
         if data.get("role"):
             role = required_text(data, "role", 128)
@@ -231,6 +237,7 @@ class Bridge:
         return self.native_chat({"workspace": workspace, "session_path": path, **({"role": role} if role else {})})
 
     def saved_chat_sessions(self, data):
+        """List saved conversations belonging to the requested role and workspace."""
         if data.get("all_roles"):
             data = {**data, "_live_paths": self._live_pane_session_paths()}
             sessions = []
@@ -300,6 +307,7 @@ class Bridge:
         return {"messages": messages, "sessionId": entries[0].get("id")}
 
     def project_list(self, data):
+        """Return remembered projects with the state needed by the project selector."""
         paths = data.get("paths", [])
         if not isinstance(paths, list) or any(not isinstance(p, str) for p in paths):
             raise ValueError("项目列表格式有误")
@@ -314,6 +322,7 @@ class Bridge:
         return {"projects": [{"path": p, "available": Path(p).is_dir()} for p in saved]}
 
     def pick_project_folder(self, data):
+        """Run the isolated native folder picker and register a selected project."""
         if not self.picker_lock.acquire(blocking=False):
             raise ValueError("文件夹选择窗口已打开，请先完成选择")
         try:
@@ -334,6 +343,7 @@ class Bridge:
             self.picker_lock.release()
 
     def project_sessions(self, data):
+        """Combine conversation and task-session entries for one selected workspace."""
         cwd = self._cwd(data)
         if os.path.normcase(cwd) not in {os.path.normcase(p) for p in self.projects.read()}:
             raise ValueError("请先添加这个项目")
@@ -347,6 +357,7 @@ class Bridge:
         return result
 
     def session_update(self, data):
+        """Validate session ownership before changing its title, pin or trash preference."""
         cwd = self._cwd(data)
         path = required_text(data, "path", 4096)
         key = path_key(path)
@@ -388,6 +399,7 @@ class Bridge:
         return {"preferences": self.session_library.preferences(cwd)}
 
     def composer_skills(self, data):
+        """Use the live runner's skill catalogue, falling back for legacy runners only."""
         cwd = self._cwd(data)
         role = skill_role(data.get("role"))
         if role and role not in sisters():
@@ -594,7 +606,7 @@ class Bridge:
 
     def _action_research_jobs(self, data, action):
         'Handle research_jobs.'
-        return {"jobs": self.research_runs.listing(self._cwd(data))}
+        return {"jobs": self.research_runs.listing(self._cwd(data)), "warning": self.research_runs.warning()}
 
     def _action_research_log(self, data, action):
         'Handle research_log.'
@@ -941,6 +953,7 @@ class GUIServer(ThreadingHTTPServer):
     allow_reuse_address = os.name != "nt"
 
     def __init__(self, address, bridge):
+        """Bind the bridge and retain frontend assets with their loaded source revision."""
         super().__init__(address, Handler)
         self.bridge = bridge
         self.token = secrets.token_urlsafe(32)
@@ -955,6 +968,7 @@ class Handler(BaseHTTPRequestHandler):
         pass  # Neither credentials, messages nor capability URLs belong in access logs.
 
     def reply(self, status, payload, content_type="application/json; charset=utf-8", cache="no-store"):
+        """Send a response with local-GUI security headers and disconnect handling."""
         raw = payload if isinstance(payload, bytes) else json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -970,6 +984,7 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def same_origin(self):
+        """Reject requests whose Host or Origin does not match this local server."""
         if self.headers.get("Host") != urlsplit(self.server.origin).netloc:
             self.reply(403, {"error": "拒绝非本机访问"})
             return False
@@ -980,6 +995,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self):
+        """Serve allowlisted frontend assets and fonts while rejecting arbitrary paths."""
         if not self.same_origin():
             return
         files = {"/": ("index.html", "text/html; charset=utf-8"),
@@ -999,6 +1015,7 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200, raw if raw is not None else (STATIC / match[0]).read_bytes(), match[1])
 
     def do_POST(self):
+        """Authenticate and validate JSON requests before dispatching GUI operations."""
         if not self.same_origin():
             return
         if not hmac.compare_digest(self.headers.get("X-Misaka-Token", ""), self.server.token):
@@ -1041,6 +1058,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(*, port=0, open_browser=True, workspace=None):
+    """Run the authenticated local HTTP service and clean up GUI-owned work on exit."""
     server = GUIServer(("127.0.0.1", port), Bridge(workspace or os.getcwd()))
     url = server.origin + "/#token=" + server.token
     print(f"MISAKA 中文界面已启动：{url}", flush=True)

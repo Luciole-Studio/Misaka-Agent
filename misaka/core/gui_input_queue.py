@@ -28,6 +28,7 @@ class GuiInputQueue:
         self.changed()
 
     def resume(self, message_id=None):
+        """Resume delivery, optionally moving one selected message to the front."""
         if message_id is not None:
             item = next((p for p in self.pending if p["message_id"] == message_id), None)
             if item is not None:
@@ -39,10 +40,12 @@ class GuiInputQueue:
             self._schedule()
 
     def snapshot(self):
+        """Return browser-safe pending message identities, display text and image counts."""
         return [{"id": p["message_id"], "text": p.get("display_text") or p["text"],
                  "images": len(p.get("images") or [])} for p in self.pending]
 
     def submit(self, params):
+        """Queue one identified input, rejecting overflow and deduplicating pending IDs."""
         if len(self.pending) >= 100:
             raise ValueError("排队消息已达 100 条，请等待处理后再发送")
         item = {**params, "message_id": params.get("message_id") or uuid.uuid4().hex}
@@ -56,10 +59,12 @@ class GuiInputQueue:
         return {"accepted": True, "message_id": item["message_id"]}
 
     def _schedule(self):
+        """Start a drain task only when no existing drain is still active."""
         if self.task is None or self.task.done():
             self.task = asyncio.create_task(self._drain())
 
     async def _drain(self):
+        """Deliver queued inputs in order and pause on a confirmed pre-acceptance rejection."""
         while self.pending:
             await self.ready.wait()
             await self.session.waitForIdle()
@@ -80,6 +85,7 @@ class GuiInputQueue:
         self.settled()
 
     async def send_now(self, message_id):
+        """Promote a pending message to steering, or to the next idle delivery."""
         item = next((p for p in self.pending if p["message_id"] == message_id), None)
         if item is None:
             raise ValueError("这条消息已开始处理，请等待回复")
@@ -87,7 +93,7 @@ class GuiInputQueue:
         if self.session.isStreaming:
             try:
                 await self.deliver({**item, "streamingBehavior": "steer"})
-            except Exception:
+            except InputNotAccepted:
                 self.pending.insert(0, item)
                 self.changed()
                 raise
@@ -99,6 +105,7 @@ class GuiInputQueue:
         return {"accepted": True, "message_id": message_id, "steering": self.session.isStreaming}
 
     def withdraw(self, message_id):
+        """Remove an undelivered input and return its text and attachments for editing."""
         item = next((p for p in self.pending if p["message_id"] == message_id), None)
         if item is None:
             raise ValueError("这条消息已开始处理，无法撤回")
@@ -110,6 +117,7 @@ class GuiInputQueue:
                 "pendingPrompts": self.snapshot()}
 
     def clear(self):
+        """Discard pending inputs and cancel a drain owned by another task."""
         self.pending.clear()
         self.changed()
         if self.task is not None and not self.task.done():

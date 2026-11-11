@@ -25,6 +25,7 @@ class FileRouteTests(unittest.TestCase):
         self.bridge.request = Mock(side_effect=ConnectionError("no daemon"))
 
     def test_listing_and_preview_carry_size_and_time(self):
+        """Verify listing and preview carry size and time."""
         listing = self.bridge.dispatch("files", {"path": "."})
         names = [e["name"] for e in listing["entries"]]
         self.assertEqual(names, ["资料", "paper.tex"])
@@ -73,6 +74,7 @@ class OpenPathTests(unittest.TestCase):
         self.assertEqual(self.launched(), 2)
 
     def test_paths_outside_the_project_are_refused(self):
+        """Verify paths outside the project are refused."""
         for value in ["../", "../../etc/passwd", "missing.md"]:
             with self.assertRaises(ValueError):
                 workbench.open_path(str(self.root), value)
@@ -105,6 +107,7 @@ class GitChangeTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True)
 
     def test_status_counts_and_patches_stay_inside_the_project(self):
+        """Verify status counts and patches stay inside the project."""
         (self.repo / "子项目" / "笔记.md").write_text("第一行\n改过的第二行\n第三行\n", encoding="utf-8")
         (self.repo / "子项目" / "新文件.csv").write_text("a,b\n1,2\n", encoding="utf-8")
         (self.repo / "根.txt").write_text("changed outside the project\n", encoding="utf-8")

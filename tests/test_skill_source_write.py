@@ -99,6 +99,7 @@ def test_an_edit_returns_to_the_loaded_directory_and_the_startup_copy():
 
 
 def test_a_staged_review_names_the_source_and_the_copy_before_approval():
+    """Verify a staged review names the source and the copy before approval."""
     root = _place()
     external = root / "agents-skills"
     source = _skill(external)

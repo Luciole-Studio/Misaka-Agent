@@ -62,6 +62,7 @@ class TerminalTests(unittest.TestCase):
         self.assertEqual(start.call_args.kwargs["cwd"], str(self.root.resolve()))
 
     def test_missing_binary_invalid_type_and_non_directory_never_spawn(self):
+        """Verify missing binary invalid type and non directory never spawn."""
         with patch.object(terminals.subprocess, "Popen") as start:
             for invalid in [None, "cmd & echo unwanted", ["cmd"], "bash"]:
                 with patch.object(terminals, "setting", return_value=invalid), self.assertRaises(ValueError):

@@ -12,6 +12,7 @@ from misaka.config.product import setting
 
 
 def terminal_choices() -> list[dict]:
+    """List platform terminal choices and whether their launcher executables are available."""
     if sys.platform == "win32":
         specs = [("wt", "Windows Terminal", "wt.exe"),
                  ("pwsh", "PowerShell 7", "pwsh.exe"),
@@ -28,6 +29,7 @@ def terminal_choices() -> list[dict]:
 
 
 def validate_terminal(value) -> str:
+    """Reject terminal identifiers outside the current platform's supported choices."""
     if not isinstance(value, str) or value not in {c["id"] for c in terminal_choices()}:
         raise ValueError("未知的终端类型")
     return value
@@ -45,6 +47,7 @@ def _powershell(executable: str, cwd: str) -> list[str]:
 
 
 def _command(kind: str, cwd: str) -> list[str]:
+    """Build a fixed launcher argument list that preserves the exact working directory."""
     if sys.platform == "win32":
         if kind == "wt":
             shell = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
@@ -65,6 +68,7 @@ def _command(kind: str, cwd: str) -> list[str]:
 
 
 def open_terminal(workspace: str) -> dict:
+    """Launch an available terminal in the project, falling back only in automatic mode."""
     path = Path(workspace).expanduser().resolve(strict=True)
     if not path.is_dir():
         raise ValueError("项目路径必须是已有文件夹")

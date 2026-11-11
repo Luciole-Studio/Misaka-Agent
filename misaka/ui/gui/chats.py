@@ -91,11 +91,13 @@ class ChatChannel:
             self.condition.notify_all()
 
     def trim(self) -> None:
+        """Bound retained events and move the replay floor when old events are removed."""
         while len(self.events) >= RING_LIMIT:
             self.events.popleft()
             self.base_seq += 1
 
     def wait_for_result(self, request_id: int, timeout: float, waiter: dict) -> dict:
+        """Wait for an IPC request response or report timeout and channel closure."""
         if not waiter["event"].wait(timeout):
             self.pending.pop(request_id, None)
             raise TimeoutError("会话没有在时限内应答；它可能仍在处理，请稍后在界面查看结果")
@@ -105,11 +107,13 @@ class ChatChannel:
         return reply.get("data") or {}
 
     def drop_waiters(self) -> None:
+        """Wake outstanding IPC callers when their runner can no longer respond."""
         for waiter in list(self.pending.values()):
             waiter["event"].set()
         self.pending.clear()
 
     def send_raw(self, payload: dict) -> None:
+        """Serialize one IPC request under the runner's write lock."""
         if self.proc is None or self.proc.stdin is None or self.proc.poll() is not None:
             raise ValueError("会话进程已退出")
         line = json.dumps(payload, ensure_ascii=False)
@@ -118,6 +122,7 @@ class ChatChannel:
             self.proc.stdin.flush()
 
     def summary(self) -> dict:
+        """Return browser-facing channel metadata without exposing process handles."""
         return {"id": self.id, **{key: self.meta.get(key) for key in
                                   ("role", "workspace", "sessionId", "sessionFile", "name",
                                    "model", "thinkingLevel", "availableThinkingLevels",
@@ -129,6 +134,7 @@ class ChatManager:
     """Owns every native chat runner the GUI server has spawned."""
 
     def __init__(self, workspace: str, program: list[str] | None = None):
+        """Initialize the workspace, runner command and synchronized channel registry."""
         self.workspace = workspace
         self.program = program or [sys.executable, "-u", "-X", "utf8",
                                    "-m", "misaka.ui.gui.chat_runner"]
@@ -149,6 +155,7 @@ class ChatManager:
                     self.channels.pop(channel.id, None)
 
     def create(self, spec: dict) -> dict:
+        """Validate a conversation specification and launch its dedicated native runner."""
         self._prune_closed()
         workspace = os.path.realpath(spec.get("workspace") or self.workspace)
         if not os.path.isdir(workspace):
@@ -196,6 +203,7 @@ class ChatManager:
         return {"chat_id": chat_id}
 
     def _pump(self, channel: ChatChannel) -> None:
+        """Read runner events, reap the process and publish its final channel state."""
         proc = channel.proc
         try:
             for line in proc.stdout:
@@ -239,6 +247,7 @@ class ChatManager:
             return list(self.channels.values())
 
     def _channel(self, chat_id) -> ChatChannel:
+        """Validate a channel ID and return its retained channel or a visible closed error."""
         if not isinstance(chat_id, str) or len(chat_id) > 64:
             raise ValueError("会话标识无效")
         self._prune_closed()
@@ -271,6 +280,7 @@ class ChatManager:
                                                         "streaming", "error", "pendingPrompts", "capabilities")}}
 
     def request(self, data: dict, op: str, params: dict | None = None, timeout: float = REQUEST_TIMEOUT) -> dict:
+        """Send a correlated operation to the native runner and await its response."""
         channel = self._channel(data.get("chat_id"))
         request_id = next(channel.request_counter) * 100000 + 7   # never collides with a cursor
         # Register before writing: a fast reply can arrive before send_raw returns.
@@ -286,6 +296,7 @@ class ChatManager:
             channel.pending.pop(request_id, None)
 
     def send(self, data: dict) -> dict:
+        """Validate and forward a browser prompt to the selected conversation."""
         text = data.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > 262144:
             raise ValueError("消息不能为空，且不能超过 262144 个字符")
@@ -298,6 +309,7 @@ class ChatManager:
                             "streamingBehavior": data.get("streamingBehavior", "followUp")})
 
     def send_now(self, data: dict) -> dict:
+        """Forward a selected queued message for immediate step-boundary delivery."""
         return self.request(data, "send_now", {key: data.get(key) for key in
                             ("message_id", "text", "display_text", "images", "files") if key in data})
 
@@ -308,6 +320,7 @@ class ChatManager:
         return self.request(data, "stop", {}, timeout=60)
 
     def fork(self, data: dict) -> dict:
+        """Ask the running conversation to create a branch at the requested reply."""
         name = data.get("name")
         return self.request(data, "fork", {"timestamp": data.get("timestamp"),
                                            "name": name if isinstance(name, str) else None})
@@ -316,12 +329,14 @@ class ChatManager:
         return self.request(data, "rewind", {"timestamp": data.get("timestamp")}, timeout=60)
 
     def restore(self, data: dict) -> dict:
+        """Request restoration of the latest withdrawn turn from its owning runner."""
         leaf = data.get("leaf_id")
         if not isinstance(leaf, str) or len(leaf) > 64:
             raise ValueError("还原标识无效")
         return self.request(data, "restore", {"leaf_id": leaf}, timeout=90)
 
     def side(self, data: dict) -> dict:
+        """Validate and forward a prompt for a conversation's side agent."""
         text, side_id = data.get("text"), data.get("side_id")
         if not isinstance(text, str) or not text.strip() or len(text) > 262144:
             raise ValueError("问题不能为空，且不能超过 262144 个字符")
@@ -346,24 +361,28 @@ class ChatManager:
                                                 "id": data.get("model"), "persist": bool(data.get("persist"))})
 
     def set_thinking(self, data: dict) -> dict:
+        """Forward a bounded thinking-level value for validation by the runtime."""
         level = data.get("level")
         if not isinstance(level, str) or not level.strip() or len(level) > 32:
             raise ValueError("未知思考等级")
         return self.request(data, "set_thinking", {"level": level, "persist": bool(data.get("persist"))})
 
     def rename(self, data: dict) -> dict:
+        """Validate a display name and forward it to the owning conversation."""
         name = data.get("name")
         if not isinstance(name, str) or not name.strip() or len(name) > 120:
             raise ValueError("会话名称不能为空，且不能超过 120 个字符")
         return self.request(data, "rename", {"name": name})
 
     def ui_response(self, data: dict) -> dict:
+        """Validate an interaction ID and deliver the browser's answer to the runner."""
         key = data.get("id")
         if not isinstance(key, str) or len(key) > 64:
             raise ValueError("对话框标识无效")
         return self.request(data, "ui_response", {"id": key, "value": data.get("value")})
 
     def close(self, chat_id, timeout: float = 5.0) -> dict:
+        """Request runner shutdown and remove the closed channel from the registry."""
         channel = self.channels.get(chat_id) if isinstance(chat_id, str) else None
         if channel is None:
             return {"closed": False}
@@ -383,6 +402,7 @@ class ChatManager:
         return {"closed": True}
 
     def close_all(self) -> None:
+        """Close a stable snapshot of GUI-owned runners during server shutdown."""
         for channel in self.channels_snapshot():
             try:
                 self.close(channel.id, timeout=3)
@@ -390,10 +410,12 @@ class ChatManager:
                 pass
 
     def list(self) -> list[dict]:
+        """Return summaries of retained channels after pruning expired closed entries."""
         self._prune_closed()
         return [channel.summary() for channel in self.channels_snapshot()]
 
     def alive_count(self) -> int:
+        """Count starting and ready channels under the registry lock."""
         self._prune_closed()
         with self.lock:
             return sum(1 for channel in self.channels.values() if channel.status in ("starting", "ready"))

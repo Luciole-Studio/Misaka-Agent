@@ -23,6 +23,7 @@ class ModelSelectionTests(unittest.TestCase):
                                "models": ["old", "unused"]})
 
     def test_live_catalog_over_400_imports_only_selected_and_preserves_siblings(self):
+        """Verify live catalog over 400 imports only selected and preserves siblings."""
         models_file = self.home / "models.json"
         before = json.loads(models_file.read_text(encoding="utf-8"))
         before["note"] = "保留"
@@ -50,6 +51,7 @@ class ModelSelectionTests(unittest.TestCase):
         self.assertEqual(set(reopened["selected"]), {"vendor/m1", "vendor/m600"})
 
     def test_disable_clear_and_provider_identity(self):
+        """Verify disable clear and provider identity."""
         worker.op_save_custom({"provider": "second", "api": "openai-completions", "base_url": "http://127.0.0.1:9/v1",
                                "api_key": "other-secret", "models": ["old"]})
         for provider in ("sample", "second"):
@@ -74,6 +76,7 @@ class ModelSelectionTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), before)
 
     def test_subscription_catalog_does_not_send_token_to_public_endpoint(self):
+        """Verify subscription catalog does not send token to public endpoint."""
         registry = worker._runtime().registry
         model = next(m for m in registry.getAll() if m.provider == "openai-codex")
         with patch.object(worker, "_provider_auth", return_value=(registry, model, {"apiKey": "subscription-secret"})), \
@@ -84,6 +87,7 @@ class ModelSelectionTests(unittest.TestCase):
         self.assertTrue(result["models"])
 
     def test_openrouter_connection_checks_credentials_without_inference(self):
+        """Verify openrouter connection checks credentials without inference."""
         registry = worker._runtime().registry
         model = next(m for m in registry.getAll() if m.provider == "openrouter")
         with patch.object(worker, "_provider_auth", return_value=(registry, model, {"apiKey": "test-secret"})), \
@@ -94,11 +98,13 @@ class ModelSelectionTests(unittest.TestCase):
         infer.assert_not_called()
 
     def test_unset_preferences_keep_only_existing_defaults_and_pins(self):
+        """Verify unset preferences keep only existing defaults and pins."""
         registry = worker._runtime().registry
         with patch("misaka.core.model_preferences.initial_refs", return_value={"sample/old"}):
             self.assertEqual([m.id for m in visible_models(registry.getAvailable())], ["old"])
 
     def test_catalog_pagination_and_non_chat_models(self):
+        """Verify catalog pagination and non chat models."""
         registry = worker._runtime().registry
         model = registry.find("sample", "old").model_copy(update={"api": "google-generative-ai"})
         pages = [(200, {"models": [{"name": "models/chat-a", "supportedGenerationMethods": ["generateContent"]},
@@ -111,6 +117,7 @@ class ModelSelectionTests(unittest.TestCase):
         self.assertIn("pageToken=a+b", fetch.call_args.args[0])
 
     def test_model_selection_preserves_explicit_dated_ids(self):
+        """Verify model selection preserves explicit dated ids."""
         worker.op_save_custom({"provider": "sample", "api": "openai-completions",
                                "base_url": "http://127.0.0.1:9/v1", "api_key": "test-secret",
                                "models": [{"id": "m", "name": "Model"}, {"id": "m-2026-01-01", "name": "Model"}]})

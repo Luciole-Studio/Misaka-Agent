@@ -15,14 +15,17 @@ _QUIET_ENTRIES = frozenset({"model_change", "thinking_level_change", "label", "s
 
 
 def _field(value: Any, key: str) -> Any:
+    """Read an optional field from either mapping-backed or typed session data."""
     return value.get(key) if isinstance(value, dict) else getattr(value, key, None)
 
 
 def message_role(entry: dict) -> Any:
+    """Return the role of a message entry, or None for non-message entries."""
     return _field(entry.get("message"), "role") if entry.get("type") == "message" else None
 
 
 def _continues_turn(entry: dict) -> bool:
+    """Decide whether an entry belongs to the preceding visible reply."""
     kind = entry.get("type")
     if kind == "message":
         return message_role(entry) in ("assistant", "toolResult", "system")
@@ -46,6 +49,7 @@ def turn_end(branch: list[dict], timestamp: Any) -> str:
 
 
 def last_user_entry(branch: list[dict]) -> dict | None:
+    """Find the most recent user message on the supplied active branch."""
     return next((entry for entry in reversed(branch) if message_role(entry) == "user"), None)
 
 

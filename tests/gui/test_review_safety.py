@@ -42,6 +42,7 @@ def test_redirect_never_sends_credentials_to_a_different_origin(origin, target):
 
 
 def test_redirect_accepts_an_equivalent_default_port():
+    """Verify redirect accepts an equivalent default port."""
     requests = []
 
     def handle(request):
@@ -65,6 +66,7 @@ def test_empty_role_is_rejected_before_resolving_a_profile(role):
 
 @pytest.mark.parametrize("platform,name,directory", [("darwin", "project.app", True), ("linux", "project.desktop", False)])
 def test_project_launchers_cannot_be_opened(tmp_path, platform, name, directory):
+    """Verify project launchers cannot be opened."""
     target = tmp_path / name
     target.mkdir() if directory else target.write_text("fixture", encoding="utf-8")
     with patch.object(workbench.sys, "platform", platform), patch.object(workbench.subprocess, "Popen") as launch:
@@ -122,6 +124,7 @@ def test_runtime_supported_thinking_levels_are_forwarded(tmp_path):
 
 
 def test_ended_channel_keeps_final_events_then_expires(tmp_path):
+    """Verify ended channel keeps final events then expires."""
     manager = ChatManager(str(tmp_path))
     channel = ChatChannel("fixture", {"workspace": str(tmp_path)}, "unused.log")
     channel.proc = Mock(stdout=io.StringIO(json.dumps({"type": "bye"}) + "\n"), stdin=None)
@@ -156,6 +159,7 @@ def test_restoring_a_live_chat_uses_a_locked_channel_snapshot(tmp_path):
 
 
 def test_cached_workspace_search_does_not_wait_for_another_walk(tmp_path):
+    """Verify cached workspace search does not wait for another walk."""
     slow, cached = tmp_path / "slow", tmp_path / "cached"
     slow.mkdir()
     cached.mkdir()
@@ -203,6 +207,7 @@ def test_cli_job_times_out_and_reaps_its_owned_process(tmp_path):
 
 
 def test_cli_output_is_bounded_and_old_finished_jobs_are_evicted(tmp_path):
+    """Verify cli output is bounded and old finished jobs are evicted."""
     script = "import sys; sys.stdout.buffer.write(('测'*100000+'END').encode()); sys.stdout.flush()"
     jobs = Jobs(finished_limit=1, program=[sys.executable, "-u", "-c", script])
     first = jobs.start(str(tmp_path), [], "first")["job_id"]
@@ -230,6 +235,7 @@ def test_gui_shutdown_reaps_a_running_cli_job(tmp_path):
 
 
 def test_research_start_reports_an_unavailable_session_service(tmp_path):
+    """Verify research start reports an unavailable session service."""
     bridge = Bridge(str(tmp_path))
     bridge.ensure = Mock(side_effect=ConnectionError("fixture connection refused"))
     bridge.research_runs.start = Mock(return_value={"job_id": "fixture"})

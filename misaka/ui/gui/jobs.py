@@ -16,6 +16,7 @@ FINISHED_RETENTION = 86400
 
 class Jobs:
     def __init__(self, *, timeout=1800, finished_limit=64, program=None):
+        """Configure command execution limits and the synchronized job receipt registry."""
         self.items = {}
         self.lock = threading.Lock()
         self.timeout = timeout
@@ -66,6 +67,7 @@ class Jobs:
                     item["error"] += f"; failed to terminate process: {error}"
 
     def start(self, workspace, args, title):
+        """Launch a noninteractive CLI command with bounded output and a timeout."""
         key = uuid.uuid4().hex
         item = {"id": key, "workspace": workspace, "title": title,
                 "status": "running", "exit_code": None, "_chunks": deque(), "_bytes": 0}
@@ -84,6 +86,7 @@ class Jobs:
         timer.start()
 
         def read():
+            """Drain process output and finalize the job receipt after exit or read failure."""
             code = None
             try:
                 while chunk := proc.stdout.read1(8192):
@@ -104,6 +107,7 @@ class Jobs:
         return {"job_id": key}
 
     def get(self, key, workspace):
+        """Return a workspace-scoped job receipt with a safely decoded output tail."""
         with self.lock:
             self._prune_locked()
             item = self.items.get(key)

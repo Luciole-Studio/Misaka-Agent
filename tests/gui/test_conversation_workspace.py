@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from pathlib import Path
 import tempfile
 
-from misaka.core.gui_input_queue import GuiInputQueue
+from misaka.core.gui_input_queue import GuiInputQueue, InputNotAccepted
 from misaka.core.session_control import SessionControl
 from misaka.ui.gui.chat_runner import ChatHost
 from misaka.ui.gui.chats import ChatChannel, ChatManager
@@ -64,6 +64,7 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.queue.clear)
 
     async def test_followups_wait_and_preserve_fifo_and_images(self):
+        """Verify followups wait and preserve fifo and images."""
         self.queue.submit({"text": "first", "message_id": "1"})
         await self.session.started.wait()
         image = {"type": "image", "data": "abc", "mime": "image/png"}
@@ -79,6 +80,7 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.settled, [True])
 
     async def test_send_now_reaches_live_session_before_first_turn_finishes(self):
+        """Verify send now reaches live session before first turn finishes."""
         self.queue.submit({"text": "first", "message_id": "1"})
         await self.session.started.wait()
         self.queue.submit({"text": "keep queued", "message_id": "2"})
@@ -95,6 +97,7 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([c[0] for c in self.session.calls], ["first", "change direction", "keep queued"])
 
     async def test_stop_drops_waiting_followups(self):
+        """Verify stop drops waiting followups."""
         self.queue.submit({"text": "first"})
         await self.session.started.wait()
         self.queue.submit({"text": "second"})
@@ -118,10 +121,11 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.queue.task.cancelled())
 
     async def test_failed_promotion_remains_in_queue(self):
+        """Verify failed promotion remains in queue."""
         self.session.isStreaming = True
         self.session.idle.clear()
         self.queue.submit({"text": "retry", "message_id": "1"})
-        self.queue.deliver = AsyncMock(side_effect=ValueError("preflight failed"))
+        self.queue.deliver = AsyncMock(side_effect=InputNotAccepted("preflight failed"))
         with self.assertRaisesRegex(ValueError, "preflight"):
             await self.queue.send_now("1")
         self.assertEqual([p["id"] for p in self.queue.snapshot()], ["1"])
@@ -150,6 +154,7 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         await self.queue.task
 
     async def test_paused_queue_survives_idle_and_can_withdraw_or_send_now(self):
+        """Verify paused queue survives idle and can withdraw or send now."""
         self.queue.pause()
         self.queue.submit({"text": "withdraw", "message_id": "a"})
         self.queue.submit({"text": "send", "message_id": "b"})
@@ -164,6 +169,7 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         await self.queue.task
 
     async def test_stop_preserves_followups_and_new_input_runs_first(self):
+        """Verify stop preserves followups and new input runs first."""
         host = ChatHost({"workspace": "."})
         host.session = self.session
         host._create_input_queue()
@@ -212,6 +218,7 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(control.gui_queue.paused)
 
     async def test_local_message_is_promoted_atomically_while_streaming(self):
+        """Verify local message is promoted atomically while streaming."""
         host = ChatHost({"workspace": "."})
         host.session = self.session
         host._create_input_queue()

@@ -55,6 +55,7 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(manager.events({"chat_id": "fast", "cursor": result["cursor"], "wait": 0})["events"][0]["event"]["type"], "agent_end")
 
     def test_new_runner_uses_selected_project(self):
+        """Verify new runner uses selected project."""
         manager = ChatManager(str(self.root), program=[sys.executable, "-u", STUB])
         self.addCleanup(manager.close_all)
         key = manager.create({"workspace": str(self.other)})["chat_id"]
@@ -66,6 +67,7 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(meta["cwd"], str(self.other.resolve()))
 
     def test_state_filters_chats_by_project(self):
+        """Verify state filters chats by project."""
         self.bridge.chats.list = Mock(return_value=[
             {"id": "a", "workspace": str(self.root.resolve())},
             {"id": "b", "workspace": str(self.other.resolve())}])
@@ -87,6 +89,7 @@ class ProjectTests(unittest.TestCase):
             self.bridge.native_chat({"session_path": str(path)})
 
     def test_foreign_card_cannot_be_started(self):
+        """Verify foreign card cannot be started."""
         with self.assertRaisesRegex(ValueError, "当前项目"):
             self.bridge.dispatch("card", {"task_id": "foreign", "operation": "run"})
         self.assertFalse(any(c.args[0] == "pane.run_card" for c in self.bridge.request.call_args_list))
@@ -97,6 +100,7 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(result["entries"], [{"name": self.other.name, "path": str(self.other.resolve())}])
 
     def test_interactive_command_is_not_run_as_output_job(self):
+        """Verify interactive command is not run as output job."""
         self.bridge.jobs.start = Mock()
         for args in [["setup", "model"], ["research", "hello"], ["doc", 4]]:
             with self.assertRaises(ValueError):

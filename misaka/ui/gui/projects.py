@@ -14,6 +14,7 @@ class Projects:
         self.path = Path(path)
 
     def read(self):
+        """Read and validate the UTF-8 project list without rewriting invalid input."""
         if not self.path.exists():
             return []
         data = json.loads(self.path.read_bytes().decode("utf-8-sig", errors="strict"))
@@ -22,6 +23,7 @@ class Projects:
         return data
 
     def add(self, paths):
+        """Merge project paths under a file lock and atomically preserve the bookmark list."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(str(self.path) + ".lock"):
             saved = self.read()

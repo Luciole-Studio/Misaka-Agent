@@ -50,6 +50,7 @@ def test_project_edit_updates_the_host_source_without_shadowing_it(tmp_path, rel
 
 
 def test_explicit_source_selects_one_independent_project_copy(tmp_path):
+    """Verify explicit source selects one independent project copy."""
     first = skill(tmp_path / ".claude" / "skills")
     second = skill(tmp_path / ".codex" / "skills")
     profile = tmp_path / "profiles" / "role"
@@ -100,6 +101,7 @@ def test_legacy_batch_source_is_not_silently_discarded(tmp_path):
 
 
 def test_source_cannot_address_an_unindexed_directory_or_override_create(tmp_path):
+    """Verify source cannot address an unindexed directory or override create."""
     source = skill(tmp_path / "outside-index")
     profile = tmp_path / "profiles" / "role"
     layers.write_skills_config({"skill_write_mode": "allow"})
@@ -113,6 +115,7 @@ def test_source_cannot_address_an_unindexed_directory_or_override_create(tmp_pat
 
 
 def test_batch_never_overwrites_independent_sources_with_one_staging_copy(tmp_path):
+    """Verify batch never overwrites independent sources with one staging copy."""
     sources = [skill(tmp_path / host / "skills") for host in (".claude", ".grok")]
     profile = tmp_path / "profiles" / "role"
     layers.write_skills_config({"skill_write_mode": "allow"})
@@ -147,6 +150,7 @@ def test_review_and_approval_keep_the_explicit_source(tmp_path):
 
 
 def test_host_roots_are_protected_before_creation_and_use_project_quarantine(tmp_path, monkeypatch):
+    """Verify host roots are protected before creation and use project quarantine."""
     profile = tmp_path / "profiles" / "role"
     protected = layers.protected_skill_roots(str(profile), str(tmp_path))
     for host in (".agents", ".claude", ".codex", ".grok"):
@@ -165,6 +169,7 @@ def test_host_roots_are_protected_before_creation_and_use_project_quarantine(tmp
 
 
 async def test_model_tool_lists_selectable_sources_and_reports_the_written_path(tmp_path):
+    """Verify model tool lists selectable sources and reports the written path."""
     first = skill(tmp_path / ".claude" / "skills")
     second = skill(tmp_path / ".codex" / "skills")
     profile = tmp_path / "profiles" / "role"

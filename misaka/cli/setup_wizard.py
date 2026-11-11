@@ -473,7 +473,7 @@ class Wizard:
         ui.print_header("Skills")
         roles_root = os.path.expanduser(CFG["roles_root"])
         shared = skill_layers.shared_skills_dir()
-        shown = (("<project>/skills/ and <project>/.agents/skills/", "the current project, loaded first"),
+        shown = (("<project>/skills/, <project>/.agents/skills/, <project>/.claude/skills/, <project>/.codex/skills/, <project>/.grok/skills/", "the current project, loaded first"),
                  (f"{ui.tilde(roles_root)}/<role>/skills/", "that role alone"),
                  (ui.tilde(shared), "every role"),
                  ("~/.agents/skills", "shared with your other agent tools; an approved edit is written back here when the skill was loaded from here"))

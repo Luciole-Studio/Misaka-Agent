@@ -89,6 +89,7 @@ class ServerReuseTests(unittest.TestCase):
                                        "source_revision": start_gui.source_revision(start_gui.SOURCE)}))
 
     def test_frontend_and_model_handler_edits_change_the_revision(self):
+        """Verify frontend and model handler edits change the revision."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             names = ["misaka/ui/gui/server.py", "misaka/ui/gui/static/index.html",
@@ -96,7 +97,8 @@ class ServerReuseTests(unittest.TestCase):
                      "misaka/core/session_control.py", "misaka/core/model_preferences.py", "misaka/core/network/roster.py",
                      "misaka/core/skills/write.py", "misaka/core/skills/manage.py",
                      "misaka/core/skills/review.py", "misaka/core/skills/sandbox.py",
-                     "misaka/core/skills/operations.py", "misaka/core/skills/layers.py"]
+                     "misaka/core/skills/operations.py", "misaka/core/skills/layers.py",
+                     "misaka/core/skills/index.py", "misaka/core/skills/wiring/skills.py"]
             for name in names:
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -113,6 +115,10 @@ class ServerReuseTests(unittest.TestCase):
             before_layers = start_gui.source_revision(root)
             (root / "misaka/core/skills/layers.py").write_bytes(b"new skill roots")
             self.assertNotEqual(before_layers, start_gui.source_revision(root))
+            for name in ("index.py", "wiring/skills.py"):
+                before = start_gui.source_revision(root)
+                (root / "misaka/core/skills" / name).write_bytes(b"new skill runtime")
+                self.assertNotEqual(before, start_gui.source_revision(root))
 
 
 if __name__ == "__main__":

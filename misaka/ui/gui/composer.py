@@ -16,6 +16,7 @@ class ComposerFiles:
         self.lock = threading.Lock()
 
     def search(self, workspace, query=""):
+        """Search a bounded project file catalogue, caching scans independently by workspace."""
         root = Path(workspace).resolve()
         key = os.path.normcase(str(root))
         with self.lock:
@@ -53,6 +54,7 @@ class ComposerFiles:
 
 
 def referenced_message(text, files, workspace):
+    """Append validated in-project file references to a prompt without reading their contents."""
     if not files:
         return text
     if not isinstance(files, list) or len(files) > 24 or any(not isinstance(p, str) for p in files):
@@ -68,6 +70,7 @@ def referenced_message(text, files, workspace):
 
 
 def skill_role(role):
+    """Normalize Last Order and Sister aliases into a role catalogue selector."""
     if role in (None, "", "last-order", "last_order"):
         return None
     if not isinstance(role, str):
@@ -76,6 +79,7 @@ def skill_role(role):
 
 
 def skill_catalogue(workspace, role=None):
+    """Return slash-command skills visible to the selected role in this workspace."""
     from misaka.config import current_config, sisters
     from misaka.core.skills import index
     from misaka.core.skills.layers import skill_roots

@@ -26,6 +26,7 @@ class BridgeTests(unittest.TestCase):
         self.bridge.request = Mock(return_value={"pane_id": "p1"})
 
     def test_research_goal_is_positional_and_bounds_are_enforced(self):
+        """Verify research goal is positional and bounds are enforced."""
         argv = research_args({"goal": "--中文问题\n第二行", "depth": 0})
         self.assertEqual(argv[-2:], ["--", "--中文问题\n第二行"])
         from misaka.cli.app import _parser
@@ -48,6 +49,7 @@ class BridgeTests(unittest.TestCase):
             launch.assert_not_called()
 
     def test_launch_uses_argv_without_shell(self):
+        """Verify launch uses argv without shell."""
         self.bridge.dispatch("command", {"args": ["doc", "find", "中文 & echo test"]})
         method, params = self.bridge.request.call_args.args
         self.assertEqual(method, "pane.create")
@@ -58,6 +60,7 @@ class BridgeTests(unittest.TestCase):
                 self.bridge.dispatch("command", {"args": args})
 
     def test_utf8_multiline_paste_obeys_terminal_mode(self):
+        """Verify utf8 multiline paste obeys terminal mode."""
         for bracketed in (True, False):
             self.bridge.request.reset_mock()
             self.bridge.request.side_effect = lambda method, params: {"input": {"bracketed_paste": bracketed}} if method == "pane.screen" else {"ok": True}
@@ -88,6 +91,7 @@ class BridgeTests(unittest.TestCase):
             self.bridge.dispatch("files", {"path": "中文.md"})
 
     def test_live_session_reuses_its_pane(self):
+        """Verify live session reuses its pane."""
         self.bridge.request.side_effect = lambda method, params=None: {"sessions": [{"id": "s1", "path": "session.jsonl"}]} if method == "cards.list" else {"panes": [{"id": "p9", "alive": True, "reported": {"session": "session.jsonl"}}]}
         result = self.bridge.dispatch("session", {"session_id": "s1", "read_only": False})
         self.assertEqual(result, {"pane_id": "p9"})
@@ -100,6 +104,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(self.bridge.request.call_count, 1)
 
     def test_saved_sister_keeps_role_and_task_history_is_read_only(self):
+        """Verify saved sister keeps role and task history is read only."""
         entry = {"id": "s1", "path": "session.jsonl", "role": "10032", "kind": "foreground", "state": "saved"}
         self.bridge.request.side_effect = lambda method, params=None: {"sessions": [entry]} if method == "cards.list" else {"panes": []}
         self.bridge.launch = Mock(return_value={"pane_id": "p7"})
@@ -111,6 +116,7 @@ class BridgeTests(unittest.TestCase):
             self.assertIn("--read-only", self.bridge.launch.call_args.args[1])
 
     def test_key_uses_negotiated_terminal_protocol(self):
+        """Verify key uses negotiated terminal protocol."""
         self.bridge.request.side_effect = lambda method, params=None: {"input": {"application_cursor": True}} if method == "pane.screen" else {"ok": True}
         self.bridge.dispatch("key", {"id": "p1", "key": "up"})
         self.assertEqual(base64.b64decode(self.bridge.request.call_args.args[1]["data"]), b"\x1bOA")
@@ -128,6 +134,7 @@ class BridgeTests(unittest.TestCase):
             self.bridge.dispatch("chat_native", {"role": "99999"})
 
     def test_native_chat_refuses_to_double_own_a_live_pane_session(self):
+        """Verify native chat refuses to double own a live pane session."""
         session = self.root / "live.jsonl"
         session.write_text('{"type":"session","id":"x"}\n', encoding="utf-8")
         self.bridge.request.side_effect = lambda method, params=None: {
@@ -145,6 +152,7 @@ class BridgeTests(unittest.TestCase):
             self.bridge.dispatch("chat_snapshot", {"path": str(not_session)})
 
     def test_settings_ops_include_custom_services(self):
+        """Verify settings ops include custom services."""
         from misaka.ui.gui.server import SETTINGS_OPS
         from misaka.ui.gui.services import SLOW_OPS
         from misaka.ui.gui.settings_worker import OPS
@@ -199,6 +207,7 @@ class NativeChatManagerTests(unittest.TestCase):
             self.manager.request({"chat_id": "nope"}, "ping")
 
     def test_ring_trim_forces_full_replay(self):
+        """Verify ring trim forces full replay."""
         from misaka.ui.gui.chats import ChatChannel
         channel = ChatChannel("trim", {}, "unused.log")
         self.manager.channels["trim"] = channel
@@ -286,6 +295,7 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/../../server.py")[0], 404)
 
     def test_frontend_stays_paired_with_running_backend_after_source_changes(self):
+        """Verify frontend stays paired with running backend after source changes."""
         with patch("misaka.ui.gui.server.STATIC", Path("missing-new-source")):
             for path, asset in [("/", "index.html"), ("/app.js", "app.js"), ("/style.css", "style.css")]:
                 status, body, _ = self.request("GET", path)
@@ -293,6 +303,7 @@ class HTTPTests(unittest.TestCase):
                 self.assertEqual(body, self.server.assets[asset])
 
     def test_malformed_and_oversized_requests(self):
+        """Verify malformed and oversized requests."""
         for data in [b"[]", b"invalid"]:
             self.assertEqual(self.request(data=data, headers=self.auth())[0], 400)
         # A declared oversized body is rejected before receiving it, including

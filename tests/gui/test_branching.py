@@ -113,6 +113,7 @@ class BranchOpsTests(unittest.IsolatedAsyncioTestCase):
         return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()]
 
     async def test_fork_copies_up_to_the_turn_and_leaves_the_source_alone(self):
+        """Verify fork copies up to the turn and leaves the source alone."""
         source = self.manager.getSessionFile()
         before = Path(source).read_bytes()
         forked = self.host.op_fork({"timestamp": 11, "name": "研究计划 · 分支"})["session_path"]
@@ -133,11 +134,13 @@ class BranchOpsTests(unittest.IsolatedAsyncioTestCase):
                         "an earlier, finished turn forks while the newest one streams")
 
     async def test_saved_session_forks_from_its_file(self):
+        """Verify saved session forks from its file."""
         forked = fork_file(self.manager.getSessionFile(), timestamp=23)
         texts = [e["message"]["content"][0]["text"] for e in self.read(forked) if e["type"] == "message"]
         self.assertEqual(texts[-1], "第二答")
 
     async def test_rewind_returns_the_prompt_and_restore_brings_the_turn_back(self):
+        """Verify rewind returns the prompt and restore brings the turn back."""
         leaf = self.manager.getLeafId()
         with self.assertRaisesRegex(ValueError, "已经更新"):
             await self.host.op_rewind({"timestamp": 10})
@@ -190,6 +193,7 @@ def reply(*content, stop="stop"):
 
 class SideTests(unittest.IsolatedAsyncioTestCase):
     async def test_side_question_reads_but_never_writes_and_leaves_the_main_context(self):
+        """Verify side question reads but never writes and leaves the main context."""
         executed, contexts = [], []
 
         def tool(name):

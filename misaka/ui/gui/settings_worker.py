@@ -40,6 +40,7 @@ TOOLS = (("git", "项目仓库与结果提交", True), ("rg", "文本检索（ri
 
 
 def _extras_command(extras: list[str]) -> dict:
+    """Build an installer-specific optional-dependency command, with a pip fallback."""
     from misaka.cli import update
     try:
         install = update.describe()
@@ -53,6 +54,7 @@ def _extras_command(extras: list[str]) -> dict:
 
 
 def op_overview(_params: dict) -> dict:
+    """Report local tools, research settings and skill sources without changing settings."""
     if _params.get("section") == "skills":
         # Older GUI servers can invoke this fresh, read-only worker while their
         # existing chats stay alive, before they gain composer_skills themselves.
@@ -112,6 +114,7 @@ def _runtime(read_only=True):
 
 
 def _profile_for(target):
+    """Resolve a known role target, rejecting names outside the current roster."""
     from misaka.config import current_config
     cfg = current_config()
     if not target:
@@ -125,6 +128,7 @@ def _profile_for(target):
 
 
 def op_models_overview(_params: dict) -> dict:
+    """Collect provider authentication, model selections and per-role default targets."""
     from misaka.cli.auth_overview import missing_sdk_extras
     from misaka.cli.setup_wizard import FEATURED_PROVIDERS
     from misaka.config import current_config, profiles
@@ -169,6 +173,7 @@ def op_models_overview(_params: dict) -> dict:
 
 
 def op_models(params: dict) -> dict:
+    """List model metadata filtered by provider, credentials or enabled selections."""
     from misaka.cli.setup_wizard import Wizard
     from misaka.config import current_config
     provider = str(params.get("provider") or "")
@@ -189,6 +194,7 @@ def op_models(params: dict) -> dict:
 
 
 def op_set_key(params: dict) -> dict:
+    """Validate a known provider and persist its API key through credential storage."""
     provider, key = str(params.get("provider") or ""), str(params.get("key") or "").strip()
     if not provider or not key:
         raise ValueError("请选择服务商并填写 API Key")
@@ -205,6 +211,7 @@ def op_set_key(params: dict) -> dict:
 
 
 def op_logout(params: dict) -> dict:
+    """Remove stored provider authentication without changing environment credentials."""
     provider = str(params.get("provider") or "")
     runtime = _runtime(read_only=False)
     asyncio.run(runtime.registry.modelRuntime.logout(provider))
@@ -212,6 +219,7 @@ def op_logout(params: dict) -> dict:
 
 
 def op_set_default(params: dict) -> dict:
+    """Validate and save a global or role model, or clear an existing role pin."""
     from misaka.config import profiles
     from misaka.core.settings_manager import SettingsManager
     provider, model = str(params.get("provider") or ""), str(params.get("model") or "")
@@ -232,6 +240,7 @@ def op_set_default(params: dict) -> dict:
 
 
 def _clear_pin(profile: str) -> None:
+    """Remove only the role's model and provider pins under its settings file lock."""
     from filelock import FileLock
 
     from misaka.config import profiles
@@ -247,11 +256,13 @@ def _clear_pin(profile: str) -> None:
 
 
 def op_verify(params: dict) -> dict:
+    """Send a small completion to a registered model and report its response or error."""
     from misaka.ai.types import Context, SimpleStreamOptions, UserMessage
     provider, model_id = str(params.get("provider") or ""), str(params.get("model") or "")
     registry = _runtime().registry
 
     async def ping() -> str:
+        """Request a short model response, raising on a reported completion error."""
         model = registry.find(provider, model_id)
         if model is None:
             raise RuntimeError(f"{provider}/{model_id} 不在模型目录中")
@@ -269,6 +280,7 @@ def op_verify(params: dict) -> dict:
 
 
 def _provider_catalog(registry, provider: str) -> list[dict]:
+    """Merge cached provider models with selected built-in entries for the picker."""
     from misaka.config.product import setting
     saved = setting("gui", "modelCatalog", {})
     cached = saved.get(provider, []) if isinstance(saved, dict) else []
@@ -286,6 +298,7 @@ def _provider_catalog(registry, provider: str) -> list[dict]:
 
 
 def op_provider_models(params: dict) -> dict:
+    """Return the saved catalog and current selection for a known provider."""
     from misaka.core.model_preferences import selection
     provider = str(params.get("provider") or "")
     registry = _runtime().registry
@@ -297,6 +310,7 @@ def op_provider_models(params: dict) -> dict:
 
 
 def _provider_auth(provider: str, model_id: str = ""):
+    """Resolve a provider model and usable credentials, rejecting unavailable authentication."""
     registry = _runtime(read_only=False).registry
     models = [m for m in registry.getAll() if m.provider == provider]
     if not models:
@@ -312,6 +326,7 @@ def _provider_auth(provider: str, model_id: str = ""):
 
 
 def op_fetch_provider_models(params: dict) -> dict:
+    """Refresh a bounded paginated catalog while keeping retired selected models visible."""
     from misaka.core.settings_manager import SettingsManager
     provider = str(params.get("provider") or "")
     registry, model, auth = _provider_auth(provider)
@@ -372,6 +387,7 @@ def op_fetch_provider_models(params: dict) -> dict:
 
 
 def op_test_provider(params: dict) -> dict:
+    """Check provider credentials via OpenRouter's key endpoint or a small completion."""
     provider = str(params.get("provider") or "")
     _registry, model, auth = _provider_auth(provider, str(params.get("model") or ""))
     if provider == "openrouter":
@@ -391,6 +407,7 @@ def op_test_provider(params: dict) -> dict:
 
 
 def op_save_model_selection(params: dict) -> dict:
+    """Validate selected IDs, import discovered models and persist enabled selections."""
     from misaka.core.settings_manager import SettingsManager
     provider = str(params.get("provider") or "")
     registry = _runtime().registry
@@ -409,6 +426,7 @@ def op_save_model_selection(params: dict) -> dict:
     additions = [catalog[v] for v in ids if registry.find(provider, v) is None]
     if additions:
         def import_models(data):
+            """Merge newly selected catalog entries into the provider's stored model definitions."""
             block = data.setdefault("providers", {}).setdefault(provider, {})
             existing = {m["id"]: m for m in block.get("models", [])}
             existing.update((m["id"], m) for m in additions)
@@ -452,6 +470,7 @@ def _models_file() -> str:
 
 
 def _read_models_document() -> dict:
+    """Read comment-tolerant model JSON and validate its provider mapping."""
     path = _models_file()
     if not os.path.isfile(path):
         return {"providers": {}}
@@ -477,12 +496,14 @@ def _builtin_provider_ids() -> set[str]:
 
 
 def _is_custom_block(provider_id: str, block: object, builtin: set[str]) -> bool:
+    """Recognize a configured custom service without treating built-in overrides as custom."""
     if provider_id in builtin or not isinstance(block, dict) or not _PROVIDER_ID.fullmatch(provider_id):
         return False
     return bool(block.get("baseUrl")) and bool(block.get("api") or block.get("models") or block.get("apiKey"))
 
 
 def _key_hint(api_key: str) -> str:
+    """Describe a stored key source without returning a literal credential."""
     if not api_key:
         return ""
     if api_key.startswith("!"):
@@ -493,6 +514,7 @@ def _key_hint(api_key: str) -> str:
 
 
 def _public_model(item: dict) -> dict:
+    """Select model fields suitable for the custom-service settings form."""
     published = {"id": item["id"]}
     for key in ("name", "contextWindow", "maxTokens", "reasoning"):
         if item.get(key) not in (None, ""):
@@ -501,6 +523,7 @@ def _public_model(item: dict) -> dict:
 
 
 def _custom_catalog() -> dict:
+    """List custom service metadata and key hints, returning configuration errors as data."""
     protocols = [dict(item) for item in CUSTOM_PROTOCOLS]
     try:
         document = _read_models_document()
@@ -526,6 +549,7 @@ def _custom_catalog() -> dict:
 
 
 def _check_base_url(url: object) -> str:
+    """Validate an HTTP service URL without embedded credentials and trim trailing slashes."""
     from urllib.parse import urlsplit
     text = str(url or "").strip()
     if not text or len(text) > 2048:
@@ -539,6 +563,7 @@ def _check_base_url(url: object) -> str:
 
 
 def _require_protocol(api: object) -> str:
+    """Require one of the supported custom-service wire protocols."""
     text = str(api or "").strip()
     if text not in _CUSTOM_API_IDS:
         raise ValueError("请选择协议")
@@ -546,6 +571,7 @@ def _require_protocol(api: object) -> str:
 
 
 def _clean_key(value: object) -> str:
+    """Trim a bounded API key while rejecting newlines and NUL characters."""
     key = str(value or "")
     if any(char in key for char in "\r\n\0"):
         raise ValueError("API Key 不能包含换行")
@@ -556,12 +582,14 @@ def _clean_key(value: object) -> str:
 
 
 def _scrub(message: str, key: str) -> str:
+    """Mask a known key of at least eight characters and bound the displayed error."""
     if key and len(key) >= 8:
         message = message.replace(key, "******")
     return message[:500]
 
 
 def _resolved_key(stored: str) -> str:
+    """Resolve stored literal, environment or command credentials, rejecting missing values."""
     if not stored:
         return ""
     from misaka.core.resolve_config_value import resolveConfigValue as resolve_config_value
@@ -572,6 +600,7 @@ def _resolved_key(stored: str) -> str:
 
 
 def _stored_api_key(provider_id: str) -> str:
+    """Read a provider's stored key expression, returning empty for unavailable configuration."""
     if not _PROVIDER_ID.fullmatch(provider_id):
         return ""
     try:
@@ -584,6 +613,7 @@ def _stored_api_key(provider_id: str) -> str:
 
 
 def _key_for_request(params: dict, *, required: bool) -> str:
+    """Prefer a supplied key over stored credentials and enforce required authentication."""
     typed = _clean_key(params.get("api_key"))
     stored = typed or _stored_api_key(str(params.get("provider") or "").strip())
     resolved = _resolved_key(stored)
@@ -593,6 +623,7 @@ def _key_for_request(params: dict, *, required: bool) -> str:
 
 
 def _catalog_urls(api: str, base: str) -> list[str]:
+    """Construct protocol-specific model-list endpoints in fallback order."""
     if api in {"openai-completions", "openai-responses"}:
         return [base if base.endswith("/models") else base + "/models"]
     if api == "anthropic-messages":
@@ -607,6 +638,7 @@ def _catalog_urls(api: str, base: str) -> list[str]:
 
 
 def _catalog_headers(api: str, key: str) -> dict[str, str]:
+    """Build protocol-specific authentication headers for a model catalog request."""
     from misaka.ai.utils.pi_user_agent import getPiUserAgent as get_misaka_user_agent
     headers = {"Accept": "application/json", "User-Agent": get_misaka_user_agent()}
     if not key:
@@ -622,6 +654,7 @@ def _catalog_headers(api: str, key: str) -> dict[str, str]:
 
 
 def _parse_model_catalog(payload: object, limit: int = _CATALOG_LIMIT) -> tuple[list[dict], bool]:
+    """Normalize and deduplicate text-capable model records up to the requested limit."""
     if isinstance(payload, list):
         items = payload
     elif isinstance(payload, dict):
@@ -682,6 +715,7 @@ def _parse_model_catalog(payload: object, limit: int = _CATALOG_LIMIT) -> tuple[
 
 
 def _fetch_one(url: str, headers: dict[str, str], key: str) -> tuple[int, object]:
+    """Fetch catalog JSON with a timeout and same-origin redirects, redacting connection errors."""
     import httpx
     from urllib.parse import urljoin, urlsplit
     host = (urlsplit(url).hostname or "").lower()
@@ -699,6 +733,7 @@ def _fetch_one(url: str, headers: dict[str, str], key: str) -> tuple[int, object
                     # Credentials stay on the exact service origin, including its
                     # scheme and effective port. An omitted default port is equal.
                     def service_origin(parsed):
+                        """Normalize scheme, host and effective port for redirect credential confinement."""
                         port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
                         return parsed.scheme.lower(), (parsed.hostname or "").lower(), port
 
@@ -722,6 +757,7 @@ def _fetch_one(url: str, headers: dict[str, str], key: str) -> tuple[int, object
 
 
 def _fetch_model_catalog(api: str, base: str, key: str) -> dict:
+    """Try supported catalog endpoints and distinguish rejected credentials from absent listings."""
     missing = False
     for url in _catalog_urls(api, base):
         status, parsed = _fetch_one(url, _catalog_headers(api, key), key)
@@ -755,6 +791,7 @@ def op_probe_custom(params: dict) -> dict:
 
 
 def op_ping_custom(params: dict) -> dict:
+    """Test an unsaved custom model with a small completion and redact its key from errors."""
     api = _require_protocol(params.get("api"))
     base = _check_base_url(params.get("base_url"))
     key = _key_for_request(params, required=True)
@@ -770,6 +807,7 @@ def op_ping_custom(params: dict) -> dict:
     )
 
     async def ping() -> str:
+        """Request a short model response, raising on a reported completion error."""
         reply = await complete_simple(
             model, Context(messages=[UserMessage(content="Reply with the single word OK.", timestamp=0)]),
             SimpleStreamOptions(apiKey=key, maxTokens=32, timeoutMs=30_000),
@@ -786,6 +824,7 @@ def op_ping_custom(params: dict) -> dict:
 
 
 def _clean_models(value: object) -> list[dict]:
+    """Validate and deduplicate a bounded custom-model list before persistence."""
     if not isinstance(value, list):
         raise ValueError("请至少选择或填写一个模型")
     models = []
@@ -828,6 +867,7 @@ def _clean_models(value: object) -> list[dict]:
 
 
 def _ordered_block(block: dict) -> dict:
+    """Put familiar service fields first while preserving unknown configuration keys."""
     ordered = {}
     for key in ("name", "baseUrl", "api", "apiKey", "headers", "compat", "authHeader", "oauth", "models", "modelOverrides"):
         if key in block:
@@ -839,6 +879,7 @@ def _ordered_block(block: dict) -> dict:
 
 
 def _update_models_document(mutate):
+    """Apply a model-document mutation under a file lock and write atomically."""
     from filelock import FileLock
 
     from misaka.utils import atomic
@@ -852,6 +893,7 @@ def _update_models_document(mutate):
 
 
 def op_save_custom(params: dict) -> dict:
+    """Validate a custom service form and save it without overwriting built-in providers."""
     provider_id = str(params.get("provider") or "").strip()
     if not _PROVIDER_ID.fullmatch(provider_id):
         raise ValueError("服务 ID 只能使用字母、数字、点、下划线和短横线，并以字母或数字开头")
@@ -891,6 +933,7 @@ def op_save_custom(params: dict) -> dict:
 
 
 def op_remove_custom(params: dict) -> dict:
+    """Remove a verified custom service through the locked model-document writer."""
     provider_id = str(params.get("provider") or "").strip()
     builtin = _builtin_provider_ids()
 
@@ -984,6 +1027,7 @@ ROLE_FILES = ("DESCRIBE.md", "SOUL.md")
 
 
 def op_sisters(_params: dict) -> dict:
+    """List role descriptions and model pins, with a suggested unused Sister ID."""
     from misaka.config import CFG, profiles
     from misaka.core.network import roster
     root = CFG["profiles_root"]
@@ -1003,6 +1047,7 @@ def op_sisters(_params: dict) -> dict:
 
 
 def op_create_sister(params: dict) -> dict:
+    """Create a Sister through the roster API and surface validation failures."""
     from misaka.core.network import roster
     sid = str(params.get("id") or "").strip()
     ok, message = roster.create_sister(sid, specialty=(params.get("specialty") or None),
@@ -1013,6 +1058,7 @@ def op_create_sister(params: dict) -> dict:
 
 
 def op_remove_sister(params: dict) -> dict:
+    """Remove a Sister through the roster API and surface its result."""
     from misaka.core.network import roster
     ok, message = roster.remove_sister(str(params.get("id") or ""))
     if not ok:
@@ -1021,6 +1067,7 @@ def op_remove_sister(params: dict) -> dict:
 
 
 def _role_file(params: dict) -> str:
+    """Resolve only supported identity files for a validated role or shared identity."""
     from misaka.config import CFG, profiles
     name = params.get("file")
     if name not in ROLE_FILES and name != "SHARED_SOUL":
@@ -1039,6 +1086,7 @@ def _role_file(params: dict) -> str:
 
 
 def op_read_role_file(params: dict) -> dict:
+    """Read the selected identity file as UTF-8, returning empty content when absent."""
     path = _role_file(params)
     try:
         with open(path, encoding="utf-8-sig") as f:
@@ -1048,6 +1096,7 @@ def op_read_role_file(params: dict) -> dict:
 
 
 def op_write_role_file(params: dict) -> dict:
+    """Validate identity text size and atomically save the permitted role file."""
     from misaka.utils import atomic
     path = _role_file(params)
     content = params.get("content")
@@ -1077,6 +1126,7 @@ def op_set_terminal(params: dict) -> dict:
 
 
 def op_set_research(params: dict) -> dict:
+    """Update research approval and OpenAlex credentials requested by the settings form."""
     from misaka.config import env as env_file
     from misaka.core.settings_manager import SettingsManager
     from misaka.extensions import coverage
@@ -1098,6 +1148,7 @@ def op_set_research(params: dict) -> dict:
 
 
 def op_init_project(params: dict) -> dict:
+    """Initialize project cards, creating the directory only when explicitly requested."""
     from misaka.core.platform import cards
     folder = os.path.abspath(os.path.expanduser(str(params.get("folder") or "")))
     if not params.get("folder"):
@@ -1114,6 +1165,7 @@ def op_init_project(params: dict) -> dict:
 
 @contextlib.contextmanager
 def _web_scope():
+    """Activate discovered web extensions for one operation and invalidate them on exit."""
     from misaka.cli import web as web_cli
     from misaka.core.web import registry
     from misaka.core.web.scope import WebScope, current_scope
@@ -1130,6 +1182,7 @@ def _web_scope():
 
 
 def _kind(key: str) -> dict:
+    """Map a web setting key to its form input type and allowed choices."""
     from misaka.cli.web_setup import CHOICES
     from misaka.core.web import config
     if key in config._BOOL_KEYS or tuple(key.split(".")) in config._NESTED_BOOL_KEYS or key == "vault.enabled":
@@ -1147,6 +1200,7 @@ def _kind(key: str) -> dict:
 
 
 def _shown(key):
+    """Render a web setting for the form while masking sensitive values."""
     from misaka.cli.web_setup import _sensitive, _value
     from misaka.core.web import config
     value = _value(key)
@@ -1158,6 +1212,7 @@ def _shown(key):
 
 
 def op_web_overview(_params: dict) -> dict:
+    """Collect provider readiness, browser settings and redacted web configuration fields."""
     from misaka.cli import web as web_cli
     from misaka.cli import web_setup
     from misaka.core.web import config, dispatch, registry
@@ -1244,6 +1299,7 @@ def _web_commit(changes: dict, remove=()) -> dict:
 
 
 def op_web_save(params: dict) -> dict:
+    """Validate the form payload and persist changes in an isolated web scope."""
     changes = params.get("changes") or {}
     remove = params.get("remove") or []
     if not isinstance(changes, dict) or not isinstance(remove, list):
@@ -1295,6 +1351,7 @@ def op_web_provider(params: dict) -> dict:
 
 
 def op_web_enable(params: dict) -> dict:
+    """Enable or disable a registered web provider in the active configuration."""
     from misaka.core.web import config, registry
     name = str(params.get("name") or "")
     with _web_scope():
@@ -1345,6 +1402,7 @@ OPS = {name[3:]: fn for name, fn in globals().items() if name.startswith("op_") 
 
 
 def main() -> int:
+    """Dispatch one JSON settings request and emit a marked, redacted result before exiting."""
     try:
         for stream in (sys.stdout, sys.stderr):
             if hasattr(stream, "reconfigure"):
