@@ -97,6 +97,9 @@ class GuiInputQueue:
                 self.pending.insert(0, item)
                 self.changed()
                 raise
+            except Exception:
+                self.changed()
+                raise
         else:
             self.pending.insert(0, item)
             self._schedule()

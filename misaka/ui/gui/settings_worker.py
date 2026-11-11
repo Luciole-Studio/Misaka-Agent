@@ -340,7 +340,8 @@ def op_fetch_provider_models(params: dict) -> dict:
     headers = {**_catalog_headers(model.api, key), **(auth.get("headers") or {})}
     catalog = None
     from urllib.parse import urlencode
-    for url in _catalog_urls(model.api, base):
+    for endpoint in _catalog_urls(model.api, base):
+        url = endpoint
         gathered, seen = {}, set()
         while url and len(gathered) < 2000:
             if url in seen or len(seen) >= 20:
@@ -348,6 +349,7 @@ def op_fetch_provider_models(params: dict) -> dict:
             seen.add(url)
             status, payload = _fetch_one(url, headers, key)
             if status in {404, 405} and not gathered:
+                url = ""
                 break
             if status in {401, 403}:
                 raise ValueError(f"地址可达，但凭证被拒绝（HTTP {status}）")
@@ -360,9 +362,9 @@ def op_fetch_provider_models(params: dict) -> dict:
             url = ""
             if isinstance(payload, dict):
                 if payload.get("nextPageToken"):
-                    url = _catalog_urls(model.api, base)[0] + "?" + urlencode({"pageToken": payload["nextPageToken"]})
+                    url = endpoint + "?" + urlencode({"pageToken": payload["nextPageToken"]})
                 elif payload.get("has_more") and page:
-                    url = _catalog_urls(model.api, base)[0] + "?" + urlencode({"after_id": page[-1]["id"], "limit": 1000})
+                    url = endpoint + "?" + urlencode({"after_id": page[-1]["id"], "limit": 1000})
         if url:
             raise ValueError("目录超过 2000 个模型，请使用更小的目录")
         if gathered:

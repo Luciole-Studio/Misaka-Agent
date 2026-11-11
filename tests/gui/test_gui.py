@@ -273,6 +273,7 @@ class HTTPTests(unittest.TestCase):
     def test_api_requires_capability_even_for_reads(self):
         self.assertEqual(self.request()[0], 403)
         self.assertEqual(self.request(headers={"X-Misaka-Token": "wrong"})[0], 403)
+        self.assertEqual(self.request(headers={"X-Misaka-Token": "é"})[0], 403)
         status, body, _ = self.request(headers=self.auth())
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["message"], "中文成功")

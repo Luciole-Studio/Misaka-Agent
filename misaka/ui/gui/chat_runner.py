@@ -301,8 +301,8 @@ class ChatHost:
         def on_event(event) -> None:
             try:
                 emit({"type": "event", "event": to_json_event(event)})
-            except Exception:  # noqa: BLE001 - one bad event must not kill the stream
-                pass
+            except Exception as error:  # noqa: BLE001 - one bad event must not kill the stream
+                print(f"GUI event serialization failed: {type(error).__name__}", file=sys.stderr, flush=True)
 
         if self._unsubscribe is not None:
             self._unsubscribe()
@@ -598,6 +598,8 @@ class ChatHost:
         if side["task"] is not None and not side["task"].done():
             raise ValueError("侧边对话还在回复，请稍候或先停止")
         side["task"] = asyncio.get_running_loop().create_task(self._run_side(side_id, side["agent"], text))
+        self._operations.add(side["task"])
+        side["task"].add_done_callback(self._operations.discard)
         return {"side_id": side_id}
 
     def _side_listener(self, side_id: str):
@@ -608,8 +610,8 @@ class ChatHost:
                 if isinstance(payload, dict) and "message" in payload:
                     payload["message"] = _without_side_note(payload["message"])
                 emit({"type": "side_event", "side": side_id, "event": payload})
-            except Exception:  # noqa: BLE001, S110 - optional UI events must not interrupt the stream
-                pass
+            except Exception as error:  # noqa: BLE001 - optional UI events must not interrupt the stream
+                print(f"GUI side event serialization failed: {type(error).__name__}", file=sys.stderr, flush=True)
         return on_event
 
     async def _run_side(self, side_id: str, agent, text: str) -> None:
@@ -686,8 +688,14 @@ class ChatHost:
                     continue
                 try:
                     request = json.loads(line)
+                    if not isinstance(request, dict):
+                        raise ValueError("IPC request must be an object")
                 except ValueError:
-                    continue
+                    # A malformed frame has no reliable request ID. End the
+                    # channel so all pending callers wake instead of timing out.
+                    emit({"type": "fatal", "message": "会话请求格式错误，请重新打开会话"})
+                    loop.call_soon_threadsafe(queue.put_nowait, {"op": "shutdown"})
+                    return
                 loop.call_soon_threadsafe(queue.put_nowait, request)
             loop.call_soon_threadsafe(queue.put_nowait, {"op": "shutdown"})
 
@@ -714,8 +722,8 @@ class ChatHost:
         try:
             if self.runtime is not None:
                 await self.runtime.dispose()
-        except Exception:  # noqa: BLE001 - shutdown must never mask the exit itself
-            pass
+        except Exception as error:  # noqa: BLE001 - shutdown must never mask the exit itself
+            print(f"GUI runtime disposal failed: {type(error).__name__}", file=sys.stderr, flush=True)
         emit({"type": "bye"})
 
 

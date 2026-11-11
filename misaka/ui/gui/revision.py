@@ -14,6 +14,7 @@ def source_revision(source: Path | None = None) -> str:
     skill_runtime = ("write.py", "manage.py", "review.py", "sandbox.py", "operations.py", "layers.py",
                      "index.py", "wiring/skills.py")
     paths = [*gui.rglob("*.py"),
+             source / "misaka" / "ui" / "panel" / "client.py",
              *(gui / "static" / name for name in ("index.html", "app.js", "style.css")),
              source / "misaka" / "core" / "session_control.py",
              source / "misaka" / "core" / "model_preferences.py",

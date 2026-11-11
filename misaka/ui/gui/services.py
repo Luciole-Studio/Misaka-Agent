@@ -166,6 +166,7 @@ class ResearchProcesses:
     def _load(self):
         """Recover receipts without replacing process handles owned by this server."""
         with self.receipt_lock:
+            errors = {}
             for path in self.directory.glob("*.json"):
                 try:
                     item = json.loads(path.read_bytes().decode("utf-8"))
@@ -178,11 +179,11 @@ class ResearchProcesses:
                             or item["run_id"] is not None and not isinstance(item["run_id"], str)):
                         raise ValueError("研究进程记录格式有误")
                 except (OSError, ValueError) as error:
-                    self.receipt_errors[path.name] = f"{path.name}: {error}"
+                    errors[path.name] = f"{path.name}: {error}"
                     continue
-                self.receipt_errors.pop(path.name, None)
                 with self.lock:
                     self.items.setdefault(item["id"], item)
+            self.receipt_errors = errors
 
     def warning(self):
         """Describe preserved unreadable receipts without hiding healthy jobs."""

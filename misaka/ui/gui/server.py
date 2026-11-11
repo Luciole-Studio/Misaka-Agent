@@ -1018,7 +1018,8 @@ class Handler(BaseHTTPRequestHandler):
         """Authenticate and validate JSON requests before dispatching GUI operations."""
         if not self.same_origin():
             return
-        if not hmac.compare_digest(self.headers.get("X-Misaka-Token", ""), self.server.token):
+        if not hmac.compare_digest(self.headers.get("X-Misaka-Token", "").encode("utf-8"),
+                                   self.server.token.encode("utf-8")):
             return self.reply(403, {"error": "访问凭证已失效，请从启动器重新打开页面"})
         try:
             if self.headers.get_content_type() != "application/json":

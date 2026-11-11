@@ -383,17 +383,20 @@ class ChatManager:
 
     def close(self, chat_id, timeout: float = 5.0) -> dict:
         """Request runner shutdown and remove the closed channel from the registry."""
-        channel = self.channels.get(chat_id) if isinstance(chat_id, str) else None
+        with self.lock:
+            channel = self.channels.get(chat_id) if isinstance(chat_id, str) else None
         if channel is None:
             return {"closed": False}
         try:
             channel.send_raw({"id": -1, "op": "shutdown"})
         except (ValueError, OSError):
             pass
-        try:
-            channel.proc.wait(timeout=timeout)
-        except Exception:  # noqa: BLE001 - a hung runner must not hang the GUI
-            channel.proc.kill()
+        if channel.proc is not None:
+            try:
+                channel.proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                channel.proc.kill()
+                channel.proc.wait(timeout=timeout)
         with channel.condition:
             channel.status = "closed"
             channel.condition.notify_all()

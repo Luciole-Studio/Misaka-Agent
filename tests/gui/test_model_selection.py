@@ -50,6 +50,23 @@ class ModelSelectionTests(unittest.TestCase):
         self.assertEqual(len(reopened["models"]), 601)
         self.assertEqual(set(reopened["selected"]), {"vendor/m1", "vendor/m600"})
 
+    def test_catalog_fallback_keeps_pagination_on_the_working_endpoint(self):
+        """A missing primary endpoint falls back and paginates the alternate endpoint."""
+        worker.op_save_custom({"provider": "sample", "api": "anthropic-messages",
+                               "base_url": "http://127.0.0.1:9", "api_key": "test-secret",
+                               "models": ["old"]})
+        pages = [(404, {}), (200, {"data": [{"id": "first"}], "has_more": True}),
+                 (200, {"data": [{"id": "second"}]})]
+        with patch.object(worker, "_fetch_one", side_effect=pages) as fetch:
+            result = worker.op_fetch_provider_models({"provider": "sample"})
+        urls = [call.args[0] for call in fetch.call_args_list]
+        self.assertEqual(urls, ["http://127.0.0.1:9/v1/models", "http://127.0.0.1:9/models",
+                                "http://127.0.0.1:9/models?after_id=first&limit=1000"])
+        self.assertTrue({"first", "second"}.issubset({m["id"] for m in result["models"]}))
+        with patch.object(worker, "_fetch_one", return_value=(405, {})):
+            with self.assertRaisesRegex(ValueError, "没有返回"):
+                worker.op_fetch_provider_models({"provider": "sample"})
+
     def test_disable_clear_and_provider_identity(self):
         """Verify disable clear and provider identity."""
         worker.op_save_custom({"provider": "second", "api": "openai-completions", "base_url": "http://127.0.0.1:9/v1",

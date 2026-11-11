@@ -93,6 +93,7 @@ class ServerReuseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             names = ["misaka/ui/gui/server.py", "misaka/ui/gui/static/index.html",
+                     "misaka/ui/panel/client.py",
                      "misaka/ui/gui/static/app.js", "misaka/ui/gui/static/style.css",
                      "misaka/core/session_control.py", "misaka/core/model_preferences.py", "misaka/core/network/roster.py",
                      "misaka/core/skills/write.py", "misaka/core/skills/manage.py",
@@ -119,6 +120,9 @@ class ServerReuseTests(unittest.TestCase):
                 before = start_gui.source_revision(root)
                 (root / "misaka/core/skills" / name).write_bytes(b"new skill runtime")
                 self.assertNotEqual(before, start_gui.source_revision(root))
+            before = start_gui.source_revision(root)
+            (root / "misaka/ui/panel/client.py").write_bytes(b"new panel client")
+            self.assertNotEqual(before, start_gui.source_revision(root))
 
 
 if __name__ == "__main__":

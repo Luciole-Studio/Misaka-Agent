@@ -105,12 +105,14 @@ async def test_send_now_never_replays_an_accepted_turn(accepted):
     async def deliver(_item):
         raise RuntimeError("accepted failure") if accepted else InputNotAccepted("rejected")
 
-    queue = GuiInputQueue(Mock(isStreaming=True), deliver)
+    changed = Mock()
+    queue = GuiInputQueue(Mock(isStreaming=True), deliver, changed=changed)
     item = {"message_id": "fixture", "text": "fixture", "images": ["image"]}
     queue.pending.append(item)
     with pytest.raises((RuntimeError, InputNotAccepted)):
         await queue.send_now("fixture")
     assert queue.pending == ([] if accepted else [item])
+    changed.assert_called_once()
 
 
 def test_corrupt_receipts_do_not_hide_healthy_jobs(tmp_path):
@@ -125,6 +127,9 @@ def test_corrupt_receipts_do_not_hide_healthy_jobs(tmp_path):
         assert manager.listing(str(tmp_path))[0]["id"] == "healthy"
     assert "broken.json" in manager.warning()
     assert bad.read_bytes() == b"not json"
+    bad.unlink()
+    manager._load()
+    assert manager.warning() == ""
 
 
 def test_receipt_mutation_and_save_share_a_lock(tmp_path):
@@ -143,3 +148,61 @@ def test_receipt_mutation_and_save_share_a_lock(tmp_path):
     saved = json.loads((tmp_path / "fixture.json").read_text(encoding="utf-8"))
     assert saved["run_id"] == "fixture-run" and saved["exit_code"] == 0
     assert "proc" not in saved
+
+
+async def test_side_task_finishes_before_runtime_disposal():
+    """Shutdown cancels a side task even after its panel has been closed."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    finished = asyncio.Event()
+    async def prompt(_text):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finished.set()
+
+    host = ChatHost({})
+    agent = Mock(state=SimpleNamespace(messages=[], isStreaming=False))
+    agent.prompt = prompt
+    host._side_agent = Mock(return_value=agent)
+    async def dispose():
+        assert finished.is_set()
+    host.runtime = Mock(dispose=AsyncMock(side_effect=dispose))
+    with patch("misaka.ui.gui.chat_runner.emit"):
+        side = host.op_side({"text": "fixture"})
+        await asyncio.sleep(0)
+        task = host.sides[side["side_id"]]["task"]
+        host.op_side_close(side)
+        await host._dispose()
+    assert task.cancelled()
+
+
+@pytest.mark.parametrize("line", ["not json\n", "[]\n"])
+async def test_malformed_ipc_shuts_down_with_visible_error(line):
+    """Uncorrelatable invalid requests end the channel instead of being ignored."""
+    import io
+    host = ChatHost({})
+    with patch("misaka.ui.gui.chat_runner.sys.stdin", io.StringIO(line)), \
+         patch("misaka.ui.gui.chat_runner.emit") as emit:
+        await asyncio.wait_for(host.serve(), 2)
+    assert any(call.args[0]["type"] == "fatal" for call in emit.call_args_list)
+    assert host.shutting_down
+
+
+def test_close_handles_absent_process_and_only_kills_on_timeout():
+    """Absent runners close normally; unrelated wait errors are not treated as hangs."""
+    from misaka.ui.gui.chats import ChatChannel, ChatManager
+    manager = ChatManager(".")
+    channel = ChatChannel("fixture", {}, "fixture.log")
+    manager.channels[channel.id] = channel
+    assert manager.close(channel.id) == {"closed": True}
+    manager.channels[channel.id] = channel
+    channel.proc = Mock()
+    channel.proc.wait.side_effect = OSError("fixture wait failure")
+    with pytest.raises(OSError):
+        manager.close(channel.id)
+    channel.proc.kill.assert_not_called()
+    channel.proc.wait.side_effect = [subprocess.TimeoutExpired("fixture", 1), 0]
+    assert manager.close(channel.id) == {"closed": True}
+    channel.proc.kill.assert_called_once()
