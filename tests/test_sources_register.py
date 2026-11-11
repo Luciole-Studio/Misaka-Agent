@@ -10,7 +10,8 @@ from tests.test_research_artifact_drift import _accept, state  # noqa: F401
 
 
 def named(paths, tail):
-    return next(path for rel, path in paths.items() if rel.endswith(tail))
+    """The declared file whose path ends with ``tail``, whichever separator the platform wrote it with."""
+    return next(path for rel, path in paths.items() if Path(rel).as_posix().endswith(tail))
 
 def rows(con, run, tid):
     return {Path(r["path"]).name: r for r in runs.artifacts(con, run["id"], task_id=tid)}

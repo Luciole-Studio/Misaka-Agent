@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -41,6 +42,17 @@ def misaka_home(monkeypatch):
     strays = home.strays()
     shutil.rmtree(root, ignore_errors=True)
     assert not strays, f"written into the home without a row in misaka.config.home.LAYOUT: {strays}"
+
+
+@pytest.fixture
+def tmp_path(tmp_path):
+    """pytest's folder, spelled as the disk spells it.
+
+    pytest names it ``pytest-of-<login>`` from the environment. Under OpenSSH on Windows the login
+    is lower case (``makiko``) whatever the account's folder is called (``MAKIKO``), and the product
+    stores a path as the disk spells it (``home.stored``), so a test that compared the two as text
+    failed there and nowhere else."""
+    return Path(os.path.realpath(tmp_path))
 
 
 @pytest.fixture(autouse=True)

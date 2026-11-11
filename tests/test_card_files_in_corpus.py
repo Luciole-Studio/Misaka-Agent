@@ -95,7 +95,7 @@ def test_a_working_file_the_card_indexed_itself_keeps_its_id(state, monkeypatch)
     con, run, root = state
     _, paths = _accept(con, run, root, "kept", {"notes.md": "own\n", "work/table.md": PAGE})
     workflow.settle_done_tasks(con, run_id=run["id"])
-    table = next(path for rel, path in paths.items() if rel.endswith("work/table.md"))
+    table = next(path for rel, path in paths.items() if Path(rel).as_posix().endswith("work/table.md"))
     doc, _pages = corpus.ingest(str(table), workspace=run["workspace"])
     monkeypatch.setattr(report, "doc_id", lambda _run, path: None)
 

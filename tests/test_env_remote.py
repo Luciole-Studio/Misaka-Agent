@@ -1,10 +1,15 @@
-"""pi env's ``test/remote.test.ts``."""
+"""pi env's ``test/remote.test.ts``.
+
+MISAKA fork: four cases start ``sh`` or ``sleep``. On Windows those come with Git and are on the PATH only where
+Git's own folders are, which an OpenSSH session's is not, so the cases skip without them.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import os
 import platform
+import shutil
 import signal
 import sys
 import tempfile
@@ -27,6 +32,8 @@ from tests.env_support import (
 )
 
 context = BACKGROUND_CONTEXT
+needs_sh = pytest.mark.skipif(shutil.which("sh") is None, reason="sh is not on the PATH")
+needs_sleep = pytest.mark.skipif(shutil.which("sleep") is None, reason="sleep is not on the PATH")
 
 
 @pytest.fixture
@@ -63,6 +70,7 @@ def killProcess(pid: int) -> None:
     os.kill(pid, signal.SIGKILL if sys.platform != "win32" else signal.SIGTERM)
 
 
+@needs_sh
 async def test_transfers_only_about_a_window_of_output_a_caller_keeps_with_exact_counts(environments):
     env, _ = environments()
     total = 5_000_000
@@ -96,6 +104,7 @@ async def test_transfers_only_about_a_window_of_output_a_caller_keeps_with_exact
     assert len(tail) > 1000 or len(tail.split("\n")) - 1 > 20
 
 
+@needs_sleep
 async def test_aborts_commands_cancelled_right_after_they_are_sent(environments):
     env, _ = environments()
     started = time.monotonic()
@@ -155,6 +164,7 @@ async def test_cancels_a_listing_in_the_daemon(environments):
     # Creating 10,000 files takes several seconds on Windows CI.
 
 
+@needs_sleep
 async def test_times_out_a_command_that_produces_no_output(environments):
     env, _ = environments()
     started = time.monotonic()
@@ -181,6 +191,7 @@ async def test_fails_requests_on_handles_of_a_lost_connection_instead_of_reachin
     await b.close(context)
 
 
+@needs_sh
 async def test_computes_the_command_at_each_start_and_retries_a_start_that_failed(environments):
     cwd = tempfile.mkdtemp(prefix="pi-env-remote-")
     environments.dirs.append(cwd)
