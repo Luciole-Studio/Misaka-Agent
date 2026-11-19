@@ -1,6 +1,6 @@
 [project]
 name = "misaka"
-version = "0.19.29"
+version = "0.19.30"
 description = "A research team of AI agents for the humanities and social sciences"
 requires-python = ">=3.12"
 authors = [{ name = "makiko", email = "nishikinokki@gmail.com" }]
