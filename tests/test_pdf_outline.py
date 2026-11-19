@@ -20,23 +20,39 @@ PAGES = 24
 BOOKMARKS = [("Part One", 0, None), ("Chapter 1 The Crossing", 2, 0), ("Chapter 2 The Siege", 7, 0),
              ("Part Two", 12, None), ("Chapter 3 At the Passes", 13, 3), ("Chapter 4 The Retreat", 18, 3),
              ("Index", 22, None)]
+SECTIONS = [("Chapter 1 The Crossing", 2, None), ("1.1 The Fords", 2, 0), ("1.2 The Bridge", 5, 0),
+            ("Chapter 2 The Siege", 8, None), ("2.1 The Lines", 8, 3), ("2.2 The Sortie", 11, 3),
+            ("Chapter 3 At the Passes", 14, None), ("3.1 The Snow", 14, 6), ("3.2 The Guides", 17, 6),
+            ("Chapter 4 The Retreat", 20, None), ("4.1 The Rearguard", 20, 9)]
 
 
-def book(path, bookmarks=()):
-    """A 24-page PDF of running prose, with ``bookmarks`` as ``(title, page, parent)`` rows."""
+def book(path, bookmarks=(), headed=False):
+    """A 24-page PDF of running prose, with ``bookmarks`` as ``(title, page, parent)`` rows.
+    ``headed`` prints each bookmark's title on its page as a heading, prose under it."""
     writer = PdfWriter()
-    font = writer._add_object(DictionaryObject({
-        NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"),
-        NameObject("/BaseFont"): NameObject("/Helvetica")}))
+
+    def font(name):
+        return writer._add_object(DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject(name)}))
+
+    fonts = DictionaryObject({NameObject("/F1"): font("/Helvetica"), NameObject("/F2"): font("/Helvetica-Bold")})
+    heads = {}
+    for title, at, _parent in bookmarks if headed else ():
+        heads.setdefault(at + 1, []).append(title)
     for number in range(1, PAGES + 1):
         writer.add_blank_page(width=420, height=595)
         page = writer.pages[-1]
-        lines = "".join(f"({PROSE} {number}.{line}) Tj T* " for line in range(1, 31))
+        lines = "".join(
+            f"/F2 {size} Tf ({head}) Tj T* T* /F1 9 Tf "
+            + "".join(f"({PROSE} {number}.0{line}) Tj T* " for line in range(1, 5)) + "T* "
+            for size, head in zip((16, 13), heads.get(number, [])))
+        lines += "/F1 9 Tf " + "".join(f"({PROSE} {number}.{line}) Tj T* "
+                                       for line in range(1, 31 - 7 * len(heads.get(number, []))))
         stream = DecodedStreamObject()
-        stream.set_data(f"BT /F1 9 Tf 14 TL 36 550 Td {lines}ET".encode())
+        stream.set_data(f"BT 14 TL 36 550 Td {lines}ET".encode())
         page[NameObject("/Contents")] = writer._add_object(stream)
-        page[NameObject("/Resources")] = DictionaryObject({
-            NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})})
+        page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): fonts})
     made = []
     for title, at, parent in bookmarks:
         made.append(writer.add_outline_item(title, at, parent=None if parent is None else made[parent]))
@@ -91,6 +107,22 @@ def test_a_pdf_with_bookmarks_is_outlined_by_them(workspace):
         ("Chapter 1 The Crossing", 3, 8), ("Chapter 2 The Siege", 8, 13)]
     assert corpus.node_pages(doc_id, "0004", workspace=str(workspace)) == (14, 19)
     assert "- [0005] Chapter 4 The Retreat  p19-23" in corpus.tree_outline(doc_id, workspace=str(workspace))
+
+
+def test_a_pdf_with_deep_bookmarks_is_outlined_by_them_alone(workspace):
+    """Each chapter opens on the page of its first section and both titles are printed there. The
+    reader hung the printed chapter title under the section a second time: 11 bookmarks made 16
+    entries, and in 43 real PDFs 952 of 4,386 entries were not the file's bookmarks (2026-11-19)."""
+    doc_id, _count = corpus.ingest(book(workspace / "campaign.pdf", SECTIONS, headed=True), workspace=str(workspace))
+
+    def titles(nodes):
+        return [title for node in nodes for title in [node["title"], *titles(node.get("nodes") or [])]]
+
+    tree = stored(workspace, doc_id, "tree.json")
+    assert titles(tree) == [title for title, _at, _parent in SECTIONS]
+    assert [(node["title"], node["start_index"], node["end_index"]) for node in tree[0]["nodes"]] == [
+        ("1.1 The Fords", 3, 6), ("1.2 The Bridge", 6, 9)]
+    assert stored(workspace, doc_id, "meta.json")["outline"]["source"] == "bookmarks"
 
 
 def test_a_pdf_that_states_no_outline_has_none(workspace):
