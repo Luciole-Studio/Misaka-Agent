@@ -340,8 +340,6 @@ def sessionEntryToContextMessages(entry: SessionEntry) -> list[AgentMessage]:
     if entry_type == "compaction":
         system_message = entry.get("systemMessage")
         if entry.get("contextMessages") is not None:
-            # MISAKA fork: an engine's whole-context replacement carries the conversation only;
-            # the prompt and tool state it replayed under lead it, as they lead a summary.
             replaced = _copy_context_messages(entry["contextMessages"])
             return [system_message, *replaced] if system_message else replaced
         summary = createCompactionSummaryMessage(
@@ -688,7 +686,6 @@ class SessionManager:
         if header is not None:
             self.fileEntries = entries
             self.sessionId = str(header.get("id"))
-            # MISAKA fork: a session is version 3 or refused (pi migrates older headers in place).
             require_current_version(self.fileEntries, "<preloaded entries>")
         else:
             self.newSession(options)
@@ -708,7 +705,6 @@ class SessionManager:
                 if preloadedFileEntries is not None
                 else loadEntriesFromFile(self.sessionFile, strict=True, repair_unterminated=True)
             )
-            # MISAKA fork: an empty file is refused like an unparseable one (pi writes a new header into it).
             if not self.fileEntries:
                 raise InvalidSessionFileError(self.sessionFile)
 
@@ -817,8 +813,6 @@ class SessionManager:
         serialized_entry = _dump_json(entry)
 
         if not self.flushed:
-            # MISAKA fork: the entry is persisted before it joins `fileEntries`, so it is
-            # checked alongside them.
             if not self._hasConversation() and not _entry_starts_transcript(entry):
                 return False
             payload = f"{_dump_jsonl(self.fileEntries)}{serialized_entry}\n"
@@ -933,9 +927,6 @@ class SessionManager:
                 update={"timestamp": int(_datetime_from_iso(timestamp).timestamp() * 1000)}
             )
         if contextMessages is not None:
-            # MISAKA fork: a context engine that replaces the whole context supplies it here; the
-            # projection then reads `contextMessages` instead of the summary, and the transcript
-            # shows the ones the engine wrote itself (`contextSummaries`) as compaction summaries.
             entry["contextMessages"] = _copy_context_messages(contextMessages)
             if contextSummaries:
                 entry["contextSummaries"] = list(contextSummaries)
@@ -957,10 +948,6 @@ class SessionManager:
 
     def appendSessionInfo(self, name: str, *, is_user: bool = True) -> str:
         sanitizedName = jsTrim(re.sub(r"[\r\n]+", " ", name))
-        # MISAKA fork: Hermes' canonical Bot Chat guard (``SessionDB.set_session_title``,
-        # hermes_state_titles.py). A role's contact session is found by this name, so renaming it
-        # orphans the conversation: a person is refused, an automatic name changes nothing, and
-        # setting the name it already has is no change either.
         from misaka.config import sessions
 
         header = self.getHeader() or {}
@@ -1287,8 +1274,6 @@ class SessionManager:
         cwdOverride: str | None = None,
     ) -> SessionManager:
         resolved_path = resolvePath(path)
-        # MISAKA fork: a missing file is refused (pi starts a new session at that path), as are empty or unparseable
-        # ones (pi writes a header into an empty file): a session that is not there is not quietly replaced.
         if not os.path.isfile(resolved_path):
             raise FileNotFoundError(f"Session file not found: {resolved_path}")
         entries = loadEntriesFromFile(resolved_path, strict=True)
@@ -1461,8 +1446,6 @@ class SessionManager:
         progress: SessionListProgress | None = onProgress if callable(onProgress) else None
         abortSignal = signal if callable(onProgress) or isinstance(sessionsRoot, str) else (onProgress or signal)
         throwIfAborted(abortSignal)
-        # MISAKA fork: a given root is a store of cwd buckets plus loose files (pi lists only its files), and the
-        # store's `.git`/`.catalog` directories are not buckets.
         explicit_root = sessionsRoot is not None
         sessions_dir = normalizePath(sessionsRoot) if sessionsRoot else get_sessions_dir()
         try:

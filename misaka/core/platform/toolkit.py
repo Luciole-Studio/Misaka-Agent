@@ -29,13 +29,8 @@ from typing import Any
 from misaka.ai.utils.typebox_helpers import typeboxSchema
 from misaka.core.extensions.types import ToolDefinition
 
-# Inventory lines sit one per tool in every request; the existing hand-written ones
-# run 40-90 characters. Past this a derived line is padding the prompt, not naming
-# the tool, so it is cut at the last word that fits.
 _MAX_SNIPPET_CHARS = 120
 
-# A first sentence shorter than this is an abbreviation ("e.g.", "cf.") rather than
-# a sentence, so the scan keeps going instead of advertising a fragment.
 _MIN_SENTENCE_CHARS = 24
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s")
@@ -61,11 +56,6 @@ def derive_snippet(description: str) -> str:
     text = text.rstrip(".")
     if len(text) > _MAX_SNIPPET_CHARS:
         head = text[: _MAX_SNIPPET_CHARS + 1]
-        # A sentence too long to keep is cut at a clause boundary when one falls in
-        # its back half, so the line ends on a whole thought ("...WITHOUT loading full
-        # content...") rather than on whatever word the limit landed after ("...or
-        # inspect an externalized"). Only a word boundary otherwise; the trailing dots
-        # say the tool has more to it than this line.
         cut = max(head.rfind(", "), head.rfind("; "), head.rfind(": "))
         if cut < _MAX_SNIPPET_CHARS // 2:
             cut = head.rfind(" ")

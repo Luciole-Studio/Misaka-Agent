@@ -271,7 +271,6 @@ async def test_should_not_trigger_threshold_compaction_for_error_messages_when_n
         lambda event: compactionStarts.append(event) if read_field(event, "type") == "compaction_start" else None
     )
 
-    # MISAKA fork: see the module docstring.
     assert await session._checkCompaction(errorAssistant) is False
     assert compactionStarts == []
 

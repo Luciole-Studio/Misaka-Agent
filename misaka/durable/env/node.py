@@ -54,8 +54,6 @@ from .node_watch import NodeFileWatcher, NodeWatchOptions
 
 MAX_TIMEOUT_MS = 2_147_483_647
 MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000
-# MISAKA fork: no `EXIT_STDIO_GRACE_MS`; upstream's `waitForChildProcess` is misaka.utils.child_process, which applies
-# the 100 ms post-exit stdio grace itself (`EXIT_STDIO_GRACE_MS`, re-armed while `spillIsDraining`).
 SPILL_HIGH_WATER_MARK = 1024 * 1024
 # Largest single read of a `BinaryReader`, so a huge `length` allocates only as much as the file yields.
 BINARY_READ_CHUNK = 1024 * 1024
@@ -161,8 +159,6 @@ def _hasInvalidWindowsName(path: str) -> bool:
     return any(character in _WINDOWS_INVALID_NAME_CHARACTERS for character in os.path.splitdrive(path)[1])
 
 
-# MISAKA fork: `openingFile` -- Windows refuses to open a directory with a permission error, which is `is_directory`
-# only when the call was opening a file.
 def toFileError(error: Any, fallbackPath: str | None = None, openingFile: bool = False) -> FileError:
     if isinstance(error, FileError):
         return error
@@ -299,8 +295,6 @@ async def getShellConfig(customShellPath: str | None = None) -> Result:
 def getShellEnv(baseEnv: dict[str, str] | None = None, extraEnv: dict[str, str] | None = None, inheritEnv: bool = True) -> dict[str, str]:
     if not inheritEnv:
         return {**(extraEnv or {})}
-    # MISAKA fork: MISAKA 0.18.9 -- a release archive's Python runs with PYTHONSAFEPATH/PYTHONNOUSERSITE, which a user's
-    # `python script.py` must not inherit (misaka.utils.shell.getShellEnv strips them the same way).
     from misaka.config.engine import bundle_root
     from misaka.utils.shell import _ARCHIVE_PYTHON_FLAGS
 
@@ -544,7 +538,6 @@ class NodeBinaryReader:
         self._file = file
         self._path = path
         self._closed = False
-        # MISAKA fork: Windows has no ``os.pread``; a seek and a read are one step under this lock.
         self._lock = threading.Lock()
 
     def _readAt(self, position: int, length: int) -> bytes:
@@ -922,12 +915,6 @@ class _ExecRun:
 
     async def run(self) -> Result:
         try:
-            # MISAKA fork: `spawn` plus `waitForChildProcess` are misaka.utils.child_process, an asyncio subprocess
-            # protocol with the same exit-then-stdio settling. As upstream wires `spillIsDraining` and the child before
-            # any event of it can fire, the check goes in at construction and the child is ours at `on_spawn`, before
-            # its first chunk (a spill pauses that one already): set later, the exit could have armed the 100 ms
-            # post-exit grace first, and a loop that took that long to resume closed the pipes on a backpressured
-            # spill, losing what a descendant wrote afterwards.
             self.child = await spawn_child_process(
                 self.program,
                 *self.args,

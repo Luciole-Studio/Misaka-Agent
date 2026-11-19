@@ -228,7 +228,6 @@ async def test_preserves_steering_behavior_when_flushing_into_an_active_agent_ru
 
     await InteractiveMode.flushCompactionQueue(fakeThis, {"willRetry": False})
 
-    # MISAKA fork: the prompt also reports its preflight acceptance.
     fakeThis.session.prompt.assert_called_once_with(
         "change direction", {"streamingBehavior": "steer", "preflightResult": ANY}
     )

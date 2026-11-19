@@ -339,7 +339,6 @@ def stream(
             stopReason="pending",
             timestamp=time.time_ns() // 1_000_000,
         )
-        # MISAKA fork: the client this request opened, closed in `finally`.
         client: Any = None
 
         # `reasoning_details` are replay metadata, not user-visible stream deltas.
@@ -404,7 +403,6 @@ def stream(
             hasFinishReason = False
             toolCallBlocksByIndex: dict[Any, ToolCall] = {}
             toolCallBlocksById: dict[str, ToolCall] = {}
-            # MISAKA fork: the streaming tool calls' scratch fields, keyed by the block's identity.
             streamingToolCalls: dict[int, _StreamingToolCallScratch] = {}
             blocks = output.content
 
@@ -566,7 +564,6 @@ def stream(
                 return block
 
             onProviderStreamEvent = _option(options, "onProviderStreamEvent")
-            # MISAKA fork: the chunk iterator is closed with the reply (GitHub issue #6).
             async with contextlib.aclosing(_openai_sdk._iterate_stream(openaiStream, _option(options, "signal"))) as chunks:
                 async for chunk in chunks:
                     if onProviderStreamEvent:
@@ -709,23 +706,18 @@ def stream(
             for block in output.content:
                 if block.type == "thinking":
                     applyStreamedReasoningDetails(block)
-                # MISAKA fork: streaming scratch buffers live beside the blocks
-                # (`_StreamingToolCallScratch`), so there is nothing to strip here.
             output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
-            # MISAKA fork: a connection error names the transport failure behind it.
             output.errorMessage = _openai_sdk._format_completion_error(error)
             # Some providers via OpenRouter give additional information in this field.
             # normalizeProviderError already stringifies the parsed body (error.error)
             # into errorMessage, so only append the raw metadata when it is not already
             # present to avoid double-printing it.
-            # MISAKA fork: openai-python keeps what openai-node calls `error.error` on `error.body`.
             rawMetadata = read_field(read_field(getattr(error, "body", None), "metadata"), "raw")
             if rawMetadata and jsString(rawMetadata) not in output.errorMessage:
                 output.errorMessage += f"\n{jsString(rawMetadata)}"
             stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
             stream.end()
         finally:
-            # MISAKA fork: close the client this request opened while its loop still runs.
             await _openai_sdk._close_client(client)
 
     spawn_stream_task(run(), stream=stream)

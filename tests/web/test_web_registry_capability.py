@@ -36,9 +36,8 @@ def web_home(monkeypatch, tmp_path):
     """A throwaway web config and an empty vendor environment for every test."""
     for name in _VENDOR_ENV:
         monkeypatch.delenv(name, raising=False)
-    path = home.path("settings")           # the "web" section lives here now
+    path = home.path("settings")
     registry.reset_for_tests()
-    # The ring cursor is random per process; pin it so the keyless walk order is assertable.
     monkeypatch.setattr(keyless.current_scope(), "cursor", [0])
     yield path
     registry.reset_for_tests()
@@ -93,8 +92,6 @@ def test_the_legacy_walk_steps_over_a_higher_priority_search_only_backend():
     registry.register_provider(_Fake("firecrawl", available=True))
     registry.register_provider(_Fake("parallel", available=True, extract=True))
     registry.register_provider(_Fake("exa", available=True, extract=True))
-    # firecrawl leads the preference order and wins search; extract skips it for the
-    # next capable name rather than stopping at the first available one.
     assert registry.resolve_search_provider(None).name == "firecrawl"
     assert registry.resolve_extract_provider(None).name == "parallel"
 
@@ -177,7 +174,6 @@ def test_a_failed_registration_does_not_latch_the_registry_empty(monkeypatch):
     reg.ensure_backends_registered()
     assert reg.list_providers() == []
 
-    # The flag stayed down, so a later call tries again rather than being stuck.
     reg.ensure_backends_registered()
     assert calls["n"] == 2
 

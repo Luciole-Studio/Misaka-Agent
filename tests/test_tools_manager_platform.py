@@ -90,7 +90,7 @@ def installed(tmp_path, monkeypatch):
     """tesseract in a folder of its own, PATH leading nowhere near it."""
     folder = tmp_path / "Tesseract-OCR"
     folder.mkdir()
-    program = folder / ("tesseract.exe" if os.name == "nt" else "tesseract")   # Windows runs no bare name
+    program = folder / ("tesseract.exe" if os.name == "nt" else "tesseract")
     program.write_text("#!/bin/sh\n", encoding="utf-8")
     program.chmod(0o755)
     empty = tmp_path / "empty"
@@ -137,7 +137,7 @@ def test_the_path_is_asked_first_and_the_registry_only_on_windows(installed, mon
     monkeypatch.setenv("PATH", str(folder))
     assert _found("tesseract") == program and asked == []
     monkeypatch.setenv("PATH", str(folder.parent / "empty"))
-    assert tools_manager.find_tool("pdftotext") is None and asked == []     # no installer key is known for it
+    assert tools_manager.find_tool("pdftotext") is None and asked == []
 
 
 @pytest.mark.parametrize(("platform", "line", "absent"), [

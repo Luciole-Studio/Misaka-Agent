@@ -281,7 +281,7 @@ def test_all_core_setting_sections_and_scalars_are_reachable():
 
 def test_menu_error_is_recoverable_and_back_returns_to_menu(monkeypatch):
     pick(monkeypatch, 'Browser connection', 'cdp', 'Done')
-    menu.configure()  # Missing endpoint is shown, not an exit or a partial save.
+    menu.configure()
     assert document() == {}
     pick(monkeypatch, 'Search provider', 'Done')
     monkeypatch.setattr(menu, '_search', lambda *a: (_ for _ in ()).throw(ui.SetupGoBack()))

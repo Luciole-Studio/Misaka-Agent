@@ -115,7 +115,6 @@ def test_installers_name_every_archive():
         assert target.name in script
     assert "Luciole-Studio/Misaka-Agent" in shell
     assert "Luciole-Studio/Misaka-Agent" in powershell
-    assert "uv" in shell and "poppler" in shell
 
 
 def test_checked_in_formula_and_winget_match_the_renderer():

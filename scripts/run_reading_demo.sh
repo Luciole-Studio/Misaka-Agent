@@ -1,17 +1,4 @@
 #!/bin/sh
-# Run one complete reading-action chain over the two public texts in examples/reading.
-#
-#   scripts/run_reading_demo.sh [WORKSPACE]
-#
-# WORKSPACE is a scratch folder (default: a new temporary directory). The materials are
-# downloaded there, the run is written to WORKSPACE/reading/<run-id>/, and nothing is
-# copied back into the repository. The script prints every command it runs, the run ID,
-# and the node files the readers actually wrote.
-#
-# Prerequisites: a text model reachable through MISAKA's settings (Last Order's model, or
-# MISAKA_READING_MODEL=provider/id) and network access to the two texts. If MISAKA is
-# not on PATH, set MISAKA_READING_BIN to the command that starts it (for example
-# "uv run --project /path/to/Misaka-Agent misaka"); the default tries uv, then misaka.
 
 set -eu
 
@@ -33,7 +20,6 @@ else
 fi
 
 if [ -n "${MISAKA_READING_BIN:-}" ]; then
-  # shellcheck disable=SC2086 # the override is a command line, by design
   run_misaka() { $MISAKA_READING_BIN "$@"; }
 elif [ -x "$REPO_ROOT/.venv/Scripts/misaka.exe" ]; then
   run_misaka() { "$REPO_ROOT/.venv/Scripts/misaka.exe" "$@"; }
@@ -46,9 +32,6 @@ else
 fi
 
 read_json() {
-  # read_json FIELD : print one top-level field of the JSON on stdin. `-X utf8` is not
-  # decoration: on Windows a piped stdin is otherwise decoded with the locale codec, and a
-  # run id or path with Chinese characters in it comes apart before json can parse it.
   "$PYTHON" -I -X utf8 -c 'import json, sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"
 }
 
@@ -61,8 +44,6 @@ show() { printf '   $ %s\n' "$*"; }
 
 say "workspace: $WORKSPACE"
 
-# 1. Open: index/download both texts and write the run. No model is called here; N0 is
-#    the reader's own question.
 show "misaka read open <luxun> <ibsen> --question '...' --intent '...' --workspace '$WORKSPACE' --json"
 OPEN=$(run_misaka read open "$LUXUN" "$IBSEN" \
   --question "$QUESTION" \
@@ -73,13 +54,11 @@ ROOT_NODE=$(printf '%s' "$OPEN" | read_json currentNodeId)
 RUN_DIR=$(printf '%s' "$OPEN" | read_json runDirectory)
 printf '   run: %s\n   entry node: %s\n   directory: %s\n' "$RUN" "$ROOT_NODE" "$RUN_DIR"
 
-# 2. Reconstruct: rebuild the lecture's question and its turns in the entry node.
 show "misaka read act $RUN reconstruct --node $ROOT_NODE --focus '论证的转折' --workspace '$WORKSPACE' --json"
 ACT=$(run_misaka read act "$RUN" reconstruct --node "$ROOT_NODE" \
   --focus "论证的转折" --workspace "$WORKSPACE" --json)
 printf '   wrote: %s\n' "$(printf '%s' "$ACT" | read_json bodyPath)"
 
-# 3. Fork: two lenses, run in parallel as independent reading lines.
 show "misaka read fork $RUN --node $ROOT_NODE --lens '主体性与自我理解' --lens '经济条件与社会关系' --workspace '$WORKSPACE' --json"
 FORK=$(run_misaka read fork "$RUN" --node "$ROOT_NODE" \
   --lens "主体性与自我理解" --lens "经济条件与社会关系" \
@@ -87,8 +66,6 @@ FORK=$(run_misaka read fork "$RUN" --node "$ROOT_NODE" \
 FORK_IDS=$(printf '%s' "$FORK" | "$PYTHON" -I -X utf8 -c 'import json, sys; print(" ".join(json.load(sys.stdin)["nodeIds"]))')
 printf '   lines: %s\n' "$FORK_IDS"
 
-# 4. Compare: one node with every chosen line as a parent.
-# shellcheck disable=SC2086 # FORK_IDS is a list of ids
 show "misaka read compare $RUN $FORK_IDS --question '...' --workspace '$WORKSPACE' --json"
 CMP=$(run_misaka read compare "$RUN" $FORK_IDS \
   --question "两条路线给出的自由是怎样的，它们在哪里分岔？" \
@@ -96,18 +73,14 @@ CMP=$(run_misaka read compare "$RUN" $FORK_IDS \
 CMP_NODE=$(printf '%s' "$CMP" | read_json nodeId)
 printf '   wrote: %s\n' "$(printf '%s' "$CMP" | read_json bodyPath)"
 
-# 5. Reread: the entry node's material, read again with the new understanding.
 show "misaka read reread $RUN --node $ROOT_NODE --using $CMP_NODE --focus '结尾' --workspace '$WORKSPACE' --json"
 RE=$(run_misaka read reread "$RUN" --node "$ROOT_NODE" --using "$CMP_NODE" \
   --focus "结尾" --workspace "$WORKSPACE" --json)
 printf '   wrote: %s\n' "$(printf '%s' "$RE" | read_json bodyPath)"
 
-# 6. Graph: the map and every node body path, read back from disk.
 say "graph (read back from $RUN_DIR/graph.json)"
 show "misaka read graph $RUN --workspace '$WORKSPACE' --json"
 GRAPH=$(run_misaka read graph "$RUN" --workspace "$WORKSPACE" --json)
-# The JSON goes in as an argument: with `python -` the program arrives on stdin, so the
-# graph cannot also come that way. A quoted heredoc keeps the shell out of the Python.
 "$PYTHON" -I -X utf8 - "$GRAPH" <<'PY'
 import json, os, sys
 graph = json.loads(sys.argv[1])
@@ -120,10 +93,6 @@ for node in graph["nodes"]:
     print(f"  {node['id']}{lens}  {actions}  {os.path.join(run_dir, node['bodyPath'])}")
 PY
 
-# 7. Resume: talk with the leader, then reopen the run in a new process and talk again.
-#    Both turns are one conversation: Last Order's, which leads the reading. The message is
-#    followed by end of input rather than /stop: an explicit /stop means "stop now" and would
-#    cancel the turn this script is waiting for.
 say "chat: one leader turn, then end of input"
 show "misaka read chat $RUN   <<< '用两三句话说明这次阅读的两条线'"
 printf '%s\n' "用两三句话说明这次阅读的两条线分别读到了什么。" \

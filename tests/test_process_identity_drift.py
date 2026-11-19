@@ -22,7 +22,7 @@ def test_a_start_time_a_second_off_is_the_same_process_but_a_reused_pid_is_not()
     assert processes.same_identity(mine, mine)
     assert processes.same_identity(mine, _shifted(mine, 1.0))
     assert processes.same_identity(mine, _shifted(mine, -2.0))
-    assert not processes.same_identity(mine, _shifted(mine, 3600.0))       # a PID reused an hour later
+    assert not processes.same_identity(mine, _shifted(mine, 3600.0))
     host, pid, started = mine.split(":")
     assert not processes.same_identity(mine, f"other-host:{pid}:{started}")
     assert not processes.same_identity(mine, f"{host}:{int(pid) + 1}:{started}")
@@ -49,7 +49,7 @@ def test_a_node_claims_its_row_although_the_parent_recorded_a_drifted_identity(t
                     (os.getpid(), _shifted(mine, 1.0), node["id"]))
         assert runs.claim_runner(con, "research_execution", node["id"], key) is True
         row = runs.node(con, node["id"])
-        assert row["runner_identity"] == mine                                # the child's own reading stands
+        assert row["runner_identity"] == mine
 
         con.execute("UPDATE research_execution SET runner_identity=? WHERE id=?",
                     (_shifted(mine, 3600.0), node["id"]))
@@ -57,8 +57,6 @@ def test_a_node_claims_its_row_although_the_parent_recorded_a_drifted_identity(t
         assert "identity mismatch" in runs.note_claim_failure(con, "research_execution", node["id"], key)
 
 
-# Only a POSIX worker publishes a process-group identity (dispatch._worker_identity), so only
-# there does the reconciler fence a group.
 posix_groups = pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
 
 
@@ -77,9 +75,9 @@ def _group_leader():
 def test_a_drifted_leader_identity_still_gets_its_group_stopped():
     proc = _group_leader()
     try:
-        recorded = _shifted(processes.identity(proc.pid), 1.0)      # the recorder read one second off
+        recorded = _shifted(processes.identity(proc.pid), 1.0)
         assert processes.terminate_orphaned_group(proc.pid, recorded) is True
-        assert proc.wait(timeout=5) is not None                         # stopped, not just forgotten
+        assert proc.wait(timeout=5) is not None
     finally:
         proc.kill()
 
@@ -88,8 +86,8 @@ def test_a_drifted_leader_identity_still_gets_its_group_stopped():
 def test_a_reused_pid_is_never_signalled():
     proc = _group_leader()
     try:
-        recorded = _shifted(processes.identity(proc.pid), 3600.0)   # a different, older process
+        recorded = _shifted(processes.identity(proc.pid), 3600.0)
         assert processes.terminate_orphaned_group(proc.pid, recorded) is True
-        assert proc.poll() is None                                   # the new owner of the PID lives
+        assert proc.poll() is None
     finally:
         proc.kill()

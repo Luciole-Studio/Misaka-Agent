@@ -28,9 +28,6 @@ from misaka.ai.utils.typebox_convert import Convert
 from misaka.ai.utils.typebox_helpers import typeboxSchema
 from misaka.utils.js import jsIsInteger, jsNumber, jsonStringify, jsString, jsTrim
 
-# MISAKA fork: keyed by content and bounded, not a WeakMap: schemas are dicts (not weak-referenceable) and the union-arm
-# coercion builds fresh copies, so an address-keyed cache grew on every tool call and could hand back another schema's
-# validator once CPython reused a freed address.
 _VALIDATOR_CACHE_LIMIT = 512
 _validatorCache: dict[str, Draft202012Validator] = {}
 
@@ -211,9 +208,6 @@ def _coerceWithJsonSchema(value: Any, schema: _JsonSchemaObject) -> Any:
                 nextValue = candidate
                 break
 
-    # MISAKA fork: stands in for TypeBox's `Value.Convert`, which upstream runs first and which rescues the same value
-    # written in another type ("1" for 1) for literal and enum schemas. Nothing else is rewritten: a model asking for an
-    # operation that does not exist gets the validation error back rather than a real one run in its place.
     if "enum" in schema and isinstance(schema["enum"], list) and nextValue not in schema["enum"]:
         for candidate in schema["enum"]:
             if jsString(candidate) == jsString(nextValue):
@@ -247,7 +241,6 @@ def _normalizeOptionalNulls(value: Any, schema: Any) -> None:
     if not isinstance(value, dict) or not isinstance(schema, Mapping) or not isinstance(schema.get("properties"), Mapping):
         return
 
-    # MISAKA fork: `object` (upstream's name) is a builtin here.
     record = value
     required = set(schema.get("required") or [])
     for key, propertySchema in schema["properties"].items():
@@ -311,7 +304,6 @@ def validateToolArguments(tool: Tool, toolCall: ToolCall) -> Any:
     """
     if toolCall.argumentsError:
         raise ValueError(f'Invalid arguments for tool "{toolCall.name}": {toolCall.argumentsError}')
-    # MISAKA fork: a pydantic model class is the TypeBox schema of a MISAKA tool.
     if isinstance(tool.parameters, type) and issubclass(tool.parameters, BaseModel):
         return _validatePydanticToolArguments(tool, toolCall)
     if not isinstance(tool.parameters, Mapping):

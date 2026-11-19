@@ -144,7 +144,6 @@ sources to adjudicate the review, but do not conceal fresh evidence or present a
 the draft. This is a terminal review; it opens no new node of the graph.
 """ + planner.SOURCES_FOOTER
 
-# Stage contracts change the deliverable, not the basic research/Skill capabilities.
 SURVEY_TOOLS = FINAL_TOOLS = planner.RESEARCH_TOOLS
 REPORT_TOOL = "misaka_research_report"
 
@@ -192,7 +191,7 @@ def _catalog(con, run, docs, focus=None):
     SOURCES.md; the ``focus`` node, the one a survey section is about, also gets how it was reached,
     every version, its plans, deliberation and cards. Every node in full came to 137 KB, sent again
     with each of fifteen survey turns until the draft no longer fit the window (2026-09-29)."""
-    doc = lambda path: docs.get(path, path)  # a file the corpus would not take is read by path
+    doc = lambda path: docs.get(path, path)
     out = []
     for node in runs.nodes(con, run["id"]):
         rows = runs.artifacts(con, run["id"], branch_id=node["id"])
@@ -206,10 +205,7 @@ def _catalog(con, run, docs, focus=None):
                  "conclusion": (by_kind.get("synthesis") or [None])[-1],
                  "critiques": by_kind.get("critique", []),
                  "divergence_review": by_kind.get("divergence", []),
-                 # the node's folder in one page: its products, the sources they cite, hard-linked beside them
                  "sources_manifest": os.path.join(run["workspace"], runs.node_dir(node["id"]), "SOURCES.md"),
-                 # Counts only: every issue's text made the catalog 280 KB (2026-09-29, 293 issues); the
-                 # issues view lists a node's.
                  "issues": _issue_counts(runs.issues(con, run["id"], node_id=node["id"])),
                  "dissolves": views.dissolution(con, run, node)}
         if node["id"] == focus:
@@ -218,7 +214,7 @@ def _catalog(con, run, docs, focus=None):
                                          for o in runs.origin_options(con, node["id"])],
                           "rounds": runs.plan_round(con, run["id"], node["id"]),
                           "plans": by_kind.get("plan", []),
-                          "conclusions": by_kind.get("synthesis", []),     # every version, oldest first
+                          "conclusions": by_kind.get("synthesis", []),
                           "deliberation": by_kind.get("deliberation", []),
                           "cards": [{"id": t["id"], "title": t["title"], "kind": t["research_kind"], "status": t["status"],
                                      "deliverables": [doc(a["path"]) for a in rows if a["task_id"] == t["id"]]}
@@ -299,7 +295,7 @@ def _checkpoint(con, run, kind):
     if not rows:
         return None
     row = rows[-1]
-    _intact(con, run, row)  # A modified checkpoint is an integrity error, not permission to redraft.
+    _intact(con, run, row)
     return row
 
 
@@ -329,8 +325,6 @@ def _intact(con, run, row):
         runs.artifact_text(row)
         return
     except (ValueError, FileNotFoundError):
-        # Moved or deleted is rebuilt the same way: a missing draft failed the final review and
-        # every resume after it, until the file was put back by hand (0.18.10 sweep).
         text = _recorded_text(con, run, row["kind"])
         if text is None or hashlib.sha256(text.encode("utf-8")).hexdigest() != row["sha256"]:
             raise

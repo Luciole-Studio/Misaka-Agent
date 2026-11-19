@@ -184,7 +184,6 @@ def test_branch_selection_uses_the_latest_physical_response_without_a_model_chan
 
 
 def test_branch_selection_skips_a_failed_moa_answer_like_a_failed_routing():
-    # MISAKA fork: an MoA preset's failure message names the preset, as a failed routing names the virtual model.
     selection, lookups = _branch_selection(
         [_answer("faux", "small"), _answer("faux", "large"), _answer("moa", "default", api="moa", stop_reason="error")],
         {**_CATALOG, "moa/default": "moa"},

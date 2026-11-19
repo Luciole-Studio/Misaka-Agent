@@ -110,12 +110,9 @@ async def _login(providerId: str) -> None:
     if provider is None or provider.auth.oauth is None:
         raise RuntimeError(f"Unknown provider: {providerId}")
     # This dev CLI does not persist an installation ID; apps should reuse one across logins.
-    # MISAKA fork: misaka introduces itself by its own name.
     credential = await provider.auth.oauth.login(
         _Interaction(), LoginOptions(getDeviceId=lambda: str(uuid.uuid4()), agentName=CLIENT_NAME)
     )
-    # MISAKA fork: stored in misaka's credential store, not in `auth.json` under the
-    # working directory.
     storage = AuthStorage.create()
 
     async def store(_current: Any) -> Any:

@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/vercel-ai-gateway.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "vercel-ai-gateway.json").read_text(encoding="utf-8"))
 
 VERCEL_AI_GATEWAY_MODELS = flattenChatModelCatalog("vercel-ai-gateway", _values)

@@ -33,12 +33,6 @@ from misaka.ui.tui import (
 )
 from misaka.utils.clipboard_image import readClipboardImage
 
-# question / header / label / description / preview all come from the model, and Text,
-# Markdown and theme.fg pass escape sequences straight through to the terminal (and
-# visibleWidth counts them as zero-width, so nothing looks off). A prompt-injected model
-# could rewrite the clipboard with OSC 52 or repaint the screen from inside a dialog that
-# exists to ask the user for a decision. Strip control characters at the single accessor
-# every one of those fields goes through; \n and \t stay, previews are Markdown.
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 
@@ -119,11 +113,6 @@ class AskUserQuestionComponent:
         return self.questions[self.current]
 
     def _key(self, question: Any | None = None) -> str:
-        # Deliberately unsanitised: this is the identity the answers/annotations dicts are
-        # keyed by, and `core/ask_user` looks those up with the question text it sent.
-        # Every caller that puts the result on screen must wrap it in `_sanitize` itself --
-        # `_submit_lines` does, and `_nav_line` only uses it as a dict lookup. Adding a new
-        # render site that prints a `_key()` without `_sanitize` reopens the OSC 52 hole.
         return str(_read(question or self._question(), "question", ""))
 
     def _options(self, question: Any | None = None) -> list[Any]:
@@ -311,7 +300,6 @@ class AskUserQuestionComponent:
         task.add_done_callback(self._tasks.discard)
 
     async def _open_external_editor(self) -> None:
-        # The same hand-over as pi's ExtensionEditorComponent.handleOpenExternalEditor.
         command = (
             os.environ.get("VISUAL") or os.environ.get("EDITOR") or ("notepad" if sys.platform == "win32" else "nano")
         )
@@ -505,8 +493,6 @@ class AskUserQuestionComponent:
             elif index == self._other_index():
                 self.focuses[self.current] = index
                 self._begin_input("other")
-            # `_option_lines`/`_question_lines` number the multi-select "Submit"/"Next" row
-            # and the "Chat about this" row too, so the digits that render must also act.
             elif self._is_multi() and index == self._submit_index():
                 self.focuses[self.current] = index
                 self._advance()
@@ -676,8 +662,6 @@ class AskUserQuestionComponent:
         for question in self.questions:
             key = self._key(question)
             if key in self.answers:
-                # `key` is the raw question text (the answers dict identity); the review
-                # screen is a render site, so only the sanitised copy reaches the terminal.
                 lines += [
                     theme.fg("text", f"• {_sanitize(key)}"),
                     theme.fg("success", f"  → {_sanitize(self.answers[key])}"),
@@ -697,9 +681,6 @@ class AskUserQuestionComponent:
         inner = max(1, width - 2)
         border = theme.fg("border", "─" * max(1, width))
         body = self._submit_lines(inner) if self.current == len(self.questions) else self._question_lines(inner)
-        # Every body field can contain long or multiline text, including user answers.
-        # Fit once at the component boundary, retaining ANSI styles and all wrapped text.
-        # Clipping is only a final guard for a glyph wider than a one-column terminal.
         prefix = " " if width > 1 else ""
         fitted = [truncateToWidth(prefix + part, width, "")
                   for line in body for part in wrapTextWithAnsi(line, inner)]

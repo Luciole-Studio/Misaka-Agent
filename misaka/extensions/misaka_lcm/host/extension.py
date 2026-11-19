@@ -45,8 +45,6 @@ def register(harn, *, kind: str, workspace: str, source: str | None = None):
             harn.appendEntry("lcm-project", {"workspace": str(storage.project(ctx))})
         try:
             await _off_loop(context_engine.bound_engine, ctx)
-        # Binding failure does not prevent opening saved history. The next operation
-        # retries the bind; owned compaction errors never invoke a different engine.
         except Exception:
             logger.warning("LCM session bind failed; the next operation retries it.", exc_info=True)
 
@@ -57,7 +55,6 @@ def register(harn, *, kind: str, workspace: str, source: str | None = None):
             logger.warning("LCM ingest failed; the transcript is unaffected.", exc_info=True)
 
     async def session_tree(event, ctx):
-        # Rebind and ingest before another prompt is appended to the selected branch.
         def rebind(transcript, ctx):
             context_engine.start(ctx)
             context_engine.sync(ctx, transcript=transcript)
@@ -69,7 +66,6 @@ def register(harn, *, kind: str, workspace: str, source: str | None = None):
     async def context_prepare(event, ctx):
         transcript = context_engine.snapshot(ctx)
         frozen = context_engine.freeze_context(ctx, transcript)
-        # The model this request goes to: under a virtual selection ctx.model has no window.
         if read_field(event, "model") is not None:
             frozen.model = copy.deepcopy(read_field(event, "model"))
         prepared = await execution.off_loop(
@@ -81,11 +77,6 @@ def register(harn, *, kind: str, workspace: str, source: str | None = None):
         return {"execute": execute if prepared is not None else None}
 
     async def compact_failed(event, ctx):
-        # The engine committed its side of a compaction pi then threw away (an abort
-        # during the round, or a later failure), so its ingest cursor now points past
-        # messages that are still in the live context. Rebinding the session is how
-        # upstream repairs a cursor from the store; without it the next ingest writes
-        # that whole region a second time.
         try:
             await _off_loop(context_engine.start, ctx, must_finish=True)
         except Exception:
@@ -94,9 +85,8 @@ def register(harn, *, kind: str, workspace: str, source: str | None = None):
 
     async def session_end(event, ctx):
         if read_field(event, 'contextCarried', False):
-            return  # The explicit rollover already ran end/reset/start/carry.
+            return
         try:
-            # Upstream on_session_end already performs one bounded final flush.
             await _off_loop(partial(context_engine.end, transcript=context_engine.snapshot(ctx),
                                     reset=read_field(event, "reason") == "new"),
                             ctx, must_finish=True)
@@ -122,14 +112,9 @@ def register(harn, *, kind: str, workspace: str, source: str | None = None):
             logger.warning("LCM usage update failed; the next one repairs it.", exc_info=True)
 
     async def subagent_start(event, ctx):
-        # A subagent runs in its own process with its own copy of this plugin, and joins the project
-        # store this session belongs to -- not the directory it runs in, which may be a worktree or
-        # the launch directory of a resumed session. ``ctx`` is already scoped to that project.
         event["env"][storage.PROJECT_ENV] = str(storage.project(ctx))
 
     async def discover_resources(event, ctx):
-        # hermes registers its bundled skill through the plugin's register_skill; pi's door
-        # for a skill root an extension ships is resources_discover.
         return {"skillPaths": [os.path.join(os.path.dirname(__file__), "skills")]}
 
     async def lcm_command(args, ctx):
@@ -140,7 +125,6 @@ def register(harn, *, kind: str, workspace: str, source: str | None = None):
         ctx.ui.notify(text, "info")
 
     async def preanswer_context(event, ctx):
-        # Keep the native user turn and protected-tail positions intact.
         try:
             return await _off_loop(partial(preanswer.inject, active_tools=harn.getActiveTools()),
                                    event, ctx, signal=read_field(ctx, "signal"))

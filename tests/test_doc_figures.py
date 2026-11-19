@@ -28,8 +28,6 @@ BODY = ("The campaign of 1812 is told here from the letters of the officers who 
         "and the maps show where it stood on the evening of each day of the march.")
 
 
-# -- what a page's signals say -----------------------------------------------------------------------
-
 def _page(images=(), strokes=0, ink=None, size=(600, 800)):
     return {"cover": 0.0, "marked": True, "images": [list(b) for b in images], "strokes": strokes,
             "ink": list(ink) if ink else None, "size": list(size), "rotation": 0}
@@ -74,8 +72,6 @@ def test_the_reader_is_told_which_figure_is_which():
     notes = documents._page_notes({}, 10, 14, {12: record, 30: record})
     assert "Page 12 carries" in notes and "Page 30" not in notes
 
-
-# -- a real PDF -------------------------------------------------------------------------------------------
 
 def _typeset(pdf, page, line, y):
     obj = raw.FPDFPageObj_NewTextObj(pdf.raw, b"Helvetica", 10.0)
@@ -163,7 +159,6 @@ async def test_a_figure_is_rendered_alone_at_the_resolution_its_labels_need(inde
     figure = await _call("doc_page_image", {"doc_id": doc_id, "page": 2, "figure": 1, "_cwd": workspace})
     assert figure["details"]["figure"] == 1 and "figure 1" in figure["content"][0]["text"]
     whole, alone = page["details"], figure["details"]
-    # The map is 300pt wide on a 595pt page: alone it gets far more pixels than in the whole page.
     assert alone["width"] > 2 * whole["width"] * 300 / 595
     with pytest.raises(ValueError, match="has 1 figure"):
         await _call("doc_page_image", {"doc_id": doc_id, "page": 2, "figure": 2, "_cwd": workspace})

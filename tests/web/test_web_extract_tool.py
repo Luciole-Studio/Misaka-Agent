@@ -42,7 +42,7 @@ def web_home(tmp_path, monkeypatch):
     monkeypatch.setitem(CFG, "web_cache", str(tmp_path / "cache" / "web"))
     registry.reset_for_tests()
     website_policy.invalidate_cache()
-    yield home.path("settings")            # the "web" section lives here now
+    yield home.path("settings")
     registry.reset_for_tests()
     website_policy.invalidate_cache()
 
@@ -98,11 +98,6 @@ def body(rendered):
     return json.loads(rendered)
 
 
-# ---------------------------------------------------------------------------
-# Schema: every character of it came from Hermes
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.skipif(not HERMES_WEB_TOOLS.exists(), reason="Hermes checkout not present")
 def test_the_schema_matches_hermes_with_host_tools_and_material_note():
     """Read WEB_EXTRACT_SCHEMA out of the Hermes source and compare the objects.
@@ -129,11 +124,6 @@ def test_the_schema_matches_hermes_with_host_tools_and_material_note():
     for contract in ("excerpts", "saved_path", "size-capped", "read call", "content_kind", "final_url"):
         assert contract in description
 
-
-
-# ---------------------------------------------------------------------------
-# The gates, in order
-# ---------------------------------------------------------------------------
 
 
 async def test_a_non_url_item_becomes_that_position_s_error(monkeypatch):
@@ -188,7 +178,7 @@ async def test_a_blocklisted_host_is_one_entry_not_the_whole_call(monkeypatch, w
     assert result["results"][0]["blocked_by_policy"] is True
     assert "website policy" in result["results"][0]["error"]
     assert result["results"][1]["error"] is None
-    assert calls[0][1] == ["https://a.test"]  # the blocked one never reached a vendor
+    assert calls[0][1] == ["https://a.test"]
 
 
 async def test_a_private_address_is_refused_per_url(monkeypatch):
@@ -216,11 +206,6 @@ async def test_more_than_five_urls_are_sliced(monkeypatch):
     result = body(await run([f"https://{i}.test" for i in range(9)]))
     assert len(calls[0][1]) == extract.MAX_URLS
     assert len(result["results"]) == extract.MAX_URLS
-
-
-# ---------------------------------------------------------------------------
-# Backend selection errors
-# ---------------------------------------------------------------------------
 
 
 async def test_a_search_only_backend_says_so_by_name(monkeypatch, web_home):
@@ -255,11 +240,6 @@ async def test_no_provider_at_all_says_how_to_get_one(monkeypatch):
     result = body(await run(["https://a.test"]))
     assert result["success"] is False
     assert "No web extract provider configured" in result["error"]
-
-
-# ---------------------------------------------------------------------------
-# Budget, evidence and the footer
-# ---------------------------------------------------------------------------
 
 
 async def test_a_short_page_comes_back_whole_and_lands_on_disk(monkeypatch, tmp_path):
@@ -299,7 +279,6 @@ async def test_the_footer_offset_lands_in_the_page_not_the_frontmatter(monkeypat
     saved = (tmp_path / entry["saved_path"]).read_text(encoding="utf-8").split("\n")
     landed = saved[offset - 1]
     assert landed.startswith("line ")
-    # And it is past what the head already showed.
     head = entry["content"].split("\n\n[... middle omitted")[0]
     assert landed not in head
 
@@ -312,7 +291,7 @@ async def test_the_whole_document_stays_under_the_result_ceiling(monkeypatch, tm
     rendered = await run([f"https://{i}.test" for i in range(5)], char_limit=500_000, cwd=str(tmp_path))
     result = body(rendered)
 
-    assert len(rendered) <= extract.MAX_RESULT_SIZE_CHARS + 2000  # + the fence's own text
+    assert len(rendered) <= extract.MAX_RESULT_SIZE_CHARS + 2000
     assert len(result["results"]) == 5
     assert all("[TRUNCATED]" in entry["content"] for entry in result["results"])
     assert all(entry["saved_path"] for entry in result["results"])
@@ -335,14 +314,9 @@ async def test_the_char_limit_comes_from_config_when_unset(monkeypatch, web_home
     write_web({"extract_char_limit": 2500})
     assert extract.extract_char_limit() == 2500
     write_web({"extract_char_limit": 10})
-    assert extract.extract_char_limit() == 2000  # floored
+    assert extract.extract_char_limit() == 2000
     write_web({"extract_char_limit": "nonsense"})
     assert extract.extract_char_limit() == extract.DEFAULT_EXTRACT_CHAR_LIMIT
-
-
-# ---------------------------------------------------------------------------
-# Cache and ledger
-# ---------------------------------------------------------------------------
 
 
 async def test_a_cached_page_is_not_fetched_again(monkeypatch, tmp_path):
@@ -352,7 +326,7 @@ async def test_a_cached_page_is_not_fetched_again(monkeypatch, tmp_path):
     assert len(calls) == 1
 
     await run(["https://a.test"], cwd=str(tmp_path))
-    assert len(calls) == 1  # served from the disk cache, no second vendor call
+    assert len(calls) == 1
 
 
 async def test_a_rescued_batch_is_never_cached(monkeypatch, tmp_path):
@@ -360,7 +334,7 @@ async def test_a_rescued_batch_is_never_cached(monkeypatch, tmp_path):
     stub(monkeypatch, [page("https://a.test", "ring body")], rescued=True, calls=calls)
     await run(["https://a.test"], cwd=str(tmp_path))
     await run(["https://a.test"], cwd=str(tmp_path))
-    assert len(calls) == 2  # the chosen backend is attempted again next call
+    assert len(calls) == 2
 
 
 async def test_a_failed_page_is_not_cached(monkeypatch, tmp_path):
@@ -385,16 +359,11 @@ async def test_dispatch_stub_and_cache_do_not_fabricate_outbound_rows(monkeypatc
     stub(monkeypatch, lambda urls: [page(u, "x") for u in urls])
 
     await run(["https://a.test", "https://b.test"], cwd=str(tmp_path))
-    assert rows == []  # dispatch was stubbed; only provider I/O may account calls
+    assert rows == []
 
     rows.clear()
     await run(["https://a.test", "https://b.test"], cwd=str(tmp_path))
-    assert rows == []  # both cache hits: nothing was paid for
-
-
-# ---------------------------------------------------------------------------
-# Order, shape and the fence
-# ---------------------------------------------------------------------------
+    assert rows == []
 
 
 async def test_the_result_order_is_the_argument_order(monkeypatch, web_home):
@@ -415,7 +384,7 @@ async def test_the_result_order_is_the_argument_order(monkeypatch, web_home):
 
     urls = [entry["url"] for entry in result["results"]]
     assert urls[0] == "https://one.test"
-    assert urls[1] == ""  # the invalid item keeps its place
+    assert urls[1] == ""
     assert urls[2] == "https://blocked.test/x"
     assert urls[3] == "https://two.test"
 
@@ -443,7 +412,7 @@ async def test_the_document_is_wrapped_in_the_untrusted_fence(monkeypatch):
 
     assert rendered.startswith(f'<<<{MARKER} name="web-extract">>>')
     assert rendered.count("<<<END-UNTRUSTED-DATA>>>") == 1
-    assert "UNTRUSTED-DATA-ESCAPED" in rendered  # the page cannot close the block
+    assert "UNTRUSTED-DATA-ESCAPED" in rendered
 
 
 async def test_nothing_extractable_is_an_error_not_an_empty_list(monkeypatch):
@@ -474,11 +443,6 @@ async def test_a_backend_that_explodes_is_a_result_not_a_crash(monkeypatch):
     assert "socket exploded" in result["error"]
 
 
-# ---------------------------------------------------------------------------
-# Registration
-# ---------------------------------------------------------------------------
-
-
 def test_registering_installs_the_tool_with_hermes_name_and_schema():
     installed: list = []
     harn = type("H", (), {"registerTool": lambda _self, definition: installed.append(definition)})()
@@ -493,11 +457,6 @@ def test_the_cache_key_carries_the_format_so_two_renderings_cannot_collide():
     assert cache.extract_cache_get("https://a.test", format="markdown", provider="tavily")
     assert cache.extract_cache_get("https://a.test", format="html", provider="tavily") is None
     assert cache.extract_cache_get("https://a.test", format="markdown", provider="exa") is None
-
-
-# ---------------------------------------------------------------------------
-# The reason every page is stored: the research ledger has to be able to quote it
-# ---------------------------------------------------------------------------
 
 
 async def test_an_extracted_page_keeps_its_full_text_and_provenance(monkeypatch, tmp_path):
@@ -531,11 +490,6 @@ async def test_the_evidence_header_names_the_chosen_backend_when_it_served(monke
     entry = body(await run(["https://a.test"], cwd=str(tmp_path)))["results"][0]
     header = (tmp_path / entry["saved_path"]).read_text(encoding="utf-8").split("---")[1]
     assert '"tavily"' in header
-
-
-# ---------------------------------------------------------------------------
-# The abort race, the stored-copy ceiling, and the two vendor-written fields
-# ---------------------------------------------------------------------------
 
 
 class _LiveSignal:
@@ -587,7 +541,7 @@ async def test_an_abort_mid_flight_cancels_the_vendor_call(monkeypatch):
     result = json.loads(await task)
 
     assert result == {"error": "Interrupted", "success": False}
-    assert cancelled.is_set()  # the vendor call was really stopped, not left running
+    assert cancelled.is_set()
 
 
 async def test_a_multi_megabyte_page_is_capped_before_it_reaches_the_disk(monkeypatch, tmp_path):
@@ -601,7 +555,6 @@ async def test_a_multi_megabyte_page_is_capped_before_it_reaches_the_disk(monkey
     assert len(saved) < cache.MAX_STORED_TEXT_CHARS + 2000
     assert "stored copy truncated at" in saved
 
-    # The digest identifies the complete saved representation, not its short preview.
     import hashlib
     header, text = saved.split("---\n", 2)[1:]
     assert hashlib.sha256(text.removeprefix("\n").removesuffix("\n").encode()).hexdigest() in header
@@ -640,7 +593,7 @@ async def test_text_that_cannot_be_encoded_costs_the_evidence_file_not_the_extra
 
     assert entry["error"] is None
     assert "before" in entry["content"]
-    assert "saved_path" not in entry  # storage failed, the extraction did not
+    assert "saved_path" not in entry
 
 
 async def test_a_presigned_vendor_final_url_is_not_written_into_the_header(monkeypatch, tmp_path):

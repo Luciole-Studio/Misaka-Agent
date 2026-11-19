@@ -40,9 +40,6 @@ helpers: dict[str, NativePlatformHelper | None] = {}
 
 _PASTEBOARD_TIMEOUT_SECONDS = 5
 
-# MISAKA fork: the macOS addon reads the file URLs on the pasteboard through AppKit; Python has no AppKit binding,
-# so JavaScript for Automation asks for them through the Objective-C bridge. The script answers a JSON list of POSIX
-# paths, and anything that is not a file URL stays out of it.
 _FINDER_PATHS_SCRIPT = r"""
 ObjC.import('AppKit');
 const paths = [];
@@ -207,7 +204,6 @@ class _Win32PlatformHelper:
     async def getImage(self) -> bytes | None:
         return await asyncio.to_thread(_grabClipboardPng)
 
-    # MISAKA fork: the files copied in Explorer (CF_HDROP); the Windows addon exports no `getFilePaths`.
     async def getFilePaths(self) -> list[str] | None:
         from misaka.utils import win_clipboard
 

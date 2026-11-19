@@ -34,7 +34,7 @@ async def request(record, operation, **arguments):
             writer.write((json.dumps({"session": record["id"], "instance": record["instance"],
                                       "operation": operation, **arguments}) + "\n").encode())
             await writer.drain()
-            line = await reader.read()  # One reply then EOF; large saved conversations are not single-line input frames.
+            line = await reader.read()
             if not line:
                 raise ConnectionError("The original session disconnected; delivery is unconfirmed. Do not resend automatically.")
             reply = json.loads(line)
@@ -71,8 +71,6 @@ class SessionControl:
         if self.server is not None:
             return
         self.accepting, self.paused = True, False
-        # macOS sockaddr_un is only 104 bytes; its default temp directory can
-        # consume most of that. A private, short directory also protects the socket.
         from misaka.core.session_catalog import _CONTROL_PARENT
 
         self.directory = tempfile.TemporaryDirectory(prefix="misaka-session-", dir=_CONTROL_PARENT)
@@ -146,7 +144,7 @@ class SessionControl:
             writer.write((_dump_json(reply) + "\n").encode())
             await writer.drain()
         except (ConnectionError, OSError):
-            pass  # The client detached. Accepted input belongs to the owner, not this connection.
+            pass
         finally:
             self.connections.discard(task)
             writer.close()
@@ -163,8 +161,6 @@ class SessionControl:
             streaming = self.session.state.streamingMessage
             if read_field(streaming, "role") != "assistant":
                 streaming = None
-            # Keep native in-flight content separate from committed history. A history
-            # change also resends the preview after the view rebuilds its branch.
             stream_cursor = [self.session.sessionId, *cursor, self._stream_revision, streaming is not None]
             return {"id": self.session.sessionId, "cwd": manager.getCwd(),
                     "state": "idle" if self.session.isIdle else "working", "paused": self.paused,
@@ -185,8 +181,6 @@ class SessionControl:
         text = command.get("text")
         if not isinstance(text, str) or not text.strip():
             raise ValueError("Enter a message for this session.")
-        # Serialize only ingress, not turns. A second message can steer the first
-        # while it is running, using AgentSession's normal input/queue contract.
         async with self.ingress:
             if not self.accepting or not self._owns(command):
                 raise ValueError("The original session ended before accepting this input.")
@@ -195,7 +189,6 @@ class SessionControl:
             accepted.add_done_callback(lambda result: result.exception() if not result.cancelled() else None)
 
             def preflight(disposition):
-                # Called only for an accepted prompt; `finally` below reports a rejected one.
                 if not accepted.done():
                     accepted.set_result(bool(disposition))
 

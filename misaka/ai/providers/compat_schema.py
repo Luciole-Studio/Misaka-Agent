@@ -46,7 +46,6 @@ _SessionAffinityFormatLiteral: TypeAlias = Literal["openai", "openai-nosession",
 _ThinkingTokenBudgetFieldLiteral: TypeAlias = Literal[
     "thinking_token_budget", "thinking_budget", "thinking_budget_tokens"
 ]
-# MISAKA fork: the two as schema fields, whose `enum` keeps this order (`TypeBoxLiteralUnion`).
 _SessionAffinityFormatField = TypeBoxLiteralUnion(*get_args(_SessionAffinityFormatLiteral))
 _ThinkingTokenBudgetFieldField = TypeBoxLiteralUnion(*get_args(_ThinkingTokenBudgetFieldLiteral))
 
@@ -164,8 +163,6 @@ _optionalSessionAffinityFormat = _optional
 
 
 class _CompatSchemaObject(TypeBoxObject):
-    # MISAKA fork: the base of the compat schemas, which upstream declares with `additionalProperties: true`. A comment,
-    # not a docstring: pydantic would publish a docstring as the schema's description.
     model_config = ConfigDict(json_schema_extra={"additionalProperties": True})
 
 
@@ -383,7 +380,6 @@ class MistralConversationsCompatSchema(_CompatSchemaObject):
     )
 
 
-# MISAKA fork: a property is `(annotation, FieldInfo)`, what `create_model` takes.
 _Property: TypeAlias = tuple[Any, FieldInfo]
 
 _ProviderCompatPropertyOverrides: dict[str, _Property] = {

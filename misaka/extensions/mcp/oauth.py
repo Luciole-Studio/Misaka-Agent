@@ -70,7 +70,6 @@ from misaka.utils.whatwg_url import URL
 CALLBACK_HOST = "127.0.0.1"
 CALLBACK_PATH = "/callback"
 # Where pi.dev serves pi's Client ID Metadata Documents: `client.json` and `<callback ID>/client.json`.
-# MISAKA fork: unreached, since the config validation rejects `clientRegistration: "cimd"`.
 CLIENT_METADATA_BASE_URL = "https://pi.dev/oauth"
 # Redirect URI for refreshes when none is stored. Refreshing never redirects the user.
 FALLBACK_REDIRECT_URL = f"http://{CALLBACK_HOST}{CALLBACK_PATH}"
@@ -122,7 +121,6 @@ def callbackSettings(settings: McpOAuthSettings) -> CallbackSettings:
     url = URL(callbackUrl if callbackUrl is not None else f"http://{CALLBACK_HOST}{CALLBACK_PATH}")
     address = re.sub(r"^\[|\]$", "", url.hostname)
     port = int(url.port) if url.port else settings.get("callbackPort")
-    # MISAKA fork: JSON's `8080.0` is JavaScript's 8080, but Python reads it as a float, which no socket binds.
     if isinstance(port, float):
         port = int(port)
     fixedRedirectUrl: str | None = None
@@ -214,8 +212,6 @@ class McpOAuthCredentialStore:
     """Per-server OAuth state (client registration, tokens, pending PKCE verifier) in ``mcp-auth.json``."""
 
     def __init__(self, backend: AuthStorageBackend | None = None, lockDir: str | None = None) -> None:
-        # MISAKA fork: the file sits with the other credentials and the lock files under `run/locks`,
-        # where pi uses `<agent-dir>/mcp-auth.json` and the agent directory.
         self._backend: AuthStorageBackend = (
             backend if backend is not None else FileAuthStorageBackend(str(home.path("mcp_auth")))
         )
@@ -418,8 +414,6 @@ class _McpAuthProvider:
                 raise McpOAuthAuthorizationRequiredError()
 
         if self._refreshing is None:
-            # MISAKA fork: one task stands in for the shared promise, started at once as the promise is;
-            # waiters shield it and its failure is always observed. `.finally` clears it once it settles.
             refreshing = startTask(store.withRefreshLock(refresh))
 
             def settle(done: asyncio.Future[None]) -> None:

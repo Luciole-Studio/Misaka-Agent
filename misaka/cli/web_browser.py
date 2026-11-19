@@ -68,7 +68,6 @@ def run(args):
         if not args.key:
             raise ValueError('browser-connect requires an explicit CDP discovery or WebSocket URL')
         from misaka.core.web.browser.cdp import resolve_endpoint
-        # Probe only discovery. Opening/closing tabs belongs to the future session owner.
         asyncio.run(resolve_endpoint(args.key))
         config.update_config({'browser.cdp_url': args.key, 'browser.enabled': 'true'})
         print('CDP endpoint saved; sessions attach their own tab on first use')
@@ -88,7 +87,6 @@ def run(args):
             if not npm:
                 raise ValueError('Install Node/npm first, then run browser-install again')
             subprocess.run([npm, 'install', '--prefix', str(root), '--save-exact', 'agent-browser@0.26.0'], check=True)
-            # npm writes a shell script plus agent-browser.cmd/.ps1 on Windows; the bare script is not a Win32 program.
             cli = shutil.which('agent-browser', path=str(root / 'node_modules' / '.bin'))
             if not cli:
                 raise ValueError('agent-browser was not found after npm install')

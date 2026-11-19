@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/openrouter.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "openrouter.json").read_text(encoding="utf-8"))
 
 OPENROUTER_MODELS = flattenChatModelCatalog("openrouter", _values)

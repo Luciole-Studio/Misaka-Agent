@@ -51,9 +51,8 @@ def web_home(monkeypatch, tmp_path):
     """A throwaway web config and an empty vendor environment for every test."""
     for name in _VENDOR_ENV:
         monkeypatch.delenv(name, raising=False)
-    path = home.path("settings")           # the "web" section lives here now
+    path = home.path("settings")
     registry.reset_for_tests()
-    # The ring cursor is random per process; pin it so walk order is assertable.
     monkeypatch.setattr(keyless.current_scope(), "cursor", [0])
     yield path
     registry.reset_for_tests()
@@ -61,11 +60,6 @@ def web_home(monkeypatch, tmp_path):
 
 def write_config(_path, **keys) -> None:
     write_web(keys)
-
-
-# ---------------------------------------------------------------------------
-# Config: credentials and tier pins
-# ---------------------------------------------------------------------------
 
 
 def test_a_missing_config_file_is_an_empty_config(web_home):
@@ -107,11 +101,6 @@ def test_auto_follows_the_key_and_then_the_tier(web_home):
     assert config.use_keyless("exa", "") is True
     write_config(web_home, keyless_fallback=False)
     assert config.use_keyless("exa", "") is False
-
-
-# ---------------------------------------------------------------------------
-# HTTP stubbing
-# ---------------------------------------------------------------------------
 
 
 class _FakeClient:
@@ -174,11 +163,6 @@ def assert_contract(payload, expected_count=None):
         assert isinstance(entry["title"], str)
         assert isinstance(entry["url"], str)
         assert isinstance(entry["description"], str)
-
-
-# ---------------------------------------------------------------------------
-# Brave (free tier)
-# ---------------------------------------------------------------------------
 
 
 async def test_brave_returns_the_contract_shape(monkeypatch):
@@ -252,11 +236,6 @@ async def test_brave_reports_a_non_json_body(monkeypatch):
     }
 
 
-# ---------------------------------------------------------------------------
-# SearXNG
-# ---------------------------------------------------------------------------
-
-
 async def test_searxng_sorts_by_score_and_caps_to_limit(monkeypatch):
     monkeypatch.setenv("SEARXNG_URL", "http://localhost:8080/")
     body = {
@@ -300,11 +279,6 @@ async def test_searxng_reports_the_http_status(monkeypatch):
     result = await searxng.SearXNGWebSearchProvider().search("q")
 
     assert result["error"] == "SearXNG returned HTTP 502"
-
-
-# ---------------------------------------------------------------------------
-# Tavily
-# ---------------------------------------------------------------------------
 
 
 async def test_tavily_keyed_search(monkeypatch):
@@ -405,11 +379,6 @@ def test_tavily_is_not_a_member_of_the_keyless_ring():
     assert keyless.KEYLESS_RING == ("exa", "parallel", "firecrawl", "keenable")
 
 
-# ---------------------------------------------------------------------------
-# Exa
-# ---------------------------------------------------------------------------
-
-
 async def test_exa_keyed_search_joins_highlights(monkeypatch):
     monkeypatch.setenv("EXA_API_KEY", "exa-key")
     body = {
@@ -459,11 +428,6 @@ async def test_exa_without_a_key_rides_the_ring(monkeypatch):
     assert result["via"] == "exa"
 
 
-# ---------------------------------------------------------------------------
-# Parallel
-# ---------------------------------------------------------------------------
-
-
 async def test_parallel_keyed_search_works_without_sdk(monkeypatch):
     monkeypatch.setenv("PARALLEL_API_KEY", "p-key")
     monkeypatch.setitem(sys.modules, "parallel", None)
@@ -494,11 +458,6 @@ def test_parallel_search_mode_is_validated(monkeypatch):
     assert parallel._resolve_search_mode() == "fast"
 
 
-# ---------------------------------------------------------------------------
-# Keenable
-# ---------------------------------------------------------------------------
-
-
 async def test_keenable_keyed_search(monkeypatch):
     monkeypatch.setenv("KEENABLE_API_KEY", "kn")
     body = {"results": [{"title": "K", "url": "https://k.test", "snippet": "s"}]}
@@ -519,11 +478,6 @@ async def test_keenable_reports_the_error_body(monkeypatch):
     result = await keenable.KeenableWebSearchProvider().search("q")
 
     assert result["error"] == "Keenable search failed: too many requests"
-
-
-# ---------------------------------------------------------------------------
-# Firecrawl
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -566,14 +520,8 @@ async def test_firecrawl_paid_pin_without_credentials_names_the_variable(monkeyp
 
     result = await firecrawl.FirecrawlWebSearchProvider().search("q")
 
-    # Both ways to configure it, because the branch fires only when neither is set.
     assert "FIRECRAWL_API_KEY is not set" in result["error"]
     assert "FIRECRAWL_API_URL" in result["error"]
-
-
-# ---------------------------------------------------------------------------
-# ddgs
-# ---------------------------------------------------------------------------
 
 
 def _stub_worker(monkeypatch, source):
@@ -644,11 +592,6 @@ async def test_ddgs_rejects_a_worker_that_says_nothing(monkeypatch):
     result = await provider.search("q")
 
     assert "exited without a result" in result["error"]
-
-
-# ---------------------------------------------------------------------------
-# The keyless ring
-# ---------------------------------------------------------------------------
 
 
 def _mcp_body(text):
@@ -897,11 +840,6 @@ def test_rescue_eligibility_never_raises(monkeypatch, web_home):
     assert dispatch.rescue_eligible(searxng.SearXNGWebSearchProvider()) is False
 
 
-# ---------------------------------------------------------------------------
-# Registry: availability and selection
-# ---------------------------------------------------------------------------
-
-
 class _Fake(WebSearchProvider):
     def __init__(self, name, available=False, keyless_ok=False):
         self._name = name
@@ -1039,7 +977,6 @@ def test_ddgs_worker_env_carries_no_credentials(monkeypatch):
     assert "TAVILY_BASE_URL" not in env
     assert "ANTHROPIC_API_KEY" not in env
     assert "GITHUB_TOKEN" not in env
-    # Networking and path stay: an allowlist that forgot these would break real installs.
     assert env["PATH"] == "/usr/bin"
     assert env["HTTPS_PROXY"] == "http://proxy.internal:3128"
     assert "PYTHONPATH" in env
@@ -1143,11 +1080,6 @@ def test_readiness_accepts_keyless_and_rejects_nothing_at_all():
     assert registry.provider_is_ready(_Fake("x", available="raise")) is False
 
 
-# ---------------------------------------------------------------------------
-# Dispatch and the one-shot rescue
-# ---------------------------------------------------------------------------
-
-
 class _Failing(_Fake):
     async def search(self, query, limit=5):
         return {"success": False, "error": "backend exploded"}
@@ -1174,14 +1106,10 @@ async def test_dispatch_names_a_selection_that_matches_nothing(web_home):
 
     assert result["success"] is False
     assert "ghost-vendor" in result["error"]
-    assert config.config_label() in result["error"]      # the file in effect, not a fixed spelling
+    assert config.config_label() in result["error"]
 
 
 async def test_dispatch_reports_when_nothing_can_serve(web_home, monkeypatch):
-    # A stripped install: no backend registered at all, and no keyless tier to fall to.
-    # Both entry points into registration are stubbed -- the dispatcher calls one and the
-    # selection ladder calls the other, exactly as Hermes' `_ensure_web_plugins_loaded()`
-    # is called from both places.
     write_config(web_home, keyless_fallback=False)
     monkeypatch.setattr(dispatch, "ensure_backends_registered", lambda: None)
     monkeypatch.setattr(registry, "ensure_backends_registered", lambda: None)

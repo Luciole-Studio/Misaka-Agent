@@ -34,7 +34,6 @@ class RgbColorValue:
 # A concrete color. Every color can be converted to sRGB, so color math never fails.
 type Color = IndexedColor | RgbColorValue
 type TerminalColorMode = Literal["256color", "truecolor"]
-# MISAKA fork: no "oklch" space (D11).
 type ColorMixSpace = Literal["srgb"]
 
 
@@ -94,7 +93,6 @@ def parseColor(value: str | float) -> Color:
             int(digits[4:6], 16),
         )
 
-    # MISAKA fork: no oklch() / okhsl() values (D11).
     raise ValueError(f"Invalid color value: {value}")
 
 

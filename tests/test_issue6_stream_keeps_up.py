@@ -67,7 +67,7 @@ async def test_a_slow_frame_leaves_the_loop_as_long_as_it_took(monkeypatch):
     monkeypatch.setattr(loop, "call_later", lambda delay, *args: delays.append(delay) or real_call_later(delay, *args))
 
     def frame_then_schedule():
-        ui.lastRenderAt = time.perf_counter() * 1000          # as the render runners stamp it
+        ui.lastRenderAt = time.perf_counter() * 1000
         ui.doRender()
         ui.renderRequested = True
         ui.scheduleRender()
@@ -75,11 +75,8 @@ async def test_a_slow_frame_leaves_the_loop_as_long_as_it_took(monkeypatch):
 
     frame_then_schedule()
     assert ui.lastRenderCostMs >= 30
-    # pi's 16 ms from the frame's start would have rendered again at once.
     assert delays[-1] >= ui.lastRenderCostMs / 1000 - 0.005
 
-    # A frame that waited beyond its CPU (threads contending for the GIL, a loaded machine) still
-    # leaves the loop its CPU's worth: counted from the frame's start, the wait came to nothing.
     ui.lastRenderCostMs, ui.lastRenderWallMs = 30.0, 60.0
     ui.lastRenderAt = time.perf_counter() * 1000 - 60
     ui.scheduleRender()

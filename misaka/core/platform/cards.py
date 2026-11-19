@@ -57,46 +57,10 @@ def _dump(fields, body):
     return out.getvalue()
 
 
-# The mtime gate for :func:`reconcile_one`, which is run over every card in the project on
-# every dispatch and every workflow tick. Nothing durable lives here: losing the dict to
-# process death costs one re-read per card, never a lost fact, so it stays on the allowed
-# side of "process-local caches may not hold anything a crash must not lose".
-#
-# The key is the stat triple a rewrite moves. Our own writer replaces the inode (atomic.write
-# renames a fresh temp file over the target) *and* calls _forget below, so an in-process edit
-# can never be missed. An outside writer -- a card shell in its own process, a person's editor,
-# a git checkout -- moves st_mtime_ns, and usually st_ino with it. What remains possible is an
-# outside in-place rewrite landing the exact same byte count within one mtime tick of our last
-# stat; on the filesystems this runs on that tick is sub-microsecond, and the cost is one stale
-# dispatch of a card that is re-read on its next write -- the same window reconcile already has
-# between reading a card and the claim it feeds.
 _PARSED: dict[str, tuple] = {}
-_PARSED_CAP = 4096          # cards seen in one long-lived process; a cache, so overflow just drops it
+_PARSED_CAP = 4096
 
 
-# Card files this process could not use: path -> (kind, reason). A card is a hand-edited file,
-# so a broken one is a normal accident; what it may not do is take every *other* card down with
-# it, since the traversals below walk the whole project on behalf of a single card's transition.
-# They skip a card they cannot use -- and record it here, because a skip nobody can see is the
-# same lost work by a quieter route. :func:`board` shows such a card as ``invalid`` so the person
-# who broke the file learns which file to fix.
-#
-# The three kinds are cleared by different readers, and confusing them loses the diagnosis:
-#   "unreadable" -- the bytes are there and do not parse (broken frontmatter, not UTF-8, a
-#                   directory or an unreadable mode in the file's place). Every reader hits it,
-#                   so any successful :func:`try_read` is proof the file was repaired and clears it.
-#   "missing"    -- there is no file at all. That is not a broken card: an index row whose file
-#                   never got written (pre-migration) is what ``board`` already shows as
-#                   ``missing_file``, and a card that does not exist declares no dependencies and
-#                   can hide no cycle. So it is kept apart from "unreadable" -- it is not listed
-#                   as a card that failed to parse, and it may not make a caller fail closed --
-#                   and, like "unreadable", any successful read clears it.
-#   "invalid"    -- it parses, but is not a usable card (an at-rest status no lifecycle can
-#                   produce, generation < 1, a field of the wrong type). ``try_read`` succeeds on
-#                   such a file, so only :func:`reconcile_one` -- the one reader that validates --
-#                   may clear it. Letting try_read clear it too meant the diagnosis died on the
-#                   next board() or dependency walk, and the board went on printing the stale
-#                   index status of a card that could never be dispatched.
 _INVALID: dict[str, tuple[str, str]] = {}
 
 
@@ -106,8 +70,6 @@ def _forget(path):
 
 
 def _note_invalid(path, error, kind):
-    # "no file there" is its own answer, never a parse failure: only a caller holding bytes it
-    # cannot make sense of has something to fail closed on.
     if kind == "unreadable" and isinstance(error, (FileNotFoundError, NotADirectoryError)):
         kind = "missing"
     if len(_INVALID) >= _PARSED_CAP:
@@ -202,7 +164,6 @@ def create(con, workspace, title, body, assignee, *, reviewer=None, model=None,
         if after_row is not None:
             after_row(tid)
         if needs:
-            # Publish the entire contract at once, never a ready file with half its edges.
             fields.update(needs=needs, status="todo")
             con.execute("UPDATE tasks SET status='todo' WHERE id=?", (tid,))
         _write_file(card_path(workspace, tid), _dump(fields, text))
@@ -217,7 +178,7 @@ def _rewrite(workspace, task_id, mutate):
     one card never lose each other's change."""
     from filelock import FileLock
     path = card_path(workspace, task_id)
-    with FileLock(os.path.join(tasks.task_state_dir(task_id), "card.lock")):   # outside the tracked tree
+    with FileLock(os.path.join(tasks.task_state_dir(task_id), "card.lock")):
         card = read(path)
         fields, body = mutate(card["fields"], card["body"])
         _write_file(path, _dump(fields, body))
@@ -275,7 +236,7 @@ def attach(workspace, task_id, source):
     name, target = src.name, os.path.join(target_dir, src.name)
     stem, dot, ext = src.name.rpartition(".")
     counter = 0
-    while os.path.exists(target):                  # same name, same second: keep counting, never overwrite
+    while os.path.exists(target):
         counter += 1
         suffix = f"{int(time.time())}" + (f"-{counter}" if counter > 1 else "")
         name = f"{stem or ext}-{suffix}{dot}{ext if stem else ''}"
@@ -330,8 +291,8 @@ def read_log(workspace, task_id):
     return [line[2:] for line in section.splitlines() if line.startswith("- ")]
 
 
-STUCK_SECONDS = 24 * 3600       # a card blocked this long is waiting on nobody in particular
-FAILING_AFTER = 2               # consecutive failed attempts before the board says so
+STUCK_SECONDS = 24 * 3600
+FAILING_AFTER = 2
 
 
 def card_signal(row, now=None):
@@ -360,10 +321,6 @@ def board(con, workspace):
         note = _INVALID.get(str(path))
         row = tasks.get(con, tid)
         seen.add(tid)
-        # Unparsable, or parsed and not a usable card (``rebuild`` above just decided that):
-        # either way ``reconcile_one`` refuses it, so it can never be dispatched. Printing the
-        # index row's status -- a mirror last written when the file was still good -- would tell
-        # the reader the card is ``ready`` while nothing will ever pick it up. Name the file.
         if card is None or note is not None:
             kind, reason = note if note is not None else ("unreadable", "unreadable card file")
             fields = card["fields"] if card is not None else {}
@@ -409,9 +366,6 @@ def remove(con, workspace, task_id):
     except OSError as error:
         return False, (f"Card {task_id} left the board but its file could not be deleted ({error}); "
                        f"remove {path} by hand or the card comes back on the next rebuild.")
-    # Deleting the file is the last repair a broken card can get: nothing will ever read it again,
-    # so nothing would ever clear its diagnosis, and it would go on being reported for the life of
-    # the process (and, through board(), to the person who just removed it).
     _forget(path)
     attachments = attachment_dir(workspace, task_id)
     if os.path.isdir(attachments):
@@ -420,9 +374,6 @@ def remove(con, workspace, task_id):
             shutil.rmtree(attachments)
         except OSError as error:
             return False, f"Card {task_id} was deleted but its attachments remain ({error}): {attachments}"
-    # Nothing is committed here: the project's history is the user's to write. Only say the file
-    # survives in git when git actually has it -- nothing commits cards/ on its own, so unless the
-    # user did, the file is simply gone, and saying otherwise sends them to a history that holds nothing.
     msg += (" Its committed copy stays in the project's git history; the deletion itself is left "
             "uncommitted for you to commit."
             if tracked else
@@ -465,7 +416,7 @@ def reconcile_one(con, workspace, task_id):
     workspace = tasks.canonical_workspace(workspace)
     path = _card_path(workspace, task_id)
     try:
-        info = os.stat(path, follow_symlinks=False)     # lstat: a symlinked card is not a card
+        info = os.stat(path, follow_symlinks=False)
     except OSError:
         return None
     if not stat.S_ISREG(info.st_mode):
@@ -479,53 +430,39 @@ def reconcile_one(con, workspace, task_id):
             card = read(path)
         except (OSError, ValueError) as error:
             _note_invalid(path, error, "unreadable")
-            return None                     # a card we cannot use is re-read next pass, never cached
+            return None
         fields, body = card["fields"], card["body"]
         try:
             if str(fields.get("id") or "") != str(task_id):
                 raise ValueError(f"Card names id {fields.get('id')!r}, but its file is {task_id}.md")
             values = _card_values(fields, body)
         except (TypeError, ValueError) as error:
-            # Parses, but is not a card any lifecycle could have written. This is the only reader
-            # that can tell, so it is also the only one allowed to clear the note below.
             _note_invalid(path, error, "invalid")
             return None
         _INVALID.pop(path, None)
         if len(_PARSED) >= _PARSED_CAP:
             _PARSED.clear()
         _PARSED[path] = (key, fields, body, values)
-    # The caller gets its own mapping: an edit to the returned fields must not rewrite the
-    # parse every later reconcile will answer with.
     card = {"fields": dict(fields), "body": body}
     row = con.execute(
         "SELECT workspace,output_dir," + ",".join(_MIRRORED) + " FROM tasks WHERE id=?", (task_id,)
     ).fetchone()
     if row is None:
         return card if tasks.insert_index_row(con, fields, body, workspace=workspace) else None
-    if row["workspace"] != workspace:           # the stored workspace is written canonical
+    if row["workspace"] != workspace:
         return None
     if row["status"] in {"running", "review"}:
-        return card                         # an in-flight contract is immutable until it rests again
-    if not row["output_dir"]:               # from before every card had a folder
+        return card
+    if not row["output_dir"]:
         con.execute("UPDATE tasks SET output_dir=? WHERE id=?", (tasks.card_output_dir(workspace, task_id), task_id))
     if all(row[column] == values[column] for column in _MIRRORED):
         return card
-    # The status the SELECT above saw is part of the WHERE: between it and here another process
-    # can have claimed this card (``claim`` sets status='running' and the lease in one CAS), and
-    # this mirror is then holding a snapshot that is simply out of date. Writing it anyway would
-    # put the row back to 'ready' with the claimer's lock still on it -- every fenced write that
-    # worker makes afterwards fails, nobody can re-claim it, and the round's work is lost. Zero
-    # rows affected is that case, and it is not an error: the file's at-rest status is only ever
-    # a mirror of the live state, and the next pass reads both again.
     changed = con.execute(
         "UPDATE tasks SET title=?,body=?,assignee=?,reviewer=?,model=?,priority=?,"
         "origin_session=?,status=?,generation=? WHERE id=? AND status=?",
         (*(values[column] for column in _MIRRORED), task_id, row["status"]),
     ).rowcount
     if changed and row["status"] != values["status"]:
-        # The file is the contract: an index status edited by hand (2026-09-18, B24: Last Order
-        # wrote `UPDATE tasks SET status='ready'` twice and saw it undone twice, in silence) is
-        # put back, and the put-back is on the record so nobody has to guess who did it.
         tasks.add_event(con, task_id, "reconciled",
                         {"from": row["status"], "to": values["status"], "source": "card file"},
                         generation=values.get("generation"))
@@ -580,13 +517,11 @@ def reconcile(con, workspace):
         card = reconcile_one(con, workspace, task_id)
         if card is None:
             continue
-        needs = _needs(card)          # one read per card: reconcile_one already parsed it
+        needs = _needs(card)
         if needs is None:
             continue
         contracts[task_id] = needs
 
-    # ponytail: O(cards^2) fixed-point validation; use a graph library only if
-    # projects grow large enough for reconciliation to show up in profiles.
     valid = set()
     while True:
         resolved = {
@@ -676,7 +611,7 @@ def init_project(folder, *, draft_brief=True, git=True):
     folder = tasks.canonical_workspace(folder)
     _refuse_whole_home(folder)
     actions = []
-    fresh = git and not repo.enabled(folder)  # a worktree's .git is a file, not a directory
+    fresh = git and not repo.enabled(folder)
     if fresh:
         _git(folder, "init", "-q")
         actions.append("git repository created")
@@ -688,8 +623,6 @@ def init_project(folder, *, draft_brief=True, git=True):
     ignore = os.path.join(folder, ".gitignore")
     config_dir = home.project_dir(folder)
     if not os.path.exists(ignore) and config_dir is not None:
-        # Derived and cache material only, the board's and what each card owner derives (anchored
-        # to its own layout, so a person's own ``sources/`` elsewhere stays theirs to commit).
         atomic.write_text(ignore, GITIGNORE_TEMPLATE.format(config_dir=config_dir.name)
                           + "".join(owner.gitignore() for owner in owners.registered()))
         actions.append(".gitignore written")
@@ -701,11 +634,6 @@ def init_project(folder, *, draft_brief=True, git=True):
     if restored:
         actions.append(f"{restored} card(s) indexed from cards/")
     if fresh:
-        # Only the skeleton this call wrote, never `git add -A`. A folder that is not
-        # already a repository may be full of things that are not project material, and
-        # the first commit is the one place nobody reviews: run in a home directory,
-        # `add -A` quietly commits ssh keys, .env files and whatever is in Downloads.
-        # Existing repositories are not committed to at all, so this is the only path.
         skeleton = [name for name in ("PROJECT.md", "cards", ".gitignore")
                     if os.path.exists(os.path.join(folder, name))]
         if skeleton:

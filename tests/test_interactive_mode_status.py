@@ -232,8 +232,6 @@ class _CustomHost(InteractiveMode):
 
 
 async def test_a_second_custom_ui_waits_for_the_open_overlay_and_input_follows_focus():
-    # MISAKA fork: pi lets the inline component replace the editor while the overlay stays open; here it waits for its
-    # turn, so the overlay keeps the input until it closes.
     terminal = VirtualTerminal(80, 24)
     ui = TuiMainScreen(terminal)
     editorContainer = Container()
@@ -289,8 +287,6 @@ async def test_a_second_custom_ui_waits_for_the_open_overlay_and_input_follows_f
 # Regression test for #10648: closing a lower overlay removed the topmost overlay instead.
 @pytest.mark.parametrize("nonCapturing", [False, True], ids=["capturing", "non-capturing"])
 async def test_closing_a_lower_overlay_custom_ui_removes_its_own_overlay_not_the_topmost_one(nonCapturing):
-    # MISAKA fork: a second custom UI waits for the first, so the overlay above it is opened on the TUI directly
-    # (as a selector or another component of the window would).
     terminal = VirtualTerminal(80, 24)
     ui = TuiMainScreen(terminal)
     editorContainer = Container()
@@ -493,7 +489,6 @@ def autocompleteContext(models: list, getLoginProviderOptions=None):
             modelRuntime=SimpleNamespace(getAvailableSnapshot=lambda: models),
             promptTemplates=[],
             extensionRunner=SimpleNamespace(getRegisteredCommands=list),
-            # MISAKA fork: skills and the other core commands come from the session's parts.
             moments=SimpleNamespace(commands=list),
         ),
         sessionManager=SimpleNamespace(getCwd=lambda: "/tmp"),
@@ -779,7 +774,6 @@ def test_captures_mixed_extension_layouts_in_compact_output():
 
     showLoaded(fakeThis)
 
-    # MISAKA fork: a git source keeps its whole name (pi shows `HazAT/pi-interactive-subagents`).
     assert normalizeRenderedOutput(fakeThis.loadedResourcesContainer) == (
         "[Extensions]\n"
         "  @scope/pi-scoped, answer.ts, cli-extension.ts, git:github.com/HazAT/pi-interactive-subagents, "
@@ -819,7 +813,6 @@ def cliExtension(path: str, baseDir: str) -> SimpleNamespace:
             id="strips index.js from local extension label, showing parent dir",
         ),
         pytest.param(
-            # MISAKA fork: a Python directory extension's entry is `index.py`.
             [localExtension("/tmp/extensions/plan-mode/index.py", "/tmp/extensions")],
             "plan-mode",
             id="strips index.py from local extension label, showing parent dir",
@@ -1035,7 +1028,6 @@ def test_hides_the_startup_header_with_full_quiet_startup_unless_verbose():
 
 
 def test_still_shows_diagnostics_on_quiet_startup_when_requested(skillSection):
-    # MISAKA fork: no skill conflicts (skills are not resources of the loader); prompt conflicts show the same path.
     skillSection(["commit"])
     fakeThis = createShowLoadedResourcesThis(
         quietStartup=True, promptDiagnostics=[{"type": "warning", "message": "duplicate prompt name"}]
@@ -1052,7 +1044,6 @@ def test_still_shows_diagnostics_on_quiet_startup_when_requested(skillSection):
 
 
 def test_debug_dump_shows_rendered_lines_without_terminal_sequences(tmp_path, monkeypatch):
-    # MISAKA fork: since 1.2 a rendered line carries the fake cursor's APC markers; the dump lists the visible text.
     from misaka.modes.interactive import interactive_mode
     from misaka.ui.tui import renderFakeCursor
 

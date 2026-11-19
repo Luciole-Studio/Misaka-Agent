@@ -162,7 +162,7 @@ async def test_root_stays_alive_while_fork_level_runs(root_run, monkeypatch):
 
     monkeypatch.setattr(workflow, "_expand", expand)
     monkeypatch.setattr(workflow, "_expand_level", forks)
-    monkeypatch.setattr(workflow, "_prepare_sessions", lambda *a: None)   # the fixture root has no transcript to fork
+    monkeypatch.setattr(workflow, "_prepare_sessions", lambda *a: None)
     result = await workflow.run(con, {}, spawner, run_id=run["id"])
     assert result["reason"] == "done"
     assert events == ["open", "expand", "forks", "draft", "review", "final", "dispose", "runner-close"]

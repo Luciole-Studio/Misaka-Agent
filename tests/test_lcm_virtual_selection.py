@@ -29,4 +29,4 @@ def test_a_virtual_selection_keeps_the_routed_models_binding(monkeypatch):
     assert bound == [] and built._usage_anchor == "anchor"
 
     context_engine.update_model(SimpleNamespace(model=PHYSICAL))
-    assert bound == [] and built._usage_anchor == "anchor"   # unchanged: the same model
+    assert bound == [] and built._usage_anchor == "anchor"

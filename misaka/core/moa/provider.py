@@ -814,8 +814,6 @@ def stream_simple_moa(model: Model, context: Context, options: SimpleStreamOptio
                 etype = getattr(event, "type", "")
                 if etype == "start":
                     continue
-                # MISAKA fork: the round is the request: its reply starts when the round did, and `outer`, created
-                # then, times it through the advisors and the aggregator rather than the aggregator alone.
                 if etype == "done":
                     event = event.model_copy(update={"message": event.message.model_copy(update={
                         "usage": _fold_usage(event.message.usage, usages, advisor_models),

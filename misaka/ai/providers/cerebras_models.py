@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/cerebras.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "cerebras.json").read_text(encoding="utf-8"))
 
 CEREBRAS_MODELS = flattenChatModelCatalog("cerebras", _values)

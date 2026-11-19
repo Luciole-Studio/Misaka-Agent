@@ -147,7 +147,6 @@ class FooterDataProvider:
         self._refreshInFlight = False
         self._refreshPending = False
         self._disposed = False
-        # MISAKA fork: holds the refresh tasks `void refreshGitBranchAsync()` starts (asyncio keeps tasks weakly).
         self._backgroundTasks: set[asyncio.Task[Any]] = set()
         self._gitPaths = findGitPaths(cwd)
         self._setupGitWatcher()
@@ -214,7 +213,6 @@ class FooterDataProvider:
         self._branchChangeCallbacks.clear()
 
     def _notifyBranchChange(self) -> None:
-        # MISAKA fork: iterates a copy (a dict cannot change size while iterated; pi walks its Set live).
         for cb in list(self._branchChangeCallbacks):
             cb()
 
@@ -318,8 +316,6 @@ class FooterDataProvider:
         self._clearGitWatchers()
         if not self._gitPaths:
             return
-        # MISAKA fork: the debounce timer and the async git call need an event loop; a provider made outside one
-        # reads the branch on demand (getGitBranch) and is not refreshed by watchers.
         try:
             asyncio.get_running_loop()
         except RuntimeError:

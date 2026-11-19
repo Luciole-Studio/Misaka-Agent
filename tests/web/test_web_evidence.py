@@ -31,9 +31,6 @@ def _write(workspace, provenance, text):
     return relative, (workspace / relative).read_text(encoding="utf-8")
 
 
-# --- the name ------------------------------------------------------------------------
-
-
 def test_name_is_hash_of_exact_saved_bytes(workspace):
     path, text = _write(workspace, PROVENANCE, "body")
     assert path == f"downloads/pages/{hashlib.sha256(text.encode()).hexdigest()[:12]}.md"
@@ -48,9 +45,6 @@ def test_every_changed_byte_gets_a_new_immutable_name(workspace):
     assert _write(workspace, {**PROVENANCE, "provider": "parallel"}, "body")[0] != first
     assert _write(workspace, PROVENANCE, "new extraction")[0] != first
     assert (workspace / first).read_text(encoding="utf-8") == original
-
-
-# --- the file ------------------------------------------------------------------------
 
 
 def test_the_saved_path_is_relative_to_the_workspace(workspace):
@@ -97,9 +91,6 @@ def test_the_same_call_twice_writes_byte_identical_files(workspace):
     assert first == second
 
 
-# --- the line count the truncation footer is computed from ----------------------------
-
-
 def _first_text_line(workspace, provenance, text):
     """The 1-indexed line ``read`` would land on, following :func:`frontmatter_line_count`."""
     _, document = _write(workspace, provenance, text)
@@ -128,10 +119,7 @@ def test_the_count_is_the_header_the_writer_actually_wrote(workspace):
     """Counted against the file rather than against a number typed into this test."""
     _, document = _write(workspace, PROVENANCE, "body")
     header, _, _rest = document.partition("\n\n")
-    assert frontmatter_line_count(PROVENANCE) == len(header.split("\n")) + 1  # + the blank line
-
-
-# --- what happens when there is nowhere to write --------------------------------------
+    assert frontmatter_line_count(PROVENANCE) == len(header.split("\n")) + 1
 
 
 def test_no_workspace_means_no_file_and_no_exception():

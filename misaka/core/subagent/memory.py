@@ -25,7 +25,7 @@ def memory_enabled(settings: dict[str, Any] | None = None) -> bool:
     if not setting("subagents", "auto_memory", True, bool) or setting("subagents", "simple", False, bool):
         return False
     if _truthy(os.environ.get("MISAKA_REMOTE")) and not os.environ.get("MISAKA_REMOTE_MEMORY_DIR"):
-        return False                      # a remote runner's hand-off: no memory dir, no memory
+        return False
     return (settings or {}).get("autoMemoryEnabled", True) is not False
 
 
@@ -63,7 +63,7 @@ def check_snapshot(snapshot: Path, local: Path) -> dict[str, str]:
         try:
             newer = datetime.fromisoformat(timestamp) > datetime.fromisoformat(synced)
         except (ValueError, TypeError):
-            pass  # CCB Invalid Date comparisons are false.
+            pass
     if synced is None or newer:
         return {"action": "prompt-update", "snapshotTimestamp": timestamp}
     return {"action": "none"}
@@ -105,9 +105,9 @@ def copy_snapshot(snapshot: Path, local: Path, timestamp: str, *, replace: bool 
         except Timeout as error:
             if replace:
                 raise ValueError("An active agent or snapshot operation is using this memory directory; wait for it to finish") from error
-            return  # Another owner initialized or is already using this memory.
+            return
         if not replace and any(item.name.endswith(".md") for item in _regular_files(local)):
-            return  # Recheck under the lock, not just before it was acquired.
+            return
         _copy_snapshot(snapshot, local, timestamp, replace=replace)
 
 
@@ -115,8 +115,6 @@ def _copy_snapshot(snapshot: Path, local: Path, timestamp: str, *, replace: bool
     """CCB initialize/replaceFromSnapshot; replacement is explicitly invoked only."""
     if snapshot.is_symlink() or local.is_symlink():
         raise ValueError("Memory snapshot roots must not be symlinks")
-    # Read/validate the entire source first. A corrupt snapshot must never
-    # delete existing memories before its content has even been decoded.
     contents = {source.name: source.read_text(encoding="utf-8")
                 for source in snapshot.iterdir()
                 if not source.is_symlink() and source.is_file() and source.name != "snapshot.json"}

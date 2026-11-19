@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/deepseek.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "deepseek.json").read_text(encoding="utf-8"))
 
 DEEPSEEK_MODELS = flattenChatModelCatalog("deepseek", _values)

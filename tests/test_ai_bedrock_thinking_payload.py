@@ -119,7 +119,6 @@ async def test_sends_block_binding_and_the_binding_beta_for_claude_opus_5_5():
 
 
 async def test_treats_claude_haiku_5_5_like_the_other_claude_5_models():
-    # MISAKA addition: pi 1.1.0 adds `haiku-5` to every Claude 5 marker but has no Bedrock case for it.
     model = getModel("amazon-bedrock", "global.anthropic.claude-haiku-5-5")
     fields = (await capturePayload(model, {"reasoning": "xhigh"}))["additionalModelRequestFields"]
     payload = await _captureWith(

@@ -62,7 +62,6 @@ def by_page(outline, monkeypatch):
 
 
 async def test_a_document_without_a_tree_lists_every_page(by_page):
-    # It listed the first eighty and said nothing: a 120-slide deck read as an eighty-slide one.
     text = await by_page(120)
     assert [f"p{n} " in text for n in (1, 80, 81, 120)] == [True] * 4
     assert text.count("\n  p") == 120 and "limit reached" not in text
@@ -74,4 +73,4 @@ async def test_a_page_outline_past_the_cap_says_how_much_it_shows(by_page, monke
     shown = text.count("\n  p")
     assert 0 < shown < 120
     assert f"limit reached: {shown} of 120 pages shown" in text and "pages=<range>" in text
-    assert text.index("END-UNTRUSTED-DATA") < text.index("limit reached")   # the notice is ours
+    assert text.index("END-UNTRUSTED-DATA") < text.index("limit reached")

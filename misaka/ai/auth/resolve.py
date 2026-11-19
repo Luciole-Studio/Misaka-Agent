@@ -195,8 +195,6 @@ async def refreshStoredOAuthCredential(
             raise ModelsError("oauth", f"OAuth refresh failed for {providerId}", {"cause": error}) from error
 
     try:
-        # MISAKA fork: shielded, so a cancelled caller task cannot kill a started refresh; before it starts, the
-        # cancellation cancels the lock wait as an aborted signal does.
         modifying = asyncio.ensure_future(
             credentials.modify(providerId, fn, AuthOperationOptions(signal=lockWait.signal))
         )

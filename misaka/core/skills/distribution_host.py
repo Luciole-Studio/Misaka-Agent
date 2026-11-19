@@ -17,11 +17,10 @@ class ThreadPoolExecutor(_Pool):
         return super().submit(contextvars.copy_context().run, fn, *args, **kwargs)
 
 
-DaemonThreadPoolExecutor = ThreadPoolExecutor  # Native import seam; never daemon/abandoned.
+DaemonThreadPoolExecutor = ThreadPoolExecutor
 
 
 def decode_claims(token):
-    # Advisory routing only. The server, not this decoder, authenticates the JWT.
     parts = token.split('.')
     if len(parts) != 3:
         raise ValueError('Malformed bearer token')
@@ -64,7 +63,6 @@ def http_get(url, *, timeout=20, headers=None, params=None, follow_redirects=Tru
                 check_active(scope)
                 if truncated:
                     raise ValueError("Skill registry response exceeds byte budget.")
-                # Decoded body: don't feed its old gzip header to HTTPX a second time.
                 safe_headers = {k: v for k, v in response.headers.items()
                                 if k not in ('content-encoding', 'content-length', 'transfer-encoding')}
                 return httpx.Response(response.status_code, headers=safe_headers,
@@ -77,7 +75,6 @@ def http_get(url, *, timeout=20, headers=None, params=None, follow_redirects=Tru
                 check_active(scope)
             return task.result()
         finally:
-            # Stop also covers waiting for headers/redirects, not just body chunks.
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
     try:
@@ -195,7 +192,6 @@ def sync_http_client(base_url):
     from .scope import _current
     scope = _current.get()
     if scope is None:
-        # Direct standalone wire clients have no role; HTTPX retains its native environment behavior.
         return httpx.Client(follow_redirects=False)
     from misaka.core.web.network import proxy_for_url, tls_verify
     from misaka.core.web.scope import WebScope

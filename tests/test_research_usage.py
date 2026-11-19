@@ -37,7 +37,7 @@ def spent_run(tmp_path, monkeypatch):
         started = run["created_at"] * 1000
         window = _session(tmp_path / "sessions" / "last-order" / "window.jsonl",
                           {"type": "session"},
-                          _call("big", 900, 9.0, started - 5000),        # the window's talk before the run
+                          _call("big", 900, 9.0, started - 5000),
                           _call("big", 100, 1.0, started + 1000))
         runs.set_state(con, run["id"], root_session=str(window))
         root = runs.root(con, run["id"])
@@ -88,9 +88,9 @@ def test_a_window_is_charged_to_a_run_only_until_it_ended_or_the_next_run_began(
         first = runs.create(con, workspace=str(tmp_path), question="Run A")
         second = runs.create(con, workspace=str(tmp_path), question="Run B")
         window = _session(tmp_path / "sessions" / "last-order" / "window.jsonl",
-                          _call("big", 100, 1.0, 1_050_000),      # run A, before it stopped
-                          _call("big", 300, 3.0, 2_000_000),      # unrelated talk after it stopped
-                          _call("big", 5000, 50.0, 5_050_000))    # run B
+                          _call("big", 100, 1.0, 1_050_000),
+                          _call("big", 300, 3.0, 2_000_000),
+                          _call("big", 5000, 50.0, 5_050_000))
         for run, status, created, updated in ((first, "stopped", 1000, 1100), (second, "active", 5000, 5100)):
             runs.set_state(con, run["id"], root_session=str(window))
             con.execute("UPDATE research_runs SET status=?, created_at=?, updated_at=? WHERE id=?",

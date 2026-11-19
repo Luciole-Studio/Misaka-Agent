@@ -40,7 +40,6 @@ async def test_does_not_subscribe_from_the_stale_startup_rebind():
         updateTerminalTitle=updateTerminalTitle,
     )
 
-    # MISAKA fork: `startTask` runs the coroutine up to its first suspension, as a JavaScript call does.
     startupRebind = startTask(InteractiveMode.rebindCurrentSession(context))
     assert bindCount == 1
 

@@ -126,18 +126,6 @@ def deriveExportColors(base_color: str) -> dict[str, str]:
     }
 
 
-# MISAKA fork: theme values are whitelisted before they reach the CSS. A theme is a data file: it comes from
-# `get_custom_themes_dir()`, and themes get
-# copied off the internet and passed between people. Its keys and values land inside
-# the export's `<head><style>`, so an unvalidated value can close the element
-# (`red;} </style><script>...`) and run script in the browser of everyone the export
-# is handed to -- with the whole transcript in reach, since the page decodes and
-# renders it itself. The session-content path is already fenced (base64 + escapeHtml +
-# marked's html/tag tokenizers disabled); this is the one hole left.
-# The schema (misaka/schemas/theme.schema.json) admits any string -- hex such as `#RRGGBB`, a variable
-# name, "" -- or a 0-255 palette index, so it keeps nothing out of the CSS; `adjustBrightness` emits
-# `rgb(r, g, b)`. The whitelist below admits every color a legitimate theme produces; anything outside
-# it falls back rather than reaching the CSS.
 _SAFE_CSS_IDENT = re.compile(r"[A-Za-z0-9_-]+")
 _SAFE_CSS_COLOR = re.compile(
     r"#[0-9A-Fa-f]{3,8}"  # hex, the only literal the schema documents
@@ -304,7 +292,6 @@ def _serialize_tool(tool: Any) -> dict[str, Any]:
     return {
         "name": _get_value(tool, "name"),
         "description": _get_value(tool, "description"),
-        # MISAKA fork: parameters may be a pydantic model class, which the export writes as its JSON schema.
         "parameters": (
             typeboxSchema(parameters)
             if isinstance(parameters, type) and hasattr(parameters, "model_json_schema")

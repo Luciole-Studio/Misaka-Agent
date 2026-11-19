@@ -69,8 +69,6 @@ async def personalizeOpenRouterCatalog(catalog: Sequence[Any], context: RefreshM
             raise RuntimeError(f"OpenRouter model list request failed: {response.status}")
         body: Any = await response.json()
     finally:
-        # MISAKA fork: undici collects an unread body; the fetch shim holds its connection until the body is read or
-        # cancelled, so the rejected-key, missing-endpoint and error statuses would leak one per refresh.
         if response.body is not None:
             await response.body.cancel()
     if not isinstance(body, dict) or not isinstance(body.get("data"), list):

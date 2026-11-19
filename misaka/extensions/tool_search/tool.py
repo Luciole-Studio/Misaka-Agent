@@ -130,8 +130,6 @@ def createToolSearchDocument(tool: Any, namespace: ToolNamespace | None = None) 
     name = read_field(tool, "name")
     parts = [name, name.replace("_", " "), read_field(tool, "description")]
     parameters = read_field(tool, "parameters")
-    # MISAKA fork: misaka tools may declare their parameters as a pydantic model class (pi's are
-    # always TypeBox objects); index the JSON schema it produces.
     if isinstance(parameters, type) and hasattr(parameters, "model_json_schema"):
         parameters = typeboxSchema(parameters)
     _schemaText(parameters, parts)
@@ -240,8 +238,6 @@ def _searchAndLoad(
         for tool in tools.getAllTools()
         if _isSearchable(read_field(tool, "exposure"))
         and read_field(tool, "name") not in active
-        # MISAKA fork: inside a tool scope (a research window) only the tools the run can reach;
-        # outside one every codemode and deferred tool is callable, as upstream.
         and (callable is None or read_field(tool, "name") in callable)
     ]
     documents = [createToolSearchDocument(tool, read_field(tool, "namespace")) for tool in candidates]

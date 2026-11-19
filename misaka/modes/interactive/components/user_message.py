@@ -66,7 +66,6 @@ class UserMessageComponent(Container):
                 self.text,
                 self.outputPad,
                 1,
-                # MISAKA fork: the bubble theme (see `_bubbleMarkdownTheme`).
                 _bubbleMarkdownTheme(self.markdownTheme),
                 DefaultTextStyle(
                     color=lambda content: theme.fg("userMessageText", content),

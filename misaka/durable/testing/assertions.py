@@ -61,8 +61,6 @@ class PytestAssertions:
 
 
 def createAssertions() -> PytestAssertions:
-    # MISAKA fork: upstream's `createExpectAssertions(expect)` adapts a Vitest/Jest `expect`; plain `assert` needs no
-    # runner, so this takes no argument and is named for what it builds.
     return PytestAssertions()
 
 

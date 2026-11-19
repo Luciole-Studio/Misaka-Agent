@@ -132,8 +132,6 @@ class SessionImpl:
         self._documentSweep: _DocumentSweep | None = None
         self._sweepJobs = 0
         # Set once a timer could not be unreferenced: then none is kept, and the end of each commit evicts what expired.
-        # MISAKA fork: an asyncio timer never keeps the process alive, as an unreferenced Node timer does, so every
-        # runtime misaka runs in can keep one and this stays false.
         self._documentTimersUnavailable = False
         # Sets, as upstream's: a listener subscribed twice is one listener, and one unsubscribe removes it. A dict keeps
         # the insertion order a JavaScript Set iterates in.
@@ -936,11 +934,6 @@ class GuardedStorage:
             raise
         except BaseException as error:
             if not isRejection(error):
-                # MISAKA fork: asyncio can cancel the running task (a caller's timeout, loop teardown), which
-                # JavaScript cannot. A read cancelled that way says nothing about the Storage and fails that call only.
-                # A commit or mint is never exempt: it runs on the shielded commit line, so only teardown cancels it
-                # there, and whether its batch landed is unknown. A ``CancelledError`` the backend raised while the
-                # task is not cancelled is a rejection like any other (`isRejection`), handled below.
                 if read is None:
                     self._latch.fail(error)
                 raise

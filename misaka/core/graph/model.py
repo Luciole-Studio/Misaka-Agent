@@ -50,9 +50,6 @@ class ConstraintError(GraphError):
         super().__init__("; ".join(violation.message for violation in self.violations))
 
 
-# --- frozen JSON ------------------------------------------------------------------------------
-
-
 def _refuse(self: Any, *args: Any, **kwargs: Any) -> Any:
     raise TypeError("graph values are read-only; change graph.thaw(value) and write that back")
 
@@ -129,9 +126,6 @@ def dumps(value: Any) -> str:
 
 def loads(text: str | None) -> Any:
     return None if text is None else freeze(json.loads(text))
-
-
-# --- schema -----------------------------------------------------------------------------------
 
 
 def _limit(value: Any, what: str, problems: list[str]) -> int | None:
@@ -319,9 +313,6 @@ class Schema:
         if self.gates:
             data["gates"] = sorted(self.gates)
         return data
-
-
-# --- what the store hands out -----------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)

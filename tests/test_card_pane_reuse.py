@@ -44,10 +44,6 @@ def panel(home, request):
         yield daemon
     finally:
         for pane in list(daemon.panes.values()):
-            # Only panes with a real child are closed: `close` signals the pane's process
-            # group, and a stand-in pid would aim that at somebody else's. On Windows a real
-            # child is a pseudo-console process, not a `Popen`; skipping it left the reader
-            # (`misaka chat --read-only`) running after the test.
             if pane.proc is None or isinstance(pane.proc, SimpleNamespace):
                 daemon.panes.pop(pane.id, None)
                 continue
@@ -89,8 +85,6 @@ async def _settle(proc, tries=60):
     return False
 
 
-# ── choosing the card's window ─────────────────────────────────────────────────────────
-
 def test_the_newest_live_pane_is_the_cards_window(panel):
     panel.panes = {}
     for index, (alive, started) in enumerate([(True, 10), (True, 30), (False, 50)]):
@@ -99,7 +93,7 @@ def test_the_newest_live_pane_is_the_cards_window(panel):
         pane.proc = SimpleNamespace(poll=lambda alive=alive: None if alive else 1, pid=-9000 - index)
         panel.panes[pane.id] = pane
     panel.panes["px"] = d.Pane("px", "other", [], "/", card="t_2")
-    assert panel._card_pane_to_reuse("t_1").id == "p1"          # live beats newer-but-dead
+    assert panel._card_pane_to_reuse("t_1").id == "p1"
     assert panel._card_pane_to_reuse("t_2").id == "px"
     assert panel._card_pane_to_reuse("t_missing") is None
 
@@ -112,8 +106,6 @@ def test_a_dead_pane_is_still_the_cards_window(panel):
     panel.panes["p1"] = pane
     assert panel._card_pane_to_reuse("t_1") is pane
 
-
-# ── replacing the program in place ─────────────────────────────────────────────────────
 
 async def test_replacing_a_program_keeps_the_pane_its_seat_and_its_size(panel, home):
     pane = panel.create(IDLE, str(home), title="before")
@@ -143,8 +135,6 @@ async def test_a_replaced_program_starts_on_a_clean_terminal(panel, home):
     assert bytes(pane.buf) == b""
     assert "OLD" not in "".join(pane.term.recent_text(pane.size()[0]))
 
-
-# ── continuing a card ──────────────────────────────────────────────────────────────────
 
 async def test_continuing_a_card_comes_back_in_its_own_window(panel, home):
     task_id, _ = _card(panel, home)
@@ -235,8 +225,6 @@ async def test_a_requeued_card_runs_in_the_window_it_left_open(panel, home):
     assert tasks.get(panel._board(), task_id)["status"] == "running"
 
 
-# ── looking at a card ──────────────────────────────────────────────────────────────────
-
 async def test_looking_at_a_card_opens_a_reader_not_a_second_sister(panel, home, monkeypatch):
     task_id, transcript = _card(panel, home)
     captured = {}
@@ -285,8 +273,6 @@ async def test_a_card_whose_window_went_dark_gets_the_reader_in_it(panel, home):
     assert pane.argv == [sys.executable, "-m", "misaka", "chat", "--read-only", "--session", transcript]
 
 
-# ── telling the attempt from the reader ────────────────────────────────────────────────
-
 def test_the_pane_listing_says_which_pane_holds_the_claim(panel, home):
     reader = d.Pane("p1", "reader", [], str(home), card="t_1")
     reader.proc = SimpleNamespace(poll=lambda: None, pid=-9004)
@@ -323,7 +309,7 @@ def test_last_order_steers_the_pane_holding_the_claim(monkeypatch):
     monkeypatch.setattr("misaka.ui.panel.client.request", lambda method, params=None: listing)
     assert network._pane_for_card("t_1")["id"] == "p2"
     listing["panes"] = [listing["panes"][0]]
-    assert network._pane_for_card("t_1")["id"] == "p1"          # a reader is still the window
+    assert network._pane_for_card("t_1")["id"] == "p1"
     assert network._pane_for_card("t_2") is None
 
 
@@ -342,8 +328,6 @@ async def test_two_requests_for_one_card_do_not_race_for_its_window(panel, home)
     assert len(hosted) == 1 and len(refused) == 1, (first, second)
     assert len(panel.panes) == 1
     assert hosted[0].alive() and hosted[0].claim_lock
-    # Only reachable once the first request has finished claiming: the loser meets an owned
-    # card rather than a second chance at its window.
     assert "still running" in str(refused[0]), refused[0]
 
 
@@ -366,7 +350,7 @@ async def test_stopping_a_card_mid_takeover_does_not_crash(panel, home):
     """A pane between programs has no pid of its own; the stop still stands."""
     task_id, _ = _card(panel, home, status="running")
     pane = panel.create([*IDLE, task_id], str(home), card=task_id)
-    await panel._stop_program(pane)             # as `_replace_program` leaves it, briefly
+    await panel._stop_program(pane)
     assert pane.proc is None
     reply = panel._api("card.stop", {"task_id": task_id})
     assert reply["stopped"] is True and reply["pid"] is None
@@ -381,7 +365,7 @@ async def test_a_card_that_never_ran_starts_from_its_contract_with_the_note_mail
     from misaka.core.platform import tasks as db
 
     task_id, transcript = _card(panel, home, status="stopped")
-    os.unlink(transcript)                                   # never got as far as a transcript
+    os.unlink(transcript)
     panel._mcon = messages.connect(str(home / "messages.db"))
     pane = await panel.continue_card(task_id, "start with the 1982 edition")
     assert "--resume" not in pane.argv and "--say-file" not in pane.argv and pane.prompt_file is None
@@ -417,8 +401,6 @@ async def test_an_allys_card_runs_in_its_acp_runner_and_is_continued_with_a_mess
     assert pane.argv[:-1] == [*IDLE, done, "--say-file"] and _said(pane.argv) == "one more source"
 
 
-
-# ── Last Order's own tab ───────────────────────────────────────────────────────────────
 
 async def test_a_tab_lists_only_its_own_panes(panel, home):
     lo = panel.create(IDLE, str(home), title="Last Order")
@@ -474,7 +456,7 @@ async def test_a_card_woken_to_answer_a_message_leaves_the_cards_built_on_it_alo
     a, _ = _card(panel, home, title="T1 timeline")
     b, _ = _card(panel, home, title="T2 attribution", status="todo")
     con = panel._board()
-    tasks.link_dependencies(con, [a], b)        # edges are drawn before a card finishes
+    tasks.link_dependencies(con, [a], b)
     con.execute("UPDATE tasks SET status='done' WHERE id=?", (b,))
     tasks._mirror_status(con, b)
     con.commit()
@@ -494,7 +476,7 @@ async def test_continuing_a_card_as_rework_still_sends_its_dependents_back(panel
     a, _ = _card(panel, home, title="T1 timeline")
     b, _ = _card(panel, home, title="T2 attribution", status="todo")
     con = panel._board()
-    tasks.link_dependencies(con, [a], b)        # edges are drawn before a card finishes
+    tasks.link_dependencies(con, [a], b)
     con.execute("UPDATE tasks SET status='done' WHERE id=?", (b,))
     tasks._mirror_status(con, b)
     con.commit()
@@ -514,12 +496,12 @@ async def test_a_card_answers_a_message_while_its_parent_is_running(panel, home)
     tasks.link_dependencies(con, [a], b)
     con.execute("UPDATE tasks SET status='done' WHERE id=?", (b,))
     tasks._mirror_status(con, b)
-    con.execute("UPDATE tasks SET status='running' WHERE id=?", (a,))     # A reworked meanwhile
+    con.execute("UPDATE tasks SET status='running' WHERE id=?", (a,))
     tasks._mirror_status(con, a)
     con.commit()
 
     with pytest.raises(ValueError, match="could not be claimed"):
-        await panel.continue_card(b, "redo the breakpoints")              # rework: A must be done
+        await panel.continue_card(b, "redo the breakpoints")
 
     await panel.consult_card(b, "A's answer to your question")
     assert tasks.get(con, b)["status"] == "done" and tasks.live_consultation(con, b) is not None

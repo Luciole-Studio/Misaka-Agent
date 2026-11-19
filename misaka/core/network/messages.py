@@ -35,7 +35,7 @@ from misaka.utils.async_lifecycle import run_in_thread, settle, settle_thread_ca
 logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 3.0
-PENDING_BATCH = 100    # one poll's worth; the rest stay queued (see ``pending``)
+PENDING_BATCH = 100
 DELIVERY_LEASE_SECONDS = 60
 DELIVERY_RENEW_SECONDS = 30
 
@@ -61,7 +61,6 @@ CREATE TABLE IF NOT EXISTS messages (
 """
 COLUMNS = frozenset(line.split()[0] for line in SCHEMA.splitlines()
                     if line.startswith(" ") and not line.lstrip().startswith("--"))
-# Bumped with a migration whenever SCHEMA changes shape; stamped the way the board stamps its own.
 MESSAGES_SCHEMA_VERSION = 1
 VERSION_TABLE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -86,9 +85,7 @@ def connect(path=None) -> sqlite3.Connection:
                                "columns), and pre-release data is not migrated. Move the file aside and "
                                "MISAKA starts a new one.")
         from misaka.core.platform.tasks import require_schema
-        # A queue of the current shape without a marker predates the marker, not the shape.
         require_schema(con, "messages", MESSAGES_SCHEMA_VERSION, populated=False)
-        # Delivered messages expire after seven days; undelivered messages remain queued.
         con.execute("DELETE FROM messages WHERE delivered_at IS NOT NULL AND delivered_at < ?",
                     (int(time.time()) - 7 * 86400,))
     except BaseException:
@@ -131,8 +128,6 @@ def send(
 
 
 CARD_ID = re.compile(r"^t_[0-9a-f]{6}$")
-# A card that ended. A parked one (blocked, triage) has not: it waits on an answer, which goes the
-# way the help protocol takes it.
 FINISHED = frozenset({"done", "failed", "stopped"})
 SESSION_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -217,7 +212,7 @@ def settle_consultation(board, run_id, lock, status, *, reason=None, exit_code=N
     if run is not None and status != "done":
         try:
             tell_asker(board, run, reason or status)
-        except Exception:  # the consultation is settled; a lost notice is only logged
+        except Exception:
             logger.warning("Could not tell the sender that consultation %s ended", run_id, exc_info=True)
     return run
 
@@ -231,7 +226,7 @@ def tell_asker(board, run, reason):
                             "AND run_id=? ORDER BY id DESC LIMIT 1", (run["task_id"], run["id"])).fetchone()
     asker = (json.loads(started["payload"] or "{}") if started else {}).get("asker") or {}
     if not asker:
-        return                                   # typed in her window: the person saw it end
+        return
     text = (f"Card {run['task_id']} ({run['assignee']}) did not answer your message: {reason}. "
             "Her delivered work stands; send it again, or have the card reworked.")
     con = connect()
@@ -294,7 +289,7 @@ def _node_last_order(*, sender_task, sender_session):
     try:
         owner, _run, node = _sender_node(board, sender_task=sender_task, sender_session=sender_session)
         session_file = owner.unit_session_file(board, node) if node else None
-    except sqlite3.OperationalError:     # a board its workflows have never touched has no such tables
+    except sqlite3.OperationalError:
         return None
     finally:
         board.close()
@@ -329,7 +324,7 @@ def _run_cards(role, *, sender_task, sender_session):
                              "ORDER BY created_at", (role, *ids)).fetchall()
         mine = [row for row in rows if branch and units[row["id"]] == branch]
         return owner, mine or rows
-    except sqlite3.OperationalError:     # a board its workflows have never touched has no such tables
+    except sqlite3.OperationalError:
         return None, []
     finally:
         board.close()
@@ -394,11 +389,8 @@ def resolve_address(addr, *, sender, space=None, sender_task=None, sender_sessio
             raise ValueError(f"Unknown card '{addr}'.")
         record = session_catalog.live_card_session(addr)
         if card["status"] == "running":
-            # Without a live session yet she is still starting: the row is pinned to this
-            # attempt, and her inbox hands it over at her first tool boundary (B16).
             return {**_card_target(card, record), "starting": record is None}
         if record is not None and card["status"] not in FINISHED and card["status"] != "review":
-            # Parked for an answer, her window still open: that session reads it.
             return _session_target(record)
         return _idle_card_target(card)
     if SESSION_ID.match(addr):
@@ -408,7 +400,6 @@ def resolve_address(addr, *, sender, space=None, sender_task=None, sender_sessio
         if record is None:
             saved = session_catalog.find_session(addr)
             if saved and saved.get("task_id"):
-                # A card's closed session: wake the card, in her own conversation.
                 return resolve_address(saved["task_id"], sender=sender, space=space,
                                        sender_task=sender_task, sender_session=sender_session,
                                        contact=contact)
@@ -422,7 +413,6 @@ def resolve_address(addr, *, sender, space=None, sender_task=None, sender_sessio
             finally:
                 board.close()
             if card is not None and card["status"] in FINISHED:
-                # A finished card's open window: wake the card, as for its closed session.
                 return resolve_address(record["task_id"], sender=sender, space=space,
                                        sender_task=sender_task, sender_session=sender_session,
                                        contact=contact)
@@ -467,9 +457,6 @@ def resolve_address(addr, *, sender, space=None, sender_task=None, sender_sessio
         )
     writer = _last_writer(addr, inbox=sender) if contact else None
     if writer is not None:
-        # Hermes' Bot Mode returns the reply to whoever wrote. A contact session has no space, so
-        # the name alone would wake that role's contact session, which never wrote, and the
-        # window that did would wait for an answer that never comes (2026-10-01).
         board = tasks.connect(_board_path())
         try:
             return _reader_target(writer, board)
@@ -502,7 +489,6 @@ def wake_contact(role, message_id, *, sender):
     """
     argv = [sys.executable, "-m", "misaka", "dm", "--wait-message", str(message_id),
             "--from", sender, "--", role]
-    # The detached recipient owns neither the sender's task, pane nor space.
     child_env = {
         k: v
         for k, v in os.environ.items()
@@ -510,9 +496,6 @@ def wake_contact(role, message_id, *, sender):
         and k not in {"MISAKA_DM_CARD_ALLOWLIST", "MISAKA_NET_PANE", "MISAKA_NET_SPACE"}
     }
     try:
-        # Hermes runs the turn with stdin=DEVNULL too. Inherited, it is the sender's terminal: once
-        # that window closed, every process the wake-up started died on a bad descriptor at birth
-        # ("init_sys_streams", 2026-10-24).
         subprocess.Popen(
             argv,
             stdin=subprocess.DEVNULL,
@@ -522,8 +505,6 @@ def wake_contact(role, message_id, *, sender):
             env=child_env,
         )
     except OSError:
-        # Mail remains queued for the next contact turn. An explicit help request also has
-        # the Board's durable blocked notification.
         logger.warning("Could not start the contact-session wake-up", exc_info=True)
 
 
@@ -557,8 +538,6 @@ def send_as(sender, addr, message, summary, *, request_input=False, card_task=No
     if target.get("wake_card"):
         who = "".join((sender, f" · card {card_task}" if card_task else "",
                        f" · session {sender_session}" if sender_session else ""))
-        # A note that asks nothing gets no reply: a reply to a finished card wakes her in turn,
-        # and two finished cards thanking each other would wake each other for ever.
         consult = bool(target.get("consult"))
         if consult:
             header = (f"[Message from {who}. If it asks you something, answer with SendMessage; a note that "
@@ -571,7 +550,6 @@ def send_as(sender, addr, message, summary, *, request_input=False, card_task=No
             "sender": sender, "sender_task": card_task, "sender_session": sender_session})
         from misaka.core.platform import cards
         try:
-            # [consult] and [message] (a continuation) read alike otherwise in her log.
             cards.append_log(target["workspace"], target["to_task"], sender,
                              f"[{'consult' if consult else 'message'}] {message}")
         except OSError:
@@ -620,14 +598,12 @@ def request_help(target, body, message, summary, *, sender, card_task, sender_se
     from misaka.core.platform import tasks
 
     if card_task and worker.claim_env(card_task)[0] is None and worker.attempt_env(card_task)[0] is not None:
-        # A finished card answering a consultation has no attempt to park.
         raise ValueError("This card is finished and is answering a message; it cannot wait for input. "
                          "Ask with SendMessage (request_input=false) and answer with what you have.")
     raw_generation = (os.environ.get("MISAKA_SISTER_OWNER_GENERATION")
                       or os.environ.get("MISAKA_USAGE_GENERATION", ""))
     generation = int(raw_generation) if raw_generation.isdigit() else None
     hold_token = new_lease_token()
-    # The board is opened before anything is queued: a board that will not open queues nothing.
     board = tasks.connect(_board_path())
     try:
         con = connect()
@@ -676,7 +652,7 @@ def delivery_plan(rows, board_path=None, *, task_generation=None):
         bound = row["generation"]
         if (row["to_task"] and bound is not None and task_generation is not None
                 and int(bound) != int(task_generation)):
-            discard.add(int(row["id"]))          # a note for an attempt that is over
+            discard.add(int(row["id"]))
         else:
             deliverable.add(int(row["id"]))
     if not task_rows:
@@ -877,11 +853,11 @@ class MessagesPart:
         self.card_task = card_task
         self.contact = contact
         self._stop = asyncio.Event()
-        self._opened = asyncio.Event()  # a card's first run has started (_pump waits for it)
+        self._opened = asyncio.Event()
         if not card_task:
             self._opened.set()
         self._job = None
-        self._handovers = set()     # sendCustomMessage calls still running (a turn mail started)
+        self._handovers = set()
         self.commands = []
         self.tools = [ToolDefinition(
             name="SendMessage",
@@ -914,8 +890,6 @@ class MessagesPart:
         addr = args.to.strip()
         if args.request_input and not self.card_task:
             raise ValueError("request_input=true is for a Sister task card asking a Last Order for input.")
-        # CCB SendMessage resolves the caller's agent registry before teammates. The card
-        # help protocol goes to a Last Order, never to a child that shares a name.
         if self.route is not None and not args.request_input:
             hit = await self.route(addr, args.message, args.summary, ctx)
             if hit is not None:
@@ -924,9 +898,6 @@ class MessagesPart:
         own_session = self._session_id()
 
         def send():
-            # The sender's space is the one its catalog record holds: a session belongs to the
-            # space it first ran in, wherever it runs now. sqlite and a process start are
-            # blocking, so all of it runs off the loop.
             from misaka.core import session_catalog
             record = session_catalog.find_session(own_session) if own_session else None
             return send_as(self.sender, addr, args.message, args.summary,
@@ -968,20 +939,11 @@ class MessagesPart:
     async def _pump(self):
         if not await self._until_opened():
             return
-        # `connect` opens the file, runs the schema script and sweeps delivered rows: all
-        # blocking, all on this session's loop unless it is handed to a thread.
         con, cancelled = await settle_thread_call(connect)
         try:
             if cancelled is not None:
                 raise cancelled
             while not self._stop.is_set():
-                # One bad poll must not end the inbox. Everything below -- pending/claim/ack --
-                # is synchronous sqlite against a database several processes write (Last Order,
-                # every Sister session, every ``misaka dm`` child), so an OperationalError past
-                # the 5s busy timeout is ordinary. Before, it escaped into the ensure_future task
-                # nobody inspects, and the session silently stopped receiving mail forever while
-                # senders kept getting successful queue receipts. Log it and poll again;
-                # unacked rows keep their lease and come back when it expires.
                 try:
                     await self._deliver_once(con)
                 except Exception:
@@ -994,9 +956,6 @@ class MessagesPart:
             await run_in_thread(con.close)
 
     async def _deliver_once(self, con):
-        # Every sqlite call below waits on a lock other processes hold; none of them may run
-        # on the loop. The connection is opened with check_same_thread=False and only this
-        # task uses it, and these awaits are sequential, so it is never touched concurrently.
         rows = await run_in_thread(
             pending, con, self.sender, session_id=self._session_id(), task_id=self.card_task,
             contact=self.contact,
@@ -1015,8 +974,6 @@ class MessagesPart:
         if not mine:
             return
 
-        # Keep one wake-up for the batch. Remember individual row identities in its
-        # transcript details so a retry with different batch membership can skip old mail.
         persisted = set()
         manager = self.session.sessionManager
         recorded = {key for entry in manager.getEntries()
@@ -1032,8 +989,6 @@ class MessagesPart:
                 fresh.append(row)
         remaining = {f"{row['id']}:{row['created_at']}": row for row in fresh}
         batches = []
-        # After a cancelled poll, reattach to any still-queued batch instead of enqueueing
-        # its rows again alongside new arrivals. These are the session's existing receipts.
         for delivery_id in tuple(self.session._customMessageReceipts):
             if delivery_id.startswith("mail:"):
                 queued = [remaining.pop(key) for key in delivery_id[5:].split(",") if key in remaining]
@@ -1059,8 +1014,6 @@ class MessagesPart:
                 await run_in_thread(
                     renew, con, ids, ttl_seconds=DELIVERY_LEASE_SECONDS, token=token)
         finally:
-            # Receipt callbacks never touch the connection; it stays owned by this pump.
-            # Drain children before closing/releasing it, including shutdown and cancellation.
             async def cleanup():
                 for task in deliveries:
                     task.cancel()
@@ -1092,11 +1045,6 @@ class MessagesPart:
                 receipt.set_exception(error)
 
         try:
-            # steer, not followUp: a working recipient reads mail at its next tool boundary (pi:
-            # after the current assistant turn and its tool calls), as CCB delivers to a running
-            # agent and Hermes steers a running child. followUp waits for the whole run, which for
-            # a card is after it has submitted (2026-09-29: five notes 183-396 s late). Completion
-            # notices and nudges stay followUp elsewhere: they are for when the work stops.
             sending = self._hand_over(
                 {"customType": "agent-messages", "content": text,
                  "display": True, "details": {"count": len(rows), "mail_ids": mail_ids,
@@ -1106,13 +1054,13 @@ class MessagesPart:
                  "_onPersist": on_persist, "_onError": on_error})
             await asyncio.wait((sending, receipt), return_when=asyncio.FIRST_COMPLETED)
             if not receipt.done() and not sending.cancelled() and sending.exception() is not None:
-                raise sending.exception()        # failed before the session could take the batch
+                raise sending.exception()
             await receipt
         finally:
             if not receipt.done():
                 receipt.cancel()
             elif not receipt.cancelled():
-                receipt.exception()  # observe an error also raised directly by sendCustomMessage
+                receipt.exception()
 
     def _hand_over(self, message, options):
         """Give one batch to the session without waiting for the turn it may start.
@@ -1132,17 +1080,12 @@ class MessagesPart:
             logger.warning("Delivering mail into the %s session failed", self.sender, exc_info=task.exception())
 
     def _report(self, task):
-        # The only reader of this task's result is ``session_shutdown``'s return_exceptions=True
-        # gather, which discards it. A pump that ended on its own is a session that stopped
-        # receiving mail; log that instead of silently stranding its durable queue.
         if not task.cancelled() and task.exception() is not None:
             logger.warning("Message inbox for %s stopped", self.sender, exc_info=task.exception())
 
     async def session_start(self, event, ctx):
         if not self.receive or (self._job is not None and not self._job.done()):
             return
-        # /reload shuts the parts down and starts them again: a pump started under the stop of
-        # the one before it left at once, and the session read no more mail.
         self._stop = asyncio.Event()
         self._job = asyncio.ensure_future(self._pump())
         self._job.add_done_callback(self._report)

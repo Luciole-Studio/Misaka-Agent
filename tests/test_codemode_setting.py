@@ -39,13 +39,9 @@ def bound(settings: dict, profile: str | None) -> SettingsManager:
     return manager
 
 
-# -- settings ----------------------------------------------------------------------------------
-
-
 def test_unset_switches_are_what_each_kind_does_today():
     manager = SettingsManager.inMemory()
     assert [manager.getRoleCodemode(kind) for kind in ("lastOrder", "sisters", "subagents")] == [False, False, True]
-    # Last Order and the Sisters follow a hand-written `defaultTools` while their switch is unset.
     manager = SettingsManager.inMemory({"defaultTools": ["+codemode"]})
     assert [manager.getRoleCodemode(kind) for kind in ("lastOrder", "sisters", "subagents")] == [True, True, True]
 
@@ -76,9 +72,6 @@ def test_without_its_switch_or_a_role_a_session_follows_default_tools_alone(role
     unbound = bound({"roles": {"lastOrder": {"codemode": True}, "sisters": {"codemode": True}}}, None)
     assert unbound.getRoleType() is None
     assert unbound.getDefaultTools() is None
-
-
-# -- new sessions ------------------------------------------------------------------------------
 
 
 @asynccontextmanager
@@ -136,9 +129,6 @@ async def test_a_resumed_session_keeps_the_tools_its_transcript_declared(tmp_pat
         assert ("codemode" in resumed.getActiveToolNames()) is declared
 
 
-# -- sub-agents and cards that start with every tool --------------------------------------------
-
-
 def child(settings: dict, *, active: list[str], tools=("read", "bash", "codemode", "web_search")):
     return SimpleNamespace(
         getAllTools=lambda: [SimpleNamespace(name=name) for name in tools],
@@ -152,7 +142,6 @@ def test_a_sub_agent_keeps_codemode_unless_its_switch_is_off():
     assert "codemode" in inherited_tool_names(child({}, active=["read"]), card=False, fork=False)
     off = {"roles": {"subagents": {"codemode": False}}}
     assert inherited_tool_names(child(off, active=["read"]), card=False, fork=False) == ["read", "bash", "web_search"]
-    # The switch is more specific than `defaultTools`, which put codemode in the starting tools here.
     assert "codemode" not in inherited_tool_names(
         child({**off, "defaultTools": ["+codemode"]}, active=["read", "codemode"]), card=False, fork=False)
 
@@ -168,8 +157,6 @@ def test_a_card_keeps_codemode_as_its_sisters_settings_started_it():
 
 
 async def test_a_resumed_sub_agent_keeps_the_codemode_its_transcript_declared():
-    # Taking a declared tool back is a `tool_removal` on the wire: the switch is for new sessions only. Here
-    # `defaultTools` put codemode in the starting tools, so it is not an MCP server's doing either.
     off = {"defaultTools": ["+codemode"], "roles": {"subagents": {"codemode": False}}}
     async with createHarness(settings=off, extensionFactories=[createCodemodeExtension()]) as harness:
         session = harness.session
@@ -190,9 +177,6 @@ def test_a_fork_keeps_its_parents_tools():
     off = {"roles": {"subagents": {"codemode": False}}}
     names = inherited_tool_names(child(off, active=[]), card=False, fork=True)
     assert names == ["read", "bash", "codemode", "web_search"]
-
-
-# -- /settings ---------------------------------------------------------------------------------
 
 
 @pytest.fixture

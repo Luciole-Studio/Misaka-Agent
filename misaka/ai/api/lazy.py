@@ -57,7 +57,6 @@ async def _forwardStream(
     source: AsyncIterable[AssistantMessageEvent],
 ) -> None:
     async for event in source:
-        # MISAKA fork: the inner stream's live exception rides along with its error event.
         target.push(event, cause=getattr(source, "error_cause", None))
     target.end(await source.result() if _hasResult(source) else UNDEFINED)  # type: ignore[attr-defined]
 
@@ -82,7 +81,6 @@ def lazyStream(
             outer.push(ErrorEvent(reason="error", error=message), cause=error)
             outer.end(message)
         finally:
-            # MISAKA fork: join the inner producer, transport finalizers included.
             settled = getattr(inner, "settled", None)
             if settled is not None:
                 await settled()
@@ -107,7 +105,6 @@ def lazyApi(
     async def stream(implementation: str, model: Model, context: Any, options: Any) -> Any:
         return getattr(await load(), implementation)(model, context, options)
 
-    # MISAKA fork: each request is metered against the token cap here (`api/_meter.py`).
     api: Any = SimpleNamespace(
         stream=markMetered(
             lambda model, context, options=None: metered(

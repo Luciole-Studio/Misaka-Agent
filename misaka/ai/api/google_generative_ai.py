@@ -165,8 +165,6 @@ def stream(
             nextParams = await maybe_await(onPayload(params, model)) if onPayload else None
             if nextParams is not None:
                 params = nextParams
-            # MISAKA fork: the SDK sends the request on the first read and takes no abort signal, so the stream is
-            # opened inside the retried call and the wait for it races the signal.
             googleStream = await _await_with_signal(
                 retryGoogleRequest(lambda: open_google_stream(client, params), options), _option(options, "signal")
             )
@@ -179,8 +177,6 @@ def stream(
                 return len(blocks) - 1
 
             onProviderStreamEvent = _option(options, "onProviderStreamEvent")
-            # MISAKA fork: `iterate_google_stream` is the `for await`, minding the signal; the SDK's models are read
-            # through `coalesce_attr`.
             async with contextlib.aclosing(iterate_google_stream(googleStream, _option(options, "signal"))) as chunks:
                 async for chunk in chunks:
                     if onProviderStreamEvent:
@@ -194,7 +190,6 @@ def stream(
                     if parts:
                         for part in parts:
                             text = coalesce_attr(part, "text")
-                            # MISAKA fork: the SDK types the signature as bytes.
                             thoughtSignature = coerce_thought_signature(
                                 coalesce_attr(part, "thought_signature", "thoughtSignature")
                             )
@@ -314,7 +309,6 @@ def stream(
 
                     finishReason = coalesce_attr(candidate, "finish_reason", "finishReason")
                     if finishReason:
-                        # MISAKA fork: the SDK hands back its FinishReason enum; pi records the wire string.
                         output.rawStopReason = raw_finish_reason(finishReason)
                         output.stopReason = mapStopReason(finishReason)
                         if any(b.type == "toolCall" for b in output.content) and output.stopReason == "stop":
@@ -374,13 +368,11 @@ def stream(
             stream.push(DoneEvent(reason=output.stopReason, message=output))
             stream.end()
         except Exception as error:  # noqa: BLE001 - every failure becomes the stream's error event
-            # MISAKA fork: the blocks carry no `index`, so there is nothing to strip here.
             output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
             output.errorMessage = format_google_error(error)
             stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
             stream.end()
         finally:
-            # MISAKA fork: the SDK client owns an httpx client; close it while this loop still runs.
             await close_client(client)
 
     spawn_stream_task(run(), stream=stream)

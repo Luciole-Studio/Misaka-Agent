@@ -12,8 +12,6 @@ from misaka.ui.tui.keys import KeyId, matchesKey
 
 # Global keybinding registry.
 # Downstream packages can add keybindings via declaration merging.
-# MISAKA fork: Python has no declaration merging; the registry lists pi-tui's own keybindings, and a `Keybinding`
-# is any string so downstream ids (`app.*`) type-check.
 Keybindings = TypedDict(
     "Keybindings",
     {
@@ -53,7 +51,6 @@ Keybindings = TypedDict(
         "tui.select.pageDown": Literal[True],
         "tui.select.confirm": Literal[True],
         "tui.select.cancel": Literal[True],
-        # Alternate-screen viewport navigation: MISAKA fork (D1), not ported.
     },
 )
 
@@ -157,8 +154,6 @@ TUI_KEYBINDINGS: KeybindingDefinitions = {
         defaultKeys=["escape", "ctrl+c"],
         description="Cancel selection",
     ),
-    # MISAKA fork (D1): upstream's `tui.altScreen.*` entries (fullscreen viewport navigation and transcript search)
-    # follow here.
 }
 
 

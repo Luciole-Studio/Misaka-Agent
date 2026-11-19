@@ -18,7 +18,6 @@ def createSubmitContext():
         flushPendingBashComponents=Mock(),
         onInputCallback=None,
         pendingUserInputs=[],
-        # MISAKA fork: the editor calls `onSubmit` synchronously, so the handler runs as a task.
         _schedule_task=lambda coroutine: tasks.append(asyncio.ensure_future(coroutine)),
     )
     return context, tasks

@@ -390,10 +390,6 @@ async def test_throws_when_prompting_without_configured_auth():
 
 
 
-# MISAKA fork: "expands skill commands before sending the prompt" is not ported -- skills are MISAKA's own layer
-# system (core/skills), which reads no `getSkills()` from the resource loader; tests/test_skill_command_delivery.py
-# covers `/skill:<name>` expansion.
-
 
 # Issue #10267, #5581: a run started by sendMessage(..., { triggerTurn: true }) skipped
 # before_agent_start, so its second request patched away the sections handlers had added.

@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/kimi-coding.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "kimi-coding.json").read_text(encoding="utf-8"))
 
 KIMI_CODING_MODELS = flattenChatModelCatalog("kimi-coding", _values)

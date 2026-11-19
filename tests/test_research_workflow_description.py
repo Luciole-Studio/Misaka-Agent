@@ -79,11 +79,11 @@ async def test_window_description_restores_on_exit_without_touching_ingress(rese
             await owner.close()
     else:
         await owner.close()
-    await owner.close()  # ExitStack cleanup is idempotent even after an exit error.
+    await owner.close()
     assert control.describe is (replacement if outcome == "replacement" else previous)
     assert control.on_input is original_input and control.check_active is original_check
     con.close()
-    control.describe()  # no stale callback may read the now-closed research database
+    control.describe()
 
 
 async def test_resumed_window_rebinds_live_run_and_node_status(research):

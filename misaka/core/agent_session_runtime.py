@@ -199,7 +199,6 @@ class AgentSessionRuntime:
             "entryId": entryId,
             **options,
         }
-        # MISAKA fork: the session's own parts may take the fork first (the panel splits it).
         result = await self.session.moments.session_before_fork(event)
         if _result_flag(result, "cancel", False) is True:
             return {"cancelled": True}
@@ -226,7 +225,7 @@ class AgentSessionRuntime:
             "targetSessionFile": targetSessionFile,
             **({"contextCarried": True} if carryTo is not None else {}),
         }
-        await self.session.moments.session_shutdown(shutdown_event)  # MISAKA fork
+        await self.session.moments.session_shutdown(shutdown_event)
         await emitSessionShutdownEvent(self.session.extensionRunner, shutdown_event)
         if self.beforeSessionInvalidate is not None:
             self.beforeSessionInvalidate()
@@ -534,7 +533,7 @@ class AgentSessionRuntime:
 
     async def dispose(self) -> None:
         shutdown_event = {"type": "session_shutdown", "reason": "quit"}
-        await self.session.moments.session_shutdown(shutdown_event)  # MISAKA fork
+        await self.session.moments.session_shutdown(shutdown_event)
         await emitSessionShutdownEvent(self.session.extensionRunner, shutdown_event)
         if self.beforeSessionInvalidate is not None:
             self.beforeSessionInvalidate()

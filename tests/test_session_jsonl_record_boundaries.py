@@ -30,7 +30,7 @@ def transcript(tmp_path):
 def test_jsonl_only_splits_at_lf(separator, record_ending, strict):
     entries = [{"text": f"before{separator}after"}, {"text": "second"}]
     content = _dump_jsonl(entries).replace("\n", record_ending)
-    assert separator in content  # Reproduce the native unescaped serializer.
+    assert separator in content
     assert _parse_jsonl_entries(content, strict=strict) == entries
 
 
@@ -55,7 +55,7 @@ def test_native_open_list_and_forks_preserve_unicode(tmp_path):
 
     forked = SessionManager.forkFrom(str(path), str(tmp_path), str(tmp_path / "fork"))
     research_path, entry = fork_session(str(path), str(tmp_path / "research-fork"))
-    assert entry == original.getLeafId()     # the node's own turns begin after this inherited entry
+    assert entry == original.getLeafId()
     for manager in (forked, SessionManager.open(research_path)):
         assert manager.getSessionId() != original.getSessionId()
         assert manager.getEntries() == original.getEntries()

@@ -39,7 +39,7 @@ class CollaborationPromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Verify delegated evidence", text)
         self.assertNotIn("## Allies", text)
         self.assertNotIn("misaka_ally_", text)
-        self.assertNotIn("Explore:", text)  # the dynamic agent catalog has one owner
+        self.assertNotIn("Explore:", text)
 
     async def test_role_messages_do_not_grant_card_management(self):
         part = self.make_part(["SendMessage"])
@@ -50,7 +50,7 @@ class CollaborationPromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("do not create, start, complete or park a card", text)
         self.assertNotIn("misaka_card", text)
         self.assertNotIn("misaka_sister_message", text)
-        self.assertNotIn("request_input=true", text)  # card-only protocol remains tool-owned
+        self.assertNotIn("request_input=true", text)
         self.assertNotIn("## Sub-agents", text)
 
     async def test_card_routes_distinguish_creation_start_reply_and_review(self):

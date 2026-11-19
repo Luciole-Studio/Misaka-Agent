@@ -35,7 +35,6 @@ from misaka.utils.values import signal_aborted
 from misaka.utils.whatwg_fetch import RequestInit, fetch
 from misaka.utils.whatwg_url import URL, URLSearchParams
 
-# MISAKA fork: asyncio holds tasks weakly; `void this.watch(...)` keeps its task here until it settles.
 _background: set[asyncio.Task[Any]] = set()
 
 
@@ -190,7 +189,6 @@ async def sleep(ms: float, signal: Any = None) -> None:
     try:
         await future
     finally:
-        # MISAKA fork: a cancelled sleep drops its timer and listener; a promise cannot be cancelled.
         timeout.cancel()
         remove()
 

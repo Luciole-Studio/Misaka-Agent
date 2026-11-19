@@ -34,26 +34,16 @@ import zipfile
 
 from misaka.core.documents.office import soffice
 
-# Data-island split: this many consecutive blank rows or columns end a block. Borrowed from
-# FrontierAgent(_reader_xlsx.py:22 _GAP), with its own recorded risk -- a title separated
-# from its table by more than two blank rows is split off as a region of its own.
 GAP = 2
 
-# An Excel Table of at most this many data rows is emitted whole; past it the reader emits
-# a column schema plus PREVIEW rows and points at cell_range for the rest.
 TABLE_FULL = 20
 PREVIEW = 20
 
-# A dense region larger than this is named rather than rendered. FrontierAgent has no such
-# bound because it runs in a sandbox with its own memory cap; here the rendering goes into
-# a model's context, and a million-cell island would be the whole of it.
 MAX_GRID_CELLS = 200_000
 
 _NS_C = "{http://schemas.openxmlformats.org/drawingml/2006/chart}"
 _NS_A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 
-# A cell reference in a formula: optional $ anchors, 1-3 column letters, up to 7 digits, not
-# followed by a word character or "(" -- so ``LOG10(`` is a function, not column LOG row 10.
 _REF_RE = re.compile(r"(?<![A-Za-z0-9_$])(\$?)([A-Za-z]{1,3})(\$?)([0-9]{1,7})(?![\w(])")
 
 _CHART_PART = re.compile(r"xl/charts/chart\d+\.xml")
@@ -121,8 +111,6 @@ def _render(cell):
             match = re.search(r"\.(0+)E", active, re.IGNORECASE)
             return f"{value:.{len(match.group(1)) if match else 2}E}"
         if re.search(r"[0#],(?![0#])", active):
-            # A trailing comma is thousands *scaling* (#,##0,,"M"): rendering it would state
-            # a number the sheet does not show. Give the stored value instead.
             return _esc(value)
         if "#,##" in active:
             match = re.search(r"0\.(0+)", active)
@@ -197,7 +185,6 @@ def _has_formula(cell):
 
 
 def _missing_cache(formula_cell, value_cell):
-    # t="str" with an empty <v> is a calculated empty string, not a missing result.
     return (_has_formula(formula_cell) and value_cell.value is None
             and value_cell.data_type not in ("s", "str", "inlineStr"))
 
@@ -225,10 +212,6 @@ def _grid(values_sheet, formula_sheet, bbox, mark_uncached):
             cells.append(shown)
         if seen:
             lines.append(f"{r}\t" + "\t".join(cells))
-    # Every cell rendered to nothing. Not hypothetical: after a recalculation a report
-    # template full of ``=IF(A1>0,A1,"")`` has a cached value of ``""`` in every unused row
-    # -- non-empty to the coordinate scan, empty to the renderer. A label and column letters
-    # with no rows under them assert a region is there and say nothing about it.
     if len(lines) == 1:
         return []
     return lines
@@ -251,18 +234,18 @@ def _r1c1(formula, anchor_row, anchor_col):
     try:
         tokens = Tokenizer(formula)
     except TokenizerError:
-        return formula  # Unsupported syntax remains verbatim, never guessed.
+        return formula
     for token in tokens.items:
         if token.type != "OPERAND" or token.subtype != "RANGE":
             continue
         prefix, separator, reference = token.value.rpartition("!")
         endpoints = reference.split(":")
         if len(endpoints) > 2 or not all(_REF_RE.fullmatch(part) for part in endpoints):
-            continue  # Names, structured references and whole-column ranges stay literal.
+            continue
         matches = [_REF_RE.fullmatch(part) for part in endpoints]
         if any(not 1 <= int(match[4]) <= 1048576
                or column_index_from_string(match[2].upper()) > 16384 for match in matches):
-            continue  # e.g. ZZZ1 can be a defined name, not an Excel cell reference.
+            continue
         token.value = prefix + separator + _REF_RE.sub(convert, reference)
     return tokens.render()
 
@@ -279,7 +262,6 @@ def _formula_lines(formula_sheet):
     if not cells:
         return ("formulas", [])
     done, items = set(), []
-    # Column-major, so a vertical fill -- much the commoner shape -- is found first.
     for (r, c) in sorted(cells, key=lambda t: (t[1], t[0])):
         if (r, c) in done:
             continue
@@ -300,7 +282,7 @@ def _formula_lines(formula_sheet):
         if run > 1:
             items.append(f"{_col(c)}{r}:{_col(c + run - 1)}{r} {base}")
         else:
-            items.append(f"{_col(c)}{r} {cells[(r, c)]}")   # isolated: keep its A1 text
+            items.append(f"{_col(c)}{r} {cells[(r, c)]}")
     return ("formulas", items)
 
 
@@ -387,7 +369,6 @@ def _cond_lines(formula_sheet):
             kind = rule.type
             if kind == "colorScale":
                 try:
-                    # ``val`` is meaningless for min/max, so those show the type name alone.
                     stops = [v.type if v.type in ("min", "max") else f"{v.type}:{v.val}"
                              for v in rule.colorScale.cfvo]
                     items.append(f"{where} color-scale({'→'.join(stops)})")
@@ -599,15 +580,10 @@ def _chart_lines(path):
             plot = root.find(f".//{_NS_C}plotArea")
             if plot is None:
                 continue
-            # Deduplicated in order: a combo chart with two bar plots is "bar", not
-            # "bar+bar".
             kinds = list(dict.fromkeys(
                 e.tag[len(_NS_C):].replace("Chart", "") for e in plot
                 if e.tag.startswith(_NS_C) and e.tag.endswith("Chart")))
             title_element = root.find(f".//{_NS_C}title")
-            # Joined with a space and requoted: a title split across formatting runs
-            # otherwise runs its words together, and one carrying a quote closes the
-            # attribute early.
             title = (" ".join(t.text or "" for t in title_element.iter(f"{_NS_A}t"))
                      if title_element is not None else "")
             title = " ".join(title.split()).replace('"', "'")
@@ -615,14 +591,14 @@ def _chart_lines(path):
             for ser in plot.iter(f"{_NS_C}ser"):
                 values = ser.find(f"{_NS_C}val")
                 if values is None:
-                    values = ser.find(f"{_NS_C}yVal")     # scatter / bubble
+                    values = ser.find(f"{_NS_C}yVal")
                 if values is not None:
                     formula = values.find(f".//{_NS_C}f")
                     if formula is not None and formula.text:
                         series.append(formula.text)
                 axis = ser.find(f"{_NS_C}cat")
                 if axis is None:
-                    axis = ser.find(f"{_NS_C}xVal")       # scatter: x values, not categories
+                    axis = ser.find(f"{_NS_C}xVal")
                     if axis is not None:
                         category_key = "x"
                 if axis is not None and not categories:
@@ -688,17 +664,11 @@ def _load(path):
     from openpyxl.reader.excel import ExcelReader
 
     class MetadataParser:
-        # The upstream optimization used to replace WorkbookParser.pivot_caches
-        # globally. That leaked into later writes and lost actual pivot caches.
-        # Delegate everything except cache loading, on this reader instance only.
         def __init__(self, parser):
             self.parser = parser
             from openpyxl.packaging.relationship import get_rel
             from openpyxl.pivot.cache import CacheDefinition
             self.pivot_caches = defaultdict(lambda: None)
-            # Keep cache *definitions* (source and field names); only large cache
-            # records are unnecessary. Follow WorkbookParser's get_rel lookup but
-            # never fetch RecordList, and never change another reader or writer.
             for cache in parser.caches:
                 self.pivot_caches[cache.cacheId] = get_rel(
                     parser.archive, parser.rels, id=cache.id, cls=CacheDefinition)
@@ -753,9 +723,6 @@ def _range(cell_range, value_book):
                          f"like \"Sheet1!A3:D15\" ({error})") from error
     sheet = value_book[name]
     if not hasattr(sheet, "cell"):
-        # A chartsheet is in ``sheetnames`` but is not a grid: ``.cell`` does not exist on
-        # it, and reaching the renderer with one raised a bare AttributeError out of a tool
-        # call. This is the second of the two cell_range crash paths.
         raise ValueError(f"{name!r} is a chart sheet, not a grid, so it has no cell range. "
                          "Its chart is described under ▸ charts in the full reading.")
     r1 = sheet.min_row if r1 is None else r1
@@ -841,8 +808,6 @@ def render(path, *, cell_range=None, meta=None):
 def _render_book(path, chart_source, *, cell_range=None):
     formula_book, value_book = _load(path)
     head = [_HEAD]
-    # Only ever shown when the recalculation did not happen -- ``render`` renders a
-    # recalculated copy when it could make one, and then no cell is uncached.
     note = ("`uncached: this workbook carries formulas whose cached results are empty, so "
             f"their values are not in the file; {soffice.INSTALL_HINT} to have them "
             "recalculated on read.`")
@@ -859,10 +824,6 @@ def _render_book(path, chart_source, *, cell_range=None):
         head.append(note)
 
     charts = _chart_lines(chart_source)
-    # A chart is filed under the sheet its *data* is on, which for a dashboard is not the
-    # sheet it is drawn on. Anything no worksheet claims -- a series pointing at another
-    # workbook, a deleted sheet, a chartsheet, a name whose spacing does not match a title
-    # -- would otherwise be dropped without a word.
     claimed = {sheet.title for sheet in formula_book.worksheets}
     out, any_content = list(head), False
     for formula_sheet in formula_book.worksheets:
@@ -871,12 +832,8 @@ def _render_book(path, chart_source, *, cell_range=None):
                   if cell.value is not None}
         sheet_charts = charts.get(formula_sheet.title, [])
         if not coords and not sheet_charts:
-            continue                      # an empty sheet is not a page
+            continue
         any_content = True
-        # Owner decision D6: a hidden sheet is read rather than skipped. An archival
-        # workbook hides the sheet holding the working numbers at least as often as it
-        # hides junk, and for a corpus a missing number is the worse failure. The marker
-        # is what tells a reader where the text came from.
         state = "" if formula_sheet.sheet_state == "visible" else (
             " (very hidden)" if formula_sheet.sheet_state == "veryHidden" else " (hidden)")
         out += ["", f"## Sheet: {formula_sheet.title}{state}"]
@@ -931,7 +888,6 @@ def render_csv(path):
     data = [[((cell if cell != "" else None), _esc(cell)) for cell in row] for row in rows[1:]]
     summary = _table_md(header, data, name=os.path.basename(path), preview=0, delimiter=delimiter)
     summary = summary[:summary.index("```") + 1]
-    # The preview marker is for truncated XLSX tables, not the full CSV below.
     summary = [line for line in summary if not line.startswith("▸ preview:")]
     return "\n".join([
         ("<!-- csv readout: the file's own rows, with a ```meta column summary added above "

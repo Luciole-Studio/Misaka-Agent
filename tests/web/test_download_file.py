@@ -97,7 +97,6 @@ async def test_downloads_to_the_workspace_with_a_correct_digest(serve, workspace
     assert result.details["content_type"] == "application/pdf"
     assert result.details["url"] == URL
     assert result.details["path"] == str(saved)
-    # 正文不进上下文,只给路径。
     assert "%PDF" not in _text(result)
     assert str(saved) in _text(result)
 
@@ -136,7 +135,6 @@ async def test_actual_oversize_aborts_and_deletes_the_partial_file(serve, monkey
             yield b"y" * 512
 
     def handler(_request):
-        # 没有 content-length:分块响应本来就不声明大小,预检无从下手。
         return httpx.Response(200, content=body(), headers={"content-type": "application/pdf"})
 
     serve(handler)
@@ -401,7 +399,6 @@ async def test_nothing_appears_under_the_download_name_until_it_is_verified(serv
 
     assert seen and "paper.pdf" not in seen[0]
     assert all(name.startswith(".partial-") for name in seen[0])
-    # 校验通过后才出现,且暂存文件不留下。
     assert _downloads(workspace) == ["paper.pdf"]
     assert result.details["path"] == str(directory / "paper.pdf")
 
@@ -423,7 +420,6 @@ async def test_bogus_content_length_does_not_escape_as_an_exception(serve, works
 
     result = await _run(workspace)
 
-    # 声明不可解析 → 预检放弃,实际累计仍然是权威,下载照常完成。
     assert _downloads(workspace) == ["paper.pdf"]
     assert result.details["bytes"] == len(PDF)
 
@@ -438,8 +434,6 @@ async def test_percent_encoded_traversal_in_content_disposition_is_sanitized(ser
     assert not (workspace / "evil.pdf").exists()
     assert result.details["path"] == str(workspace / "downloads" / "evil.pdf")
 
-
-# --- 下载即入语料(H2)---------------------------------------------------------------
 
 MARKDOWN = ("# 一份笔记\n\n" + "这一段要够长,才算得上有正文的一页。" * 8 + "\n").encode()
 MD_URL = "https://files.example/notes.md"
@@ -465,7 +459,6 @@ async def test_a_downloaded_document_is_indexed_and_the_doc_id_comes_back(serve,
     assert _downloads(workspace) == ["notes.md"]
     assert f"indexed as doc {doc_id}" in _text(result)
     assert "doc_outline" in _text(result) and "doc_verify" in _text(result)
-    # 归属于本工作区,doc_* 工具(按 workspace 过滤)才找得到它;正文确实入了库。
     assert corpus.resolve_doc(doc_id, workspace=str(workspace))
     assert corpus.verify_quote(doc_id, "这一段要够长", workspace=workspace)
 
@@ -496,9 +489,8 @@ async def test_an_ingest_failure_keeps_the_file_and_still_reports_a_successful_d
 
     assert _downloads(workspace) == ["paper.pdf"]
     assert "Downloaded" in _text(result) and result.details["sha256"] == hashlib.sha256(PDF).hexdigest()
-    assert str(error) in _text(result)        # 原因原样转述,模型才知道下一步是 OCR
+    assert str(error) in _text(result)
     assert "doc_id" not in result.details
-    # 未入库的 PDF 不许再被指去 read(读出来是乱码):修好之后走 doc_add。
     assert "doc_add" in _text(result) and "use the read tool" not in _text(result)
 
 
@@ -522,7 +514,7 @@ async def test_ingest_runs_off_the_event_loop(serve, workspace, monkeypatch):
 
     def record(path, *_args, **_kwargs):
         seen["thread"] = threading.current_thread()
-        assert os.path.isfile(path)          # 传进去的是已落盘、已核过类型的那个文件
+        assert os.path.isfile(path)
         return "0123456789ab", 7
 
     monkeypatch.setattr(corpus, "ingest", record)

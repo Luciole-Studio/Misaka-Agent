@@ -13,17 +13,11 @@ from misaka.core.session_control import for_session, wait_for_session
 from misaka.utils.async_lifecycle import settle
 from misaka.utils.values import read_field
 
-# Hermes' text-truncation recovery (agent/turn_truncation.py ``_continue_text``): a reply cut at the
-# output cap with no tool call gets this nudge in the same conversation, up to the fourth cut reply,
-# and the pieces are joined. The wording is Hermes' own (conversation_loop.py), so Hermes' context
-# compressor -- the LCM engine here -- still recognizes the nudge as synthetic.
 LENGTH_CONTINUATION_OUTPUT_LIMIT = (
     "[System: Your previous response was truncated by the output length limit. Continue exactly "
     "where you left off. Do not restart or repeat prior text. Finish the answer directly.]"
 )
 LENGTH_CONTINUATION_LIMIT = 4
-# Below this many free tokens the prompt itself filled the window: each nudge and fragment only
-# shrinks the room (Hermes ``_MIN_CONTINUATION_HEADROOM``, #106120).
 MIN_CONTINUATION_HEADROOM = 512
 
 
@@ -125,8 +119,6 @@ class WindowLO:
                                if isinstance(part, SisterCapabilitiesPart)), None)
         if self.publisher is None:
             raise RuntimeError("Research requires the coordinator's system-prompt capability catalog.")
-        # The mode outlives a phase turn: approval waits and human input inherit
-        # the same filter. A phase scope only adds its temporary commands.
         self.mode = ExitStack()
         self.mode.enter_context(self.publisher.snapshot())
         control = for_session(session)
@@ -134,7 +126,6 @@ class WindowLO:
             previous = control.describe
 
             def restore_description():
-                # A later owner may have replaced this window's description.
                 if control.describe is describe:
                     control.describe = previous
 
@@ -178,7 +169,6 @@ class WindowLO:
 
     async def _execute_turn(self, prompt, options, *, preflight=None):
         session = self.session
-        # No tools, reservations or subscriptions are changed during another chat turn.
         while not session.isIdle:
             await session.waitForIdle()
         self.check_active()
@@ -187,7 +177,6 @@ class WindowLO:
         if os.path.realpath(options["session_dir"]) != os.path.realpath(os.path.dirname(self.session_file)):
             raise RuntimeError("A research call was routed to a different node's session.")
         if worker.over_cap(options.get("usage_db"), options.get("usage_task_id"), options.get("usage_token_cap")):
-            # Last Order's window, not a card: nothing "stays ready" here; the run halts at its cap.
             return None, "", f"{budget.EXHAUSTED_MESSAGE}: this research run stops here until the cap is raised."
         definitions = list(options.get("extra_tools", ()))
         scope = ExitStack()
@@ -202,14 +191,12 @@ class WindowLO:
             if read_field(message, "role") != "assistant":
                 return
             if answer is None:
-                final = message                  # the turn's last reply so far
+                final = message
             stop = read_field(message, "stopReason")
             if stop in {"error", "aborted", "length"} and answer is None:
                 error = read_field(message, "errorMessage") or (
                     output_limit_error(message) if stop == "length" else f"request {stop}")
             elif stop == "stop" and answer is None:
-                # A queued user/notification follow-up belongs to the same window, but
-                # must not replace the research phase's completed Markdown.
                 answer = "".join(read_field(part, "text", "") for part in read_field(message, "content", [])
                                  if read_field(part, "type") == "text")
                 error = None
@@ -217,14 +204,11 @@ class WindowLO:
         unsubscribe = session.subscribe(observe)
         try:
             from misaka.core.research.planner import session_tools
-            # Re-read at the actual turn boundary; a queued phase's old selection
-            # must not resurrect capabilities the user has since disabled.
             names = [*session_tools(self), *(tool.name for tool in definitions)]
             scope.enter_context(session.toolScope(names))
             scope.enter_context(self.publisher.snapshot(options.get("sister_catalog")))
             session.registerCustomTools(definitions)
             from misaka.core.research.planner import OPTIONAL_MATERIAL_TOOLS
-            # Credentials/executables decide availability; missing mandatory tools still fail.
             missing = set(names) - set(session.getActiveToolNames()) - set(OPTIONAL_MATERIAL_TOOLS)
             if missing:
                 raise RuntimeError(f"The window is missing research tools: {', '.join(sorted(missing))}")
@@ -235,10 +219,6 @@ class WindowLO:
 
                 guard_hooks = (session.agent.finishTurn, session.agent.prepareNextTurnWithContext)
                 install_guards(session, metering.allowance, no_progress_vocabulary=NO_PROGRESS_VOCABULARY)
-            # Direct await enters the session's active-run guard before yielding. A
-            # queued notification cannot take the window between idle and this turn.
-            # The turn's model requests -- the phase's own, compaction, the vision bridge --
-            # are billed to the run through this context (metering).
             with budget.usage_context(options.get("usage_db"), options.get("usage_task_id"),
                                       options.get("usage_generation"), options.get("usage_token_cap")):
                 from misaka.core.moments import TURN
@@ -255,11 +235,6 @@ class WindowLO:
                 else:
                     await send(prompt)
                 fragments = []
-                # A phase whose reply is its deliverable (``continue_truncated``) is continued the way
-                # Hermes continues a cut reply. A phase that delivers through a tool already has its own
-                # nudge for a reply cut before the call (``planner.commanded``). A cut reply with no
-                # visible text is not continued: Hermes turns reasoning off for that one request, and a
-                # pi session can only change its thinking level by recording the change in the transcript.
                 while (options.get("continue_truncated") and answer is None and final is not None
                        and read_field(final, "stopReason") == "length"
                        and not any(read_field(part, "type") == "toolCall" for part in read_field(final, "content", []))):
@@ -304,17 +279,11 @@ async def node_session(con, cfg, run, node):
     session_file = planner.lo_session_file(run, node)
     from misaka.core.wiring import role_session_setup
 
-    # Her Sisters write to her here as they do in a window (`node.run_interactive`, B123). The card
-    # notifications stay with the root's window, and the driver reads the cards itself.
     flags, assembly, env = role_session_setup(
         os.path.join(cfg["roles_root"], "last_order"), run["workspace"],
         workflow_context=True, receive_messages=True, receive_notifications=False,
         overrides=runs.session_overrides(run), node=node["id"])
     flags += ["--session-dir", directory]
-    # A conversation recorded but never written -- the run failed before its first entry was
-    # persisted -- is opened anew: asked for by name it raised FileNotFoundError on every resume,
-    # and --continue would pick whatever else is newest in its directory, for a root started from
-    # a chat that chat's other conversations (0.18.10 sweep).
     if session_file and os.path.exists(session_file):
         flags += ["--session", session_file]
     elif not session_file:
@@ -332,9 +301,7 @@ async def node_session(con, cfg, run, node):
     async with _env_window():
         previous = {key: os.environ.get(key) for key in (*env, "MISAKA_NET_PANE", "MISAKA_RESEARCH_NODE")}
         os.environ.update(env)
-        # A CLI root runs in its driver, not in ProcessSpawner which clears pane identity.
         os.environ.pop("MISAKA_NET_PANE", None)
-        # This runtime is driven here, not by an inherited pane's NodePart.
         os.environ.pop("MISAKA_RESEARCH_NODE", None)
         runtime = bridge = None
         try:
@@ -364,8 +331,6 @@ async def node_session(con, cfg, run, node):
 
             control.on_input = human_input
             yield bridge
-            # Stop new ingress before draining already accepted human turns. Closing
-            # a view never reaches this lifecycle; only the owning node does.
             control.accepting = False
             control.paused = False
             await asyncio.gather(*control.inputs)

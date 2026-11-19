@@ -67,7 +67,7 @@ async def test_a_never_ran_card_is_reopened_launched_and_told(board, tmp_path):
     assert out["mode"] == "first-attempt" and out["launched"] is True
     assert runtime.launched == [(task_id, "message")]
     row = tasks.get(board, task_id)
-    assert row["generation"] == 2                              # reopened as a fresh attempt
+    assert row["generation"] == 2
     assert _Runtime.mailed == [(task_id, "begin with volume one", "v1", 2)]
     assert runtime.events == [(task_id, "message", {"summary": "v1", "mode": "first-attempt"})]
 
@@ -91,7 +91,7 @@ def test_the_note_is_mailed_to_that_attempt(tmp_path, monkeypatch):
     real_connect = messages.connect
     monkeypatch.setattr(messages, "connect", lambda path=None: real_connect(str(tmp_path / "messages.db")))
     row = {"id": "t_aaaaaa", "assignee": "10032", "generation": 3, "workspace": str(tmp_path)}
-    sister_runtime.SisterRuntime._mail_card(row, "the note", "note")   # opens and closes its own
+    sister_runtime.SisterRuntime._mail_card(row, "the note", "note")
     with closing(real_connect(str(tmp_path / "messages.db"))) as con:
         rows = messages.pending(con, "10032", task_id="t_aaaaaa")
     assert len(rows) == 1 and rows[0]["to_task"] == "t_aaaaaa" and rows[0]["generation"] == 3

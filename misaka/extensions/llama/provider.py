@@ -323,7 +323,6 @@ def createLlamaProvider() -> LlamaProviderController:
             model, context, options
         )
 
-    # MISAKA fork: `Provider` is a Protocol; the provider is a namespace of upstream's members.
     provider = SimpleNamespace(
         id=LLAMA_PROVIDER_ID,
         name="llama.cpp",

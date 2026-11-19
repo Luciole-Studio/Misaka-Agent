@@ -50,9 +50,6 @@ class Waiters:
         def settled(done: asyncio.Future[Any]) -> None:
             if signal is not None:
                 signal.removeEventListener("abort", onAbort)
-            # MISAKA fork: an awaiter can stop waiting with asyncio cancellation (``wait_for``, a task group), which
-            # cancels the future; upstream stops a wait only by aborting its context. A cancelled waiter leaves its set
-            # as an aborted one does, so polling a long-lived task with timeouts holds nothing.
             if done.cancelled():
                 forget()
 

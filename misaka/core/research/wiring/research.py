@@ -121,7 +121,6 @@ def _cfg():
     return current_config()
 
 
-# The run limits /research takes as options, by flag.
 _OPTIONS = {"--depth": "max_depth", "--parallel": "parallel", "--sister-parallel": "sister_parallel",
             "--followups": "max_followups", "--revisions": "max_revisions", "--max-nodes": "max_nodes"}
 
@@ -148,7 +147,6 @@ def parse_command(raw):
     head = line.split(None, 1)[0] if line else ""
     tokens: list[str] = []
     if head == "resume":
-        # `resume [RUN_ID] [--here] [ANSWER...]`: the answer is free text, taken from the raw line.
         words = line.split(None, 2)
         run_id = words[1] if len(words) > 1 and words[1].startswith("r_") else None
         rest = ((words[2] if len(words) > 2 else "") if run_id else line[len("resume"):]).strip()
@@ -162,9 +160,9 @@ def parse_command(raw):
         try:
             tokens = shlex.split(line)
         except ValueError:
-            tokens = []                 # an apostrophe: "status of women's ..." is a question
+            tokens = []
         if not _fits_subcommand(tokens):
-            tokens = []                 # "/research limits of state capacity ..." is a question too
+            tokens = []
     if tokens and tokens[0] in {"help", "-h", "--help"}:
         return {"action": "help"}
     if tokens and tokens[0] == "status":
@@ -181,8 +179,6 @@ def parse_command(raw):
         return {"action": "close", "run_id": tokens[1] if len(tokens) == 2 else None}
     if tokens and tokens[0] == "limits":
         return _parse_limits(tokens[1:])
-    # Activation: [start] [DEPTH (alone or before an option)] [--depth N] [--parallel N] [--sister-parallel N] [QUESTION...]. Use the raw
-    # line, not the shlex tokens: an apostrophe in "Stalin's constitution" is not an open quote.
     line = (raw or "").strip()
     words = line.split(None, 1)
     if words and words[0] == "start":
@@ -205,7 +201,7 @@ def parse_command(raw):
         elif "max_depth" not in selected and _positional_depth(words):
             selected["max_depth"] = int(words[0])
         else:
-            break  # the rest is the question, including any apostrophes or options within it
+            break
         line = words[1].strip() if len(words) > 1 else ""
         words = line.split(None, 1)
     limits = runs.normalize_limits(selected)
@@ -300,10 +296,8 @@ class ResearchPart:
     """Last Order's human-only ``/research`` command and run drivers."""
 
     def __init__(self):
-        drivers = {}     # this session's research drivers; another session's are not ours to stop
+        drivers = {}
         con = _con()
-        # In a pane, a fork node is a pane too (its own tab beside this one); elsewhere a
-        # background process.
         spawner = research_node.PaneSpawner() if os.environ.get("MISAKA_NET_PANE") else research_node.ProcessSpawner()
         self.tools = []
         self.commands = []
@@ -316,9 +310,7 @@ class ResearchPart:
             if run_id:
                 payload["run_id"] = run_id
             if payload.get("stage") in TICK_STAGES:
-                payload[MEMORY] = False        # shown once in the feed, dropped from every request: not memory
-            # A node's failure is Last Order's to answer -- retry it now, or leave it for the resume --
-            # so it opens a turn; every other notice is the feed.
+                payload[MEMORY] = False
             failed = payload.get("stage") == "node_failed"
             if failed:
                 payload[TURN] = True
@@ -329,8 +321,6 @@ class ResearchPart:
             )
 
         async def drive(run_id, ctx, *, resume=False, clarification="", settling=False):
-            # While the run works in this window, the window's session runs with the run's own
-            # compaction threshold and output limit; a paused or finished run gives them back.
             release = session_overrides.apply(self.session, runs.session_overrides(runs.get(con, run_id)))
             try:
                 def progress(event):
@@ -361,9 +351,6 @@ class ResearchPart:
                     content = final.get("content") or f"Research run `{run_id}` finished: {result['reason']}."
                     final_artifact = final.get("artifact") if result["reason"] == "done" else None
                     if not final_artifact and final.get("path"):
-                        # A halted run's report quotes every node's conclusion whole: r_77d38618b4's came
-                        # to 3.4 MB, and as this message it put the window at 1.42M tokens (2026-10-26,
-                        # R44). The window is told where the report is, not handed it.
                         value = result.get("run") or {}
                         content = (f"Research run `{run_id}` {result['reason']}: {final.get('reason')}\n"
                                    f"Its incomplete report is `{final['path']}` "
@@ -389,9 +376,6 @@ class ResearchPart:
                 raise
             except Exception as error:  # noqa: BLE001 - infrastructure failures stay visible, and the run stays resumable
                 if settling and not runs.driverless(runs.get(con, run_id)):
-                    # Two windows of one conversation opening together both try to settle its
-                    # stopped run: the one whose driver found the lease taken leaves the report
-                    # to the window that took it.
                     return
                 self.session.moments.send_message(
                     {"customType": "research-error", "display": True,
@@ -424,8 +408,6 @@ class ResearchPart:
 
         self._settle_orphans = settle_orphans
 
-        # What bare /research chose while it waits for the question: None, or the run's scheduling
-        # limits, its approval policy, its own session settings and the project folder.
         pending = {"choice": None}
         starts = set()
 
@@ -438,10 +420,6 @@ class ResearchPart:
                 token_start=budget.spent(con),
                 origin_session=getattr(getattr(ctx, "sessionManager", None), "sessionId", None),
             )
-            # The discipline itself is not written into the transcript: `context` puts it in
-            # front of the model on every request while a run of this conversation is open
-            # (2026-09-18, B31: the one-off copy scrolled away, and after a while Last Order
-            # went back to being an ordinary assistant in the middle of a paused run).
             self.session.moments.send_message(
                 {"customType": "research-discipline", "display": True,
                  "content": f"Research mode is on for run {run['id']}: the research workflow's "
@@ -519,15 +497,10 @@ class ResearchPart:
                         ctx.ui.notify("No active research run.", "info")
                         return
                     if run["status"] not in runs.ACTIVE:
-                        # Named by id, an ended run was found too, and the driver started below
-                        # drove it again -- turns spent for a stop (0.18.10 sweep).
                         ctx.ui.notify(f"Research run {run['id']} is already {run['status']}; there is nothing to stop.",
                                       "info")
                         return
                     runs.request_stop(con, run["id"])
-                    # Nothing else observes this request without a live driver: a waiting-input
-                    # run's driver has returned, and a run whose driver died stopping it still names
-                    # that driver's lease -- the stop only rewrote updated_at (2026-10-28, R61).
                     if runs.driverless(run):
                         launch(run["id"], ctx, settling=True)
                     ctx.ui.notify(
@@ -588,9 +561,6 @@ class ResearchPart:
                     saved = run["root_session"]
                     here = getattr(getattr(ctx, "sessionManager", None), "sessionFile", None)
                     if saved and here and not spec.get("here") and os.path.realpath(saved) != os.path.realpath(here):
-                        # The run's Last Order is a conversation. Driving it from another window
-                        # silently rebound root_session to a Last Order that remembered none of
-                        # the run's turns (2026-09-23); the CLI path already reopens the saved one.
                         raise ValueError(
                             f"Research run {run['id']} belongs to the Last Order conversation {saved}; open that "
                             f"session and resume there. `/research resume {run['id']} --here` adopts this window "
@@ -614,7 +584,6 @@ class ResearchPart:
                 choice = {"limits": spec["limits"], "plan_approval": planner.plan_waits_for_user(_cfg()),
                           "session": {}, "workspace": _workspace(ctx)}
                 if spec.get("question"):
-                    # `/research [--depth N] QUESTION`: no picker, no waiting for the next message.
                     pending["choice"] = None
                     start_question(spec["question"], choice, ctx)
                     return
@@ -720,7 +689,6 @@ class ResearchPart:
                             "to clarify and talk through depth, LO parallelism, Sister cards per LO, follow-up rounds, revisions, "
                             "the node limit, plan approval, the compaction threshold and the output limit; do not start "
                             "research yet.",
-                            # A run a notification woke may be starting by now; the session is busy then.
                             {"deliverAs": "followUp"},
                         )
                         return
@@ -762,7 +730,7 @@ class ResearchPart:
             for task in startup_tasks:
                 task.cancel()
             live = list(drivers.items())
-            for run_id, _task in live:       # the drivers own the run's state: they see the stop, stop their nodes and settle
+            for run_id, _task in live:
                 runs.request_stop(con, run_id)
             for _run_id, task in live:
                 if not task.done():
@@ -835,8 +803,6 @@ class ResearchPart:
                 drafting = False
             elif (role == "assistant" and drafting and read_field(message, "stopReason") == "stop"
                   and not any(read_field(part, "type") == "toolCall" for part in read_field(message, "content", []))):
-                # The first completed answer belongs to this phase. A queued follow-up
-                # after it is ordinary conversation and must remain in context.
                 drafting = False
                 changed = True
                 continue
@@ -847,8 +813,6 @@ class ResearchPart:
         await self._cleanup(event, ctx)
 
 
-# Progress stages that are ticks -- a card changed status, a node changed phase, a card was
-# created -- as opposed to the events Last Order acts on or the user is asked about.
 TICK_STAGES = {"tasks", "node", "assigned", "red_team", "divergence", "planning", "deciding", "reconciling", "level"}
 
 
@@ -891,6 +855,6 @@ ROLES = {"last_order"}
 
 def part(spec):
     from misaka.core.research.wiring.node import node_identity
-    if spec.workflow_context or node_identity():  # an existing workflow already owns this session
+    if spec.workflow_context or node_identity():
         return None
     return ResearchPart()

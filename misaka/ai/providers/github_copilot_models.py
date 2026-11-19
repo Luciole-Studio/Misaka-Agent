@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/github-copilot.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "github-copilot.json").read_text(encoding="utf-8"))
 
 GITHUB_COPILOT_MODELS = flattenChatModelCatalog("github-copilot", _values)

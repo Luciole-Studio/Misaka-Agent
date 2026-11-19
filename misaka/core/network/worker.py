@@ -165,8 +165,6 @@ def attempt_payload(con, row, kind):
         return None
     if not isinstance(value, dict):
         return None
-    # A settled card has no claim left: its redeclaration (a red team revising its critique after a
-    # note) reads what its last attempt recorded, as before.
     return value if row["claim_lock"] is None or value.get("claim_lock") == row["claim_lock"] else None
 
 
@@ -188,7 +186,7 @@ def missing_deliverable(task):
     try:
         name = contract_deliverable(task)
     except ValueError as error:
-        return str(error)  # malformed contracts block completion, including the idle-turn notice
+        return str(error)
     return None if name is None or deliverable_path(task, name) else name
 
 
@@ -216,7 +214,7 @@ def deliverable_path(task, name):
         if workspace:
             root.relative_to(Path(workspace).resolve(strict=True))
         path = (root / name).resolve(strict=True)
-        path.relative_to(root)  # a symlink outside this card is not its deliverable
+        path.relative_to(root)
         if path.is_file() and path.stat().st_size > 0:
             return path
     except (OSError, RuntimeError, ValueError):
@@ -249,12 +247,11 @@ def card_handoffs(con, task):
     return out
 
 
-_MATERIAL_TITLE_CHARS = 200    # an HTML <title> is cut there already; a downloaded .md's front matter is not
-_MATERIALS_LIMIT = 40   # lines of the "already downloaded" list; the rest is counted, not listed
+_MATERIAL_TITLE_CHARS = 200
+_MATERIALS_LIMIT = 40
 
 
 def _download_dir_name():
-    # The one folder name the web tools save under; imported lazily to keep worker importable alone.
     from misaka.core.tools.path_utils import DOWNLOAD_DIR_NAME
     return DOWNLOAD_DIR_NAME
 
@@ -271,7 +268,7 @@ def materials_on_hand(workspace):
     if not os.path.isdir(root):
         return ""
     doc_ids = {}
-    with contextlib.suppress(Exception):   # the list is a convenience; a corpus fault must not stop the card
+    with contextlib.suppress(Exception):
         from misaka.core.documents import index as corpus
         for doc in corpus.docs(workspace=workspace):
             for source in [doc.get("orig_path"), *(doc.get("paths") or [])]:
@@ -294,7 +291,6 @@ def materials_on_hand(workspace):
             try:
                 provenance = read_provenance(path)
             except (OSError, UnicodeError):
-                # Optional metadata must not hide the path or prevent card startup.
                 provenance = {}
             url = (provenance.get("source_url") or provenance.get("requested_url")
                    or provenance.get("final_url") or provenance.get("url"))
@@ -309,8 +305,6 @@ def materials_on_hand(workspace):
         lines.append(line)
     if len(files) > _MATERIALS_LIMIT:
         lines.append(f"- … and {len(files) - _MATERIALS_LIMIT} more under `{_download_dir_name()}/`")
-    # URLs and titles come from the pages themselves: web_fetch fences a title, and reading it
-    # back out of the saved file's front matter must not unfence it (issue #10 audit, M5).
     lines = [untrusted("materials", "\n".join(lines))]
     lines.append("This material list is a snapshot. Reuse relevant items; check the current workspace "
                  "or an available document index when you need to discover additional or newer material.")
@@ -325,7 +319,7 @@ def card_extras(con, task, cfg=None, *, include_materials=True):
     avoiding unrelated filesystem reads.
     """
     extras = {"_owner_context": None, "_owner": None, "_materials": "", "_session_overrides": {}}
-    with contextlib.suppress(Exception):   # a board a workflow has never touched is an ordinary board
+    with contextlib.suppress(Exception):
         owner, context = owners.card(con, task["id"])
         if owner is not None:
             extras["_owner_context"], extras["_owner"] = context, owner.name
@@ -518,7 +512,6 @@ def build_submission(con, task, summary):
         except (AttributeError, TypeError, ValueError):
             baseline = None
         if not isinstance(baseline, dict):
-            # Every generation freezes one before its first model turn (record_output_baseline).
             raise ValueError("output directory baseline is missing for this generation")
         artifacts.extend(path for path, revision in current.items() if baseline.get(path) != revision)
 
@@ -536,8 +529,6 @@ def build_submission(con, task, summary):
     if path := _contract_artifact(task, root):
         artifacts.append(path)
 
-    # Notes append material. Only critique issues are a complete snapshot (below).
-    # Never let an uncertainty-only note erase the findings recorded earlier.
     findings, uncertain = [], []
     for event in con.execute(
         "SELECT payload FROM events WHERE task_id=? AND kind='card_evidence' "
@@ -577,7 +568,6 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
     role = profiles.role_of(profile_dir)
     from misaka.config import sessions as session_roots
 
-    # New cards follow saved thinking defaults; resumed cards keep their native setting.
     flags = ["--session-dir", session_roots.card_session_dir(task)]
     if model:
         flags += ["--model", model]
@@ -587,14 +577,10 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
     kind = "beast" if beast else "card"
     delegates = not profiles.is_last_order(profile_dir)
     if beast:
-        # Beast mode gets no builtin tools: with DELEGATE it keeps only the child-management
-        # tools, otherwise none (Last Order has no DELEGATE, so it runs tool-less).
         if delegates:
             flags += ["-t", ",".join(MANAGEMENT_TOOLS)]
         else:
             flags += ["-nt"]
-        # A `-t` list without `mcp__` entries keeps MCP tools registered (pi 1.0.4); a wrap-up turn
-        # starts no MCP servers at all.
         flags.append("--no-mcp")
     assembly = assemble(SessionSpec(
         profile_dir=profile_dir,
@@ -602,7 +588,7 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         workspace=workspace,
         kind=kind,
         sender=sender,
-        receive_messages=True,          # a card hears Last Order (and her Sisters) at its next tool boundary
+        receive_messages=True,
         task_id=task.get("id"),
         tool_ceiling=MANAGEMENT_TOOLS if beast and delegates else None,
         workflow_context=bool(task.get("_owner_context")),
@@ -654,15 +640,12 @@ def run_card(
         task, workspace, profile_dir, provider, default_model
     )
     if task.get("_say") is not None:
-        # A settled card continued with a message (``dispatch.run_task(say=...)``): the turn goes on
-        # in her own conversation and is the message alone, as ``card-shell --resume --say-file`` is in
-        # a pane -- the contract she already worked from is not sent again.
         from misaka.config import sessions as session_roots
         flags += continue_flags(task.get("session_file"), session_roots.card_session_dir(task)) or []
         prompt = task["_say"]
     from misaka.config import env as env_file
 
-    env = {**env_file.role_overlay(profile_dir),      # the Sister's own .env, then the card's hand-off names
+    env = {**env_file.role_overlay(profile_dir),
            "MISAKA_PROFILE_DIR": profile_dir,
            "MISAKA_WHO": role,
            "MISAKA_MCP_ROLE": role,

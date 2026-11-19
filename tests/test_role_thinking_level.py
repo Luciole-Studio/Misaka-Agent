@@ -39,11 +39,11 @@ async def test_each_agent_starts_at_her_own_level(local_models):
     _settings(home.path("roles_root") / "last_order" / "settings.json", defaultThinkingLevel="low")
 
     async with opened(root, "last_order", "foreground") as (_, session):
-        assert session.thinkingLevel == "low"          # her own level beats the per-model table
+        assert session.thinkingLevel == "low"
     async with opened(root, "sisters/10032", "card") as (_, session):
-        assert session.thinkingLevel == "high"         # no level of her own: the per-model table
+        assert session.thinkingLevel == "high"
     async with opened(root, "sisters/10036", "card") as (_, session):
-        assert session.thinkingLevel == "medium"       # neither: the home's default
+        assert session.thinkingLevel == "medium"
 
 
 async def test_a_role_window_saves_the_default_as_hers(local_models):
@@ -66,7 +66,7 @@ async def test_a_role_window_saves_the_default_as_hers(local_models):
         assert session.thinkingLevel == "medium"
 
     unbound = SettingsManager.forRole(None)
-    unbound.setDefaultThinkingLevel("low")                 # outside a role: the home's default
+    unbound.setDefaultThinkingLevel("low")
     await unbound.flush()
     assert json.loads(home.path("settings").read_text(encoding="utf-8"))["defaultThinkingLevel"] == "low"
     assert json.loads(lo_file.read_text(encoding="utf-8"))["defaultThinkingLevel"] == "high"

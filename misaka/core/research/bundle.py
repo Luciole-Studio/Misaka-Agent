@@ -37,22 +37,18 @@ from misaka.utils.paths import posix_relpath
 
 MANIFEST = "SOURCES.md"
 SOURCES_DIR = "sources"
-_SCAN_LIMIT = 4 * 1024 * 1024          # a product bigger than this is listed, not read for locators
+_SCAN_LIMIT = 4 * 1024 * 1024
 _SCAN_SUFFIXES = (".md", ".markdown", ".txt", ".rst")
-_NODE_SEEDS = ("synthesis",)            # the node product whose citations define the node's sources
-_RUN_SEEDS = ("final", "partial")       # the run's delivered document (partial when it stopped early)
-_STOP = r'''[^\s`'"<>\[\]()]'''         # a locator runs until whitespace or Markdown/quote punctuation
+_NODE_SEEDS = ("synthesis",)
+_RUN_SEEDS = ("final", "partial")
+_STOP = r'''[^\s`'"<>\[\]()]'''
 _SEG = r'''[^\s`'"<>\[\]()/]'''
 _LOCATOR = re.compile(
-    # A path set in backticks or <> is taken whole: real file names hold spaces, brackets and
-    # parentheses ("downloads/my paper 2024.pdf" used to end at "downloads/my"; issue #10 audit, M6).
     rf"(?<=[`<])(?:{DOWNLOAD_DIR_NAME}|nodes|final|cards)/[^`<>\n]+(?=[`>])"
     rf"|doc:[0-9a-f]{{8,64}}(?:#p\d+)?"
     rf"|https?://{_STOP}+"
     rf"|(?<![\w/.\-])(?:{DOWNLOAD_DIR_NAME}|nodes|final|cards)/{_STOP}+"
     rf"|(?<![\w:.])/(?:{_SEG}+/)+{_SEG}+"
-    # Windows paths are also written with "\" and from a drive (C:\project\downloads\a.md); on
-    # POSIX a "\" is an ordinary filename character, so these forms are Windows-only.
     + (rf"|(?<![\w/\\.\-])(?:{DOWNLOAD_DIR_NAME}|nodes|final|cards)\\{_STOP}+"
        r'''|(?<![\w:.\\/])[A-Za-z]:[\\/](?:[^\s`'"<>\[\]()/\\]+[\\/])+[^\s`'"<>\[\]()/\\]+'''
        if os.name == "nt" else "")
@@ -61,7 +57,7 @@ _NOTE = ("Written by misaka when the products here were settled and rebuilt each
          "file or in the files it lists under the sources folder. Each of those is a hard link to where it already "
          "lives in the project (a copy only where a hard link was not possible); the originals never move. "
          "Cite original project files, not this bundle's disposable sources paths.")
-_PLACED = re.compile(r"^- `(?P<placed>[^`]+)` ← `(?P<source>[^`]+)`")   # a "Cited sources" line of the manifest
+_PLACED = re.compile(r"^- `(?P<placed>[^`]+)` ← `(?P<source>[^`]+)`")
 
 
 def _spellings(locator):
@@ -99,12 +95,9 @@ def place(src, dst):
         os.link(src, dst)
         return False
     except OSError as error:
-        # Windows says the same (exFAT, some network shares) as ERROR_INVALID_FUNCTION or
-        # ERROR_NOT_SUPPORTED, which both read as EINVAL.
         if (error.errno not in {errno.EXDEV, errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP}
                 and getattr(error, "winerror", None) not in (1, 50)):
             raise
-    # Never open an existing destination for writing: it may link to another original.
     out = open(dst, "xb")  # noqa: SIM115 - an existing target must stay outside failure cleanup
     try:
         with out, open(src, "rb") as source:
@@ -134,11 +127,11 @@ class _Index:
 
     def __init__(self, workspace):
         self.workspace = os.path.realpath(workspace)
-        self.pages = {}            # citable URL -> real path of the saved page
-        self.docs = {}             # doc id -> real path of the original file
-        self.titles = {}           # real path -> (title, url)
-        self.digests = {}          # real path -> sha256 the corpus has on record
-        self.consulted = {}        # task id -> real paths its corpus documents point at
+        self.pages = {}
+        self.docs = {}
+        self.titles = {}
+        self.digests = {}
+        self.consulted = {}
         pages = os.path.join(self.workspace, DOWNLOAD_DIR_NAME, "pages")
         for name in (sorted(os.listdir(pages)) if os.path.isdir(pages) else []):
             real = self.file_inside(os.path.join(pages, name))
@@ -189,7 +182,7 @@ class _Index:
     def dir_inside(self, path):
         try:
             real = os.path.realpath(path)
-        except ValueError:                          # a NUL in a cited path
+        except ValueError:
             return None
         return real if os.path.isdir(real) and corpus.under(real, self.workspace) else None
 
@@ -197,9 +190,9 @@ class _Index:
 @dataclass
 class Source:
     real: str
-    relative: str                                   # to the project
-    cited: list[str] = field(default_factory=list)  # how and by whom
-    placed: str | None = None                       # where its link went, relative to the bundle folder
+    relative: str
+    cited: list[str] = field(default_factory=list)
+    placed: str | None = None
     copied: bool = False
     digest: str | None = None
 
@@ -209,19 +202,16 @@ class _Collector:
 
     def __init__(self, con, run, index):
         self.con, self.run, self.index = con, run, index
-        self.sources = {}          # real path -> Source
-        self.unresolved = []       # (locator, reason, by)
-        self.unlocated = []        # (locator, where the quotation is instead, by)
+        self.sources = {}
+        self.unresolved = []
+        self.unlocated = []
         self.consulted = set()
         self.seen = set()
-        self.cards = {}            # real output dir -> task row
-        self.nodes = {}            # real node dir -> node row
+        self.cards = {}
+        self.nodes = {}
         for task in runs.tasks(con, run["id"]):
             if task["output_dir"]:
                 self.cards[os.path.realpath(task["output_dir"])] = task
-        # The registry as it stands now, over the index's corpus digests. Kept here, not added to
-        # the index: one index serves every card a settle bundles, and a card settled again
-        # registers its files under new digests the previous card's collector never saw.
         self.digests = dict(index.digests)
         for row in runs.artifacts(con, run["id"]):
             self.digests.setdefault(os.path.realpath(row["path"]), row["sha256"])
@@ -243,7 +233,7 @@ class _Collector:
             if reason and (locator, reason, by) not in self.unresolved:
                 self.unresolved.append((locator, reason, by))
             return
-        if real == origin:                          # a document naming its own path is not a citation
+        if real == origin:
             return
         source = self.sources.get(real)
         if source is None:
@@ -266,9 +256,8 @@ class _Collector:
                 real = self.index.file_inside(candidate)
                 if real:
                     return real, ""
-                if self.index.dir_inside(candidate):    # a folder named in passing is not a citation
+                if self.index.dir_inside(candidate):
                     return None, ""
-        # An absolute path that is not one of ours is ordinary prose, not a broken citation.
         return None, "" if os.path.isabs(locator) else "no such file in this project"
 
     def follow(self, real):
@@ -459,7 +448,7 @@ def _reset(path, *, keep, placed):
             for name in files:
                 if os.path.normpath(os.path.join(base, name)) in placed:
                     os.unlink(os.path.join(base, name))
-            with contextlib.suppress(OSError):      # a folder that still holds something stays
+            with contextlib.suppress(OSError):
                 os.rmdir(base)
     if keep:
         os.makedirs(path, exist_ok=True)
@@ -484,7 +473,7 @@ def _build(collector, *, folder, manifest, sources_dir, title, products, cards=(
     to_place = sorted((s for s in valid if not inside(s.real)), key=lambda s: s.relative)
     in_folder = sorted((s for s in valid if inside(s.real)), key=lambda s: s.relative)
     _reset(sources_dir, keep=bool(to_place), placed=placed)
-    taken = {posix_relpath(os.path.join(base, name), sources_dir)   # a new link must not land on what stayed
+    taken = {posix_relpath(os.path.join(base, name), sources_dir)
              for base, _dirs, files in os.walk(sources_dir) for name in files}
     for source in to_place:
         name = _placed_name(source.relative, taken)
@@ -530,15 +519,10 @@ def _build(collector, *, folder, manifest, sources_dir, title, products, cards=(
         for source in in_folder:
             lines.append(f"- `{posix_relpath(source.real, folder)}`")
             lines += [f"  - cited {how}" for how in source.cited]
-    # Material means downloads/: a card's own outputs and the node's files are products, not sources.
-    # rel() writes "/" on every platform, and the provenance is looked up by the real path: split
-    # on os.sep and rebuilt from the relative path, nothing was ever listed on Windows (0.18.10 sweep).
     consulted = sorted((r, real) for real in collector.consulted - set(collector.sources)
                        if (r := rel(real)).split("/")[0] == DOWNLOAD_DIR_NAME)
     lines += ["", "## Consulted but not cited (left where they are)", ""]
     lines += [f"- `{r}`" + (f" — {provenance(real)}" if provenance(real) else "") for r, real in consulted] or ["- (none)"]
-    # Looked for again as the bundle is made: the page a quotation is cited on is compared with
-    # the page it is on. A mark for the reader, not a judgment on the claim (ledger.locate).
     lines += ["", "## Quotations not where they are cited", ""]
     lines += [f"- `{loc}` — {where} ({by})" for loc, where, by in collector.unlocated] or ["- (none)"]
     lines += ["", "## Unresolved locators", ""]
@@ -585,7 +569,7 @@ def node_bundle(con, run, node):
     """Beside a node's conclusion: what it cites, closed over its cards' declared sources."""
     index = _Index(run["workspace"])
     folder = index.dir_inside(os.path.join(index.workspace, runs.node_dir(node["id"])))
-    if folder is None:                                # a node that never wrote a file has no folder to bundle in
+    if folder is None:
         return None
     collector = _Collector(con, run, index)
     collector.node(node)

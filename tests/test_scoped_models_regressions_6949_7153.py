@@ -51,7 +51,6 @@ def createInteractiveContext(*, allModels, enabledModelIds, scopedModels=None):
                 refresh=AsyncMock(return_value=SimpleNamespace(aborted=False, errors={})),
                 getAvailableSnapshot=getAvailableSnapshot,
             ),
-            # MISAKA fork: the session keeps its scoped models as dicts.
             scopedModels=scopedModels or [],
             setScopedModels=setScopedModels,
         ),

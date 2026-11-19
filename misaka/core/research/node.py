@@ -37,15 +37,11 @@ class ProcessSpawner:
 
     def spawn(self, argv, *, cwd, new_session=False):
         env = os.environ.copy()
-        # A child of a pane is not the pane: neither it nor its model sessions may report as
-        # the foreground LO, and its output must not land on a pane's TUI screen.
         quiet = env.pop("MISAKA_NET_PANE", None) is not None and not self.show_output
         return subprocess.Popen(
             argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL if quiet else None,
             stderr=subprocess.DEVNULL if quiet else None,
-            # Nodes stay in the foreground owner's group so closing its panel also
-            # stops them. Headless cards need their own group for claim reconciliation.
             start_new_session=new_session and os.name == "posix")
 
     def alive(self, proc):
@@ -54,7 +50,7 @@ class ProcessSpawner:
     def stop(self, proc):
         if proc.poll() is not None:
             return
-        processes.terminate(proc.pid)      # the whole tree: a node's cards and LLM children must not outlive it
+        processes.terminate(proc.pid)
         try:
             proc.wait(5)
         except subprocess.TimeoutExpired:
@@ -138,7 +134,7 @@ class PaneRunner:
     def __init__(self, con, cfg, label, pane):
         self.con, self.cfg, self.label = con, cfg, label
         self.home = pane
-        self._said = {}       # card id / "status" -> the last refusal printed; a 2-second poll must not repeat it
+        self._said = {}
 
     async def launch_ready(self, *, task_ids, **_kwargs):
         from misaka.ui.panel import client as net
@@ -147,7 +143,7 @@ class PaneRunner:
             if row is None:
                 continue
             if row["next_attempt_at"] is not None and int(row["next_attempt_at"]) > time.time():
-                continue                     # a retry cooldown: the daemon's claim would refuse it anyway
+                continue
             if row["status"] == "ready":
                 try:
                     await asyncio.to_thread(net.request, "pane.run_card", {
@@ -194,14 +190,13 @@ class PaneRunner:
             if self._said.get("status") != str(error):
                 self._said["status"] = str(error)
                 print(f"Panel status unavailable; waiting to retry: {error}", flush=True)
-            # Unknown is not settled/dead. The drive loop still checks stop and budget.
             return set(task_ids)
         return {pane["card"] for pane in panes
                 if pane.get("card") in task_ids and pane.get("alive")
                 and (pane.get("reported") or {}).get("state") != "idle"}
 
 
-CARD_ARGV = [sys.executable, "-m", "misaka.cli.research_node", "--run-card"]   # + the card's id
+CARD_ARGV = [sys.executable, "-m", "misaka.cli.research_node", "--run-card"]
 
 
 class CardNotStarted(Exception):
@@ -226,29 +221,19 @@ class HeadlessRunner:
 
     def __init__(self, con, cfg):
         self.con, self.cfg = con, cfg
-        self.flying = {}                     # task_id -> Popen: the cards this node started
-        self._processes = ProcessSpawner()   # one place decides how a child of ours starts and dies
-        self._prompt_files = {}              # task_id -> the message file a flying continuation was given
-        self._spawn_failures = {}            # task_id -> continuations in a row whose child did not start
+        self.flying = {}
+        self._processes = ProcessSpawner()
+        self._prompt_files = {}
+        self._spawn_failures = {}
 
     async def launch_ready(self, *, task_ids, **_kwargs):
         from misaka.core.network import dispatch
         from misaka.core.platform import admission
-        self._reap()                         # before reconcile: an unwaited-for child still answers to its pid
-        # A card whose child died mid-turn comes back through the reconciler, exactly as it did
-        # when a node ran its cards inline in one dispatch pass. finish_abandoned can reach git,
-        # so it stays off the loop thread.
+        self._reap()
         await asyncio.to_thread(dispatch.reconcile, self.con, self.cfg)
         rows = {task_id: task_store.get(self.con, task_id) for task_id in task_ids}
         candidates = [row for task_id, row in rows.items()
                       if row is not None and task_id not in self.flying and row["status"] == "ready"]
-        # The same pass also carried the project's validity gate: a card whose file is missing or
-        # unreadable, whose needs list is malformed, or that blocks itself is not dispatchable, and
-        # spawning it is a fresh interpreter every poll for a card no claim will ever take.
-        # fair_ready keeps exactly those cards. It reads every card file of the project to do it,
-        # so it goes off the loop thread like the reconcile above, and only when there is a card
-        # to start -- most polls of a running batch have none. Its round-robin cursor belongs to
-        # the schedulers that use its order; we use only its set.
         dispatchable = set()
         for space in {task_store.workspace_for(row) for row in candidates}:
             dispatchable.update(row["id"] for row in await asyncio.to_thread(
@@ -259,14 +244,11 @@ class HeadlessRunner:
             if task_id in self.flying or row is None or row["status"] != "ready":
                 continue
             if task_id not in dispatchable:
-                continue                     # the card is not dispatchable: no process, this poll or any
+                continue
             if row["next_attempt_at"] is not None and int(row["next_attempt_at"]) > time.time():
-                continue                     # a rate-limit cooldown: the claim would refuse it anyway
+                continue
             if sum(taken.values()) >= host_cap or taken.get(row["assignee"], 0) >= assignee_cap:
-                continue                     # no admission slot: the card stays ready for a later poll
-            # No cwd of our own: the child inherits the run's, and run_task is what decides
-            # what a card whose project folder is gone means. The parallelism ceiling is the
-            # drive loop's free-slot count, already applied to task_ids -- not ours to re-decide.
+                continue
             self.flying[task_id] = self._processes.spawn(
                 [*CARD_ARGV, task_id], cwd=None, new_session=True)
             taken[row["assignee"]] = taken.get(row["assignee"], 0) + 1
@@ -278,17 +260,12 @@ class HeadlessRunner:
         self._reap()
         if task_id in self.flying:
             return
-        # The message goes in a file (pi's subagent prompt file): a review brief carries the
-        # node's whole evidence ledger, far past what a command line holds (issue #13).
         written = writePromptToTempFile(task_id, say)
         try:
             proc = self._processes.spawn([*CARD_ARGV, task_id, "--say-file", written[1]],
                                          cwd=None, new_session=True)
         except OSError as error:
             removePromptFile(written)
-            # Hermes' dispatcher counts a worker that will not start against the card's failure
-            # limit and parks it there (kanban_db_dispatch, outcome "spawn_failed"); the drive
-            # loop's own retry would otherwise ask again every poll, forever.
             failures = self._spawn_failures.get(task_id, 0) + 1
             self._spawn_failures[task_id] = failures
             if failures >= task_store.FAILURE_LIMIT:
@@ -327,11 +304,11 @@ class HeadlessRunner:
         the card comes back through the reconciler), still ``ready`` or ``todo`` means the child
         has not claimed it yet and has a whole turn's spending ahead of it -- waiting there would
         let a halted node run the very card the halt was meant to stop."""
-        self._reap()                         # an exited child needs neither wait nor signal
+        self._reap()
         for task_id, proc in list(self.flying.items()):
             row = task_store.get(self.con, task_id)
             if row is not None and row["status"] not in ("ready", "todo", "running"):
-                proc.wait()                  # active work has no elapsed-time kill switch
+                proc.wait()
             self.flying.pop(task_id, None)
             self._processes.stop(proc)
             removePromptFile(self._prompt_files.pop(task_id, None))
@@ -356,7 +333,7 @@ class HeadlessRunner:
 
     def _reap(self):
         for task_id, proc in list(self.flying.items()):
-            if proc.poll() is not None:      # poll() reaps: the pid is free before reconcile looks
+            if proc.poll() is not None:
                 self.flying.pop(task_id)
                 removePromptFile(self._prompt_files.pop(task_id, None))
 
@@ -440,8 +417,6 @@ def main(run_id, node_id, *, runner_key):
     its pane id and a terminal of its own) the node is an interactive window; anywhere else --
     a command-line run, a test, a redirected stdin -- it runs headless in the background."""
     if os.environ.get("MISAKA_NET_PANE") and sys.stdin.isatty():
-        # A window a person reads and answers in, and keeps open after the routine: a stall
-        # leaves its stack, but the window stays, as a chat window's does.
         loop_watchdog.configure(f"node-{node_id}", exit_on_stall=False)
         return run_interactive(run_id, node_id, runner_key=runner_key)
     loop_watchdog.configure(f"node-{node_id}", exit_on_stall=True)
@@ -471,14 +446,12 @@ def run_interactive(run_id, node_id, *, runner_key):
     profile = os.path.join(cfg["roles_root"], "last_order")
     from misaka.core.wiring import role_session_setup
 
-    # Her Sisters write to her (their card names her session): she reads the mail pinned to her,
-    # and leaves the card notifications to the root's window, which reads them for the run (B123).
     flags, assembly, env = role_session_setup(profile, run["workspace"], workflow_context=True,
                                               receive_messages=True, receive_notifications=False,
                                               overrides=runs.session_overrides(run), node=node["id"])
     flags += ["--session-dir", planner._lo_session(run, node)]
     if node["session_file"] and os.path.exists(node["session_file"]):
-        flags += ["--session", node["session_file"]]    # a resumed node goes on in its own conversation
+        flags += ["--session", node["session_file"]]
     os.chdir(run["workspace"])
     os.environ.update({
         "MISAKA_RESEARCH_NODE": f"{run_id} {node_id} {runner_key}",
@@ -488,7 +461,6 @@ def run_interactive(run_id, node_id, *, runner_key):
                            "execution. Her Sisters open beside this window."),
         **env,
         "MISAKA_INPUT_HISTORY": str(home.path("input_history") / "last-order.json"),
-        # Her tools' spending counts against the run, as a card's counts against its card.
         "MISAKA_USAGE_DB": str(cfg["db"]), "MISAKA_USAGE_TASK_ID": run_id,
         "MISAKA_USAGE_GENERATION": "1", "MISAKA_USAGE_TOKEN_CAP": ""})
     from misaka.cli.engine import main as engine_main
@@ -506,8 +478,6 @@ def run_interactive(run_id, node_id, *, runner_key):
 
 
 def run_headless(run_id, node_id, *, runner_key):
-    # Imported here, not at the top: a card child runs this module too, and the research
-    # workflow is a second of imports it has no use for.
     from misaka.core.research import workflow
     from misaka.core.research.window import node_session
 

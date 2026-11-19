@@ -31,8 +31,6 @@ def _xml(path, member="word/document.xml"):
         return archive.read(member).decode("utf-8")
 
 
-# ---- create ------------------------------------------------------------------------------
-
 def test_create_writes_every_block_type_and_counts_them(tmp_path):
     path = tmp_path / "all.docx"
     outcome = writer.write(str(path), "create", {"blocks": [
@@ -85,8 +83,6 @@ def test_metadata_reaches_the_document_properties(tmp_path):
     assert reader.title(str(path)) == "A Study"
 
 
-# ---- rich text ---------------------------------------------------------------------------
-
 def test_runs_carry_their_own_formatting(tmp_path):
     path = _document(tmp_path, [{"type": "paragraph", "text": [
         {"text": "plain "},
@@ -120,8 +116,6 @@ def test_a_cjk_font_is_written_where_cjk_text_reads_it(tmp_path):
     assert 'w:eastAsia="SimSun"' in xml
 
 
-# ---- tables -------------------------------------------------------------------------------
-
 def test_a_header_row_is_bold_and_repeats_across_pages(tmp_path):
     path = _document(tmp_path, [{"type": "table", "header": True,
                                  "rows": [["region", "units"], ["North", "800"]]}])
@@ -134,9 +128,9 @@ def test_column_widths_are_written_where_both_programs_read_them(tmp_path):
     path = _document(tmp_path, [{"type": "table", "column_widths_in": [1.5, 3.0],
                                  "rows": [["a", "b"], ["1", "2"]]}])
     xml = _xml(path)
-    assert 'w:type="fixed"' in xml                       # the layout
-    assert f'w:w="{round(1.5 * 1440)}"' in xml           # tblGrid, for LibreOffice
-    assert xml.count("<w:tcW") >= 4                      # per cell, for Word
+    assert 'w:type="fixed"' in xml
+    assert f'w:w="{round(1.5 * 1440)}"' in xml
+    assert xml.count("<w:tcW") >= 4
 
 
 def test_a_table_cell_can_carry_its_own_fill_and_alignment(tmp_path):
@@ -153,10 +147,8 @@ def test_cant_split_marks_every_row_once(tmp_path):
     writer.write(str(path), "insert_table", {"rows": [["a"], ["b"]], "cant_split": True})
     xml = _xml(path)
     assert xml.count("w:cantSplit") == 2
-    assert reader.render(str(path))                       # still parses
+    assert reader.render(str(path))
 
-
-# ---- editing ------------------------------------------------------------------------------
 
 def test_replace_text_keeps_the_rest_of_the_paragraph_formatted(tmp_path):
     """FrontierAgent rewrites the whole paragraph into its first run and blanks the rest,
@@ -171,7 +163,7 @@ def test_replace_text_keeps_the_rest_of_the_paragraph_formatted(tmp_path):
     assert outcome["ok"]
     out = reader.render(str(path))
     assert fold("Revenue rose 14% in Q3.") in fold(out)
-    assert 'bold "rose"' in out                            # the bold survived
+    assert 'bold "rose"' in out
 
 
 def test_replace_text_reaches_inside_tables(tmp_path):
@@ -250,8 +242,6 @@ def test_add_hyperlink_turns_existing_text_into_a_link(tmp_path):
     assert "w:hyperlink" in _xml(path)
     assert fold("see the appendix here") in fold(reader.render(str(path)))
 
-
-# ---- page setup ----------------------------------------------------------------------------
 
 def test_set_page_number_writes_a_field_not_a_number(tmp_path):
     """A literal "1" typed into the footer is the number 1 on every page."""

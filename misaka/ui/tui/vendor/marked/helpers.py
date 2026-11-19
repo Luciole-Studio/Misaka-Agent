@@ -34,13 +34,11 @@ def escapeHtmlEntities(html: str, encode: bool | None = None) -> str:
     return html
 
 
-# MISAKA fork: `encodeURI`'s reserved and unescaped characters, which it leaves as they are.
 _ENCODE_URI_SAFE = ";,/?:@&=+$-_.!~*'()#"
 
 
 def cleanUrl(href: str) -> str | None:
     try:
-        # MISAKA fork: `encodeURI`, which throws on a lone surrogate.
         href.encode("utf-8")
         href = js_regexp.replace(quote(href, safe=_ENCODE_URI_SAFE), other.percentDecode, "%")
     except UnicodeEncodeError:

@@ -107,12 +107,12 @@ class CardContextTests(unittest.TestCase):
                                                   "scope": "run-1"})
             self.assertEqual(extra["_owner"], "stub")
             self.assertEqual(extra["_materials"], "Existing material")
-            assert "_colleagues" not in extra                     # the routing catalog is the system prompt's
+            assert "_colleagues" not in extra
             text = worker.card_prompt({**row, **extra, "body": "Task"})
             self.assertIn("Existing material", text)
             self.assertNotIn("misaka_ally_list", text)
-            self.assertNotIn("request_input=true", text)  # owned by the active messaging tool
-            self.assertNotIn("[Research card]", text)  # the system overlay owns this discipline
+            self.assertNotIn("request_input=true", text)
+            self.assertNotIn("[Research card]", text)
 
     def test_durable_prepare_uses_shared_card_context(self):
         runtime = SimpleNamespace(con=object(), cfg={"token_cap": 100})
@@ -155,8 +155,6 @@ class CardContextTests(unittest.TestCase):
             self.assertEqual(setup.call_args.args[0]["_materials"], "Materials")
 
     def test_dispatch_and_restore_keep_shared_context_path(self):
-        # The asynchronous owners are not run: verify both entrances feed the same
-        # tested helper, without starting processes or advancing any task lease.
         for function in (dispatch.run_task, sister_runtime.SisterRuntime._restore):
             source = inspect.getsource(function)
             self.assertIn("worker.card_extras(", source)
@@ -186,7 +184,7 @@ class CardContextTests(unittest.TestCase):
                 self.assertEqual(prompt.count(SISTER_ROLE), 1)
                 for rule in office_tool_system_prompt_contribution["guidelines"]:
                     self.assertIn(rule, prompt)
-                self.assertNotIn("[Research card]", prompt)  # only the mode overlay adds it
+                self.assertNotIn("[Research card]", prompt)
                 self.assertEqual(manager.child_env_extra(task)["MISAKA_WORKFLOW_CONTEXT"],
                                  "1" if research else "0")
 

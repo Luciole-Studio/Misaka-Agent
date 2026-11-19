@@ -68,7 +68,6 @@ async def test_normal_forced_and_worker_requests_render_on_owner():
             await asyncio.to_thread(ui.requestRender, force)
             await asyncio.wait_for(content.rendered.wait(), 1)
         assert content.threads and set(content.threads) == {owner}
-        # Stop cancels a throttled frame, and late animation requests stay inert.
         ui.MIN_RENDER_INTERVAL_MS = 1000
         content.rendered.clear()
         ui.requestRender()

@@ -111,8 +111,6 @@ async def smoke(out, render):
         required = {'docx': ['中文验收', '项目', '数值', '验证'],
                     'xlsx': ['输入', '结果', '文本', '=literal'],
                     'pptx': ['中文验收', '副本']}[suffix]
-        # PDFium can return CJK fallback-font runs in content-stream rather than visual
-        # order. Keep that output as evidence; use Poppler's spatial order for phrases.
         layout = (await asyncio.to_thread(
             subprocess.run, [text_reader, '-layout', str(pdf), '-'],
             check=True, capture_output=True, text=True, timeout=60)).stdout

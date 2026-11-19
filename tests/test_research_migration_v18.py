@@ -236,7 +236,7 @@ def test_a_v18_board_is_carried_into_graphs_and_resumes_where_it_was(tmp_path):
                              "research_relations", "research_relation_nodes", "research_issues", "research_actions",
                              "research_reconciles", "research_run_tasks"}
         assert "driver_lock" not in {row[1] for row in con.execute('PRAGMA table_info("research_runs")')}
-        assert runs.get(con, "r_old")["driver_lock"] == "driver:host:1:x"          # the lease is the graph's now
+        assert runs.get(con, "r_old")["driver_lock"] == "driver:host:1:x"
 
         assert [(n["id"], n["depth"], n["status"]) for n in runs.nodes(con, "r_old")] == [
             ("b_root", 0, "closed"), ("b_child", 1, "queued")]
@@ -259,6 +259,6 @@ def test_a_v18_board_is_carried_into_graphs_and_resumes_where_it_was(tmp_path):
         assert runs.reconcile_approved(con, "r_old", 1)
         assert runs.task_contexts(con)["t_1"]["node_id"] == "b_root"
         assert graph.entries(con, "r_old", status=graph.APPLIED)[0].op == "migrate"
-    with closing(tasks.connect(board)) as con:          # opened again, the board is simply current
+    with closing(tasks.connect(board)) as con:
         runs.init(con)
         assert runs.get(con, "r_old")["status"] == "active" and len(runs.nodes(con, "r_old")) == 2

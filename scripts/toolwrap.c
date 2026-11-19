@@ -1,22 +1,3 @@
-/* Launcher for a MISAKA release bundle.
- *
- * This executable and a sibling "<name>.wrap" stay side by side. The wrap file
- * names the real program, the arguments placed before the user's, and the
- * environment to set. Paths in the file are relative to this executable's
- * directory after symlinks are resolved, so a Homebrew or WinGet link to
- * bin/misaka still finds python/ and tools/.
- *
- * git remembers the prefix it was built into. git.wrap sets GIT_EXEC_PATH and
- * GIT_TEMPLATE_DIR to the prefix inside this bundle. pdftotext.wrap points at
- * the poppler binary that sits next to its libraries.
- *
- * Wrap file, one directive per line, UTF-8, # comments and blank lines ignored:
- *   exec=<path>
- *   arg=<argument inserted before the user's arguments>
- *   env=<NAME>=<value>
- *   path_prepend=<directory inserted at the front of PATH>
- */
-
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
 
@@ -138,7 +119,6 @@ static int is_relative(const char *path) {
     if (path[0] == '/' || path[0] == '\\') {
         return 0;
     }
-    /* A Windows drive path, which a wrap file generated on Windows may carry. */
     if (((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':') {
         return 0;
     }
@@ -313,7 +293,6 @@ int wmain(int argc, wchar_t **argv) {
     if (WideCharToMultiByte(CP_UTF8, 0, wrap_path, -1, wrap_utf8, sizeof wrap_utf8, NULL, NULL) <= 0) {
         fail("could not encode the wrap path");
     }
-    /* _wfopen, not fopen: the install directory may sit outside the ANSI code page. */
     load_spec(_wfopen(wrap_path, L"rb"), wrap_utf8, &spec);
     program = absolute_path(exe_dir, spec.exec_path);
     for (index = 0; index < spec.nenv; index++) {

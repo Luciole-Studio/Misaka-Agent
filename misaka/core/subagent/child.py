@@ -165,11 +165,6 @@ def _small_fast_hook_model(parent: Any, available: list[Any]) -> Any:
 
     from misaka.core.subagent.model import bedrock_region_prefix, newest_in_family
 
-    # The newest of the tier's family in this provider's catalog, by the rule a sub-agent's
-    # "haiku" resolves with (R19). A pinned list chose claude-haiku-4-5 and
-    # gemini-3-flash-preview where newer were configured, and ranking any "*-latest" ID first
-    # chose old aliases (2026-10-28). A keyword is a whole word of the ID ("mini" is not in
-    # "gemini"); on Bedrock the parent's inference-profile region is kept when the catalog has it.
     ids = [str(read_field(model, "id", "")) for model in provider_models]
     region = bedrock_region_prefix(str(read_field(parent, "id", "")))
     for keyword in keywords:
@@ -181,8 +176,6 @@ def _small_fast_hook_model(parent: Any, available: list[Any]) -> Any:
         _provider, model_id = newest_in_family([(parent_provider, model_id) for model_id in same_region or candidates],
                                                keyword)
         return by_id[model_id.casefold()]
-    # Third-party providers should retain their configured primary model rather
-    # than silently crossing credentials into another provider.
     return parent
 
 
@@ -257,7 +250,7 @@ def _turn_sidecar(session: Any, turn_id: str) -> Path:
         transcript = Path(session_file).expanduser().resolve()
         directory = transcript.parent / ".turn-results"
         stem = transcript.stem
-    else:  # Defensive fallback; normal sub-agents always receive --session.
+    else:
         from misaka.config.sessions import subagent_session_dir
 
         stem = session.sessionManager.getSessionId()
@@ -292,9 +285,6 @@ async def _watch_parent() -> None:
         return
     expected = int(raw)
     if os.name == "nt":
-        # Windows never reparents an orphan, and a venv's python.exe is a launcher that starts
-        # the real interpreter as its own child, so this process's parent is not the supervisor
-        # at all: the supervisor is watched by its identity (PID and start time) instead.
         from misaka.core.platform import processes
 
         supervisor = processes.identity(expected)
@@ -305,8 +295,6 @@ async def _watch_parent() -> None:
         def supervised():
             return os.getppid() == expected
     while True:
-        # Once a second: a supervisor that died is still noticed promptly, and a machine
-        # running a dozen children no longer spends 120 syscalls a second asking.
         await asyncio.sleep(_PARENT_WATCH_SECONDS)
         if supervised():
             continue
@@ -454,7 +442,7 @@ async def amain() -> int:
     role = os.environ.get("MISAKA_WHO") or ""
     workspace = os.environ.get("MISAKA_WORKSPACE") or os.getcwd()
     mcp_role = os.environ.get("MISAKA_MCP_ROLE") or role
-    card = os.environ.get("MISAKA_SISTER_OWNER_TASK_ID")    # set only on the child that is a card's own session
+    card = os.environ.get("MISAKA_SISTER_OWNER_TASK_ID")
     from misaka.core import session_overrides
     from misaka.core.wiring import SessionSpec, assemble, spec_overrides
     runtime, session, error = await engine_session.open_session(
@@ -517,7 +505,6 @@ async def amain() -> int:
     if disallowed_tools:
         session.setDisallowedToolsByName(
             disallowed_tools,
-            # Structural and frontmatter denies both win over management always-allow.
             alwaysAllowed=([t for t in MANAGEMENT_TOOLS if t.casefold() not in denied] if card else []),
             admission=(None if card else
                        (lambda name: any(tool["name"] == name for tool in fork_snapshot["tools"]))
@@ -536,8 +523,6 @@ async def amain() -> int:
     install_effort_adapter(session.agent, os.environ)
 
     if os.environ.get("MISAKA_SUBAGENT_INHERIT_ALL_TOOLS") == "1":
-        # No frontmatter allow/deny list means Claude's complete independently
-        # assembled worker pool, not harn's four-tool interactive default.
         session.setActiveToolsByName(inherited_tool_names(session, card=bool(card), fork=fork_snapshot is not None))
 
     async def evaluate_model_hook(
@@ -612,8 +597,6 @@ async def amain() -> int:
             ))
 
         async def output_format(payload: dict[str, Any], model: Any) -> dict[str, Any]:
-            # Keep the native multi-provider wire adapter explicit; the CCB
-            # implementation writes Anthropic outputFormat only.
             if kind != "prompt":
                 return payload
             api = str(read_field(model, "api", ""))
@@ -659,8 +642,6 @@ async def amain() -> int:
             turns += 1
             if structured_result is not None or turns >= (1 if kind == "prompt" else 50):
                 return True
-            # Source registerStructuredOutputEnforcement: an ordinary assistant
-            # answer is not the final verdict. Request the synthetic output tool.
             message = read_field(_turn, "message", None)
             if kind == "agent" and not any(
                 read_field(block, "type") == "toolCall"
@@ -692,9 +673,6 @@ async def amain() -> int:
                     "model": model,
                     "thinkingLevel": "off",
                     "tools": tools,
-                    # The parent's transcript leads with its own system messages (prompt and
-                    # tool declarations); the verifier must run under its own `systemPrompt`,
-                    # which only seeds the head when no system message is copied in.
                     "messages": [
                         message
                         for message in copy.deepcopy(session.agent.state.messages)
@@ -714,7 +692,6 @@ async def amain() -> int:
         try:
             await verifier.prompt(prompt)
         finally:
-            # Timeout cancellation must not leave a model stream/tool task alive.
             verifier.abort()
         if kind == "agent":
             if structured_result is None:
@@ -742,8 +719,6 @@ async def amain() -> int:
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        # Keep the newest context when a very long side chain reaches the
-        # classifier.  The shared token limiter remains the hard upper bound.
         transcript = transcript[-120_000:]
         prompt = (
             "Decide whether the proposed tool action is justified by the user's "
@@ -796,10 +771,6 @@ async def amain() -> int:
         nonlocal model_turn_count
         event_type = str(read_field(event, "type", ""))
 
-        # A SendMessage acknowledgement means the running agent actually
-        # consumed the queued steering message, not merely that stdin accepted
-        # it.  This closes the final-poll window where a turn could finish
-        # immediately after queueing and silently drop an acknowledged message.
         if event_type == "message_start":
             message = read_field(event, "message")
             if str(read_field(message, "role", "")) == "user":
@@ -879,16 +850,11 @@ async def amain() -> int:
         try:
             await session.prompt(message)
             accepts_steer = False
-            # A nested child process is the supervisor for agents it launched, and a card
-            # session may start one more turn at settle time. Keep the process alive until
-            # all of that has ended before emitting this turn's sidecar to its parent.
             from misaka.core.platform.session import settle_after_prompt
             await settle_after_prompt(session)
         except Exception as exc:  # noqa: BLE001
             turn_error = f"{type(exc).__name__}: {exc}"
         finally:
-            # No command arriving after prompt completion may be queued into a
-            # run that has already stopped polling its steering queue.
             accepts_steer = False
             for pending in tuple(pending_steers):
                 if pending["turnId"] != turn_id:
@@ -909,8 +875,6 @@ async def amain() -> int:
         if terminal_error:
             turn_error = f"{turn_error}; {terminal_error}" if turn_error else terminal_error
 
-        # Sidecars remain ordered ahead of the authoritative turn-done record.
-        # A failed progress write must not discard the final transcript/result.
         if progress_jobs:
             await asyncio.gather(*progress_jobs, return_exceptions=True)
             progress_jobs.clear()
@@ -1008,13 +972,6 @@ async def amain() -> int:
         await asyncio.sleep(0.1)
     active_mcp_servers = mcp_server_names()
 
-    # ``agent_session`` matches the ``-t`` allowlist against the registry and drops
-    # every name it does not recognize, without a word.  A typo in an ``agents/*.md``
-    # ``tools:`` line, or a tool since renamed, therefore costs the child that tool
-    # and reads exactly like a model that chose not to use it.  This is the last
-    # moment before the handshake, so what is missing here is missing for good --
-    # except for MCP tools, which the parent names on purpose before their server
-    # has registered (``runtime._child_flags``) and which are not late by accident.
     requested_tools = _requested_tool_names(flags)
     if requested_tools:
         assembled = {tool.name for tool in session.getAllTools()}
@@ -1037,8 +994,6 @@ async def amain() -> int:
             await asyncio.gather(parent_watch, return_exceptions=True)
             return 2
 
-    # Discovery is complete before this handshake. The parent retains ownership of
-    # blocking preload work, but resolves against THIS child's roots.
     from misaka.core.skills.wiring.skills import SkillsPart
     skills_part = next((p for p in session.moments.parts if isinstance(p, SkillsPart)), None)
     skill_roots = skills_part.resolution_roots() if skills_part is not None else []
@@ -1100,8 +1055,6 @@ async def amain() -> int:
                                 {
                                     "turnId": active_turn_id,
                                     "requestId": request_id,
-                                    # steer() may expand a skill/prompt template;
-                                    # message_start carries the expanded value.
                                     "message": queued[-1] if queued else message,
                                 }
                             )

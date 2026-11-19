@@ -23,7 +23,6 @@ from misaka.core.tools.output_accumulator import (
 from misaka.utils._abort_signal import AbortController
 from misaka.utils.async_lifecycle import settle
 
-# CCB LocalShellTask.tsx: looksLikePrompt / startStallWatchdog.
 STALL_CHECK_SECONDS = 5.0
 STALL_THRESHOLD_SECONDS = 45.0
 STALL_TAIL_BYTES = 1024
@@ -72,8 +71,6 @@ class ShellTask:
                 'exitCode': self.exit_code, 'error': self.error, 'outputFile': snapshot.fullOutputPath}
 
     def request_background(self) -> bool:
-        # CCB ShellCommand.background / backgroundExistingForegroundTask:
-        # one registration, one execution, no process restart.
         if self.status != 'running' or self.controller.aborted or self.background:
             return False
         self.background = True
@@ -122,8 +119,6 @@ class ShellTask:
                 return None
             if self.controller.aborted or signal_aborted(signal):
                 raise RuntimeError('aborted')
-            # CCB onTimeout/startBackgrounding: reuse the registered owner. Native
-            # live scope can revoke the output/stop tools during the wait.
             active = getattr(self.manager.session, 'getActiveToolNames', None)
             manageable = active is None or {'TaskOutput', 'TaskStop'}.issubset(active())
             if (auto_allowed and manageable and timer is not None and timer.done()
@@ -133,7 +128,6 @@ class ShellTask:
                 return None
             raise RuntimeError(f'timeout:{timeout}')
         finally:
-            # A committed user handoff survives cancellation of the old caller.
             detached = detached or (self.background and self.status == 'running' and not self.controller.aborted)
             self.on_data = None
             for job in watchers:
@@ -149,7 +143,6 @@ class ShellTask:
                     if self._done.is_set():
                         self.notify()
             else:
-                # Source unregisterForeground: ordinary completions aren't tasks.
                 self.notified = True
                 if not self.background and self.manager._shell_tasks.get(self.id) is self:
                     self.manager._shell_tasks.pop(self.id)
@@ -161,8 +154,6 @@ class ShellTask:
             self._stall_job = asyncio.create_task(self._watch_stall())
 
     async def _watch_stall(self):
-        # Native pipe output already has bounded tail + raw-byte accounting;
-        # reuse it instead of polling the same file through a second I/O path.
         loop = asyncio.get_running_loop()
         last_size, last_growth = 0, loop.time()
         while True:
@@ -179,7 +170,6 @@ class ShellTask:
             if not looks_like_prompt(content):
                 last_growth = loop.time()
                 continue
-            # One-shot latch is the return: no await between the check/enqueue.
             session = self.manager.session
             if session is not None:
                 description = self.description if self.description is not None else self.command
@@ -190,7 +180,6 @@ class ShellTask:
                         ('summary', summary))) + '\n</task-notification>\nLast output:\n'
                 text += content.rstrip(''.join(_ECMASCRIPT_WHITESPACE))
                 text += "\n\nThe command is likely blocked on an interactive prompt. Kill this task and re-run with piped input (e.g., `echo y | command`) or a non-interactive flag if one exists."
-                # Source intentionally omits status: this is NOT task completion.
                 session.moments.send_message(
                     {'customType': 'task-notification', 'content': text, 'display': True,
                      'details': {'task_id': self.id, 'task_type': 'local_bash', 'progress': True}},
@@ -233,7 +222,7 @@ class ShellTask:
                 self._done.set()
             try:
                 self.notify()
-            except Exception:  # A closed parent must not invalidate command output.
+            except Exception:
                 logging.getLogger(__name__).warning('Background shell notification was not queued', exc_info=True)
 
     def notify(self) -> None:
@@ -249,10 +238,6 @@ class ShellTask:
                 ('task-id', self.id), ('output-file', data['outputFile'] or ''),
                 ('status', self.status), ('summary', summary), ('trust', 'untrusted-data'))) + '\n</task-notification>'
         def ack(): self.notified = True
-        # At the next turn boundary, as CCB's LocalShellTask queues it (priority 'next' with
-        # MONITOR_TOOL on) and query.ts drains it after each tool round. As a follow-up it waited
-        # for the whole run to end: a card working for hours got its commands' results five to
-        # eight hours late (2026-10-25, R28). The stall notice above goes the same way.
         session.moments.send_message(
             {'customType': 'task-notification', 'content': content, 'display': True, 'details': data},
             {'deliverAs': 'steer', 'triggerTurn': True, '_deliveryId': 'shell:' + self.notification_id,
@@ -261,7 +246,6 @@ class ShellTask:
     async def stop(self) -> dict:
         if self.status != 'running':
             raise ValueError(f'Task {self.id} is not running (status: {self.status})')
-        # Source stopTask suppresses shell-kill noise, not agent partial results.
         self.notified = True
         self.controller.abort()
         if self.runner is not None:

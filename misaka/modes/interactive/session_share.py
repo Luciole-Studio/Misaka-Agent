@@ -142,7 +142,6 @@ async def tryShareViaRadius(tmpFile: str, context: SessionShareContext) -> bool:
         with open(tmpFile, "rb") as file:  # noqa: ASYNC230 - upstream readFileSync
             body = file.read()
         url = httpx.URL(DEFAULT_RADIUS_GATEWAY).join("/v1/artifacts").copy_merge_params(
-            # MISAKA fork: the artifact title names MISAKA.
             {"visibility": "organization", "title": "MISAKA session"}
         )
         async with httpx.AsyncClient() as client:
@@ -227,7 +226,6 @@ async def shareViaGist(tmpFile: str, context: SessionShareContext) -> None:
             context.showError("Failed to parse gist ID from gh output")
             return
 
-        # MISAKA fork: no pi.dev share-viewer link (`getShareViewerUrl`), only the gist.
         context.showStatus(f"Gist: {hyperlink(gistUrl, gistUrl)}")
     except Exception as error:  # noqa: BLE001 - upstream `catch (error)` reports any gist failure
         if not loader.signal.aborted:

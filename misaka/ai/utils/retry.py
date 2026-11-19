@@ -42,8 +42,6 @@ _NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = _buildProviderErrorPattern(
         # Sign in with ChatGPT: the subscription's shared usage limit, which resets
         # after hours rather than seconds.
         "subscription_sharing_usage_limit_exceeded",
-        # MISAKA fork: a workflow run's own token cap. Its message carries numbers ("has 429,000
-        # of its 5,000,000 left") that the status codes below would otherwise read as a 429.
         "token_cap reached",
     ]
 )
@@ -109,16 +107,9 @@ _RETRYABLE_PROVIDER_ERROR_PATTERN = _buildProviderErrorPattern(
         # Node ERR_HTTP2_STREAM_CANCEL: the HTTP/2 session died before the request was
         # sent, e.g. after the Bedrock SDK's 5-minute session timeout (#10379).
         "pending stream has been canceled",
-        # MISAKA fork: a relaying gateway (sub2api) reports its own upstream drop as
-        # `{"type":"stream_read_error","message":"upstream stream disconnected: unexpected
-        # EOF"}`, wording none of pi's entries cover; a Sister on it then sat idle on the
-        # error instead of retrying (2026-09-23, card t_c8b161).
         "stream.?disconnected",
         "unexpected EOF",
         "stream_read_error",
-        # MISAKA fork: a reply dropped mid-stream, in httpx's and the OS's words (GitHub issue #6:
-        # the provider gave up on a slow reader, and the turn ended with no retry). LCM's error
-        # classifier already counts these as disconnects.
         "peer closed connection",
         "incomplete chunked read",
         "connection.?reset",
@@ -315,7 +306,6 @@ async def retryAssistantCall(
                 callbacks.onRetryFinished if callbacks else None, False, attempt, lastRetry["errorMessage"]
             )
             if isinstance(error, _RetrySleepAbortError):
-                # MISAKA fork: a pydantic copy cannot drop a field; `errorMessage` is cleared instead.
                 return response.model_copy(update={"stopReason": "aborted", "errorMessage": None})
             raise
         await _invoke_callback(callbacks.onRetryAttemptStart if callbacks else None)

@@ -25,8 +25,6 @@ def _book(first_printed, pages=30, head="The Mind in the Machine", unnumbered=()
     return out
 
 
-# -- reading the number off the page ---------------------------------------------------------------------
-
 def test_the_number_alone_or_at_the_edge_of_a_head_is_a_folio():
     assert corpus._folios("The Mind in the Machine    219\nbody") == {219}
     assert corpus._folios("body\n- 338 -") == {338}
@@ -35,7 +33,7 @@ def test_the_number_alone_or_at_the_edge_of_a_head_is_a_folio():
 
 
 def test_a_constant_distance_over_many_pages_is_believed():
-    labels = corpus._inferred_labels(_book(first_printed=-1, pages=30))     # file p3 is printed p. 1
+    labels = corpus._inferred_labels(_book(first_printed=-1, pages=30))
     assert labels[3] == "1" and labels[30] == "28"
 
 
@@ -52,8 +50,6 @@ def test_an_unnumbered_chapter_opening_between_two_numbered_pages_takes_its_numb
 def test_a_short_run_of_numbers_is_not_enough():
     assert corpus._inferred_labels(_book(first_printed=50, pages=6)) == {}
 
-
-# -- a PDF that labels its own pages ----------------------------------------------------------------------
 
 def _labelled_pdf(path):
     """Four pages labelled i, ii, 1, 2 -- written by hand, no PDF writer needed."""
@@ -75,8 +71,6 @@ def _labelled_pdf(path):
 def test_a_pdf_says_what_its_pages_are_labelled(tmp_path):
     assert corpus._pdf_page_labels(str(_labelled_pdf(tmp_path / "labelled.pdf"))) == ["i", "ii", "1", "2"]
 
-
-# -- shown where the page is read, found and cited ------------------------------------------------------------
 
 def _indexed(tmp_path, monkeypatch, pages, name="scan.pdf"):
     workspace = tmp_path / "ws"

@@ -21,7 +21,6 @@ from misaka.core.subagent.runtime import RoleContext, _reap_process_tree
 
 @pytest.fixture
 def pdf(tmp_path):
-    # PIL is a mandatory dependency; no new PDF fixture dependency.
     path = tmp_path / "source.pdf"
     with Image.new("RGB", (300, 100), "white") as page:
         page.save(path, "PDF", save_all=True, append_images=[page, page])
@@ -84,7 +83,6 @@ def card(tmp_path, monkeypatch):
 
     for key in ("MISAKA_SISTER_OWNER_TASK_ID", "MISAKA_SISTER_OWNER_GENERATION", "MISAKA_SISTER_OWNER_CLAIM_LOCK",
                 "MISAKA_SUBAGENT_PERMISSION_SETTINGS", "MISAKA_SUBAGENT_PERMISSION_MODE"):
-        # Set first so teardown also removes what the refresh writes (delenv of an absent key records nothing).
         monkeypatch.setenv(key, "")
         monkeypatch.delenv(key)
     monkeypatch.setenv("MISAKA_USAGE_TASK_ID", "fixture-card")
@@ -127,8 +125,7 @@ async def test_card_grant_writes_and_is_revoked_without_heartbeats(card, monkeyp
         assert await worker.before_tool({"toolName": "write", "input": args}) is None
         await createWriteToolDefinition(session.cwd).execute("write", args)
     assert (output / "nested/result.md").read_text(encoding="utf-8") == "Verified output"
-    assert con.total_changes == before_changes  # grant lookups never renew ownership
-    # The next live refresh, including nested children, must drop a stale grant.
+    assert con.total_changes == before_changes
     con.execute("UPDATE tasks SET generation=2")
     blocked = await worker.before_tool({"toolName": "write", "input": {"path": str(output / "stale.md")}})
     assert blocked["block"] is True
@@ -200,8 +197,6 @@ def test_malformed_inherited_write_scopes_fail_closed(monkeypatch, scope):
         configuration.inherited_permissions()
 
 
-# asyncio's waitpid child watcher and signal exit codes are POSIX; on Windows a child is a
-# handle and a terminated one exits with a plain code.
 posix_waitpid = pytest.mark.skipif(os.name == "nt", reason="asyncio's waitpid child watcher is POSIX")
 
 
@@ -248,8 +243,6 @@ def test_tree_cleanup_still_reaps_descendants(monkeypatch, reap_root):
 
 @posix_waitpid
 async def test_slow_asyncio_watcher_does_not_lose_child_status(monkeypatch, caplog):
-    # Reproduce the race deterministically: let psutil finish first, without
-    # changing either wait implementation or touching any non-fixture PID.
     release = threading.Event()
     waitpid, wait_procs = os.waitpid, processes.psutil.wait_procs
 

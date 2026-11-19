@@ -19,13 +19,10 @@ from pathlib import Path
 
 from misaka.config import home
 
-KEEP = 5                   # snapshots kept per reason; the oldest go first
-LARGEST = 1 << 30          # a quick snapshot skips a file this large, as Hermes's does
-# What an update snapshot holds: what a person wrote, or the program could not rebuild. Sessions
-# stay out: they are append-only, and no update rewrites them.
+KEEP = 5
+LARGEST = 1 << 30
 SNAPSHOT = ("settings", "models", "keybindings", "env", "mcp_config", "credentials",
             "db", "messages_db", "spaces", "trust", "models_store")
-# What the archive leaves out: rebuilt on demand, meaningless once processes exit, or copies already.
 ARCHIVE_SKIPS = ("cache", "logs", "run", home.LAYOUT["backups"].rel)
 _SIDECARS = ("-wal", "-shm", "-journal")
 
@@ -61,7 +58,7 @@ def snapshot(reason: str) -> Path:
     the caller decides whether a failed snapshot stops it."""
     root = home.home()
     shelf = home.path("backups")
-    home.private_dir(shelf)          # the copies hold credentials
+    home.private_dir(shelf)
     target = shelf / f"{reason}-{time.strftime('%Y%m%d-%H%M%S')}"
     sources = [home.path(name) for name in SNAPSHOT]
     sources += [home.path(name, role) for role in _roles() for name in ("settings", "env", "mcp_config", "mcp_auth")]

@@ -18,8 +18,6 @@ from pathlib import Path
 from misaka.config import home
 from misaka.utils.redact import redact, redact_payload
 
-# Columns that point into the home. They are written home-relative (``home.stored``) so a board
-# survives its home being moved or restored elsewhere, and ``Row`` hands them back as real paths.
 HOME_POINTERS = frozenset({"session_file", "session_dir", "root_session"})
 
 
@@ -34,8 +32,6 @@ class Row(sqlite3.Row):
 
 logger = logging.getLogger(__name__)
 
-# connect() runs per process and sometimes more than once; the WAL fallback is a property of
-# the filesystem, not of the connection, so it is worth saying exactly once.
 _WARNED_ROLLBACK_JOURNAL = False
 
 SCHEMA = """
@@ -153,19 +149,10 @@ CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id);
 """
 TASK_SCHEMA_VERSION = 10
 MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
-# One failure model for every way an attempt can end badly -- a crash, a timeout, a provider
-# error, a turn that ended without settling the card. Each counts against the same limit and the
-# card returns to ready with the error kept for the next attempt; at the limit it stays failed.
-# A rate limit is the one exception: it only defers the card and counts nothing.
 FAILURE_LIMIT = 3
-# A retry cannot help these: no credentials or credit, or a board that names an assignee the
-# installation does not have.
 TERMINAL_FAILURE_KINDS = frozenset({"auth_or_quota", "configuration"})
 RETRY_BASE_SECONDS = 30
 RETRY_CAP_SECONDS = 900
-# A running card whose worker is alive but has shown no progress for this long is wedged.
-# Progress is what the worker's own session stamps (``heartbeat`` with ``progress=True``);
-# a supervisor renewing the lease proves only that a process exists.
 HEARTBEAT_STALE_SECONDS = 3600
 UNSETTLED_REASON = ("the session ended without settling the card: no summary was produced, "
                     "so nothing was submitted")
@@ -255,8 +242,6 @@ class SerializedConnection(sqlite3.Connection):
             try:
                 callback()
             except Exception:
-                # DB commit/rollback has already happened. The durable projection journal
-                # remains for retry; a cleanup error must not misreport the DB outcome.
                 logger.exception("Deferred filesystem publication needs recovery")
 
     def executemany(self, sql, seq_of_parameters):
@@ -307,7 +292,7 @@ def _serialized(operation):
     @wraps(operation)
     def call(con, *args, **kwargs):
         serialized = getattr(con, "serialized", None)
-        if serialized is None:  # Preserve compatibility with caller-owned connections.
+        if serialized is None:
             return operation(con, *args, **kwargs)
         with serialized():
             return operation(con, *args, **kwargs)
@@ -355,7 +340,7 @@ def _migrate(con):
     if recorded() != 9:
         return
     with _write_txn(con):
-        if recorded() == 9:              # another process may have carried it while this one waited
+        if recorded() == 9:
             con.execute("UPDATE events SET kind='card_evidence' WHERE kind='research_evidence'")
             con.execute("INSERT INTO schema_migrations(component,version,applied_at) VALUES('tasks',?,?)",
                         (TASK_SCHEMA_VERSION, int(time.time())))
@@ -367,36 +352,19 @@ def connect(path: str) -> sqlite3.Connection:
     con = sqlite3.connect(
         path,
         timeout=5,
-        isolation_level=None,  # autocommit keeps each CAS update atomic
+        isolation_level=None,
         check_same_thread=False,
         factory=SerializedConnection,
     )
     try:
         con.row_factory = Row
-        # journal_mode=WAL is a request, not a promise: a filesystem without the shared-memory and
-        # locking primitives WAL needs (NFS, SMB, some container overlays) leaves SQLite in
-        # rollback-journal mode, and the pragma answers with the mode it kept. Read that row back --
-        # what synchronous may safely be depends on which mode actually took.
         row = con.execute("PRAGMA journal_mode=WAL").fetchone()
         journal = str(row[0]).lower() if row else ""
         if journal == "wal":
-            # WAL's canonical pairing. FULL fsyncs the WAL on every autocommit statement, and this
-            # board is written a statement at a time (one UPDATE per reconciled card, one row per
-            # event). Under WAL, NORMAL cannot corrupt the database; it risks only the last commits
-            # before a power cut, and every durable decision here is a lease or a CAS that re-runs
-            # when it is not observed: an un-fsynced claim is simply claimed again. The card file,
-            # not this index, is the contract.
             con.execute("PRAGMA synchronous=NORMAL")
         else:
-            # That whole tolerance argument was made *for* WAL. In rollback-journal mode NORMAL
-            # risks the database file itself, not just the newest commits, and nothing in the
-            # lease/CAS design compensates for a board that will not open. Keep SQLite's FULL.
             global _WARNED_ROLLBACK_JOURNAL
             if not _WARNED_ROLLBACK_JOURNAL:
-                # Said once per process, through logging rather than a flag: nothing in this build
-                # reports on the board's storage, so a flag would have no reader but its own test,
-                # while a warning reaches whoever is running MISAKA on that filesystem. Silence is
-                # the one option ruled out -- the durability the design assumes is not there.
                 _WARNED_ROLLBACK_JOURNAL = True
                 logger.warning(
                     "Task board %s could not use WAL (journal_mode=%s): this filesystem does not "
@@ -462,8 +430,6 @@ def create_task(con, title, body="", assignee="", model=None, priority=0,
         raise ValueError("A task card needs a workspace folder.")
     workspace = canonical_workspace(workspace)
     output_dir = canonical_workspace(output_dir) if output_dir else None
-    # Three bytes of id keep card names short enough to say aloud; a board of a few thousand
-    # cards will see the odd collision, which costs a fresh draw, never a failed create.
     for draw in range(3):
         tid = "t_" + secrets.token_hex(3)
         try:
@@ -602,11 +568,11 @@ def _write_txn(con):
                 for callback in callbacks:
                     try:
                         callback()
-                    except Exception:  # Durable journal remains for recovery.
+                    except Exception:
                         logger.exception("Deferred filesystem publication needs recovery")
 
 
-write_txn = _write_txn     # callers outside this module that must make several card writes one unit
+write_txn = _write_txn
 
 
 def _start_run(
@@ -628,7 +594,7 @@ def _start_run(
         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (run_id, task_id, int(generation), attempt, phase, assignee or row["assignee"], "running",
          claim_lock, pid, identity, row["workspace"],
-         home.stored(row["session_file"]) if row["session_file"] else None,   # Row decoded it; store it relative again
+         home.stored(row["session_file"]) if row["session_file"] else None,
          now, now),
     )
     con.execute("UPDATE tasks SET current_run_id=?,heartbeat_at=? WHERE id=?",
@@ -775,32 +741,25 @@ def delete_task(con, task_id, *, allow_active=False):
     con.execute("DELETE FROM todos WHERE task_id=?", (task_id,))
     con.execute("DELETE FROM task_runs WHERE task_id=?", (task_id,))
     from misaka.core.platform import owners
-    owners.card_deleted(con, task_id)          # a workflow's link without its card is a trap for its resume
+    owners.card_deleted(con, task_id)
     from misaka.core.platform import cards
     skipped = []
     for child in _children_of(con, task_id):
-        # One child's accident is that child's alone. The handler lives inside the iteration on
-        # purpose: hoisted around the loop, a single casualty (a card file deleted concurrently
-        # between _children_of's walk and this rewrite) aborted the whole loop, and every
-        # surviving sibling kept a needs entry pointing at the card being deleted -- held at
-        # todo forever, waiting on a parent that no longer exists.
         try:
             remaining = [p for p in parent_ids(con, child, strict=True) if p != task_id]
         except UnreadableCard as error:
-            skipped.append((child, error.reason))   # an empty read here would rewrite needs=None,
-            continue                                # dropping the child's *other* dependencies;
-                                                    # leave the file for its owner
+            skipped.append((child, error.reason))
+            continue
         child_row = get(con, child)
         if child_row is None or not child_row["workspace"]:
-            skipped.append((child, "no index row"))     # a card file with no row to name its project
+            skipped.append((child, "no index row"))
             continue
         try:
             cards.set_fields(child_row["workspace"], child, needs=remaining or None)
-            promote_task(con, child)        # mirrors the child's file too, so it races the same way
+            promote_task(con, child)
         except OSError as error:
             skipped.append((child, str(error)))
     for child, reason in skipped:
-        # On the *child*, which survives this deletion -- the parent's own events go with it.
         add_event(con, child, "dependency_rewrite_skipped",
                   {"parent_id": task_id, "reason": reason})
     con.execute(
@@ -813,8 +772,6 @@ def delete_task(con, task_id, *, allow_active=False):
     )
     con.execute("DELETE FROM tasks WHERE id=?", (task_id,))
     shutil.rmtree(task_state_dir(task_id), ignore_errors=True)
-    # Nothing here touches the card *file*; only cards.remove does, so only it says anything
-    # about the file.
     message = (f"Card {task_id} and its runs, dependencies, events, budget, and to-do items "
                "were deleted.")
     if skipped:
@@ -920,21 +877,11 @@ def _validate_dependency(con, parent_id, child_id):
         raise ValueError("Both ends of a dependency must be existing tasks.")
     if parent["workspace"] != child["workspace"]:
         raise ValueError("A dependency must stay inside one project.")
-    # Idempotency comes first, before every check that can refuse: an edge the child's file already
-    # carries is not a change to a moving card, it is that card's own history being re-posted. A
-    # resume replays a whole plan over cards that have since started, and the replay must be a
-    # no-op rather than the reason the node fails again. Only a *new* edge is refused below.
     needs = parent_ids(con, child_id, strict=True)
     if parent_id in needs:
         return False
     if child["status"] in {"running", "review", "done"}:
         raise ValueError(f"Child task is {child['status']}; its dependencies cannot be changed.")
-    # Cycle iff the child is already upstream of the parent. This walk is the only thing standing
-    # between a typo and a cycle written into the card files, and a cycle is not repairable by
-    # fixing the file that hid it: reconcile's fixed point then holds the whole chain at todo
-    # forever, with nothing on the board saying why. So it reads strictly -- an ancestor whose
-    # file will not parse means we do not know the graph, and an edge we cannot prove acyclic is
-    # refused. Refusing one new edge costs nobody their running work; the cycle costs the chain.
     seen, frontier = set(), [parent_id]
     while frontier:
         current = frontier.pop()
@@ -966,16 +913,6 @@ def _mirror_status(con, task_id):
             row["workspace"], task_id, status=row["status"], generation=int(row["generation"])
         )
     except FileNotFoundError:
-        # The card file is not merely unwritable, it is gone -- the project directory was
-        # deleted or moved. There is no at-rest truth left to protect, so aborting here only
-        # means the lease outlives its worker: `reclaim_abandoned` mirrors, so a reconciler
-        # could never release such a card and every card behind it in the loop kept its
-        # expired lease too. `board()` already models this row as `missing_file`; let the
-        # transition commit, and record that the mirror did not land.
-        #
-        # Every other write failure still aborts the transition, which is the rule this
-        # function exists to enforce: a file that exists and could not be written means the
-        # database must not claim a state the file does not show.
         add_event(con, task_id, "card_file_missing",
                   {"status": row["status"], "workspace": row["workspace"]},
                   generation=row["generation"])
@@ -1010,8 +947,8 @@ def parent_ids(con, task_id, *, strict=False):
     from misaka.core.platform import cards
     path = cards.card_path(row["workspace"], task_id)
     card = cards.try_read(path)
-    if card is None:                        # unreadable: recorded in cards.invalid_cards()
-        reason = cards.unreadable_reason(path)      # None when there simply is no file
+    if card is None:
+        reason = cards.unreadable_reason(path)
         if strict and reason is not None:
             raise UnreadableCard(task_id, path, reason)
         return []
@@ -1027,8 +964,8 @@ def _children_of(con, parent_id):
     out = []
     for tid, path in cards.iter_cards(row["workspace"]):
         card = cards.try_read(path)
-        if card is None:                    # one broken file is one card's problem, not the
-            continue                        # whole project's: recorded in cards.invalid_cards()
+        if card is None:
+            continue
         needs = card["fields"].get("needs") or []
         if parent_id in [str(x) for x in needs]:
             out.append(tid)
@@ -1040,7 +977,7 @@ def dependency_state(con, task_id):
     statuses = []
     for pid in parents:
         parent = get(con, pid)
-        statuses.append(parent["status"] if parent is not None else "done")  # a deleted parent holds nobody
+        statuses.append(parent["status"] if parent is not None else "done")
     if not parents or all(status == "done" for status in statuses):
         return "ready", parents
     if any(status in {"failed", "stopped"} for status in statuses):
@@ -1144,7 +1081,7 @@ def set_runtime(con, task_id, agent_id, session_file, generation=None, claim_loc
     if generation is not None:
         clauses.append("generation=?")
         values.append(generation)
-    if claim_lock is not None:   # Same fence as set_workspace/set_pid: the lease must still be live.
+    if claim_lock is not None:
         clauses.extend(["status='running'", "claim_lock=?", "claim_expires>=?"])
         values.extend([claim_lock, int(time.time())])
     with _write_txn(con):
@@ -1219,7 +1156,7 @@ def configure_review(con, task_id, reviewer=None) -> bool:
             add_event(con, task_id, "review_configured", {"reviewer": reviewer})
             if row["workspace"]:
                 from misaka.core.platform import cards
-                cards.set_fields(row["workspace"], task_id, reviewer=reviewer)   # OSError rolls the change back
+                cards.set_fields(row["workspace"], task_id, reviewer=reviewer)
         return cur.rowcount == 1
 
 
@@ -1261,19 +1198,7 @@ def _terminal_transition(
         return cur.rowcount == 1
 
 
-# Ordered: the first kind whose pattern matches wins. Quota and billing markers go before the
-# rate-limit check because a provider reports an exhausted quota with the same 429 status.
-# Every marker is a word or phrase; a bare status code is only trusted where nothing else uses
-# that number, since the reason is often the tail of a crashed process's stderr. Failures whose
-# origin the caller knows -- supervisor, finalizer and dispatch faults -- name their kind instead
-# of coming through here, which is where "KeyError: 'api_key'" used to read as a dead credential.
 _FAILURE_KINDS = (
-    # Quota means an exhausted allowance, not a rate limit that mentions one: Gemini's 429
-    # reads "Resource has been exhausted (e.g. check quota)" and must stay retryable. The last
-    # line holds the words pi's own retry refuses to retry (ai/utils/retry.py
-    # _NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN, casefolded; a test keeps the two in step --
-    # importing it here would load the provider layer into every board process). Permission is
-    # only the providers' error codes: a filesystem "Permission denied" is not a credential.
     ("auth_or_quota", re.compile(
         r"authentication|unauthori[sz]ed|unauthenticated|permission[ _]error|permission_denied"
         r"|permissiondeniederror|\b40[13] (?:forbidden|unauthorized)|invalid[ _-]?(?:x-)?(?:api[ _-]?key|token)"
@@ -1307,7 +1232,7 @@ def classify_failure(reason):
 def retry_delay(kind, failures):
     """Seconds to hold a card back after its ``failures``-th consecutive failure of ``kind``."""
     if kind == "protocol_violation":
-        return 0          # the model ended its turn early; there is nothing external to wait for
+        return 0
     return min(RETRY_CAP_SECONDS, RETRY_BASE_SECONDS * (2 ** max(0, int(failures) - 1)))
 
 
@@ -1339,7 +1264,7 @@ def mark_failed(
             reason = json.loads(raw or "{}").get("reason")
         except (ValueError, AttributeError, TypeError):
             reason = raw
-    reason = redact(reason)        # kept as the next attempt's context and the run's summary
+    reason = redact(reason)
     kind = failure_kind or classify_failure(reason)
     fingerprint = (hashlib.sha256(str(reason).encode()).hexdigest()[:16]
                    if reason else None)
@@ -1382,7 +1307,6 @@ def mark_failed(
                 failure_kind=kind, failure_fingerprint=fingerprint, summary=summary,
             ):
                 return False
-            # The transition above matched the fence, so this row is ours to stamp.
             con.execute(
                 "UPDATE tasks SET consecutive_failures=?,last_failure_error=? WHERE id=?",
                 (failures, error, task_id),
@@ -1609,7 +1533,7 @@ def request_review_changes(
                                      f"reviewer:{reviewer_row[0] if reviewer_row else 'unknown'}",
                                      f"[review] {feedback[:2000]}")
                 except OSError:
-                    pass                       # a stray index row without a file: the feedback column still has it
+                    pass
             _mirror_status(con, task_id)
         return cur.rowcount == 1
 
@@ -1779,32 +1703,17 @@ def claim_resume(
         ).fetchone()
         if row is None:
             return False
-        _invalidate_descendants(con, task_id)     # work built on the old answer goes back to todo
+        _invalidate_descendants(con, task_id)
         _start_run(con, task_id, int(row["generation"]), "worker", lock, pid, worker_identity)
-        # Publish the new generation under the card lock before its worker can run.
-        # Submission's Git tail holds that lock without a SQLite transaction, so an
-        # old generation can never commit bytes written by this continuation.
         from misaka.core.platform import cards
         workspace = get(con, task_id)["workspace"]
         cards.set_fields(workspace, task_id, generation=int(row["generation"]))
     return True
 
 
-# ── Consultations ──
-#
-# A message to a finished card is a consultation: her session answers it, and the card stays
-# what it was. It is a run of the card (``task_runs``, phase ``consult``), never its attempt:
-# the card's status and generation do not move, ``current_run_id`` stays the delivering run,
-# and ending it -- answered, stopped, crashed -- settles only the consultation. pi's durable
-# harness keeps a terminal task's receipt immutable and runs the questions put to a finished
-# subagent as new work of its conversation; CCB's runtime task state is apart from its task
-# list. A consultation used to be a new generation under a claim, so a window closed on it
-# stopped a delivered card and its workflow then stopped the cards built on her
-# (2026-10-25, R40). The sender waits on the consultation (B121), not on the card.
-
-CONSULT = "consult"                  # the task_runs phase of a consultation
+CONSULT = "consult"
 CONSULTABLE = ("done", "failed", "stopped")
-CONSULTATION_STALE_SECONDS = 300     # an unbound or silent one older than this is abandoned
+CONSULTATION_STALE_SECONDS = 300
 
 
 def _consulting(con, task_id):
@@ -1935,7 +1844,6 @@ def abandon_consultations(con, *, now=None):
         else:
             identity = str(run["process_identity"] or "")
             identity = identity.removeprefix(PROCESS_GROUP_IDENTITY)
-            # Without an identity a live pid may be a reused one: then only silence tells.
             gone = (not processes.identity_is_alive(int(run["pid"]), identity) if identity
                     else not psutil.pid_exists(int(run["pid"])) or silent)
         if gone and (row := end_consultation(con, run["id"], run["claim_lock"], "stopped",
@@ -1963,9 +1871,6 @@ def reopen_task(
         if invalidate_descendants:
             _invalidate_descendants(con, task_id)
         if target_status is None:
-            # Lenient on purpose: an unreadable card cannot reach the end of this call at all
-            # (``_mirror_status`` below rewrites its file and raises, rolling the row back), so
-            # the empty answer here is never the one that decides a reopened card's state.
             target_status = "todo" if parent_ids(con, task_id) else "ready"
         if target_status not in {"todo", "ready"}:
             raise ValueError("Only todo or ready tasks can be reset.")
@@ -2062,9 +1967,6 @@ def unblock_task(con, task_id) -> bool:
     row = get(con, task_id)
     if row is None or row["status"] not in {"blocked", "triage"}:
         return False
-    # Lenient for the same reason as ``reopen_task``: the ``_mirror_status`` below cannot write
-    # an unreadable card, so such a card's unblock raises and rolls back rather than resting on
-    # this answer. Holding it at ``todo`` instead would only be undone by ``promote_task``.
     target = "todo" if parent_ids(con, task_id) else "ready"
     with _write_txn(con):
         cur = con.execute(

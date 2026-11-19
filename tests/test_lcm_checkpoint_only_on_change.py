@@ -39,10 +39,10 @@ def harness(monkeypatch):
 
 
 def test_a_re_emitted_scaffold_behind_the_fence_is_no_checkpoint(harness):
-    fenced = untrusted("lcm:compaction:s1", SUMMARY)                       # what the last checkpoint holds
+    fenced = untrusted("lcm:compaction:s1", SUMMARY)
     native = [{"role": "user", "content": fenced, "timestamp": 1790000000000},
               {"role": "user", "content": "next question", "timestamp": 1790000000001}]
-    engine_output = [{"role": "user", "content": SUMMARY},                 # no source ordinal, no fence
+    engine_output = [{"role": "user", "content": SUMMARY},
                      {"role": "user", "content": "next question", ingest.SOURCE: 1}]
     assert context_engine.compact(harness(native, engine_output)) is None
 
@@ -66,7 +66,7 @@ def test_a_real_change_still_writes(harness):
     native = [{"role": "user", "content": "q", "timestamp": 1790000000000},
               {"role": "user", "content": "old", "timestamp": 1790000000001}]
     engine_output = [{"role": "user", "content": "q", ingest.SOURCE: 0},
-                     {"role": "user", "content": SUMMARY}]              # the second row was summarised away
+                     {"role": "user", "content": SUMMARY}]
     result = context_engine.compact(harness(native, engine_output))
     assert result is not None
     assert result.details["lcm"]["scaffolds"] == [1]

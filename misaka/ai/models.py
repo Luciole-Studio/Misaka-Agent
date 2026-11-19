@@ -103,7 +103,6 @@ from misaka.utils.values import (
 class ModelsPublication:
     # Provider-selected persisted catalog. Omit to leave storage unchanged; null deletes it.
     persist: ModelsStoreEntry | None = None
-    # MISAKA fork: whether `persist` was given; `persist=None` deletes only when it was.
     persist_is_set: bool = False
     # Optional synchronous update of provider-private in-memory catalog state.
     update: Callable[[], None] | None = None
@@ -150,8 +149,6 @@ class ModelsRequestTransforms(TypedDict, total=False):
     transformHeaders: Callable[[ProviderHeaders], ProviderHeaders | Awaitable[ProviderHeaders]]
 
 
-# MISAKA fork: the request options are open objects or mappings (`ApiStreamOptions<TApi> & ModelsRequestTransforms`
-# and its siblings are intersections of closed pydantic option classes).
 type ModelsApiStreamOptions = Any
 type ModelsSimpleStreamOptions = Any
 type ModelsDeferredFetchOptions = Any
@@ -165,8 +162,6 @@ _KNOWN_MODEL_TYPES: dict[ModelType, bool] = {"chat": True, "image": True, "class
 def _hasKnownModelType(model: AnyModel) -> bool:
     """Models from stores and remote sources may have types that only newer versions know."""
     modelType = getModelType(model)
-    # MISAKA fork: `Object.hasOwn` coerces any key to a string and never throws; a stored type
-    # that is not a string (a list, an object) is unknown here instead of unhashable.
     return isinstance(modelType, str) and modelType in _KNOWN_MODEL_TYPES
 
 
@@ -382,7 +377,6 @@ class CreateModelsOptions:
 
 
 def _mergeHeaders(base: ProviderHeaders | None, override: ProviderHeaders | None) -> ProviderHeaders | None:
-    # MISAKA fork: `!base && !override` is "both absent": an empty object is truthy in JavaScript, falsy in Python.
     if base is None and override is None:
         return None
     merged: ProviderHeaders = {**(base or {})}
@@ -501,7 +495,6 @@ class _ModelsImpl:
             if signal_aborted(signal) or self._refreshGenerations.get(providerId) != generation:
                 return False
 
-            # MISAKA fork: `persist === null` / `!== undefined` is `persist_is_set` (see ModelsPublication).
             if publication.persist_is_set and publication.persist is None:
                 await self._modelsStore.delete(providerId, ModelsStoreOperationOptions(signal=signal))
             elif publication.persist_is_set:
@@ -527,8 +520,6 @@ class _ModelsImpl:
 
         queued.add_done_callback(settle)
         self._publicationChains[providerId] = tail
-        # MISAKA fork: shielded, so a cancelled caller abandons the publication as an aborted one does, without
-        # cancelling it under the chain (a promise cannot be cancelled).
         return raceWithAbortSignal(asyncio.shield(queued), signal)
 
     async def _runProviderRefreshPhase(
@@ -549,7 +540,6 @@ class _ModelsImpl:
                 allowNetwork=allowNetwork,
                 force=force if allowNetwork else None,
                 signal=signal,
-                # MISAKA fork: `getattr`, since a provider's optional members may be absent (module docstring).
                 baseUrl=getattr(provider, "baseUrl", None),
             )
         )
@@ -601,8 +591,6 @@ class _ModelsImpl:
                 if self._refreshControllers.get(provider.id) is controller:
                     del self._refreshControllers[provider.id]
 
-        # MISAKA fork: each provider's refresh starts eagerly, running up to its first suspension as the JavaScript
-        # `map(async ...)` does, so its generation begins before refresh() yields.
         loop = asyncio.get_running_loop()
         refresh = asyncio.gather(
             *(asyncio.Task(refreshOne(provider), loop=loop, eager_start=True) for provider in refreshable)
@@ -803,7 +791,6 @@ class _ModelsImpl:
         *,
         credentialId: str | None = None,
     ) -> Credential:
-        # MISAKA fork: `credentialId` stores the credential under a named record of this store (per-account login).
         signal = operationSignal(read_field(interaction, "signal"))
         throwIfAborted(signal)
         provider = self._providers.get(providerId)
@@ -812,8 +799,6 @@ class _ModelsImpl:
         method = provider.auth.oauth if type == "oauth" else provider.auth.apiKey
         if not getattr(method, "login", None):
             raise ModelsError("auth", f"{provider.name} does not support {type} login")
-        # MISAKA fork: `{...interaction, signal}` copies the interaction's members; a login that takes the interaction
-        # only is called with that alone (a JavaScript function ignores an argument it does not declare).
         loginOperation = call_with_optional_second_arg(
             method.login, _withSignal(interaction, signal), options  # type: ignore[union-attr]
         )
@@ -887,7 +872,6 @@ class _ModelsImpl:
         return self._requireProvider(model)
 
     async def _applyAuth(self, model: Any, options: Any, into: type = ProviderStreamOptions) -> tuple[Any, Any]:
-        # MISAKA fork: `into` is the options class the operation's implementation reads.
         self._requireProvider(model)
         resolution = await self.getAuth(
             model,
@@ -1318,7 +1302,6 @@ def calculateCost(model: AnyModel, usage: Usage) -> UsageCost:
 
 _EXTENDED_THINKING_LEVELS: list[ModelThinkingLevel] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
-# MISAKA fork: `thinkingLevelMap?.[level]` is `undefined` for a missing key and `null` for a mapped-away level.
 _MISSING = object()
 
 

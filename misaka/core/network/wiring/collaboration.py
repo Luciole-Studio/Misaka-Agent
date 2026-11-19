@@ -47,7 +47,6 @@ def collaboration_sections(active):
     """Keep capability catalogs and parameter documentation in the tool definitions."""
     active = set(active)
     sections = []
-    # The board's own coordination tools, then those of the workflows that own cards.
     described = dict(SISTER_TOOLS)
     for owner in owners.registered():
         described.update(owner.tool_descriptions())
@@ -95,7 +94,6 @@ class CollaborationPart:
         self.session = session
 
     async def before_agent_start(self, event, _ctx):
-        # A section of the run's prompt, as pi's extensions add theirs (see SisterCapabilitiesPart).
         sections = event["systemPromptOptions"]["sections"]
         text = "\n\n".join(collaboration_sections(self.session.getActiveToolNames()))
         if text:

@@ -80,7 +80,6 @@ _POWERSHELL_TOOL_CONFIG = ShellToolConfig(
     promptGuidelines=tuple(
         powershellToolSystemPromptContribution["guidelines"]
     ),
-    # MISAKA fork: output files are named after misaka (upstream: `pi-powershell`).
     tempFilePrefix="misaka-powershell",
 )
 

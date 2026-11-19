@@ -95,7 +95,6 @@ async def test_a_follower_stops_waiting_on_a_stalled_leader():
     leader = asyncio.create_task(single_flight("k", fn))
     await _settle()
     assert await single_flight("k", fn, wait_timeout=0.01) == "r2"
-    # The leader is still registered, so later arrivals still coalesce onto it.
     assert [key for _loop, key in _inflight] == ["k"]
     gate.set()
     assert await leader == "r1"
@@ -196,7 +195,6 @@ def test_a_leader_on_another_loop_does_not_stall_this_one():
             return "mine"
 
         started = time.monotonic()
-        # A generous cap: before the slot was keyed by loop this call sat out all of it.
         result = asyncio.run(single_flight("cross", own, wait_timeout=10.0))
         elapsed = time.monotonic() - started
     finally:

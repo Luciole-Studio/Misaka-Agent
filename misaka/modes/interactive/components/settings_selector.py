@@ -75,7 +75,6 @@ THINKING_DESCRIPTIONS: dict[ThinkingLevel, str] = {
     "max": "Maximum reasoning",
 }
 
-# MISAKA fork: the codemode rows, one for each kind of agent (`settings_manager.ROLE_TYPES`): label and description.
 CODEMODE_ROWS: dict[str, tuple[str, str]] = {
     "lastOrder": ("Last Order", "Let Last Order's new sessions run scripts that call the other tools"),
     "sisters": ("Sisters", "Let new Sister sessions (windows and cards) run scripts that call the other tools"),
@@ -104,7 +103,7 @@ class SettingsConfig:
     autoResizeImages: bool
     blockImages: bool
     enableSkillCommands: bool
-    codemode: dict[str, bool]           # MISAKA fork: by kind of agent (`ROLE_TYPES`)
+    codemode: dict[str, bool]
     steeringMode: SteeringMode
     followUpMode: SteeringMode
     transport: Transport
@@ -143,14 +142,13 @@ class SettingsCallbacks:
     onAutoResizeImagesChange: Callable[[bool], None]
     onBlockImagesChange: Callable[[bool], None]
     onEnableSkillCommandsChange: Callable[[bool], None]
-    onCodemodeChange: Callable[[str, bool], None]  # MISAKA fork: (kind of agent, enabled)
+    onCodemodeChange: Callable[[str, bool], None]
     onSteeringModeChange: Callable[[SteeringMode], None]
     onFollowUpModeChange: Callable[[SteeringMode], None]
     onTransportChange: Callable[[Transport], None]
     onSessionShareDestinationChange: Callable[[SessionShareDestination], None]
     onHttpIdleTimeoutMsChange: Callable[[int], None]
     onCacheWarmingModeChange: Callable[[CacheWarmingMode], None]
-    # MISAKA fork: the global default thinking level row (see `thinking` below).
     onThinkingLevelChange: Callable[[ThinkingLevel], None]
     onModelThinkingLevelChange: Callable[[str, str, ThinkingLevel], None]
     onModelThinkingLevelRemove: Callable[[str, str], None]
@@ -250,7 +248,6 @@ def modelItemLabel(model: Model) -> str:
 
 
 def themeItems(availableThemes: list[str], currentTheme: str) -> list[SelectItem]:
-    # MISAKA fork (D11): no system theme, so no "Theme created from your terminal's colors" description.
     return [SelectItem(value=name, label=f"{'✓ ' if name == currentTheme else '  '}{name}") for name in availableThemes]
 
 
@@ -284,7 +281,6 @@ def defaultAutomaticThemes(currentThemeSetting: str, availableThemes: list[str])
         return {"lightTheme": autoTheme["lightTheme"], "darkTheme": autoTheme["darkTheme"]}
 
     currentFixedTheme = None if "/" in currentThemeSetting else currentThemeSetting
-    # MISAKA fork (D11): the fallback is the built-in theme matching the terminal, not the system theme.
     themeName = preferredTheme(availableThemes, currentFixedTheme, getTerminalTheme())
     return {"lightTheme": themeName, "darkTheme": themeName}
 
@@ -314,7 +310,6 @@ class ThemeSubmenu(Container):
         self.singleTheme = preferredTheme(
             availableThemes,
             fixedTheme if fixedTheme is not None else (self.getActiveAutomaticTheme() if autoTheme else None),
-            # MISAKA fork (D11): the built-in theme matching the terminal, not the system theme.
             getTerminalTheme(),
         )
 
@@ -729,7 +724,6 @@ class SettingsSelectorComponent(Container):
             ),
             SettingItem(
                 id="install-telemetry",
-                # MISAKA fork: MISAKA sends no install ping; the setting names the client "misaka" to these gateways.
                 label="Client attribution",
                 description='Name this client "misaka" to OpenRouter, NVIDIA and Cloudflare gateways; nothing else is sent',
                 currentValue="true" if config.enableInstallTelemetry else "false",
@@ -766,8 +760,6 @@ class SettingsSelectorComponent(Container):
             SettingItem(
                 id="thinking",
                 label="Thinking level",
-                # MISAKA fork: a global default thinking level row; in a Last Order or Sister window the default saved
-                # here is hers alone.
                 description="Default reasoning depth; in a Last Order or Sister window, hers alone",
                 currentValue=config.thinkingLevel,
                 submenu=thinkingSubmenu,
@@ -775,7 +767,6 @@ class SettingsSelectorComponent(Container):
             SettingItem(
                 id="model-thinking",
                 label="Default thinking level per model",
-                # MISAKA fork: an agent with her own default thinking level keeps it.
                 description=(
                     "Override the default thinking level for specific models (an agent with her own default keeps "
                     f"it). {cycleThinkingKey} cycles in-session."
@@ -851,14 +842,12 @@ class SettingsSelectorComponent(Container):
             SettingItem(
                 id="skill-commands",
                 label="Skill commands",
-                # MISAKA fork: skills register as /skill-name (no /skill: prefix), and /skill stays available.
                 description="Register automatic /skill-name commands (explicit /skill remains available)",
                 currentValue="true" if config.enableSkillCommands else "false",
                 values=["true", "false"],
             ),
         )
 
-        # MISAKA fork: a codemode toggle for each kind of agent (insert after skill-commands)
         codemodeIndex = indexOf("skill-commands")
         for roleType, (label, description) in CODEMODE_ROWS.items():
             codemodeIndex += 1
@@ -879,7 +868,6 @@ class SettingsSelectorComponent(Container):
             SettingItem(
                 id="show-hardware-cursor",
                 label="Show hardware cursor",
-                # MISAKA fork: MISAKA's drawn cursor (pi: "Pi's").
                 description="Use the terminal cursor instead of MISAKA's drawn cursor",
                 currentValue="true" if config.showHardwareCursor else "false",
                 values=["true", "false"],

@@ -66,8 +66,8 @@ class Transcript:
     def __init__(self, manager, ally):
         self.manager, self.ally = manager, ally
         self._text, self._thought = [], []
-        self._calls: dict[str, str] = {}      # tool call id -> name, for calls still open
-        self.produced = False                  # the turn in progress said or did anything
+        self._calls: dict[str, str] = {}
+        self.produced = False
         self.last_text = ""
 
     @property

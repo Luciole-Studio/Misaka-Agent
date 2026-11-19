@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/qwen-token-plan.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "qwen-token-plan.json").read_text(encoding="utf-8"))
 
 QWEN_TOKEN_PLAN_MODELS = flattenChatModelCatalog("qwen-token-plan", _values)

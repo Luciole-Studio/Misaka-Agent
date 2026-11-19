@@ -69,7 +69,7 @@ def test_missing_output_and_symlink_escape_fail_closed(tmp_path):
     workspace.mkdir()
     (workspace / "out").symlink_to(out, target_is_directory=True)
     task.update(workspace=str(workspace), output_dir=str(workspace / "out"))
-    assert worker.missing_deliverable(task) == "report.md"  # the output root itself escaped
+    assert worker.missing_deliverable(task) == "report.md"
 
 
 def test_research_generators_separate_filename_from_requirements(monkeypatch):
@@ -105,8 +105,6 @@ def test_a_described_deliverable_is_told_to_lead_with_a_filename_and_names_its_t
         planner._validate_task({**task, "deliverable": "notes/memo.md"}, ["10032"], 1)
 
 
-# R52 (2026-10-24): eleven plan cards named a report and its script in one line, all in the first
-# shape; the completion check then looked for one file called the whole line.
 SEVERAL_FILES = ["`credential-sim.md 与 credential-sim.py`", "credential-sim.md 与 credential-sim.py",
                  "`a.md 与 b.py`：要求", "a.md、b.py", "a.md与b.py", "a.md + b.py", "a.md and b.py"]
 ONE_FILE = ["`研究 报告.md`", "v1.2 计划.md", "archive.tar.gz", "report.final.md", "中国与日本.md",
@@ -221,13 +219,13 @@ async def test_managed_sister_native_registration_defaults_and_resume(local_mode
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     settings["defaultThinkingLevel"] = "high"
     settings_path.write_text(json.dumps(settings), encoding="utf-8")
-    card_flags(root, monkeypatch)  # isolate state/skill/identity paths, not session registration
+    card_flags(root, monkeypatch)
     row = {"id": "fixture", "model": override, "assignee": "10032", "generation": 1,
            "claim_lock": "fixture", "output_dir": str(root / "workspace")}
     cfg = {"profiles_root": str(home.path("profiles_root")), "provider": "fixture-global",
            "default_model": "global", "db": str(root / "fixture.db")}
     async with opened(root, "last_order", "foreground") as (_, parent):
-        assert parent.thinkingLevel == "off"  # the parent's model cannot reason
+        assert parent.thinkingLevel == "off"
         manager = sister_runtime._SisterManager(parent, cfg, row, str(root / "workspace"))
         task = await manager.create_task(
             definition=manager.resolve_definition(None, str(root / "workspace")), description="Fixture Sister",
@@ -246,7 +244,7 @@ async def test_managed_sister_native_registration_defaults_and_resume(local_mode
                 assert child.thinkingLevel == ("low" if override else "medium")
                 await prompt(child, "MANAGED_RESUME")
         finally:
-            task.status = "completed"  # no process was launched for this registered fixture
+            task.status = "completed"
             await manager.close()
     expected = ["low", "low"] if override else ["high", "medium"]
     assert [payload["output_config"]["effort"] for _, payload in requests] == expected

@@ -34,7 +34,6 @@ def test_normalizes_newlines_and_handles_crlf():
 
 def test_throws_on_invalid_yaml_frontmatter():
     input = "---\nfoo: [bar\n---\nBody"
-    # MISAKA fork: the YAML parser is ruamel's, whose messages are not the `yaml` package's ("at line 1, column 10").
     with pytest.raises(FrontmatterError):
         parseFrontmatter(input)
 

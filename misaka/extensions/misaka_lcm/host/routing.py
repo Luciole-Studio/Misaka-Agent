@@ -19,7 +19,6 @@ _HEALTH_LOCK = threading.Lock()
 
 
 def _auth_digest(auth):
-    # Headers and provider-scoped env can identify an account without an apiKey.
     identity = {field: auth.get(field) or None for field in ('apiKey', 'headers', 'env')}
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
@@ -31,8 +30,6 @@ def update_auth(auth, base_url):
 
 @contextmanager
 def scope(registry, main_runtime, provider, base_url, auth):
-    # Role/provider credentials may differ in one process. Health is never shared
-    # across auth owners, and secrets never appear in a log or route receipt.
     key = _auth_digest(auth)
     state = SimpleNamespace(registry=registry, main=main_runtime, provider=provider,
                             base_url=base_url, health=key, unavailable=set())
@@ -79,8 +76,6 @@ def _custom_health_base_url(provider, explicit_base_url=None):
 
 def _health_cache(kind):
     state = _STATE.get()
-    # Registry lifetime owns the cache. Object id reuse must not inherit a dead
-    # owner's cooldown; rotating credentials gets a separate original cache.
     caches = vars(state.registry).setdefault('_lcm_aux_health', {})
     return caches.setdefault(state.health, {}).setdefault(kind, {})
 
@@ -104,7 +99,6 @@ def _log_skip_unhealthy(label, task=None, *, base_url=None):
 
 
 def _recoverable_pool_provider(provider, client, *, main_runtime=None):
-    # Pool policy uses native named accounts; Hermes' auth store is never opened.
     return read_field(read_field(client, 'model'), 'provider', provider)
 
 
@@ -160,7 +154,6 @@ def _resolve_fallback_entry(entry):
 def _get_provider_chain():
     registry = _STATE.get().registry
     names = list(dict.fromkeys(model.provider for model in registry.getAll()))
-    # Same discovery tiers as Hermes; Codex OAuth is explicit/main-only.
     from misaka.ai.compat import getProviders
     builtin = set(getProviders())
     names.sort(key=lambda name: 0 if name == 'openrouter' else 1 if name == 'nous' else 2 if name not in builtin else 3)

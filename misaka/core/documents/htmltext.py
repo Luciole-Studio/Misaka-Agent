@@ -17,17 +17,9 @@ from html.parser import HTMLParser
 
 import httpx
 
-# A link target longer than this is not a link a model will usefully follow, and the href is
-# attacker-chosen text; the anchor still renders, without the URL.
 MAX_LINK_CHARS = 500
 
-# A <title> is document-written text that callers repeat as metadata: into a tool result, into
-# a corpus meta.json, and from there into whatever ledger row is built from it. Bounded so one
-# document cannot decide how much of a turn -- or of a database column -- it occupies; a 2 MiB
-# <title> is as easy to serve as a 2 MiB body.
 MAX_TITLE_CHARS = 200
-# An image's alt text as a marker carries it: enough to say what the picture is, clipped like
-# the alt text the Word reader writes (office/docx.py).
 MAX_ALT_CHARS = 120
 
 _BLANK_RUN = re.compile(r"\n{3,}")
@@ -57,14 +49,8 @@ class Readable(HTMLParser):
 
     def __init__(self, base_url: str = "", images: list | None = None) -> None:
         super().__init__(convert_charrefs=True)
-        # Given a list, an <img> is written where it stands as ``![alt]`` (``![image N]`` with no
-        # alt) and its src added to the list in the same order, so a reader can be shown the
-        # picture behind each marker. The corpus asks this for an EPUB; a web page is not asked,
-        # because its icons and trackers would bury the text.
         self._images = images
         try:
-            # No base -- a file on disk, an EPUB chapter -- means no absolute target exists,
-            # so links render as the words they show rather than as a URL nobody can follow.
             self._base: httpx.URL | None = httpx.URL(base_url) if base_url else None
         except httpx.InvalidURL:
             self._base = None
@@ -77,8 +63,6 @@ class Readable(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "image" and self._hidden and self._images is not None:
-            # An EPUB's cover or plate is often <svg><image xlink:href=...>: the svg is a drawing
-            # and stays hidden, the picture it frames does not (0.18.9 sweep).
             found = dict(attrs)
             self._picture(found.get("xlink:href") or found.get("href"), "", framed=True)
             return
@@ -90,7 +74,7 @@ class Readable(HTMLParser):
         if tag == "base" and not self._seen_base:
             href = next((value for name, value in attrs if name == "href"), None)
             if href is not None:
-                self._seen_base = True  # Only the first base with an href takes effect.
+                self._seen_base = True
                 if self._base is not None:
                     try:
                         target = self._base.join(href.strip())
@@ -101,12 +85,6 @@ class Readable(HTMLParser):
         elif tag == "title":
             self._in_title = True
         elif tag == "a":
-            # Only the outermost anchor is tracked. Nested <a> is invalid HTML and a
-            # browser closes the outer one anyway, but the real reason is cost: one
-            # frame per level makes _close_anchor re-flatten the same, ever-longer text
-            # once per level, and each level also re-appends the resolved URL. 40k
-            # nested anchors -- 460 KB, well under the fetch cap -- took 8.5s of blocked
-            # event loop and rendered 1 MB of text out of them.
             if not self._anchors:
                 href = next((value for name, value in attrs if name == "href"), None)
                 self._anchors.append(_Anchor(len(self._parts), href or ""))
@@ -149,8 +127,6 @@ class Readable(HTMLParser):
             self._title.append(data)
             return
         if not data.strip():
-            # Whitespace between two inline elements is a word boundary: dropping it
-            # outright glues "<b>foo</b> <i>bar</i>" into one word.
             if self._parts and not self._parts[-1].endswith((" ", "\n")):
                 self._parts.append(" ")
             return

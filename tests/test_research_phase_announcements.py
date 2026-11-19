@@ -62,7 +62,7 @@ async def test_the_root_window_hides_the_root_nodes_announcements_and_keeps_the_
     result = await part.context({"messages": [USER, own, other, no_issues]}, ctx)
     kept = result["messages"]
     assert own not in kept and other in kept and no_issues in kept and USER in kept
-    runs.set_state(board, run["id"], status="done")             # a finished run announces nothing
+    runs.set_state(board, run["id"], status="done")
     result = await part.context({"messages": [USER, own]}, ctx)
     assert result is None or own in result["messages"]
 
@@ -81,17 +81,17 @@ def card_done():
 async def test_a_node_window_leaves_ticks_out_as_the_root_window_does():
     """Three in four of a node window's research notes were status ticks, all in its model's requests."""
     part = node.NodePart("r", "b_1", "key")
-    roster = note("b_1", announces=False, stage="roster_changed")       # news for Last Order, not a tick
+    roster = note("b_1", announces=False, stage="roster_changed")
     result = await part.context({"messages": [USER, tick(), tick("assigned"), roster, card_done()]}, None)
-    assert result["messages"] == [USER, roster, card_done()]           # its routine is not running: card news stays
+    assert result["messages"] == [USER, roster, card_done()]
 
 
 async def test_a_finished_card_is_noise_only_while_the_nodes_routine_runs():
     import asyncio
 
     part = node.NodePart("r", "b_1", "key")
-    part.routine = asyncio.get_running_loop().create_future()          # running
+    part.routine = asyncio.get_running_loop().create_future()
     result = await part.context({"messages": [USER, card_done()]}, None)
     assert result["messages"] == [USER]
-    part.routine.set_result(None)                                      # done: the notice is news again
+    part.routine.set_result(None)
     assert await part.context({"messages": [USER, card_done()]}, None) is None

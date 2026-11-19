@@ -67,8 +67,6 @@ def acceptWebSockets(server: WebSocketServerLike, host: Host, options: WebSocket
                 if isRejection(error):
                     return
                 raise
-            # MISAKA fork: upstream refuses `undefined` and accepts a `null` principal; a Python function returns None
-            # for "no value", so None (or UNDEFINED) refuses the client and a client's principal is never None.
             if principal is None or principal is UNDEFINED:
                 link.close("unauthorized")
             else:

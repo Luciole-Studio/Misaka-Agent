@@ -205,8 +205,6 @@ async def test_captures_model_identity_before_awaiting_summarization_auth(monkey
             return fauxAssistantMessage("summary")
 
         harness.setResponses([summarize])
-        # MISAKA fork: the compaction source guard rejects a compaction whose model changed while it ran, where
-        # pi publishes it; the summary request has already gone out with the identity captured before auth.
         with pytest.raises(RuntimeError, match="changed during compaction"):
             await harness.session.compact()
         assert requests == [{"id": "first", "maxTokens": 1600}]

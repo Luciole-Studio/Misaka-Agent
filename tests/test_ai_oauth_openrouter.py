@@ -273,7 +273,6 @@ async def test_rejects_before_opening_a_callback_server_when_login_is_already_ca
 
 
 async def test_uses_the_configured_oauth_callback_host(monkeypatch):
-    # MISAKA fork: the variable is MISAKA_OAUTH_CALLBACK_HOST.
     monkeypatch.setenv("MISAKA_OAUTH_CALLBACK_HOST", "localhost")
     controller = AbortController()
     sink: dict[str, Any] = {}

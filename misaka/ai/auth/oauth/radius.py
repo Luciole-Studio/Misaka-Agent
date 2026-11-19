@@ -299,7 +299,6 @@ def createRadiusOAuth(options: RadiusOAuthOptions) -> OAuthAuth:
     gateway = normalizeRadiusGatewayUrl(options.gateway)
 
     async def login(interaction: ProviderAuthInteraction, _options: LoginOptions | None = None) -> OAuthCredential:
-        # MISAKA fork: `_options` is accepted because every login is called with it.
         loginMethod = await interaction.prompt(
             SelectPrompt(
                 type="select",

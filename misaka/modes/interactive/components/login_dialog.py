@@ -43,11 +43,8 @@ class LoginDialogComponent(Container):
         # The shown sign-in URL, which `app.message.copy` copies.
         self.authUrl: AuthUrlComponent | None = None
         self.abortController = AbortController()
-        # MISAKA fork: the Promise resolver/rejecter pair is one asyncio Future, and `_cancelled` remembers a cancel
-        # that lands before the next prompt exists (see `_set_future`).
         self._inputFuture: asyncio.Future[str] | None = None
         self._cancelled = False
-        # MISAKA fork: holds the running `void this.authUrl.copy()` (asyncio holds tasks weakly).
         self._tasks: set[asyncio.Task[Any]] = set()
 
         # Focusable implementation - propagate to input for IME cursor positioning

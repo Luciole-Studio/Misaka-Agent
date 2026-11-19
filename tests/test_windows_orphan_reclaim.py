@@ -10,7 +10,7 @@ from misaka.core.platform import processes
 
 
 def test_a_gone_or_reused_pid_is_absent_and_a_live_one_is_ended():
-    reclaim = processes._terminate_recorded_tree        # what terminate_orphaned_group runs off POSIX
+    reclaim = processes._terminate_recorded_tree
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         recorded = processes.identity(child.pid)

@@ -20,8 +20,6 @@ PAGE = "第一頁的正文足夠長，足以算作這一頁確實讀到了文字
 
 REPO = Path(__file__).resolve().parent.parent
 
-# A second process, because cards settle in processes of their own: a lock that only held inside
-# one process would pass the threaded tests and read the book twice in a real run.
 CARD = f"""
 import glob, os, sys, time
 from misaka.core.documents import index as corpus
@@ -117,7 +115,7 @@ def test_different_content_does_not_wait_for_each_other(tmp_path, monkeypatch):
     both_reading = threading.Barrier(2, timeout=10)
 
     def read(_path, meta=None):
-        both_reading.wait()              # breaks, and fails the ingest, if one waits for the other
+        both_reading.wait()
         return [PAGE]
 
     monkeypatch.setattr(corpus, "extract_pages", read)

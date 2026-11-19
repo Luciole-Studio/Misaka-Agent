@@ -17,11 +17,11 @@ def write_web(values: dict, profile: str | Path | None = None) -> None:
     """
     from misaka.core.web.config import is_credential_var
 
-    values = json.loads(json.dumps(values))          # the caller's literal, untouched
+    values = json.loads(json.dumps(values))
     env = values.get("env") if isinstance(values.get("env"), dict) else {}
     secrets = {name: value for name, value in env.items() if is_credential_var(name)}
     target = env_file.path(profile)
-    target.unlink(missing_ok=True)                    # the layer held these before; not any more
+    target.unlink(missing_ok=True)
     if secrets:
         env_file.write(secrets, profile)
     rest = {name: value for name, value in env.items() if not is_credential_var(name)}

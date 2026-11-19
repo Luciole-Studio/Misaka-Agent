@@ -83,9 +83,6 @@ class _DefaultResourceLoaderOptionsRequired(TypedDict):
     agentDir: str
 
 
-# MISAKA fork: upstream's `collectExtensionPackageWarnings` flags npm extension packages that bundle a host package
-# as a dependency instead of a peer dependency, which loads a second copy of it; a Python package cannot carry its own
-# copy of an imported package, so there is nothing to warn about and only extension warnings are merged here.
 def mergeExtensionWarnings(result: LoadExtensionsResult, warnings: list[dict[str, str]]) -> None:
     # Deduplicated by path: the first position of a path, its last warning (a JS Map).
     result.warnings = list({warning["path"]: warning for warning in [*(result.warnings or []), *warnings]}.values())
@@ -457,8 +454,6 @@ class DefaultResourceLoader:
             self.lastThemePaths = self.mergePaths(self.lastThemePaths, [entry["path"] for entry in themePaths])
             self.updateThemesFromPaths(self.lastThemePaths, self.resourceMetadataByPath)
 
-        # MISAKA fork: skills are misaka's own layer system (core/skills), not this loader's;
-        # the roots an extension contributes are kept here for that system to read.
         skillPaths = self.normalizeExtensionPaths(paths.get("skillPaths", []))
         if skillPaths:
             for entry in skillPaths:
@@ -980,7 +975,6 @@ class DefaultResourceLoader:
         themes: list[Theme] = []
         diagnostics: list[ResourceDiagnostic] = []
         if includeDefaults:
-            # MISAKA fork: a project's config directory comes from `home.project_dir` (none when the cwd is the home).
             projectDir = home.project_dir(self.cwd)
             defaultDirs = [os.path.join(self.agentDir, "themes"), *([os.path.join(projectDir, "themes")] if projectDir else [])]
 
@@ -1182,6 +1176,4 @@ class DefaultResourceLoader:
         return conflicts
 
 
-# MISAKA fork: named, because the skills guard refuses writes to them (issue #10 audit H4).
-# The files a session in a folder loads as instructions, from that folder and every one above it.
 CONTEXT_FILE_NAMES = ("PROJECT.md", "AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD")  # pi 8ecf8a9 + the project brief

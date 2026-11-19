@@ -216,7 +216,6 @@ async def _pollForTokens(device: _XaiDeviceCode, signal: Any) -> OAuthCredential
 
 
 async def _loginXai(interaction: ProviderAuthInteraction, options: LoginOptions | None = None) -> OAuthCredential:
-    # MISAKA fork: `options` is accepted because every login is called with it.
     device = await _requestDeviceCode(interaction.signal)
     interaction.notify(
         DeviceCodeEvent(

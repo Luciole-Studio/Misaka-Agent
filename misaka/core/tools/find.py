@@ -114,7 +114,6 @@ def _details(details: FindToolDetails) -> FindToolDetails | None:
 
 
 def _out_of_reach(path: str, searchPath: str) -> bool:
-    # MISAKA fork: a search over the home passes its credential stores and skills hub caches by.
     from misaka.core.web.evidence import is_credential_store, is_skills_hub_cache
     full = os.path.join(searchPath, path)
     return is_credential_store(full) or is_skills_hub_cache(full)
@@ -148,7 +147,6 @@ def createFindToolDefinition(
         pattern, searchDir, limit = parsed.pattern, parsed.path, parsed.limit
 
         searchPath = resolveToCwd(searchDir or ".", read_field(ctx, "cwd") or cwd)
-        # MISAKA fork: MISAKA's credentials and the web evidence vault are out of the tools' reach.
         from misaka.core.web.evidence import check_material_read
         check_material_read(searchPath)
         effectiveLimit = limit if limit is not None else DEFAULT_LIMIT
@@ -194,7 +192,6 @@ def createFindToolDefinition(
             if signal_aborted(signal):
                 raise RuntimeError("Operation aborted")
             if not fdPath:
-                # MISAKA fork: never downloaded, so the error says how to install it.
                 raise RuntimeError(missingToolMessage("fd"))
 
             args: list[str] = ["--glob", "--color=never", "--hidden"]

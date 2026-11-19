@@ -32,7 +32,7 @@ async def test_a_driver_reads_the_cap_as_its_cards_do(board, monkeypatch, tmp_pa
     (tmp_path / "profiles" / "10032").mkdir(parents=True)
     monkeypatch.setattr(dispatch, "_profile_dir", lambda cfg, who: str(tmp_path / "profiles" / who))
     monkeypatch.setattr(workflow, "_roster_check", lambda *a, **k: asyncio.sleep(0))
-    monkeypatch.setattr(budget, "default_cap", lambda: 1_000)          # settings.json, as edited
+    monkeypatch.setattr(budget, "default_cap", lambda: 1_000)
     budget.settle_request(con, None, board.run, 1, 1_000)
     card_cfg = {"token_cap": 1_000, "db": board.path, "provider": "anthropic", "default_model": "x",
                 "profiles_root": str(tmp_path / "profiles"), "roles_root": str(tmp_path / "roles")}
@@ -59,7 +59,7 @@ def test_a_wait_for_the_user_ends_as_a_cap_halt_once_the_cap_is_spent(board, mon
     until someone stopped the run by hand."""
     run = runs.get(board.con, board.run)
     monkeypatch.setattr(budget, "default_cap", lambda: 1_000)
-    workflow._halt_at_cap(board.con, run)                          # nothing spent yet
+    workflow._halt_at_cap(board.con, run)
     budget.settle_request(board.con, None, board.run, 1, 1_000)
     with pytest.raises(RuntimeError, match="token_cap reached"):
         workflow._halt_at_cap(board.con, run)

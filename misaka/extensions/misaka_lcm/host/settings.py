@@ -48,17 +48,12 @@ def apply(config, saved=None):
 
 
 def refresh(built, ctx):
-    # Load preferences at the existing serialized operation boundary. Do not
-    # restart the engine, replay messages, or touch its cursor/DAG to flip a flag.
     from .config_bridge import load_config
     current = load_config(ctx=ctx)
     for name, spec in _FIELDS.items():
         setattr(built._config, name, getattr(current, name))
         built._config.config_sources[name] = (
             "env" if spec.env_key in os.environ else current.config_sources.get(name, "default"))
-    # The compaction threshold can change while the session runs: a research run started in this
-    # window brings its own (``misaka.core.session_overrides``) and takes it away when it leaves.
-    # Upstream derives the trigger from it only when the model changes, so recompute it here.
     threshold = (current.context_threshold, current.config_sources.get("context_threshold"))
     if threshold != (built._config.context_threshold, built._config.config_sources.get("context_threshold")):
         built._config.context_threshold, built._config.config_sources["context_threshold"] = threshold
@@ -95,7 +90,7 @@ def configure(enabled: bool):
         if config.proactive_recall_enabled != enabled or (enabled and not config.embeddings_enabled):
             raise ValueError("LCM_* environment overrides conflict with this change; adjust them first")
         if enabled:
-            check(config)  # A failed check leaves the saved preference untouched.
+            check(config)
         execution.check_cancelled()
         write_text(target, json.dumps(proposed, indent=2) + "\n", mode=0o600)
     return config

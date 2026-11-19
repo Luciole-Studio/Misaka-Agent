@@ -33,16 +33,10 @@ from misaka.utils.values import read_field
 
 logger = logging.getLogger(__name__)
 
-# `builtin:vision`, like every bundled extension: hidden from the startup list, and disabled with
-# `-builtin:vision` in the `extensions` setting.
 BUILTIN = True
-# Every session, a tool-less one included: an image the user pastes there is read the same way.
 SESSION_KINDS = KINDS
 
-# Bumped when the question changes, so a reading made under another one is not reused.
-# 2: readings kept before 0.18.10 may be empty or cut short, with nothing to tell them by.
 READING_VERSION = 2
-# Images read at once, as FrontierAgent's batch reader does (READDOC_VISION_CONCURRENCY).
 CONCURRENCY = 4
 CONTEXT_CHARS = 800
 _kept: dict[str, str] = {}
@@ -71,7 +65,7 @@ def _cached(key: str) -> str | None:
     except OSError:
         return None
     if not text.strip():
-        return None                         # no reading: the image is read again
+        return None
     _kept[key] = text
     return text
 
@@ -103,7 +97,7 @@ async def read_images(event: dict, ctx: Any) -> dict | None:
         return None
     selected, knob = selected_model()
     if not selected:
-        return None                         # Pi's placeholder stands, and the tool notes say how to set one
+        return None
     found = []
     for message in event["messages"]:
         content = read_field(message, "content")
@@ -113,7 +107,6 @@ async def read_images(event: dict, ctx: Any) -> dict | None:
         return None
     gate = asyncio.Semaphore(CONCURRENCY)
     omitted = _omitted_note()
-    # One reading per distinct image: the same page or screenshot twice in a request is read once.
     first = {}
     for message, index in found:
         block = read_field(message, "content")[index]
@@ -134,8 +127,6 @@ async def read_images(event: dict, ctx: Any) -> dict | None:
                     logger.warning("vision: %s could not read an image: %s", selected, error)
                     return (f"[An image that {selected} ({knob}) could not read for this model, which "
                             f"cannot see images: {error}]")
-            # A reading cut short is shown, never kept: the next turn reads the image again (a
-            # reasoning model that spent its output thinking used to leave such a reading for good).
             if not text.endswith(vision.CUT_OFF):
                 await asyncio.to_thread(_keep, key, text)
         return (f"[An image, read to this model by {selected} ({knob}) because "

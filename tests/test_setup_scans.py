@@ -69,7 +69,7 @@ def run_scans():
 def test_the_choices_go_to_settings_json_and_are_read_back(machine, monkeypatch):
     present, _ran = machine
     present[mineru.BINARY] = "/opt/bin/mineru-kit"
-    answers(monkeypatch, choices=[1, 2])        # mineru, basic
+    answers(monkeypatch, choices=[1, 2])
 
     run_scans()
 
@@ -163,7 +163,7 @@ def test_an_install_off_path_is_what_the_summary_says(machine, monkeypatch):
 
 def test_the_models_are_offered_right_after_the_install_for_the_tier_chosen(machine, monkeypatch):
     _present, ran = machine
-    answers(monkeypatch, choices=[0, 2], yes_no=[True, True])     # install; basic; fetch
+    answers(monkeypatch, choices=[0, 2], yes_no=[True, True])
 
     run_scans()
 

@@ -38,11 +38,8 @@ from ctypes import (
     sizeof,
 )
 
-SCROLLBACK_BYTES = 10_000_000       # ghostty's default scrollback-limit
-CELL_SIZE_PX = (8, 16)              # what CSI 14/16 t reports; the panel draws no pixels
-
-# ── C types (include/ghostty/vt/*.h) ──────────────────────────────────────────────────────
-
+SCROLLBACK_BYTES = 10_000_000
+CELL_SIZE_PX = (8, 16)
 
 class TerminalOptions(Structure):
     _fields_ = [("cols", c_uint16), ("rows", c_uint16), ("max_scrollback", c_size_t)]
@@ -139,12 +136,11 @@ WritePtyFn = CFUNCTYPE(None, c_void_p, c_void_p, POINTER(c_uint8), c_size_t)
 SizeFn = CFUNCTYPE(c_bool, c_void_p, c_void_p, POINTER(SizeReport))
 ClipboardWriteFn = CFUNCTYPE(c_int, c_void_p, c_void_p, POINTER(ClipboardWrite))
 
-# Enum values (the headers define them as plain C enums).
 OPT_USERDATA, OPT_WRITE_PTY, OPT_SIZE, OPT_COLOR_FOREGROUND, OPT_COLOR_BACKGROUND = 0, 1, 6, 11, 12
 OPT_CLIPBOARD_WRITE = 26
 CLIPBOARD_LOCATION_STANDARD = 0
 CLIPBOARD_WRITE_SUCCESS, CLIPBOARD_WRITE_UNSUPPORTED, CLIPBOARD_WRITE_INVALID_DATA = 0, 2, 4
-MAX_CLIPBOARD_BYTES = 192 * 1024      # herdr ghostty/mod.rs
+MAX_CLIPBOARD_BYTES = 192 * 1024
 DATA_TITLE = 12
 DATA_CURSOR_X, DATA_CURSOR_Y, DATA_ACTIVE_SCREEN, DATA_CURSOR_VISIBLE = 3, 4, 6, 7
 DATA_KITTY_KEYBOARD_FLAGS, DATA_SCROLLBAR = 8, 9
@@ -152,13 +148,11 @@ DATA_TOTAL_ROWS, DATA_VIEWPORT_ACTIVE, DATA_MODIFY_OTHER_KEYS = 14, 32, 33
 RS_COLS, RS_ROWS, RS_DIRTY, RS_ROW_ITERATOR = 1, 2, 3, 4
 RS_CURSOR_VISIBLE, RS_CURSOR_HAS_VALUE, RS_CURSOR_X, RS_CURSOR_Y = 11, 14, 15, 16
 RS_CURSOR_VISUAL_STYLE, RS_CURSOR_BLINKING = 10, 12
-# render.h GhosttyRenderStateCursorVisualStyle
 CURSOR_STYLE_BAR, CURSOR_STYLE_BLOCK, CURSOR_STYLE_UNDERLINE, CURSOR_STYLE_BLOCK_HOLLOW = 0, 1, 2, 3
 RS_OPTION_DIRTY, ROW_OPTION_DIRTY = 0, 0
 ROW_DIRTY, ROW_CELLS = 1, 3
 CELLS_RAW, CELLS_STYLE, CELLS_HAS_STYLING, CELLS_UTF8 = 1, 2, 8, 9
 CELL_CONTENT_TAG, CELL_WIDE, CELL_COLOR_PALETTE, CELL_COLOR_RGB = 2, 3, 10, 11
-# screen.h GhosttyCellContentTag: a cell with no text can still carry a background colour
 CONTENT_BG_COLOR_PALETTE, CONTENT_BG_COLOR_RGB = 2, 3
 WIDE_NARROW, WIDE_WIDE, WIDE_SPACER_TAIL, WIDE_SPACER_HEAD = 0, 1, 2, 3
 SCROLL_TOP, SCROLL_BOTTOM, SCROLL_DELTA, SCROLL_ROW = 0, 1, 2, 3
@@ -178,7 +172,6 @@ def mode(number, ansi=False):
 MODE_DECCKM, MODE_ALT_SCREEN, MODE_ALT_SCREEN_SAVE, MODE_BRACKETED_PASTE = mode(1), mode(1047), mode(1049), mode(2004)
 MODE_FOCUS_EVENT, MODE_ALT_SCROLL, MODE_SYNC_OUTPUT = mode(1004), mode(1007), mode(2026)
 MODE_UTF8_MOUSE, MODE_SGR_MOUSE, MODE_SGR_PIXELS_MOUSE = mode(1005), mode(1006), mode(1016)
-# The most demanding tracking mode wins, as in herdr's InputState (pane/terminal.rs).
 MOUSE_MODES = ((mode(1003), "any_motion"), (mode(1002), "button_motion"), (mode(1000), "press_release"), (mode(9), "x10"))
 
 _LIB = None
@@ -213,9 +206,6 @@ def library_path():
     system, suffix = {"darwin": ("darwin", ".dylib"), "win32": ("windows", ".dll")}.get(sys.platform, ("linux", ".so"))
     machine = platform.machine().lower()
     if sys.platform == "win32":
-        # The interpreter's architecture, not the CPU's: platform.machine() asks WMI for the CPU
-        # (3.12+), and an x64 Python emulated on ARM64 Windows (Parallels on a Mac) can load only
-        # an x64 library. win-amd64 / win-arm64.
         machine = sysconfig.get_platform().rpartition("-")[2]
     arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x86_64", "amd64": "x86_64"}.get(machine, machine)
     specific = os.path.join(folder, f"libghostty-vt-{system}-{arch}{suffix}")
@@ -336,7 +326,7 @@ class Terminal:
                "terminal_new")
         self.cols, self.rows = cols, rows
         self.on_write_pty = on_write_pty
-        self._write_pty = WritePtyFn(self._pty_output)      # kept alive with the terminal
+        self._write_pty = WritePtyFn(self._pty_output)
         self._size = SizeFn(self._size_report)
         self.on_clipboard_write = on_clipboard_write
         self._clipboard_write = ClipboardWriteFn(self._clipboard)
@@ -401,8 +391,6 @@ class Terminal:
         out[0].cell_width, out[0].cell_height = CELL_SIZE_PX
         return True
 
-    # ── input ─────────────────────────────────────────────────────────────────────────────
-
     def write(self, data):
         self._lib.ghostty_terminal_vt_write(self.raw, data, len(data))
 
@@ -422,8 +410,6 @@ class Terminal:
         fg, bg = Rgb(*foreground), Rgb(*background)
         _check(self._lib.ghostty_terminal_set(self.raw, OPT_COLOR_FOREGROUND, byref(fg)), "set foreground")
         _check(self._lib.ghostty_terminal_set(self.raw, OPT_COLOR_BACKGROUND, byref(bg)), "set background")
-
-    # ── state ─────────────────────────────────────────────────────────────────────────────
 
     def _get(self, kind, ctype):
         out = ctype()
@@ -474,8 +460,6 @@ class Terminal:
     def total_rows(self):
         return self._get(DATA_TOTAL_ROWS, c_size_t).value
 
-    # ── viewport ──────────────────────────────────────────────────────────────────────────
-
     def _scroll(self, tag, **value):
         behaviour = ScrollViewport()
         behaviour.tag = tag
@@ -486,8 +470,6 @@ class Terminal:
     def scroll(self, delta):
         """Move the viewport by rows: negative goes back into history (herdr ``scroll_up``)."""
         self._scroll(SCROLL_DELTA, delta=delta)
-
-    # ── scrollback compression (terminal.h "Scrollback Compression"; herdr ghostty/mod.rs) ──
 
     def compression_activity(self):
         """The opaque activity token: only equality means anything."""
@@ -517,8 +499,6 @@ class Terminal:
             self.scroll_to_bottom()
         else:
             self._scroll(SCROLL_ROW, row=max_offset - offset_from_bottom)
-
-    # ── text ──────────────────────────────────────────────────────────────────────────────
 
     def _grid_ref(self, x, y):
         point = Point()
@@ -657,8 +637,6 @@ class RenderState:
                         cell_style = _style_tuple(style)
                     else:
                         cell_style = PLAIN
-                    # herdr ghostty_cell_style: the cell's own background first, then the style's.
-                    # Only a cell without text can hold one, so a text cell skips the lookup.
                     if not utf8.len and (background := _content_bg(lib, raw.value)) is not None:
                         cell_style = (cell_style[0], background, *cell_style[2:])
                     out.append((text, 2 if wide.value == WIDE_WIDE else 1, cell_style))

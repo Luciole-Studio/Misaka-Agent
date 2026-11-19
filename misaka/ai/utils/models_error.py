@@ -20,7 +20,6 @@ class ModelsError(Exception):
     def __init__(self, code: ModelsErrorCode, message: str, options: _ModelsErrorOptions | None = None) -> None:
         cause = None if options is None else options.get("cause")
         super().__init__(_withCauseDetail(message, cause))
-        # MISAKA fork: `Error`'s `cause` option is `__cause__`, which takes only an exception.
         if isinstance(cause, BaseException):
             self.__cause__ = cause
         self.name = "ModelsError"

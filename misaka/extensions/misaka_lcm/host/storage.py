@@ -31,10 +31,8 @@ _IDENTITY: dict[Path, tuple | None] = {}
 _PRIVATE: dict[Path, bool] = {}
 _FIRST_OWNER: set[Path] = set()
 _MARKER = ".misaka-lcm-cache"
-_STAMP = "misaka-lcm 3\n"             # 2: images stay in the session file (`images`); 3: rows say who spoke (`ingest.archive_role`)
+_STAMP = "misaka-lcm 3\n"
 _OUTDATED = ("misaka-lcm\n", "misaka-lcm 2\n")
-# A subagent's copy of this plugin joins the project store of the session that started it: the
-# parent sets this for the child on ``subagent_start`` (see ``extension.register``).
 PROJECT_ENV = "MISAKA_LCM_PROJECT"
 
 
@@ -64,8 +62,6 @@ class ProjectContext:
 
 
 def context(ctx, workspace, source=None):
-    # A resumed worktree/child retains its original project, even if its old
-    # execution directory was temporary. The marker is native session metadata.
     manager = read_field(ctx, "sessionManager")
     entries = read_field(manager, "getEntries")
     if callable(entries):
@@ -94,7 +90,7 @@ def _private(folder: Path) -> bool:
             try:
                 probe = Path(tempfile.mkdtemp(prefix=".misaka-lcm-probe-", dir=folder))
             except OSError:
-                return True  # the store's own checks say what is wrong with this folder
+                return True
             try:
                 _PRIVATE[folder] = not probe.stat().st_mode & 0o022
             finally:
@@ -202,10 +198,10 @@ def acquire(workspace: Path) -> None:
                 try:
                     lease.acquire_write(timeout=0)
                 except Timeout:
-                    pass  # Another live process owns this project's cache.
+                    pass
                 else:
                     if _outdated(root):
-                        _discard(root)   # the session files rebuild it, and nobody else holds it
+                        _discard(root)
                     lease.release()
                     _FIRST_OWNER.add(workspace)
                 _prepare(root)
@@ -265,7 +261,7 @@ def clear(workspace: Path) -> bool:
     """Remove the project's cache. False, with nothing removed, while a process is using it."""
     workspace = workspace.resolve()
     if not directory(workspace).exists():
-        return True  # and no project layout is created to say so
+        return True
     root, gate, lock_path = _paths(workspace)
     lease = ReadWriteLock(lock_path, is_singleton=False)
     try:

@@ -26,7 +26,6 @@ from misaka.core.platform.vocabulary import DRIVER_OWNED_TOOLS
 from misaka.core.wiring import ToolCollector
 
 _CON = None
-# How many board rows one `misaka_board` result carries.
 _BOARD_LIMIT = 40
 TaskId = Annotated[str, Field(pattern=r"^t_[0-9a-f]{6}$")]
 
@@ -218,10 +217,6 @@ def _install(harn, runtime):
         rows = card_files.board(con, workspace)
         if params.status:
             rows = [r for r in rows if r["status"] == params.status]
-        # `cards.board` puts index rows with no card file last, so a bare `[-40:]` on a
-        # project with more than 40 cards keeps exactly the strays and drops every real
-        # card without saying so. Truncation stays (the tool result is model context),
-        # but it is named, and the count is the pre-truncation one.
         total = len(rows)
         rows = rows[-_BOARD_LIMIT:]
         mine = _session_line(ctx)
@@ -234,8 +229,6 @@ def _install(harn, runtime):
             lines.insert(0, f"(showing the last {len(rows)} of {total} cards)")
         if mine and any(line.startswith("*") for line in lines):
             lines.append("* = created in this conversation")
-        # The cap is each workflow run's, as its owner sets it; the board's total is everything
-        # recorded, contact turns and plain cards included, and has no mode.
         spent = budget.spent(con)
         caps = "; ".join(f"{owner.token_cap_setting} applies to each {owner.scope_label}"
                          for owner in owners.registered() if owner.token_cap_setting)
@@ -393,7 +386,7 @@ def _install(harn, runtime):
         changed = await asyncio.to_thread(decide)
         if not changed:
             return _text("Review ownership expired; no decision was recorded.")
-        if params.decision == "approve":              # the card is done; there is nothing to relaunch
+        if params.decision == "approve":
             state = db.get(con, params.task_id)["status"]
             return _text(f"Review recorded: approve; the card is done ({state}).")
         follow = await runtime.launch_ready(
@@ -430,11 +423,9 @@ def _install(harn, runtime):
         if on_update:
             on_update({"content": [{"type": "text", "text": f"Starting {ready} card(s)…"}], "details": {}})
         if os.environ.get("MISAKA_NET_PANE"):
-            # Start worker cards in visible panes, a tab each.
             from misaka.ui.panel import client as net
             wanted = set(params.task_ids) if params.task_ids is not None else None
             lines, started = [], 0
-            # Reconciliation is filesystem work; keep it off the session's loop.
             picked = await asyncio.to_thread(db.fair_ready, con, lane="workers", workspace=workspace)
             picked = [row for row in picked if wanted is None or row["id"] in wanted]
             _require_ordinary_tasks([row["id"] for row in picked])
@@ -506,10 +497,6 @@ def _install(harn, runtime):
 
 
     class SisterOutputParams(CardReadParams):
-        # The default is the non-blocking read. Progress arrives on its own as a
-        # <sister-notification>, and Last Order's charter tells her not to poll while
-        # work is running, so a bare call is asking "where is this card now" -- it must
-        # not quietly hold the turn for thirty seconds waiting for an answer.
         task_id: TaskId = Field(description="Sister task-card ID.")
         block: bool = Field(False, description=(
             "Leave false to inspect the task's current state and return immediately. "
@@ -538,8 +525,7 @@ def _install(harn, runtime):
             timeout_ms=params.timeout,
             signal=signal,
         )
-        _require_project_tasks(ctx, params)  # A blocking read may span a new generation.
-        # The Sister's summary and result are her session's output: fenced, as peek and card-log are.
+        _require_project_tasks(ctx, params)
         return _text(untrusted(f"sister-output:{params.task_id}", json.dumps(result, ensure_ascii=False)))
 
 
@@ -631,21 +617,13 @@ def _install(harn, runtime):
         )
         ally = row["assignee"] in _allies()
         if row["status"] == "running" and pane and pane.get("claimed", True):
-            # A running Sister is steered through her own inbox, addressed to this attempt: the
-            # note is durable, lands at her next tool boundary as a steering message rather than
-            # as keystrokes in her editor, and does not depend on the pane's input queue
-            # (2026-09-18: pane.send lost the Enter behind a full pty queue, B1, and could
-            # land in a reader pane, B14). The pane stays the way to *see* her.
             mid = await asyncio.to_thread(
                 _mail_running_card, row, params.message, params.summary, _session_id(ctx))
             _card_log(row["workspace"], params.task_id, "last-order", f"[steer] {params.message}")
             when = ("the ally reads it between turns: at once if it is idle, otherwise when its current turn ends"
                     if ally else "her session reads it at its next tool boundary")
             return _text(f"Message #{mid} queued for card {params.task_id} (attempt {row['generation']}); {when}.")
-        # An ally's attempt always runs in a daemon pane, with or without a panel.
         if row["status"] != "running" and (in_panel or pane or help_reply or ally):
-            # The daemon drains any old pane/headless runner, then owns the new attempt beyond
-            # this contact turn. A finished card still only restarts on the user's nod.
             if not (params.confirmed or help_reply):
                 return _text(f"Card {params.task_id} is {row['status']}; continuing it starts a new "
                              "model turn. Ask the user, then call again with confirmed=true.")
@@ -747,7 +725,7 @@ def _install(harn, runtime):
             return "this conversation", "self"
         if pane.get("card"):
             card = f"card {pane['card']} ({pane.get('status') or '?'})"
-            if pane.get("claimed", True):          # a daemon that does not say is treated as running
+            if pane.get("claimed", True):
                 return f"running {card}", "running"
             if pane.get("alive"):
                 return f"showing {card}; its attempt does not run here", "leftover"
@@ -1017,7 +995,6 @@ def _install(harn, runtime):
                 f"Card {params.task_id} changed underneath the requeue; read it again before retrying."
             )
         row = db.get(con, params.task_id)
-        # Nothing polls for ready cards: every attempt is started by somebody asking for it.
         waiting = ("Start it with misaka_dispatch once the user approves." if row["status"] == "ready"
                    else "It waits at todo until the cards it depends on finish, then misaka_dispatch "
                         "starts it.")
@@ -1073,8 +1050,6 @@ def _install(harn, runtime):
 class NetworkPart:
     """Last Order's board: the coordination tools, the Sister runtime behind them, and what a session hears at its start."""
 
-    # How often a live coordinator session looks at the notification outbox, so a card
-    # is announced within seconds of settling rather than at Last Order's next turn.
     PENDING_POLL_SECONDS = 5.0
 
     def __init__(self, *, receive_notifications=True):
@@ -1093,15 +1068,13 @@ class NetworkPart:
 
     async def session_start(self, event, ctx):
         if not self.receive_notifications:
-            return  # branch/headless owners keep the tools but do not consume the root's inbox
+            return
         await self._resume_briefing(event, ctx)
         await self._settle_orphans()
         asyncio.ensure_future(self._collect_pending(ctx))
         self._pending_watch = asyncio.ensure_future(self._watch_pending(ctx))
 
     async def before_agent_start(self, event, ctx):
-        # A user's turn collects what is pending. A run a notification woke does not: the watcher
-        # below already delivers, and each wake would repeat the board hint.
         if self.receive_notifications and event.get("messageType", "user") == "user":
             asyncio.ensure_future(self._collect_pending(ctx))
 

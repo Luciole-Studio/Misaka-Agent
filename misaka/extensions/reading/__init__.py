@@ -4,7 +4,7 @@ Last Order leads; for each reading action (overview, reconstruct, presuppose, tr
 translate, reread, generate) a study reader works with that action's method, in a session of its
 own that a line of reading keeps. Lines fork under different lenses, are compared, and send the
 reader back to earlier material; the reading graph records where each understanding came from.
-A port of PR #12 to MISAKA's own engine. See ``docs/guide/reading.md``.
+A port of PR #12 to MISAKA's own engine.
 
 - ``/read`` in Last Order's window, and the window as the reading's leader: :mod:`.window`
 - ``misaka read``: :mod:`.cli`

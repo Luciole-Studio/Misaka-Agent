@@ -159,7 +159,6 @@ codemodeToolSystemPromptContribution: _SystemPromptContribution = {
 }
 
 # The reference for scripts: globals, tool results, `store()`, the `models` API, and limits.
-# MISAKA fork: the file ships inside the package (pi reads it from its docs directory).
 CODEMODE_DOCS_PATH = str(Path(__file__).with_name("codemode.md"))
 
 DESCRIPTION_INTRO = (
@@ -193,8 +192,6 @@ CHARS_PER_TOKEN = 4
 
 def _inputSchema(tool: Any) -> CodemodeJsonSchema:
     parameters = read_field(tool, "parameters")
-    # MISAKA fork: misaka tools may declare their parameters as a pydantic model class (pi's are
-    # always TypeBox objects); the declaration renders the JSON schema it produces.
     if isinstance(parameters, type) and hasattr(parameters, "model_json_schema"):
         return typeboxSchema(parameters)
     return parameters

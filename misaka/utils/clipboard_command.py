@@ -30,7 +30,6 @@ async def runClipboardCommand(
 
 
 def _run(command: str, args: list[str], input: str | None, timeout: float, maxBufferBytes: int) -> bytes | None:
-    # MISAKA fork: a thread runs the child to completion, as the event loop of a Node process would.
     try:
         # Clipboard writers can daemonize. Do not give them output pipes to retain.
         child = subprocess.Popen(

@@ -78,8 +78,6 @@ type ModifierName = Literal["ctrl", "shift", "alt", "super"]
 
 # Union type of all valid key identifiers.
 # Provides autocomplete and catches typos at compile time.
-# MISAKA fork: upstream's `ModifiedKeyId<BaseKey>` builds every modifier permutation as a template literal type,
-# which Python typing cannot express; a key identifier is any string here.
 type KeyId = str
 
 
@@ -234,7 +232,6 @@ class Key:
         return f"ctrl+shift+super+{key}"
 
 
-# MISAKA fork: `Key.return` as an attribute set from outside the class body; read it with `getattr(Key, "return")`.
 setattr(Key, "return", "return")
 
 # =============================================================================

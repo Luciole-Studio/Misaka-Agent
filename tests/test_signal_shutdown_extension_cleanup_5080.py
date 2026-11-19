@@ -49,7 +49,6 @@ def createContext(order: list[str], sessionManager=None):
         ui=SimpleNamespace(terminal=SimpleNamespace(drainInput=AsyncMock(side_effect=drainInput))),
         stop=Mock(side_effect=lambda: order.append("stop")),
         sessionManager=sessionManager or createSessionManager(),
-        # MISAKA fork: the input loop's pending read and the exit-code future.
         _pendingUserInputFuture=None,
         onInputCallback=None,
         _shutdownFuture=None,

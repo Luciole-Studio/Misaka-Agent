@@ -111,19 +111,10 @@ class Intrinsics:
     # All intrinsics enabled (default).
     ALL = 0xFFFFFFFF
 
-# MISAKA fork: native stack the wasm frames may use. wasmtime's default (512 KiB) runs out before QuickJS's own guard
-# (MAX_STACK_SIZE, measured on the wasm shadow stack) in recursion that passes through native functions -- getters,
-# Proxy traps, Array callbacks -- which then traps instead of throwing a catchable RangeError; Node's worker threads
-# give wasm about 4 MiB. 2 MiB is as far as wasmtime-py goes: a limit above its async stack size (2 MiB, which Python
-# cannot change) makes `Engine()` panic and abort the process. A thread that runs a VM needs a larger stack than this.
 MAX_WASM_STACK = 2 * 1024 * 1024
 
 _engine: wasmtime.Engine | None = None
 _engineLock = threading.Lock()
-# MISAKA fork: wasmtime-py keeps every host function of every store in one process-wide table (`wasmtime._func.FUNCTIONS`)
-# whose allocate and free are not atomic. Creating a VM's host functions and closing a VM's store (which frees them) run
-# on the worker threads of different executions at once -- a run's result no longer waits for its worker to end -- so
-# both hold this lock; unguarded, an allocation can pick a slot another thread is freeing and fail the VM's creation.
 _hostFunctionsLock = threading.Lock()
 
 
@@ -472,7 +463,6 @@ class QuickJS:
         self._false: JSValueHandle | None = None
         self._e: _Exports
         self._memory: Memory
-        # MISAKA fork: where `toString()` has the string's length written; upstream allocates four bytes each time.
         self._lengthSlot = 0
 
     # ---- Cached property accessors ----
@@ -564,8 +554,6 @@ class QuickJS:
                 # 'host' (default): use the host's timezone
                 vm.timezoneOffsetHandler = _hostTimezoneOffset
         except BaseException:
-            # MISAKA fork: a VM that failed to start closes its store now. The bound host functions keep it alive
-            # in wasmtime's function table, so the garbage collector would never free its linear memory.
             vm.dispose()
             raise
         return vm
@@ -599,7 +587,6 @@ class QuickJS:
             self._e = _Exports(instance, store)
             memory.attach(instance.exports(store)["memory"])
         except BaseException:
-            # MISAKA fork: as in `create`, a store whose instance never came up is closed now.
             with _hostFunctionsLock:
                 store.close()
             raise

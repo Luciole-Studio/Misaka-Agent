@@ -27,7 +27,6 @@ def background_disabled() -> bool:
 
 
 def auto_background_seconds() -> float:
-    # CCB getAutoBackgroundMs: 120_000 ms when enabled, no timer otherwise.
     from misaka.config.product import setting
 
     return 120.0 if setting("subagents", "auto_background_tasks", False, bool) else 0.0

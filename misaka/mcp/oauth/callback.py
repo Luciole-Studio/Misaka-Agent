@@ -82,7 +82,6 @@ class OAuthCallbackServer:
         self._timeoutMs = timeoutMs
         self._renderPage = renderPage
         self._pending: dict[str, _Pending] = {}
-        # MISAKA fork: connections that have not sent a request yet; `close()` aborts them.
         self._idle: set[asyncio.StreamWriter] = set()
 
     @classmethod
@@ -107,7 +106,6 @@ class OAuthCallbackServer:
                 await instance._serve(request, response)
 
         loop = asyncio.get_running_loop()
-        # MISAKA fork: bind only the first address the host resolves to, as `listen(port, host)` does.
         addresses = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)
         family, _, _, _, sockaddr = addresses[0]
         server = await asyncio.start_server(serve, str(sockaddr[0]), port, family=family)
@@ -132,8 +130,6 @@ class OAuthCallbackServer:
             raise RuntimeError("OAuth state is already pending")
         loop = asyncio.get_running_loop()
         future: asyncio.Future[OAuthCallback] = loop.create_future()
-        # MISAKA fork: a rejection nobody awaits (upstream's test does `denied.catch(() => undefined)`)
-        # and a future its awaiter cancelled must not surface as "never retrieved".
         future.add_done_callback(lambda done: done.cancelled() or done.exception())
 
         def timeout() -> None:
@@ -157,8 +153,6 @@ class OAuthCallbackServer:
             notRunning.code = "ERR_SERVER_NOT_RUNNING"  # type: ignore[attr-defined]
             raise notRunning
         self._server.close()
-        # MISAKA fork: `wait_closed()` (3.12.1+) waits for every connection, browser preconnects
-        # included; Node's `server.close()` closes idle sockets itself.
         for connection in list(self._idle):
             connection.transport.abort()
         self._idle.clear()
@@ -175,8 +169,6 @@ class OAuthCallbackServer:
             f"HTTP/1.1 {status} {HTTPStatus(status).phrase}\r\n"
             f"{headers}content-length: {len(body)}\r\nconnection: close\r\n\r\n"
         )
-        # MISAKA fork: the peer may be gone already; node's `response.end` does not throw for it. A
-        # HEAD request gets the head alone, as node:http sends it.
         with contextlib.suppress(OSError, RuntimeError):
             response.write(start.encode("latin-1") + (b"" if head else body))
             response.close()
@@ -227,7 +219,6 @@ class OAuthCallbackServer:
         self._reply(response, 200, {"ok": True}, head)
 
     async def _serve(self, request: asyncio.StreamReader, response: asyncio.StreamWriter) -> None:
-        # MISAKA fork: node:http parses the request; here the request line is read and the headers dropped.
         self._idle.add(response)
         try:
             requestLine = await request.readline()

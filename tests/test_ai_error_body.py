@@ -60,7 +60,6 @@ def test_preserves_the_message_when_google_genai_already_folds_the_body_into_it(
 
 
 def test_extracts_status_and_body_from_a_bedrock_shaped_service_exception():
-    # MISAKA fork: botocore's ClientError keeps a dict response with the parsed error and the metadata.
     error = _error(
         "UnknownError",
         response={"Error": {"message": "blocked by gateway WAF"}, "ResponseMetadata": {"HTTPStatusCode": 403}},

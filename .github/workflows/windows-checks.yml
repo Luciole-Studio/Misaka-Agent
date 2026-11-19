@@ -1,8 +1,5 @@
 name: Windows checks
 
-# The parts of MISAKA that behave differently on Windows, run on a real Windows runner on demand:
-# the live-skill guard on every whitespace, the event-loop watchdog (faulthandler's timer and
-# exit), MCP's environment, reclaiming a dead Sister root, the token-cap ledger.
 on:
   workflow_dispatch:
     inputs:
@@ -17,8 +14,6 @@ permissions:
 
 jobs:
   checks:
-    # x64 only: on windows-11-arm, `uv sync` builds cryptography from source and fails (the
-    # release build installs a prebuilt arm64 wheel instead; see scripts/build_release.py).
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4

@@ -42,7 +42,7 @@ def web_home(monkeypatch, tmp_path):
     """A throwaway web config, an empty vendor environment, and an empty memo."""
     for name in _VENDOR_ENV:
         monkeypatch.delenv(name, raising=False)
-    path = home.path("settings")           # the "web" section lives here now
+    path = home.path("settings")
     registry.reset_for_tests()
     cache.search_memo.clear()
     yield path
@@ -97,11 +97,6 @@ def payload(result_json: str) -> dict:
     return json.loads(result_json)
 
 
-# ---------------------------------------------------------------------------
-# Schema: every character of it came from Hermes
-# ---------------------------------------------------------------------------
-
-
 def test_the_schema_is_hermes_schema_character_for_character():
     """Read WEB_SEARCH_SCHEMA out of the Hermes source and compare the objects.
 
@@ -138,11 +133,6 @@ def test_the_registered_tool_carries_the_schema_verbatim():
     assert definition.name == tool.WEB_SEARCH_SCHEMA["name"]
     assert definition.description == tool.WEB_SEARCH_SCHEMA["description"]
     assert definition.parameters == tool.WEB_SEARCH_SCHEMA["parameters"]
-
-
-# ---------------------------------------------------------------------------
-# The response the model sees
-# ---------------------------------------------------------------------------
 
 
 async def test_a_normal_search_returns_the_contract_shape(monkeypatch):
@@ -211,7 +201,7 @@ async def test_an_untrimmable_oversized_response_stays_parseable(monkeypatch):
     """No result list to drop from: the answer must still be JSON a model can read."""
     stub(monkeypatch, {"success": True, "data": {"web": "not-a-list", "x": "z" * 200_000}})
     result_json = await tool.web_search_tool("q")
-    body = payload(result_json)  # would raise before: the old path spliced the document
+    body = payload(result_json)
     assert len(result_json) <= tool.MAX_RESULT_SIZE_CHARS
     assert "over the" in body["error"]
     assert body["success"] is False
@@ -224,11 +214,6 @@ async def test_an_aborted_call_never_reaches_the_backend(monkeypatch):
     body = payload(await tool.web_search_tool("q", signal=signal))
     assert body == {"error": "Interrupted", "success": False}
     assert calls == []
-
-
-# ---------------------------------------------------------------------------
-# limit: clamping, bucketing, slicing
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -248,7 +233,7 @@ async def test_a_non_numeric_limit_falls_back_to_five(monkeypatch):
     calls: list = []
     stub(monkeypatch, hit(1), calls=calls)
     await tool.web_search_tool("q", "not a number")
-    assert calls == [("q", 10)]  # bucket_limit(5)
+    assert calls == [("q", 10)]
 
 
 async def test_the_caller_gets_its_own_count_sliced_out_of_the_bucket(monkeypatch):
@@ -261,11 +246,6 @@ async def test_a_limit_of_one_hundred_keeps_every_row(monkeypatch):
     stub(monkeypatch, hit(100))
     body = payload(await tool.web_search_tool("q", 100))
     assert len(body["data"]["web"]) == 100
-
-
-# ---------------------------------------------------------------------------
-# The memo
-# ---------------------------------------------------------------------------
 
 
 async def test_a_repeat_query_inside_the_ttl_never_pays_twice(monkeypatch):
@@ -305,14 +285,11 @@ async def test_an_expired_entry_is_paid_for_again(monkeypatch):
     stub(monkeypatch, hit(2), calls=calls)
     await tool.web_search_tool("q")
     assert len(calls) == 1
-    # Age the stored entry past its deadline rather than sleeping through the TTL.
     store = cache.search_memo._store
     for key, (_expires, response) in list(store.items()):
         store[key] = (cache.time.monotonic() - 1.0, response)
     await tool.web_search_tool("q")
     assert len(calls) == 2
-    # Refreshed, not dropped. Keyed the way the tool keys it: with no credential anywhere,
-    # a ring vendor files under the shared keyless identity.
     from misaka.core.web.dispatch import memo_identity
 
     identity = memo_identity(FakeProvider("tavily"))
@@ -396,11 +373,6 @@ async def test_concurrent_identical_queries_share_one_request(monkeypatch):
     assert len(calls) == 1
 
 
-# ---------------------------------------------------------------------------
-# The result size ceiling
-# ---------------------------------------------------------------------------
-
-
 async def test_an_oversized_response_is_trimmed_to_valid_json(monkeypatch):
     huge = {
         "success": True,
@@ -419,15 +391,10 @@ async def test_an_oversized_response_is_trimmed_to_valid_json(monkeypatch):
     stub(monkeypatch, huge)
     result_json = await tool.web_search_tool("q", 20)
     assert len(result_json) <= tool.MAX_RESULT_SIZE_CHARS
-    body = payload(result_json)  # still parseable, which is the whole point
+    body = payload(result_json)
     assert body["success"] is True
     assert 0 < len(body["data"]["web"]) < 20
     assert "were dropped" in body["data"]["truncated"]
-
-
-# ---------------------------------------------------------------------------
-# The untrusted fence
-# ---------------------------------------------------------------------------
 
 
 async def _run_tool(monkeypatch, response, args=None):
@@ -485,11 +452,6 @@ async def test_a_missing_query_is_still_a_call_the_backend_sees(monkeypatch):
     assert calls == [("", 10)]
 
 
-# ---------------------------------------------------------------------------
-# Reachability: which sessions get the tool, and with no credentials at all
-# ---------------------------------------------------------------------------
-
-
 def _spec(kind, tmp_path):
     return SessionSpec(
         profile_dir=str(tmp_path / "profiles" / "sisters" / "misaka"),
@@ -525,8 +487,6 @@ def test_the_tool_is_withheld_when_nothing_can_serve(monkeypatch, web_home):
 
     import misaka.core.web as extension
 
-    # The extension still activates: web_fetch and download_file need no credentials.
-    # Only search is withheld.
     names = _registered_names(extension)
     assert "web_search" not in names
     assert names == ["web_fetch", "download_file"]
@@ -534,7 +494,6 @@ def test_the_tool_is_withheld_when_nothing_can_serve(monkeypatch, web_home):
 
 @pytest.mark.parametrize("kind", ["foreground", "dm", "card", "child", "bare"])
 def test_every_session_kind_that_can_hold_a_tool_gets_it(kind, tmp_path):
-    # web is core: its tools take Pi's customTools door, not the extension list.
     names = [tool.name for part in parts_for(_spec(kind, tmp_path)) for tool in part.tools]
     assert "web_fetch" in names
 
@@ -554,7 +513,6 @@ def test_the_research_flow_whitelists_name_the_tool():
     import inspect
 
     from misaka.core.research import planner, report
-    # A research window builds each turn's tools from session_tools() at the turn boundary.
     assert inspect.signature(planner.session_tools).parameters["tools"].default == planner.RESEARCH_TOOLS
     for surface in (planner.RESEARCH_TOOLS, report.SURVEY_TOOLS, report.FINAL_TOOLS):
         assert {"read", "doc_read", "web_search", "web_fetch"} <= set(surface)
@@ -565,15 +523,9 @@ def test_the_explorer_subagent_can_reach_the_web():
 
     root = Path(roster.__file__).parent / "agents"
     assert "web_search" in roster.resolve_tools(roster.parse(root / "explorer.md"))
-    # A close reader and a quotation verifier work inside an assigned document scope;
-    # giving them the web would let a page stand in for the source they were sent to.
     assert "web_search" not in roster.resolve_tools(roster.parse(root / "reader.md"))
     assert "web_search" not in roster.resolve_tools(roster.parse(root / "verifier.md"))
 
-
-# ---------------------------------------------------------------------------
-# Credentials must not ride a vendor error into the model's context
-# ---------------------------------------------------------------------------
 
 SECRET = "sk-live-SUPERSECRET-0123456789"
 
@@ -602,7 +554,6 @@ async def test_a_reflected_request_body_cannot_carry_the_api_key_to_the_model(
     result_json = await tool.web_search_tool("q")
     assert SECRET not in result_json
     assert "<redacted>" in result_json
-    # Redacted, not swallowed: the model still learns the call was rejected.
     assert "401" in result_json
 
 
@@ -653,7 +604,7 @@ async def test_a_secret_survives_neither_the_result_body_nor_the_size_trim(
     result_json = await tool.web_search_tool("q", 20)
     assert SECRET not in result_json
     assert len(result_json) <= tool.MAX_RESULT_SIZE_CHARS
-    assert "were dropped" in result_json  # the trim really did fire
+    assert "were dropped" in result_json
 
 
 async def test_a_secret_too_short_to_be_a_key_does_not_blank_the_message(
@@ -671,11 +622,6 @@ async def test_a_secret_too_short_to_be_a_key_does_not_blank_the_message(
     assert "unable to reach the backend" in await tool.web_search_tool("q")
 
 
-# ---------------------------------------------------------------------------
-# The memo has to survive the keyless ring's rotation
-# ---------------------------------------------------------------------------
-
-
 def test_the_keyless_ring_is_one_cache_identity_not_five(web_home):
     """``ring_order`` turns the round-robin cursor on every unpinned request and the
     resolver reads that same cursor, so consecutive identical searches resolve to
@@ -690,10 +636,8 @@ def test_the_keyless_ring_is_one_cache_identity_not_five(web_home):
             dispatch.memo_identity(registry.get_provider(vendor))
             == dispatch.KEYLESS_MEMO_IDENTITY
         )
-    # A ring vendor with a key of its own is a backend in its own right again.
     write_web({"env": {"TAVILY_API_KEY": SECRET}})
     assert dispatch.memo_identity(registry.get_provider("tavily")) == "tavily"
-    # And a backend that was never in the ring keeps its name either way.
     assert dispatch.memo_identity(registry.get_provider("searxng")) == "searxng"
 
 
@@ -723,7 +667,6 @@ async def test_a_repeated_query_is_paid_for_once_on_a_zero_key_install(
         await tool.web_search_tool("the same identical query", 3)
 
     assert len(served) == 1, f"paid {len(served)} times: {served}"
-    # The cursor really did move -- this does not pass because nothing rotated.
     assert len(set(resolved)) > 1, resolved
 
 

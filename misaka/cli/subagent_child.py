@@ -18,7 +18,6 @@ from misaka.utils import loop_watchdog
 
 def main() -> int:
     bootstrap.install()
-    # A durable Sister root is a card: its supervisor finds the stall under the card's name.
     owner = os.environ.get("MISAKA_SISTER_OWNER_TASK_ID")
     loop_watchdog.configure(f"card-{owner}" if owner else "subagent", exit_on_stall=True)
     return asyncio.run(loop_watchdog.watched(child.amain()))

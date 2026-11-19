@@ -8,12 +8,7 @@ by the very sentence this module appends to say the block above was only data.
 
 from __future__ import annotations
 
-# Public because a fence outlives the call that wrapped it: text that carried one through
-# a store and back out is still recognisable by this string, and a second copy of it in
-# the detector is a second thing to keep in step.
 MARKER = "UNTRUSTED-DATA"
-# Same characters, different word: after this substitution no sentinel can survive in the
-# body, and a reader still sees what the content tried to do.
 _DEFANGED = "UNTRUSTED-DATA-ESCAPED"
 
 

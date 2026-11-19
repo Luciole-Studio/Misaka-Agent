@@ -24,7 +24,6 @@ def main() -> int:
         return 0
     except Exception as error:  # noqa: BLE001 - reported, and the exit status says it failed
         print(str(error), file=sys.stderr)
-        # MISAKA fork: misaka ships the data pi published, so the remedy is to copy a release, not to generate.
         print(
             "\nModel data is missing or stale. Run `python scripts/refresh_model_catalog.py --version <pi-ai version>` "
             "from the repository root.",

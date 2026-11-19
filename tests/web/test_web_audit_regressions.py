@@ -127,7 +127,7 @@ async def test_fetch_leaves_artifacts_in_each_callers_workspace(monkeypatch, tmp
     leader = asyncio.create_task(web_fetch.create_web_fetch_tool_definition(str(a)).execute("a", {"url": URL}))
     await entered.wait()
     follower = asyncio.create_task(web_fetch.create_web_fetch_tool_definition(str(b)).execute("b", {"url": URL}))
-    await asyncio.sleep(0)  # follower reaches the real single-flight await
+    await asyncio.sleep(0)
     release.set()
     one, two = await asyncio.gather(leader, follower)
     assert len(calls) == 2
@@ -233,7 +233,6 @@ async def test_empty_env_status_matches_effective_key(monkeypatch):
 
 
 async def test_extract_error_url_fits_output_budget():
-    # Real ingress rejects this URL without DNS, then copies it into the error result.
     result = await extract.web_extract_tool(["https://example.org/" + "x" * 150000])
     assert len(result) <= extract.MAX_RESULT_SIZE_CHARS
     assert json.loads(result)["results"][0]["error"]
@@ -517,7 +516,6 @@ async def test_overlapping_cache_writers_never_pair_body_with_other_metadata(mon
     original = cache.atomic.write_text
     def write(path, text, **kw):
         original(path, text, **kw)
-        # The first writer has published its data but has not yet published the index.
         if "body-A" in text:
             entered.set()
             assert release.wait(3)

@@ -84,7 +84,7 @@ def test_a_process_that_suspends_itself_is_not_taken_for_stalled(tmp_path):
     import time
     env = {**os.environ, "MISAKA_HOME": str(tmp_path), "MISAKA_LOOP_STALL_SECONDS": "1"}
     child = subprocess.Popen([sys.executable, "-c", SCRIPT, "suspended", "1", "1"], env=env)
-    time.sleep(3)                    # stopped for longer than the limit
+    time.sleep(3)
     child.send_signal(signal.SIGCONT)
     assert child.wait(timeout=30) == 0
 
@@ -110,7 +110,7 @@ def test_old_logs_are_pruned_when_a_process_starts(tmp_path):
     gone = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True,
                           text=True, check=True).stdout.strip()
     old, recent = folder / f"card-old-{gone}.log", folder / "card-recent-2.log"
-    running = folder / f"panel-daemon-{os.getpid()}.log"       # a process open for weeks, still running
+    running = folder / f"panel-daemon-{os.getpid()}.log"
     for path in (old, recent, running):
         path.write_text("--- header\nTimeout (\n", encoding="utf-8")
     month_ago = os.path.getmtime(old) - 30 * 86400

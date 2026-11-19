@@ -39,7 +39,7 @@ _depth = 0
 
 def _seconds() -> float:
     try:
-        return float(os.environ.get("MISAKA_LOOP_STALL_SECONDS") or STALL_SECONDS)   # tests and diagnosis only
+        return float(os.environ.get("MISAKA_LOOP_STALL_SECONDS") or STALL_SECONDS)
     except ValueError:
         return STALL_SECONDS
 
@@ -140,11 +140,9 @@ def _end_on_sigterm():
 
     original = signal.getsignal(signal.SIGTERM)
     try:
-        # asyncio's registration only wakes the loop on the signal (its wakeup fd), so whichever
-        # Python handler runs -- this one, or the TUI's scheduling its shutdown -- is acted on at once.
         loop.add_signal_handler(signal.SIGTERM, lambda: None)  # windows-footgun: ok - POSIX only, returned early above
         signal.signal(signal.SIGTERM, ended)
-    except (NotImplementedError, RuntimeError, ValueError):     # a loop off the main thread
+    except (NotImplementedError, RuntimeError, ValueError):
         return asked, lambda: None
 
     def undo():
@@ -160,8 +158,6 @@ async def watched(coro):
     global _depth
     if _settings is None:
         return await coro
-    # Armed now, not on the re-arm task's first turn: a coroutine that blocks before its first
-    # suspension (a session being built) would otherwise run unwatched.
     _arm(_seconds())
     rearm = asyncio.ensure_future(_rearm(_seconds()))
     _depth += 1
@@ -170,7 +166,7 @@ async def watched(coro):
         return await coro
     except asyncio.CancelledError:
         if terminated:
-            raise SystemExit(128 + signal.SIGTERM) from None    # asyncio.run then settles the rest
+            raise SystemExit(128 + signal.SIGTERM) from None
         raise
     finally:
         _depth -= 1
@@ -204,8 +200,6 @@ def report(label: str, pid: int | None = None, *, since: float | None = None) ->
             text = f.read()
     except OSError:
         return None
-    # Only the last process's section: a reused PID appends to an earlier process's log, and that
-    # process's stall is not this one's. Its own header says the limit it ran with.
     headers = list(_HEADER.finditer(text))
     if headers:
         text = text[headers[-1].start():]
@@ -213,11 +207,9 @@ def report(label: str, pid: int | None = None, *, since: float | None = None) ->
         return None
     seconds = float(headers[-1].group(1)) if headers else _seconds()
     last = text[text.rindex("Timeout ("):]
-    # The loop's thread is the one inside asyncio's run loop; its first frame is where it is stuck.
     for block in re.split(r"\n(?=(?:Current thread|Thread) 0x)", last):
         frames = _FRAME.findall(block)
         if frames and any("asyncio" in file and func in ("run_forever", "_run_once") for file, _line, func in frames):
-            # The innermost frame is often the standard library (re, shlex); name the caller too.
             stdlib = sysconfig.get_paths()["stdlib"]
             shown = [frames[0]]
             own = next((frame for frame in frames if not os.path.realpath(frame[0]).startswith(os.path.realpath(stdlib))

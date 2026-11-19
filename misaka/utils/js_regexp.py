@@ -37,14 +37,11 @@ import regex
 
 from misaka.utils.js import jsCall, jsString
 
-# ECMAScript WhiteSpace and LineTerminator, as a character class body.
 _WHITESPACE = "\\t\\n\\x0b\\x0c\\r \\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff"
 _LINE_TERMINATORS = "\\n\\r\\u2028\\u2029"
 _SIMPLE_ESCAPES = {"n": "\\n", "r": "\\r", "t": "\\t", "f": "\\x0c", "v": "\\x0b"}
 _WORD = "A-Za-z0-9_"
-# `\d` and `\w` inside a character class.
 _CLASS_ESCAPES = {"d": "0-9", "w": _WORD}
-# Class escapes that stand for a set, so a `-` beside them cannot form a range.
 _CLASS_ESCAPE_ATOMS = frozenset({"\\d", "\\D", "\\w", "\\W", "\\s", "\\S"})
 _ESCAPES = {
     "d": "[0-9]",
@@ -125,7 +122,6 @@ def _escape(source: str, index: int, inClass: bool, unicode: bool) -> tuple[int,
     if char in _SIMPLE_ESCAPES:
         return after, _SIMPLE_ESCAPES[char]
     if char.isalnum() or char == "_":
-        # An identity escape of a letter is the letter itself (non-unicode mode).
         return after, regex.escape(char)
     if char == "/":
         return after, "/"
@@ -156,7 +152,6 @@ def _characterClass(source: str, index: int, unicode: bool) -> tuple[int, str]:
             (raw[-2:-1] and raw[-2] in _CLASS_ESCAPE_ATOMS)
             or (source[position + 1 : position + 2] == "\\" and source[position + 2 : position + 3] in "dDwWsS")
         ):
-            # Annex B: a `-` next to a class escape such as `\s` is a literal hyphen, not a range.
             body.append("\\-")
         else:
             body.append("\\[" if char == "[" else char)
@@ -168,7 +163,6 @@ def _characterClass(source: str, index: int, unicode: bool) -> tuple[int, str]:
             raise ValueError(f"\\S inside a character class is not supported: {source!r}")
         return position + 1, "[\\s\\S]"
     if not body:
-        # `[]` matches nothing and `[^]` matches any character.
         return position + 1, "(?s:.)" if negated else "(?!)"
     return position + 1, "[" + ("^" if negated else "") + "".join(body) + "]"
 
@@ -192,7 +186,6 @@ def _characterClassV(source: str, index: int) -> tuple[int, str]:
         elif char == "\\":
             escaped = source[position + 1 : position + 2]
             if escaped in ("S", "W", "D"):
-                # A complemented escape is a nested negated set here.
                 body.append({"S": f"[^{_WHITESPACE}]", "W": f"[^{_WORD}]", "D": "[^0-9]"}[escaped])
                 position += 2
             else:
@@ -272,7 +265,6 @@ def _translate(source: str, flags: str) -> str:
     vMode = "v" in flags
     groups = _captures(source, vMode)
     names = {name: number for number, name in enumerate(groups, 1) if name}
-    # The groups open at this point of the source (their numbers; None for a group that does not capture).
     opened: list[int | None] = []
     seen = 0
     out: list[str] = []
@@ -298,7 +290,6 @@ def _translate(source: str, flags: str) -> str:
             out.append(piece)
         elif char == "\\" and following == "k":
             if not names and not unicode:
-                # Annex B: without named groups, `\k` is an identity escape.
                 out.append("k")
                 index += 2
                 continue
@@ -365,7 +356,6 @@ def _compile(source: str, flags: str) -> Any:
     if "i" in flags:
         pythonFlags |= regex.IGNORECASE
     if "v" in flags:
-        # Nested classes and set operations.
         pythonFlags |= regex.V1
     return regex.compile(_translate(source, flags), pythonFlags)
 
@@ -374,7 +364,6 @@ class RegExpExecArray(list[Any]):
     """What ``RegExp.prototype.exec`` returns: the match and its groups (``None`` for a group that did not
     participate), with ``index``, ``input`` and ``groups``."""
 
-    # A JavaScript match array's `index` property, which shadows `list.index` on purpose.
     index: int  # type: ignore[assignment]
     input: str
     groups: dict[str, Any] | None
@@ -387,7 +376,6 @@ class RegExpExecArray(list[Any]):
         self.groups = dict(names) if names else None
 
     def __getitem__(self, key: Any) -> Any:
-        # An index past the groups reads as `undefined`, as on a JavaScript array.
         if isinstance(key, int) and not 0 <= key < len(self):
             return None
         return super().__getitem__(key)
@@ -539,7 +527,6 @@ def replace(string: str, pattern: RegExp | str, replacement: str | Callable[...,
         literal = _LiteralMatch(pattern, found, string)
         return string[:found] + _substitute(literal, string, replacement) + string[found + len(pattern) :]
     if pattern.global_:
-        # As @@replace does: every match is found before any replacer runs, so a replacer may use the same pattern.
         matches = list(_allMatches(pattern, string))
         out: list[str] = []
         last = 0
@@ -599,7 +586,6 @@ def split(string: str, separator: RegExp | str, limit: int | None = None) -> lis
     if isinstance(separator, str):
         parts = string.split(separator) if separator else list(string)
         return parts if limit is None else parts[:limit]
-    # The specification's @@split: a sticky match at each position q; an empty match at the last cut moves on.
     out: list[Any] = []
     size = len(string)
     if size == 0:
@@ -607,7 +593,6 @@ def split(string: str, separator: RegExp | str, limit: int | None = None) -> lis
     last = 0
     position = 0
     while position < size:
-        # A search finds the first position from here where the sticky match succeeds, as stepping does.
         found = separator._pattern.search(string, position)
         if found is None or found.start() >= size:
             break

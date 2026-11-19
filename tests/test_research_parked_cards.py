@@ -58,7 +58,7 @@ async def test_a_board_busy_for_a_moment_does_not_lose_the_drivers_lease(monkeyp
         tries.append(1)
         if len(tries) == 1:
             raise sqlite3.OperationalError("database is locked")
-        raise asyncio.CancelledError     # renewed on the retry: stop the loop here
+        raise asyncio.CancelledError
 
     monkeypatch.setattr(runs, "heartbeat_driver", heartbeat)
     real_sleep = asyncio.sleep

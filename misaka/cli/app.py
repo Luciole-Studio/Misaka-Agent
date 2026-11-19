@@ -24,8 +24,6 @@ def _parser(extension_commands=None):
     """The product CLI's grammar. ``extension_commands`` (``misaka.extensions.commands()``) are
     listed for help only: they are dispatched in ``main`` before this parser runs."""
     p = _ExactArgumentParser(prog="misaka")
-    # The first thing anyone types after installing. Without it argparse answers the version
-    # question with a usage error and exit 2, which reads as "this install is broken".
     p.add_argument("--version", "-V", action="version", version=VERSION)
     p.add_argument("--offline", action="store_true",
                    help="Disable startup network operations (same as MISAKA_OFFLINE=1); any command takes it")
@@ -194,12 +192,8 @@ def _parser(extension_commands=None):
     mo.add_argument("op", nargs="?", default="list", choices=["list", "configure", "delete"])
     mo.add_argument("name", nargs="?", help="Preset name (configure defaults to the default preset)")
 
-    # Registered so `misaka --help` lists it, and so `misaka auth --help` is not an
-    # "invalid choice" -- but it is never dispatched: `main` short-circuits `argv[0] ==
-    # "auth"` before argparse runs, because auth has its own Pi-compatible grammar.
     ac = sub.add_parser("auth", help="Check or print provider credentials")
     ac.add_argument("auth_args", nargs=argparse.REMAINDER)
-    # Like auth: listed here, dispatched by `main` before argparse runs, with pi's `config` grammar.
     cf = sub.add_parser("config", help="Enable or disable extensions, prompts and themes (-l: this project)")
     cf.add_argument("config_args", nargs=argparse.REMAINDER)
     for name, command in (extension_commands or {}).items():
@@ -272,10 +266,6 @@ def _cmd_panel(args):
     try:
         panel.launch()
     except RuntimeError as error:
-        # The panel is the last step of a first run, straight after the wizard's summary.
-        # A daemon that will not start already explains itself (and names its log); letting
-        # the exception out replaces that explanation, and the summary above it, with a
-        # traceback whose first readable line is somewhere on page two.
         print(f"The panel could not start: {error}", file=sys.stderr)
         print("`misaka chat` opens plain chat with Last Order in the meantime.", file=sys.stderr)
         sys.exit(1)
@@ -365,7 +355,6 @@ def _cmd_init(args):
     try:
         lines = cards.init_project(os.getcwd())
     except RuntimeError as err:
-        # Missing or failing git: a prerequisite the user has to install, not a bug.
         sys.exit(str(err))
     for line in lines:
         print(line)
@@ -415,7 +404,7 @@ def _task_add(con, title, args):
     body = args.body
     if args.body_file:
         try:
-            with open(args.body_file, encoding="utf-8-sig") as f:   # Notepad's BOM is not the body's
+            with open(args.body_file, encoding="utf-8-sig") as f:
                 body = f.read()
         except OSError as error:
             return f"Cannot read {args.body_file}: {error}"
@@ -503,9 +492,6 @@ def _cmd_research(args):
     if args.node:
         sys.exit(research_node.main(*args.node, runner_key=args.runner_key))
     cfg = current_config()
-    # Preflight before anything is written: a run with no Sister to assign to dies deep
-    # inside the workflow (planner._roster), after the project skeleton has been written, and
-    # the message that surfaces there names neither the roster nor the command that fills it.
     roster = {sister["id"] for sister in planner.sister_catalog(cfg.get("profiles_root"))}
     empty_roster = ("The Sister roster is empty; research tasks cannot be assigned.\n"
                     "Create at least one Sister first, for example: misaka create 10032")
@@ -542,9 +528,6 @@ def _cmd_research(args):
         run = runs.get(con, args.resume)
         if not run:
             sys.exit(f"Research run not found: {args.resume}")
-        # A resumed run keeps its cards, so what it needs is the Sisters those cards name,
-        # not any Sister: `misaka create 10032` would satisfy an empty-roster check and still
-        # leave every card assigned to somebody who no longer exists.
         assigned = sorted({row["assignee"] for row in runs.tasks(con, run["id"]) if row["assignee"]})
         missing = [sid for sid in assigned if sid not in roster]
         if missing:
@@ -579,11 +562,9 @@ def _cmd_research(args):
         from misaka.utils import loop_watchdog
         loop_watchdog.configure("research", exit_on_stall=False)
         out = _asyncio.run(loop_watchdog.watched(workflow.run(
-            con, cfg, research_node.ProcessSpawner(show_output=True),   # nodes print beside this output, in a pane's shell too
+            con, cfg, research_node.ProcessSpawner(show_output=True),
             run_id=run["id"], poll_seconds=1.0, resume=bool(args.resume), progress=progress)))
     except RuntimeError as err:
-        # Node failures already print their own reason above; the workflow's own summary is
-        # the useful part, and a traceback of the event loop is not.
         sys.exit(f"Research run {run['id']} stopped: {err}")
     print(f"Research run {run['id']}: {out['reason']}")
     for question in out.get("questions") or []:
@@ -620,8 +601,6 @@ def _cmd_moa(args):
         raw = raw_moa_config()
         presets = raw.get("presets") if isinstance(raw.get("presets"), dict) else {}
         if args.name not in presets:
-            # `moa list` prints load_moa_config(), which invents one preset when none is
-            # written; delete can only touch presets the settings actually declare.
             if args.name in cfg["presets"]:
                 sys.exit(f'"{args.name}" is the built-in MoA preset, not one your settings define, '
                          f"so there is nothing to delete. Write your own presets under \"moa\" in "
@@ -654,7 +633,6 @@ def _cmd_skills(args):
         from misaka.core.settings_manager import SettingsManager
         from misaka.core.skills.operations import execute
 
-        # A skill operation may run a review session in this process: the global HTTP proxy first, as at startup.
         applyHttpProxySettings(
             SettingsManager.create(_os.getcwd(), get_agent_dir(), {"projectTrusted": False}).getGlobalSettings().get("httpProxy")
         )
@@ -720,7 +698,6 @@ def _cmd_skills(args):
                     print(f"    Reject: misaka skills reject {pending_id}")
                     continue
                 if payload.get("content"):
-                    # Advisory lint findings, shown before approval.
                     print(format_findings(lint_content(payload["content"])))
                 diff = skill_write.pending_diff(r)
                 if diff:
@@ -732,7 +709,6 @@ def _cmd_skills(args):
             from misaka.core.skills import manage as skill_manage
             record = skill_write.get_pending(args.name)
             if record is not None:
-                # Re-run the reviewed request through the normal validation path.
                 result = skill_manage.apply_pending(record)
                 if not result.get("success"):
                     sys.exit(f"Approval failed: {result.get('error')}")
@@ -764,7 +740,7 @@ def _cmd_skills(args):
                     f"{e['skill']}  (before {len(e['before'])}/after {len(e['after'])})"
                     + ("" if rollbackable else "  [not rollbackable]")
                 )
-        else:   # rollback
+        else:
             if not args.name:
                 sys.exit("Usage: misaka skills rollback <ledger-id>")
             target = next((e for e in skill_write.entries() if e["id"] == args.name), None)
@@ -866,8 +842,6 @@ def _cmd_doc(args):
         for path, reason in skipped:
             print(f"  skipped {path}: {reason}")
         if not ingested:
-            # A scan that indexed nothing failed at its one job, whatever the reason: a
-            # script trusting exit 0 would go on to search a corpus this never filled.
             if skipped:
                 sys.exit(f"Indexed 0 file(s); all {len(skipped)} candidate(s) were skipped.")
             sys.exit(f"Nothing to index under {target}: no files with a readable suffix "
@@ -881,7 +855,6 @@ def _cmd_doc(args):
         for h in hits:
             printed = f" (printed p. {h['printed']})" if h.get("printed") else ""
             print(f"  {h['doc_id']} p{h['page']}{printed}  {h['s'][:90]}")
-        # One line a page, at its first occurrence, and every such page: the count is of pages.
         print(f"{len(hits)} page(s) hold a match. Use `misaka doc verify` before citing a quotation.")
     elif args.action == "verify":
         if not args.arg or not args.doc:
@@ -953,39 +926,28 @@ def main(argv=None):
     """The CLI entry point: one handler per sub-command (``COMMANDS``), each opening the board only
     if it uses it; ``argv`` defaults to the process arguments so tests can drive it directly."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    # pi's `--offline` (`PI_OFFLINE=1`). MISAKA fork: every command takes it, before or after its name, and the
-    # environment carries it to the panel's panes, cards and research nodes this process starts.
     end = argv.index("--") if "--" in argv else len(argv)
     if "--offline" in argv[:end]:
         argv = [arg for index, arg in enumerate(argv) if not (index < end and arg == "--offline")]
         os.environ["MISAKA_OFFLINE"] = "1"
-    # setup, update and uninstall must still run on a settings.json that stops everything else.
     bootstrap.install(check_settings=argv[:1] not in (["setup"], ["update"], ["uninstall"]))
     from misaka.config import env as env_file
     from misaka.config.engine import configure_logging
     home.ensure()
-    configure_logging()      # warnings go to the log file, never to a TUI's screen (B6)
-    env_file.load()          # the home's .env: environment for code that is not MISAKA
+    configure_logging()
+    env_file.load()
     if argv and argv[0] not in COMMANDS and argv[0] not in ("auth", "config") and not argv[0].startswith("-"):
-        # A command a bundled extension offers runs here, before the project layout exists: it
-        # decides for itself what it creates (a dry run or read-only operator creates nothing).
         from misaka import extensions
         extension_command = extensions.commands().get(argv[0])
         if extension_command is not None:
             return extension_command(argv[1:])
-    # Attaching/reading uses the existing owner's configuration. Other commands,
-    # including first-run help/version, retain the normal CLI bootstrap contract.
     if not (argv[:1] == ["chat"] and ({"--read-only", "--attach"} & set(argv))):
         layout.ensure()
     if not argv:
-        # No arguments: open the panel in a terminal, plain chat when piped.
         interactive = sys.stdin.isatty() and sys.stdout.isatty()
         if interactive:
             from misaka.cli import setup_wizard as setup
             if not setup.configured_anywhere():
-                # No credential for the default provider anywhere. On a first run the wizard
-                # is the door; once a model was saved, only that section is unfinished, and the
-                # rest of the wizard (Sisters, documents, web) is not asked a second time.
                 if setup.model_saved():
                     print("The default provider has no credential yet; starting `misaka setup model`.")
                     code = setup.run("model")
@@ -996,24 +958,17 @@ def main(argv=None):
                     return 1
             from misaka.ui.panel import ghostty
             if reason := ghostty.unavailable():
-                # The panel's terminal emulator is a prebuilt library; a platform without a
-                # build it can load (a musl system, an unusual architecture) still gets plain chat.
-                # The reason names the file and the loader's error: the chat redraws over this line
-                # at once, so it is often read from a screenshot of the scrollback.
                 print("The panel's terminal library (libghostty-vt) is not available on this system; "
                       f"opening plain chat. See `misaka setup environment`.\n  {reason}", file=sys.stderr)
                 interactive = False
         argv = ["panel"] if interactive else ["chat"]
     if argv[0] == "auth":
-        # Auth has its own Pi-compatible grammar; preserve the raw option order instead
-        # of sending it through the product CLI's unrelated parser.
         import asyncio
 
         from misaka.cli.engine import runAuthCommand
 
         raise SystemExit(asyncio.run(runAuthCommand(argv)))
     if argv[0] == "config":
-        # pi's `config` grammar (`-l`, `-a`, `-na`), parsed by the command itself as upstream does.
         import asyncio
 
         from misaka.cli.package_manager import handleConfigCommand
@@ -1028,6 +983,5 @@ def main(argv=None):
     try:
         return COMMANDS[args.cmd](args)
     except SkillsConfigError as error:
-        # A settings.json the user broke by hand is their file to fix, not a traceback.
         print(f"misaka: {error}", file=sys.stderr)
         return 1

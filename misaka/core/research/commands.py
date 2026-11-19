@@ -103,10 +103,8 @@ def merge_plan(recorded, incoming):
     _refuse_repeated_ids(incoming.get("tasks") or [])
     tasks = {task["local_id"]: task for task in recorded.get("tasks") or []}
     for task in incoming.get("tasks") or []:
-        tasks[task["local_id"]] = task      # a replacement keeps its recorded position
+        tasks[task["local_id"]] = task
     merged["tasks"] = list(tasks.values())
-    # A decision sent again (a retried call, a full re-send with append to fix one field) is the
-    # same fork, not a second one: both used to open as pending options (0.18.10 sweep).
     decisions = list(recorded.get("decisions") or [])
     merged["decisions"] = decisions + [item for item in incoming.get("decisions") or [] if item not in decisions]
     merged["status"] = incoming["status"]
@@ -172,9 +170,6 @@ class Dispositions(Params):
 
 
 class Alternative(Params):
-    # Free text: what sort of alternative this is, in the reviewer's words. A closed list made her
-    # file a theoretical framework as "other" after the call was refused (2026-09-27); nothing
-    # downstream branches on it.
     kind: str = Field("", description="What sort of proposal this is, in a few words of your own.")
     proposal: str = Field(min_length=1, description="The possibility or the gap, stated so a Last Order could plan it.")
     premise: str = Field(min_length=1, description=(
@@ -341,8 +336,6 @@ def tool(con, run, node, *, key, name, description, model, validate, session_dir
                     payload = merge(prior["payload"], payload)
             payload = validate(payload)
         except ValueError as error:
-            # A refused call records nothing. Said outright, because a model that read only the
-            # complaint took its plan as accepted and sent an empty "append" to fix one field.
             raise ValueError(f"{error} Nothing from this call was recorded; send the corrected call in full.") from error
         manager = getattr(ctx, "sessionManager", None)
         path = getattr(manager, "sessionFile", None)
@@ -350,9 +343,6 @@ def tool(con, run, node, *, key, name, description, model, validate, session_dir
             raise ValueError("Research command must come from this phase's Last Order session.")
         if session_file and os.path.realpath(path) != os.path.realpath(session_file):
             raise ValueError("Research command must come from the owning Last Order conversation.")
-        # A plan phase (``merge``) takes a full plan sent again as the plan, as Plan.append says
-        # ("instead of replacing it"): refused, it read "already accepted with different
-        # arguments" and the first plan ran as it was (0.18.10 sweep).
         record = runs.replace_action if supersede or prior or merge is not None else runs.record_action
         try:
             accepted = record(con, run, node, key, payload, session_file=path, tool_call_id=call_id)
@@ -380,7 +370,7 @@ def review_tools(con, run, node, *, validate, session_file, round=1, forks=False
         if not path or os.path.realpath(path) != os.path.realpath(session_file):
             raise ValueError("Research command must come from the owning Last Order conversation.")
         with runs.task_store.write_txn(con):
-            runs._owned(con, run, node)  # The captured epoch, never the replacement owner's row.
+            runs._owned(con, run, node)
             current = runs.node(con, node["id"])
             if current["status"] != "awaiting_approval":
                 raise ValueError("No plan of this node is waiting for the user's go-ahead right now.")
@@ -449,7 +439,6 @@ def review_tools(con, run, node, *, validate, session_file, round=1, forks=False
         *([ToolDefinition(name="misaka_research_withdraw", label=withdraw_description,
                           description=withdraw_description, parameters=Withdraw, execute=withdraw,
                           promptSnippet=withdraw_description)] if round > 1 else []),
-        # The root's first plan is the run: skipping it is `/research stop`, not a node decision.
         *([ToolDefinition(name="misaka_research_skip", label=skip_description, description=skip_description,
                           parameters=Skip, execute=skip, promptSnippet=skip_description)]
           if round == 1 and not runs.is_root(node) else []),

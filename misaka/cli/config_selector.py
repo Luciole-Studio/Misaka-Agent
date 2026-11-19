@@ -56,7 +56,6 @@ async def selectConfig(options: ConfigSelectorOptions) -> None:
     def onExit() -> None:
         ui.stop()
         stopThemeWatcher()
-        # MISAKA fork: `SystemExit` in place of `process.exit(0)`.
         if not result.done():
             result.set_exception(SystemExit(0))
 

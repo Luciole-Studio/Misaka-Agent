@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import unicodedata
 
-# ICU's root order of printable ASCII, case folded.
 _ASCII_ORDER = " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789abcdefghijklmnopqrstuvwxyz"
 _PRIMARY = {char: index for index, char in enumerate(_ASCII_ORDER)}
 

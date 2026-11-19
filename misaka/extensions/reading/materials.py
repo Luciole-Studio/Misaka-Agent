@@ -18,8 +18,8 @@ from urllib.parse import unquote, urlparse
 from .store import ReadingError
 
 MAX_BYTES = 64 * 1024 * 1024
-DOWNLOAD_SECONDS = 300          # a whole download, so a server that drips bytes cannot hang /read open
-MAX_NAME_BYTES = 180            # download_file's cap: a long percent-encoded title is no file name
+DOWNLOAD_SECONDS = 300
+MAX_NAME_BYTES = 180
 HEADERS = {"Accept": "*/*", "Accept-Encoding": "identity",
            "User-Agent": "misaka-reading/1.0 (+https://github.com/Luciole-Studio/Misaka-Agent)"}
 
@@ -35,7 +35,7 @@ def safe_name(name):
     if len(kept.encode()) <= MAX_NAME_BYTES:
         return kept
     stem, suffix = os.path.splitext(kept)
-    if len(suffix.encode()) > 16:     # a dotted name, not a suffix
+    if len(suffix.encode()) > 16:
         stem, suffix = kept, ""
     room = max(MAX_NAME_BYTES - len(suffix.encode()), 1)
     return stem.encode()[:room].decode(errors="ignore").rstrip(" .") + suffix
@@ -76,7 +76,7 @@ async def add(source, workspace, directory):
             target = inbox(workspace, directory)
             os.makedirs(target, exist_ok=True)
             copy = unique_path(os.path.join(target, safe_name(os.path.basename(path)) or "material"))
-            await asyncio.to_thread(shutil.copyfile, path, copy)   # the content, not a read-only flag
+            await asyncio.to_thread(shutil.copyfile, path, copy)
             path, origin = copy, path
     try:
         doc_id, pages = await asyncio.to_thread(corpus.ingest, path, None, True, None, workspace)

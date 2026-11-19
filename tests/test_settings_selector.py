@@ -97,7 +97,6 @@ def test_cycles_through_share_destinations():
 
 
 def test_shows_the_share_destination_after_the_transport():
-    # MISAKA: the row sits where upstream inserts it, after "Transport".
     list = SettingsSelectorComponent(makeConfig(), makeCallbacks()).getSettingsList()
     ids = [item.id for item in list.items]
     assert ids[ids.index("transport") + 1] == "share-destination"

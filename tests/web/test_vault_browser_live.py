@@ -33,7 +33,7 @@ async def test_real_vault_form_dialog_focus_and_cleanup(tmp_path):
                          str(len(body)).encode() + b'\r\nConnection: close\r\n\r\n' + body)
             await writer.drain()
         except asyncio.IncompleteReadError:
-            pass  # Chromium may close speculative connections without a request.
+            pass
         finally:
             writer.close()
             await writer.wait_closed()
@@ -82,7 +82,6 @@ async def test_real_vault_form_dialog_focus_and_cleanup(tmp_path):
             'expression': "document.querySelector('#pw').value", 'returnByValue': True}})
         assert secret not in json.dumps(readback) and '<redacted>' in str(readback)
 
-        # Nonce-bound fields survive a DOM reorder without filling the new decoy.
         await script(supervisor, build_inspection_js('fixture-nonce'))
         await script(supervisor, "document.body.insertAdjacentHTML('afterbegin','<input id=decoy type=password>')")
         filled = await script(supervisor, build_fill_js([
@@ -105,7 +104,6 @@ async def test_real_vault_form_dialog_focus_and_cleanup(tmp_path):
         assert 'pending_dialogs' in str(pending) and secret not in json.dumps(pending)
         await call('browser_dialog', {'action': 'dismiss'})
 
-        # A cross-site iframe becomes an OOPIF; DOM removal retires its frame/session.
         frame_url = other_origin.replace('127.0.0.1', 'localhost') + '/login'
         await script(supervisor, "const frame = document.createElement('iframe'); frame.id = 'fixture-frame'; "
             "frame.src = " + json.dumps(frame_url) + "; document.body.appendChild(frame)")
@@ -130,7 +128,6 @@ async def test_real_vault_form_dialog_focus_and_cleanup(tmp_path):
         assert json.loads(changed)['refused'] == 'origin_changed'
         assert await script(supervisor, "document.querySelector('#pw').value") == ''
 
-        # Focus searches owned pages for the form; shared CDP mode keeps its root.
         target = (await supervisor.call('Target.createTarget', {'url': origin + '/login'}))['targetId']
         for _ in range(100):
             focused = await owner.runtime.run(supervisor.focus_page, origin,

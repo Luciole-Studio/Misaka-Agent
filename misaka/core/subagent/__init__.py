@@ -4,8 +4,6 @@ import os
 
 from misaka.core.platform.vocabulary import MANAGEMENT_TOOLS
 
-# Last Order too, since CCB's permission mode governs the main session as well (``initial_permission_mode``):
-# she starts no sub-agents (``extension.allows_subagents``), so her part holds the policy and hooks alone.
 ROLES = {"sisters", "last_order"}
 
 
@@ -26,7 +24,6 @@ def disallowed_management_tools(kind, *, is_async=None):
 
 
 def part(spec):
-    # Built late by the assembly, after the worker's budget/identity environment is in place.
     from .extension import part_for
     return part_for(spec.profile_dir, spec.role, spec.workspace,
                     mcp_role=spec.mcp_role or spec.role, tool_ceiling=spec.tool_ceiling,

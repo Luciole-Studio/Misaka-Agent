@@ -96,7 +96,7 @@ async def assembled(home, role, kind, *, research=False, custom=False, prompt_fl
                                          "sessionManager": SessionManager.inMemory(str(workspace))})
     session = result["session"]
     from misaka.core.network.wiring.capabilities import SisterCapabilitiesPart
-    for part in session.moments.parts:      # what `session_start` does for a session that is a workflow's
+    for part in session.moments.parts:
         if isinstance(part, SisterCapabilitiesPart):
             part._settle_tools()
 
@@ -153,7 +153,7 @@ async def test_real_role_assembly(prompt_home, role, kind, research):
             assert "misaka_card_state" not in text
         assert text.count(RESEARCH_LO_ORCHESTRATION) == int(research and role == "last_order")
         assert (RESEARCH_SISTER_DISCIPLINE in text) == (research and kind == "card")
-        assert await final_prompt(session) == text  # repeated full folds do not accumulate blocks
+        assert await final_prompt(session) == text
 
 
 @pytest.mark.parametrize("role", ["last_order", "sisters/10032"])
@@ -229,7 +229,7 @@ async def test_role_entry_keeps_shared_base_and_explicit_tool_ceiling(prompt_hom
         assert "Fixture voice for last_order." in text
         assert set(session.getActiveToolNames()) == {"read"}
         session.setActiveToolsByName(["read", "bash", "misaka_card"])
-        assert set(session.getActiveToolNames()) == {"read"}  # Research never lifts CLI permission ceilings
+        assert set(session.getActiveToolNames()) == {"read"}
         assert text.count("## Sister capability profiles") == 1
         assert "## Sub-agents" not in text and "## Allies" not in text
         assert await final_prompt(session) == text
@@ -257,8 +257,6 @@ async def test_durable_sister_real_child_flags_retain_persona_and_current_tool_g
                      cwd=manager.role_context.workspace, transcript=prompt_home / "runtime" / "agent.jsonl",
                      metadata_path=prompt_home / "runtime" / "agent.meta.json", parent_session_id="fixture")
 
-    # Exercise the real atomic prompt-file writer, CLI parser, resource loader and SDK.
-    # No subprocess, persisted card owner, or model session is started.
     flags = await manager._child_flags(task)
     parsed = parseArgs(flags)
     assert parsed.systemPrompt is None and parsed.tools is None
@@ -294,7 +292,7 @@ async def test_research_scope_keeps_enabled_user_questions(prompt_home, tools):
         allowed = planner.RESEARCH_TOOLS if tools == "planning" else planner.MATERIAL_TOOLS
         names = planner.session_tools(SimpleNamespace(session=session), allowed)
         assert "AskUserQuestion" in names
-        assert "misaka_card" not in names  # retaining questions must not reopen Board mutation
+        assert "misaka_card" not in names
         with session.toolScope(list(names)):
             assert "AskUserQuestion" in session.getActiveToolNames()
             assert "- AskUserQuestion:" in await final_prompt(session)
@@ -342,8 +340,6 @@ async def test_lo_entrypoints_share_actual_default_tools_and_complete_prompt(pro
     texts, tools = [], []
     for kind in ("foreground", "headless"):
         async with assembled(prompt_home, "last_order", kind, research=research, custom=custom) as session:
-            # Do not normalize both sessions to a hand-picked test list. Start from
-            # the real default registry, then apply the production Research delta.
             with ExitStack() as scope:
                 initial = session.getActiveToolNames()
                 assert {"AskUserQuestion", "SendMessage"} <= set(initial)
@@ -430,7 +426,7 @@ async def test_research_inherits_order_and_preserves_selection_through_lifecycle
     from misaka.core.research.window import WindowLO
 
     async with assembled(prompt_home, "last_order", "foreground") as session:
-        await session.bindExtensions({})        # a reload's `session_start` takes the board tools off again
+        await session.bindExtensions({})
         normal = session.getActiveToolNames()
         assert len(DRIVER_OWNED_TOOLS) == 9
         assert DRIVER_OWNED_TOOLS <= set(normal)
@@ -457,22 +453,17 @@ async def test_research_inherits_order_and_preserves_selection_through_lifecycle
                 assert session.getActiveToolNames() == [*expected, phase.name]
                 assert "write" not in session.getActiveToolNames()
                 session.unregisterCustomTools([phase])
-            # Between phases / while waiting for approval: late ordinary tools join,
-            # phase commands leave, and the Research filter still applies.
             expected.append(late.name)
             assert session.getActiveToolNames() == expected
             session.refreshTools()
             assert session.getActiveToolNames() == expected
             await session.reload()
-            # As upstream: a reload activates again every extension tool that registration activates, so the
-            # disabled `doc_verify` is back; the built-in `write` stays off.
             expected.append("doc_verify")
             assert session.getActiveToolNames() == expected
             assert list(planner.session_tools(owner)) == expected
         finally:
             await owner.close()
-            await owner.close()  # restoration is idempotent
-        # As pi's plan mode: what the window took off comes back after the tools that stayed.
+            await owner.close()
         assert session.getActiveToolNames() == [*expected, *(name for name in selected if name in DRIVER_OWNED_TOOLS)]
         session.unregisterCustomTools([late])
         assert sorted(session.getActiveToolNames()) == sorted([*selected, "doc_verify"])
@@ -488,7 +479,6 @@ async def test_research_turn_rechecks_selection_and_keeps_mode_between_turns(pro
     from misaka.core.research.tool_policy import research_tools
 
     async with assembled(prompt_home, "last_order", "foreground") as session:
-        # Research must preserve the current selection, independent of model clamping.
         session.agent.state.thinkingLevel = thinking
 
         def unexpected_override(*_args, **_kwargs):
@@ -496,7 +486,6 @@ async def test_research_turn_rechecks_selection_and_keeps_mode_between_turns(pro
 
         monkeypatch.setattr(session, "setThinkingLevel", unexpected_override)
         normal = session.getActiveToolNames()
-        # In-memory SDK session, but a stable path for WindowLO's routing check.
         session.sessionManager.sessionFile = str(prompt_home / "fixture.jsonl")
         owner = window.WindowLO(session, lambda: None, describe=dict)
         phase = tool_definition(name="misaka_research_assign", label="Plan", description="Fixture", parameters={}, execute=None)
@@ -508,7 +497,6 @@ async def test_research_turn_rechecks_selection_and_keeps_mode_between_turns(pro
 
         async def send(*_args):
             assert session.agent.state.thinkingLevel == thinking
-            # A user adjustment during a turn must also survive phase cleanup.
             session.agent.state.thinkingLevel = "low"
             seen.append(session.getActiveToolNames())
             assert seen[-1] == [*expected, phase.name]
@@ -545,7 +533,6 @@ def test_research_planning_and_report_do_not_set_thinking(tmp_path, monkeypatch)
     worker = SimpleNamespace(run_llm_json=Mock(return_value=(None, "Fixture answer", None)))
     cfg = {"roles_root": str(tmp_path), "provider": "fixture", "default_model": "fixture"}
     planner._call(worker, cfg, "Plan", cwd=str(tmp_path), session_dir=str(tmp_path))
-    # The report stages go through the same turn as every phase command (report._stage -> planner.commanded).
     assert planner.commanded(worker, cfg, "Report", command=object(), name="misaka_research_report",
                              recorded=lambda: {"payload": {}}, cwd=str(tmp_path), session_dir=str(tmp_path),
                              raw=True)[1] == "Fixture answer"

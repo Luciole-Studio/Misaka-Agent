@@ -9,11 +9,8 @@ COMMANDS = {"import": "scripts.import_lossless_claw",
             "externalize-backfill": "scripts.backfill_externalized_tool_outputs",
             "state-embedding-backfill": "benchmarking.state_embedding_backfill"}
 
-# The dispatcher is upstream's and writes its slash command. At a terminal the same words follow
-# `misaka lcm`. A path is not the command: `.misaka/lcm/lcm.db`, or a project folder named `lcm`.
 _SLASH = re.compile(r"""(?<![^\s`"'(])/lcm(?= [a-z])""")
 _HELP = "LCM command help"
-# What this file adds to upstream's commands, which its help cannot know of.
 _OWN_HELP = """\
 Only at the command line:
 - misaka lcm clear: remove this project's LCM cache; session files are untouched
@@ -24,7 +21,6 @@ Only at the command line:
 def _for_terminal(text):
     """Upstream's reply as a terminal reads it: `misaka lcm ...` for `/lcm ...`, and this file's
     own commands under the help."""
-    # Bare `misaka lcm` prints the help, where bare `/lcm` is the status.
     text = _SLASH.sub("misaka lcm", text.replace("- /lcm or /lcm status:", "- /lcm status:"))
     return f"{text}\n\n{_OWN_HELP}" if _HELP in text else text
 
@@ -36,8 +32,6 @@ def _owned_option(options, name, value):
             raw = options[index + 1] if item == name and index + 1 < len(options) else item.partition("=")[2]
             if not raw or Path(raw).expanduser().resolve() != Path(value).resolve():
                 raise ValueError(f"{name} must name this project's LCM path: {value}")
-    # Keep the canonical value last: argparse also accepts abbreviated flags,
-    # which must not override the project's path after an injected default.
     return [*options, name, value]
 
 
@@ -47,8 +41,6 @@ def main(argv=None):
     from . import config_bridge, context_engine, operations, storage
 
     args = list(sys.argv[1:] if argv is None else argv)
-    # Nothing here knew a help flag: `misaka lcm --help` was "Unknown subcommand: --help", and
-    # `misaka lcm clear --help` cleared. The operator scripts have a help of their own.
     if ("--help" in args or "-h" in args) and args[0] not in COMMANDS:
         args = ["help"]
     if args[:1] == ["clear"]:
@@ -81,8 +73,6 @@ def main(argv=None):
         storage.acquire(workspace)
         try:
             if args[0] == "import" and module._build_parser().parse_args(options).apply:
-                # Seed the same generation's IDs before the importer allocates
-                # rows; dry runs still never open a writable runtime database.
                 context_engine.engine()
                 context_engine.close()
             return module.main(options)

@@ -166,7 +166,6 @@ class RemoteContract:
     version: int
     input: TSchema
     description: Description
-    # MISAKA fork: upstream's `def` is a Python keyword.
     def_: RemoteDef
     fingerprint: str = ""
     scope: Literal["remote"] = field(default="remote")
@@ -178,7 +177,6 @@ class LocalContract:
     version: int
     input: TSchema
     description: Description
-    # MISAKA fork: upstream's `def` is a Python keyword.
     def_: LocalDef
     fingerprint: str = ""
     scope: Literal["local"] = field(default="local")

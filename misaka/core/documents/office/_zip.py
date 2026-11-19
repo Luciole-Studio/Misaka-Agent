@@ -22,26 +22,13 @@ from __future__ import annotations
 import os
 import zipfile
 
-# Borrowed from FrontierAgent's judgement about document size, expressed here the way
-# ``index.py`` already expresses it for EPUB (``_EPUB_MEMBER_BYTES`` / ``_EPUB_BOOK_CHARS``):
-# one bound on a part and one on the whole. 16 MiB is a sheet of several million cells or a
-# slide deck's largest media part; 64 MiB is a document, and a "document" that does not fit
-# is a dataset somebody renamed.
 MEMBER_BYTES = 16 * 1024 * 1024
 PACKAGE_BYTES = 64 * 1024 * 1024
 
-# Streaming scan chunk size, not a prolog length limit. Whitespace before a DOCTYPE
-# is unbounded; all markup is checked within the package size limits above.
 ENTITY_SCAN_BYTES = 64 * 1024
 
-# Every OOXML package carries this at its root. Its absence means the zip is something
-# else -- and saying so beats letting python-docx raise ``PackageNotFoundError`` at the
-# model, which names neither the file nor what was wrong with it.
 CONTENT_TYPES = "[Content_Types].xml"
 
-# The members whose bytes are parsed as XML. An embedded image or font is not markup, and
-# scanning it would refuse a package because a PNG's compressed bytes happened to spell a
-# token.
 _MARKUP_SUFFIXES = (".xml", ".rels")
 
 
@@ -83,8 +70,6 @@ def precheck(path):
                     with archive.open(name) as member:
                         tail = b""
                         while chunk := member.read(ENTITY_SCAN_BYTES):
-                            # UTF-16/32 also encode XML declarations. Strip NUL padding
-                            # for this ASCII token scan and retain chunk-boundary overlap.
                             scanned = tail + chunk.replace(b"\x00", b"")
                             if b"<!ENTITY" in scanned:
                                 raise _refuse(path, f"{name} declares XML entities; "

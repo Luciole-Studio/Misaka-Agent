@@ -14,7 +14,6 @@ _MAX_SEQUENCE = (1 << 41) - 1
 
 _lastOrdinaryTimestamp = -1
 _sequence: int | None = None
-# MISAKA fork: ids are minted from worker threads too, and the counter below must not hand the same value out twice.
 _lock = threading.Lock()
 
 
@@ -33,7 +32,6 @@ def uuidv7(timestampMs: Any = None) -> str:
         if timestampMs is None:
             _lastOrdinaryTimestamp = effectiveTimestamp
 
-        # MISAKA fork: `bytes` (upstream's name) is a builtin here.
         randomBytes = bytearray(secrets.token_bytes(16))
         if _sequence is None:
             _sequence = (

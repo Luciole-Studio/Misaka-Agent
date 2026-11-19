@@ -138,7 +138,6 @@ def getTextOutput(result: Any | None, showImages: bool) -> builtins.str:
     return output
 
 
-# MISAKA: misaka/core/subagent imports this name, and that package is not edited.
 get_text_output = getTextOutput
 
 

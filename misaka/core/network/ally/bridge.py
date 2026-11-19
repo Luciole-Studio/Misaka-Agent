@@ -21,8 +21,6 @@ from misaka.ai.utils.typebox_helpers import typeboxSchema
 from misaka.core.network import messages, todo
 from misaka.core.platform import tasks as db
 
-# The document tools a card needs, by name; the rest of their module is not lent. A workflow's own
-# read-only tools (``platform.owners``) are lent beside them.
 BORROWED = ("doc_list", "doc_outline", "doc_read", "doc_find", "doc_verify", "doc_add")
 
 
@@ -49,7 +47,7 @@ def definitions():
         raise SystemExit(f"Card not found: {task_id}")
     sender = row["assignee"]
     borrowed = ToolCollector()
-    for owner in owners.registered():       # a workflow's read-only views
+    for owner in owners.registered():
         owner.borrowed_tools(borrowed)
     documents.register(borrowed)
     lent = {*BORROWED, *owners.read_only_tools()}
@@ -73,7 +71,6 @@ async def serve():
     from mcp.server.stdio import stdio_server
 
     tools = {tool.name: tool for tool in definitions()}
-    # Relative paths in a tool resolve against the card's folder, as in a Sister's session.
     ctx = SimpleNamespace(cwd=os.environ.get("MISAKA_WORKSPACE") or os.getcwd())
     server = Server("misaka")
 

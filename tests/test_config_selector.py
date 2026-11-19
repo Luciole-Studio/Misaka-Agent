@@ -77,8 +77,6 @@ async def test_cycles_project_built_in_extension_overrides_in_config_local_mode(
     assert settingsManager.getProjectSettings()["extensions"] == []
 
 
-# MISAKA forks
-
 
 async def test_a_toggle_leaves_misakas_skills_object_alone_and_lists_no_skills(dirs):
     projectDir, agentDir = dirs

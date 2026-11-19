@@ -89,6 +89,6 @@ SESSION_KINDS = {"foreground"}
 
 def part(spec):
     from misaka.core.platform import owners
-    if spec.workflow_context or owners.owns_window():   # a workflow's window, not the user's desk
+    if spec.workflow_context or owners.owns_window():
         return None
     return ProjectCommitPart()

@@ -50,7 +50,6 @@ async def selectSession(
 
     def onExit() -> None:
         ui.stop()
-        # MISAKA fork: `SystemExit` in place of `process.exit(0)`.
         if not result.done():
             result.set_exception(SystemExit(0))
 

@@ -128,7 +128,6 @@ class _RgiEmojiTest:
 rgiEmojiRegex = _RgiEmojiTest()
 
 # Cache for non-ASCII strings
-# MISAKA fork: larger than upstream's 512; a long transcript re-measures thousands of distinct lines per render.
 WIDTH_CACHE_SIZE = 16384
 widthCache: dict[str, int] = {}
 
@@ -147,7 +146,6 @@ autocompleteBoundaryRegex = RegExp(f"(?:^|{autocompleteSeparatorRegex.source})",
 
 
 def isPrintableAscii(str_: str) -> bool:
-    # MISAKA fork: `str` methods for upstream's charCode loop (U+0020-U+007E, the same set).
     return str_.isascii() and str_.isprintable()
 
 
@@ -246,7 +244,6 @@ def finalizeTruncatedResult(
     return result + " " * max(0, maxWidth - visibleWidth) if pad else result
 
 
-# MISAKA fork: memoised (the function is pure); a render measures the same clusters again and again.
 @functools.lru_cache(maxsize=65536)
 def graphemeWidth(segment: str) -> int:
     """Calculate the terminal width of a single grapheme cluster.
@@ -310,12 +307,6 @@ def graphemeWidth(segment: str) -> int:
     return width
 
 
-# MISAKA fork: pi measures width grapheme by grapheme (Intl.Segmenter), which V8 makes cheap and CPython does not; a
-# full render of a long transcript spent most of its time there. A character whose Grapheme_Cluster_Break is Other, LV
-# or LVT never joins a neighbour into a cluster, so a string made only of such characters has, cluster by cluster, the
-# widths of its characters: it is measured by one translate through this table (code point -> "1" or "2"). Anything
-# else, or a character of width 0, takes pi's path. The digits are in the table from the start so that an
-# untranslated "2" can never be read as a width.
 _WIDTHS: dict[int, str] = {ord("1"): "1", ord("2"): "1"}
 _CLUSTERING: set[str] = set()
 _NEVER_JOINS = regex.compile(r"[\p{Grapheme_Cluster_Break=Other}\p{Grapheme_Cluster_Break=LV}\p{Grapheme_Cluster_Break=LVT}]")
@@ -372,11 +363,9 @@ def visibleWidth(str_: str) -> int:
         # Strip supported ANSI/OSC/APC escape sequences in one pass.
         # This covers CSI styling/cursor codes, OSC hyperlinks and prompt markers,
         # and APC sequences like CURSOR_MARKER.
-        # MISAKA fork: one regex pass for upstream's indexOf/ansiCodeLength loop (what is left of an ESC is text).
         clean = _ESCAPE_REGEX.sub("", clean)
 
     # Calculate width
-    # MISAKA fork: the character table first (see `_WIDTHS`).
     widths = _widths(clean)
     if widths is not None:
         width = len(widths) + widths.count("2")
@@ -492,7 +481,6 @@ def asciiVisibleWidth(str_: str) -> int:
     """Width of a string made of printable ASCII, tabs, and ANSI escape sequences, or -1 if it contains
     anything else. Matches `visibleWidth` for those strings without allocating.
     """
-    # MISAKA fork: `str` methods and the escape regex for upstream's charCode loop; the same results.
     if not str_.isascii():
         return -1
     tabs = str_.count("\t")
@@ -521,13 +509,6 @@ def asciiVisibleWidth(str_: str) -> int:
     return width
 
 
-# MISAKA fork: ECMA-48 CSI: parameter bytes 0x30-0x3F, then intermediate bytes 0x20-0x2F, then one final byte
-# 0x40-0x7E. Upstream instead scans forward for the first `m`, `G`, `K`, `H` or `J`, which makes any other CSI
-# (`\x1b[10A`, `\x1b[6n`, `\x1b[?25l`) swallow every character up to the next `m`. The TUI appends `\x1b[0m` to every
-# line, so that `m` always exists, and `visibleWidth` then counts the swallowed text as zero: lines are wrapped and
-# truncated against a width that is far too small, the terminal soft-wraps them, and the over-wide-line guard never
-# fires. A sequence that does not terminate is not an escape. OSC and APC strings run to BEL or ESC \ (a lone ESC
-# inside them is part of the string), as upstream.
 _ESCAPE_REGEX = re.compile(
     r"\x1b(?:\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|[\]_](?:[^\x07\x1b]|\x1b(?!\\))*(?:\x07|\x1b\\))"
 )
@@ -630,8 +611,6 @@ class AnsiCodeTracker:
         if not ansiCode.endswith("m"):
             return
 
-        # MISAKA fork: the SGR parameters are parsed once per distinct code (`_sgrOperations` runs upstream's
-        # parameter switch, below, on a recorder) and the recorded changes are replayed here.
         for name, value in _sgrOperations(ansiCode):
             if name == "reset":
                 self.reset()
@@ -844,7 +823,6 @@ def _parseInt(text: str) -> int | None:
 
 
 def updateTrackerFromText(text: str, tracker: AnsiCodeTracker) -> None:
-    # MISAKA fork: one regex pass for upstream's indexOf/ansiCodeLength loop (the same sequences, in order).
     if "\x1b" not in text:
         return
     for match in _ESCAPE_REGEX.finditer(text):
@@ -856,12 +834,6 @@ def graphemeSegments(text: str) -> Iterator[str]:
         yield data.segment
 
 
-# MISAKA fork: the wrap path below is run-based. Upstream measures and places a line token by token and grapheme by
-# grapheme, which V8 makes cheap and CPython does not (re-wrapping a long transcript for a new width took several
-# seconds). Here a line is cut into the tokens upstream's splitIntoTokensWithAnsi makes (runs of spaces, runs of other
-# text, one CJK character each) with their widths known at once, and a run of consecutive CJK characters is kept as one
-# unit that is broken between any two characters, as upstream breaks between any two of its CJK tokens. The results are
-# upstream's (checked against upstream's own functions run under Node).
 _CJK_CLASS = (
     r"\p{Script_Extensions=Han}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}"
     r"\p{Script_Extensions=Hangul}\p{Script_Extensions=Bopomofo}"
@@ -1050,8 +1022,6 @@ def wrapTextWithAnsi(text: str, width: int) -> list[str]:
 
 
 def wrapSingleLine(line: str, width: int) -> list[str]:
-    # MISAKA fork: run-based (see `splitIntoTokensWithAnsi`); the tracker's active codes and line-end reset are kept
-    # and recomputed only when a token carries codes.
     if not line:
         return [""]
 
@@ -1167,7 +1137,6 @@ def isPunctuationChar(char: str) -> bool:
 
 
 def breakLongWord(word: str, width: int, tracker: AnsiCodeTracker) -> list[str]:
-    # MISAKA fork: runs measured through the character table where they can be (see `_WIDTHS`).
     lines: list[str] = []
     currentLine = tracker.getActiveCodes()
     currentWidth = 0

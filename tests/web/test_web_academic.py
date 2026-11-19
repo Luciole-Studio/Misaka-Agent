@@ -7,9 +7,7 @@ import pytest
 
 from misaka.core.web.academic import AcademicRoute, route_academic
 
-# (输入 URL, 期望 kind, 期望抓取的 URL)
 ROUTES: list[tuple[str, str, str]] = [
-    # PMC:规范化到 pmc.ncbi.nlm.nih.gov,老的 www.ncbi 路径也改道过去。
     (
         "https://pmc.ncbi.nlm.nih.gov/articles/PMC1234567/",
         "pmc",
@@ -20,19 +18,16 @@ ROUTES: list[tuple[str, str, str]] = [
         "pmc",
         "https://pmc.ncbi.nlm.nih.gov/articles/PMC1234567/",
     ),
-    # 大小写与 query/fragment 都被抹平。
     (
         "http://www.ncbi.nlm.nih.gov/pmc/articles/pmc7654321/?report=classic#abstract",
         "pmc",
         "https://pmc.ncbi.nlm.nih.gov/articles/PMC7654321/",
     ),
-    # PubMed:原样抓(改道需要 elink 调用,那是 IO,不归这里)。
     (
         "https://pubmed.ncbi.nlm.nih.gov/38123456/",
         "pubmed",
         "https://pubmed.ncbi.nlm.nih.gov/38123456/",
     ),
-    # bioRxiv/medRxiv:落地页只有摘要,改道 .full 全文。
     (
         "https://www.biorxiv.org/content/10.1101/2024.01.01.123456v1",
         "biorxiv",
@@ -48,7 +43,6 @@ ROUTES: list[tuple[str, str, str]] = [
         "biorxiv",
         "https://www.medrxiv.org/content/10.1101/2023.05.05.99999v2.full",
     ),
-    # arXiv:/pdf/ 是二进制,改道摘要页;老式带学科前缀的 id 也要认。
     (
         "https://arxiv.org/pdf/2401.12345v2.pdf",
         "arxiv",
@@ -60,13 +54,11 @@ ROUTES: list[tuple[str, str, str]] = [
         "arxiv",
         "https://arxiv.org/abs/math/0309136",
     ),
-    # 已经在 HTML 全文上了就别退回摘要页。
     (
         "https://arxiv.org/html/2401.12345v1",
         "arxiv",
         "https://arxiv.org/html/2401.12345v1",
     ),
-    # 付费墙:不改 URL,只出警告(改道需要 Unpaywall,见模块说明)。
     (
         "https://www.sciencedirect.com/science/article/pii/S0092867423001234",
         "paywall",
@@ -82,7 +74,6 @@ ROUTES: list[tuple[str, str, str]] = [
         "paywall",
         "https://www.nature.com/articles/s41586-024-01234-5",
     ),
-    # FA 清单里逐条列出的 Wiley 子域,靠后缀匹配一并覆盖。
     (
         "https://nph.onlinelibrary.wiley.com/doi/full/10.1111/nph.12345",
         "paywall",
@@ -93,12 +84,9 @@ ROUTES: list[tuple[str, str, str]] = [
         "paywall",
         "https://journals.sagepub.com/doi/10.1177/00030651231234",
     ),
-    # 普通 URL 原样通过。
     ("https://example.com/blog/post", "none", "https://example.com/blog/post"),
     ("https://en.wikipedia.org/wiki/DOI", "none", "https://en.wikipedia.org/wiki/DOI"),
-    # doi.org 要跳一次才知道落在谁家,这一层不猜;调用方拿到最终 URL 后可以再路由一次。
     ("https://doi.org/10.1038/s41586-024-01234-5", "none", "https://doi.org/10.1038/s41586-024-01234-5"),
-    # 认得域名但路径不是文章:不硬凑,原样通过。
     ("https://www.biorxiv.org/", "none", "https://www.biorxiv.org/"),
     ("https://arxiv.org/list/cs.AI/recent", "none", "https://arxiv.org/list/cs.AI/recent"),
     (
@@ -111,14 +99,11 @@ ROUTES: list[tuple[str, str, str]] = [
         "none",
         "https://www.ncbi.nlm.nih.gov/pmc/",
     ),
-    # 百分号编码解出来的 `?` 不许被拼回构造出的 URL 里。
     (
         "https://arxiv.org/abs/2401.12345%3Fevil=1",
         "none",
         "https://arxiv.org/abs/2401.12345%3Fevil=1",
     ),
-    # bioRxiv 这一路是把路径拼回 URL 的,编码必须原样带过去:解码一次再拼回去,
-    # `%3F` 会让 httpx 抛 InvalidURL,`%2F` 会静悄悄变成一层新目录。
     (
         "https://www.biorxiv.org/content/10.1101/2024.01.01.1%3Fevil=1",
         "biorxiv",
@@ -129,22 +114,17 @@ ROUTES: list[tuple[str, str, str]] = [
         "biorxiv",
         "https://www.biorxiv.org/content/10.1101%2F2024.01.01.1.full",
     ),
-    # 编码过的 `..` 能活着穿过 httpx 的解析,但 `.path` 会把它解回来:拼回去再让
-    # httpx 归一化,改道就指到 /abs/ 之外去了,说明里却还写着「这是本文摘要页」。
     (
         "https://arxiv.org/pdf/x/%2E%2E/%2E%2E/evil",
         "none",
         "https://arxiv.org/pdf/x/%2E%2E/%2E%2E/evil",
     ),
-    # 预印本这一路走的是未解码的 raw_path,所以编码原样保留,不会被归一化掉。
     (
         "https://www.biorxiv.org/content/10.1101/x/%2E%2E/y",
         "biorxiv",
         "https://www.biorxiv.org/content/10.1101/x/%2E%2E/y.full",
     ),
-    # scheme 白名单:域名认得也不行,非 http(s) 一律不碰。
     ("ftp://arxiv.org/abs/2401.12345", "none", "ftp://arxiv.org/abs/2401.12345"),
-    # 域名匹配是「等于或是其子域」,不是「后缀是这串字符」。
     ("https://evilarxiv.org/abs/2401.12345", "none", "https://evilarxiv.org/abs/2401.12345"),
     ("https://notnature.com/articles/x", "none", "https://notnature.com/articles/x"),
     (
@@ -152,19 +132,16 @@ ROUTES: list[tuple[str, str, str]] = [
         "none",
         "https://sciencedirect.com.attacker.example/science/article/pii/S1",
     ),
-    # 大小写与末尾的根点不能让认识的站漏网。
     (
         "https://ARXIV.ORG./pdf/2401.12345",
         "arxiv",
         "https://arxiv.org./abs/2401.12345",
     ),
-    # PMC id 的位数有上限:重定向落地 URL 是攻击者挑的,不许拿它灌上下文。
     (
         "https://pmc.ncbi.nlm.nih.gov/articles/PMC" + "1" * 40 + "/",
         "none",
         "https://pmc.ncbi.nlm.nih.gov/articles/PMC" + "1" * 40 + "/",
     ),
-    # 超过合法 DNS 名长度的主机名同理——它会被原样写进给模型看的那句话里。
     (
         "https://" + ("a" * 60 + ".") * 5 + "nature.com/articles/x",
         "none",
@@ -204,10 +181,10 @@ MALFORMED = [
     "file:///etc/passwd",
     "javascript:alert(1)",
     "https://",
-    "http://arxiv.org",  # 认得的域名但完全没有路径
-    "https://arxiv.org/pdf/",  # 有段落没有 id
+    "http://arxiv.org",
+    "https://arxiv.org/pdf/",
     "https://arxiv.org/abs/" + "a" * 5000,
-    "https://www.biorxiv.org/content/",  # /content/ 之后什么都没有
+    "https://www.biorxiv.org/content/",
     "https://pmc.ncbi.nlm.nih.gov/articles/",
     "https://例え.jp/paper",
 ]

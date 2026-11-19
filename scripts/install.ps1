@@ -1,14 +1,3 @@
-# Install a prebuilt MISAKA archive on Windows.
-#
-# The archive contains uv, git, ripgrep (rg), fd and poppler (pdftotext).
-# bin\misaka.exe puts tools\ on PATH when it runs.
-#
-#   irm https://raw.githubusercontent.com/Luciole-Studio/Misaka-Agent/main/scripts/install.ps1 | iex
-#
-# Optional: MISAKA_VERSION (0.18.5 or v0.18.5), else the latest GitHub release.
-# MISAKA_PREFIX  install root (default %LOCALAPPDATA%\misaka)
-# MISAKA_REPO    GitHub owner/name
-
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
@@ -60,14 +49,12 @@ try {
     $Bin = Join-Path $Dest "bin"
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if (-not $UserPath) { $UserPath = "" }
-    # This archive's bin goes first; an earlier archive's bin goes, so updates do not pile up on PATH.
     $Earlier = Join-Path $Prefix "misaka-*\bin"
     $pieces = $UserPath -split ";" | Where-Object {
         $_ -and ($_.TrimEnd("\") -ne $Bin.TrimEnd("\")) -and -not ($_.TrimEnd("\") -like $Earlier)
     }
     $Updated = (@($Bin) + @($pieces)) -join ";"
     [Environment]::SetEnvironmentVariable("Path", $Updated, "User")
-    # Another install's misaka (uv tool, pipx) is not removed, but it no longer answers to `misaka`.
     $Others = Get-Command misaka -All -ErrorAction SilentlyContinue | Where-Object {
         $_.Source -and -not $_.Source.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase)
     }

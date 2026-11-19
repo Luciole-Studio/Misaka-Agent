@@ -76,7 +76,6 @@ def local_models(isolated, monkeypatch):
         for provider, model in pairs.items()}}), encoding="utf-8")
     home.path("settings").write_text(json.dumps({
         "defaultProvider": "fixture-global", "defaultModel": "global", "retry": {"enabled": False},
-        # A shared cycling scope must not replace a role's independent default.
         "enabledModels": ["fixture-global/global"], "theme": "dark",
     }), encoding="utf-8")
     for role, provider in (("last_order", "fixture-lo"), ("sisters/10032", "fixture-a"),
@@ -217,7 +216,6 @@ async def test_lo_thinking_defaults_and_native_research_fork(local_models, model
         settings["modelThinkingLevels"] = {"fixture-lo/shared": model_preference}
     settings_path.write_text(json.dumps(settings), encoding="utf-8")
 
-    # Both transports enter the same native settings path; no phase sets its own effort.
     for kind in ("foreground", "headless"):
         async with opened(root, "last_order", kind) as (_, session):
             assert session.agent.state.thinkingLevel == (model_preference or "max")

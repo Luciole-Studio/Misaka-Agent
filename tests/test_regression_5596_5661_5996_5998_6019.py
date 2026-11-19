@@ -121,9 +121,6 @@ async def test_exports_with_the_active_fallback_theme_when_the_configured_theme_
 
 
 async def test_keeps_uppercase_header_strings_as_literals(monkeypatch: pytest.MonkeyPatch):
-    # MISAKA fork: MISAKA has no startup migrations (pi's ``runMigrations``; MISAKA never shipped the layouts they
-    # move), so this checks the half that does not depend on them: the registry keeps the uppercase strings as
-    # literals, not as names of the variables set below.
     async with createHarness(withConfiguredAuth=False) as harness:
         for key in ["CUSTOM_API_KEY", "BEARER"]:
             monkeypatch.setenv(key, f"env-{key}")

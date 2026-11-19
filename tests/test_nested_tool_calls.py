@@ -191,7 +191,6 @@ async def test_serializes_concurrent_calls_to_sequential_tools():
 
 
 async def test_a_cancelled_waiter_hands_the_queue_on_in_order():
-    # MISAKA fork: an awaiting task can be cancelled here, a JavaScript await cannot.
     order: list[str] = []
     gate = asyncio.Event()
 

@@ -42,7 +42,6 @@ def repairJson(json: str) -> str:
     repaired: list[str] = []
     inString = False
 
-    # MISAKA fork: a while loop, since a Python for loop cannot skip ahead by changing its index.
     index = 0
     while index < len(json):
         char = json[index]
@@ -142,7 +141,6 @@ def parseJsonWithRepair(json: str) -> Any:
                 return jsonParse(repairedJson)
             except ValueError:
                 pass
-        # MISAKA fork: see _escape_stray_quotes.
         requoted = _escape_stray_quotes(repairedJson)
         if requoted != repairedJson:
             return jsonParse(requoted)

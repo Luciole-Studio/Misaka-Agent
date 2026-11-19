@@ -29,8 +29,6 @@ def _load(path, **kwargs):
     return openpyxl.load_workbook(str(path), **kwargs)
 
 
-# ---- create and cells --------------------------------------------------------------------
-
 def test_create_writes_the_sheets_it_was_given(tmp_path):
     path = tmp_path / "multi.xlsx"
     outcome = writer.write(str(path), "create", {"sheets": [
@@ -102,8 +100,6 @@ def test_a_raw_format_string_passes_through(tmp_path):
     assert _load(path)["S"]["A1"].number_format == '"€"#,##0'
 
 
-# ---- formulas and the honest limit ---------------------------------------------------------
-
 def test_a_formula_written_by_any_op_reports_that_it_needs_recalculating(tmp_path):
     """The gate is what triggers recalculation. FrontierAgent once watched only
     ``set_cell``, so a workbook whose totals row came in through ``create`` was left with
@@ -156,8 +152,6 @@ def test_a_formula_whose_result_is_the_empty_string_is_not_uncalculated(tmp_path
     assert not writer.cache_empty(str(rebuilt))
 
 
-# ---- structure ------------------------------------------------------------------------------
-
 def test_sheets_can_be_added_renamed_and_deleted(tmp_path):
     path = _book(tmp_path)
     writer.write(str(path), "add_sheet", {"sheet": "Two", "headers": ["a"]})
@@ -195,8 +189,6 @@ def test_an_op_naming_a_sheet_that_is_not_there_lists_the_ones_that_are(tmp_path
     assert "sheet not found: 'Nope'" in outcome
     assert "['S']" in outcome
 
-
-# ---- formatting --------------------------------------------------------------------------
 
 def test_formatting_a_range_shows_up_in_the_readout(tmp_path):
     path = _book(tmp_path, headers=["region", "units"], rows=[["North", 800]])
@@ -236,8 +228,6 @@ def test_a_border_covers_the_sides_it_was_asked_for(tmp_path):
     assert all(getattr(border, side).style == "thin"
                for side in ("top", "bottom", "left", "right"))
 
-
-# ---- objects -----------------------------------------------------------------------------
 
 def test_a_table_becomes_a_listobject_the_reader_reports(tmp_path):
     path = _book(tmp_path, headers=["region", "units"], rows=[["North", 800], ["South", 440]])
@@ -328,7 +318,7 @@ def test_page_setup_writes_the_print_properties(tmp_path):
     assert sheet.page_setup.fitToWidth == 1
     assert sheet.page_setup.paperSize == 9
     assert sheet.sheet_properties.pageSetUpPr.fitToPage
-    assert sheet.print_title_rows == "$1:$1"      # openpyxl makes the reference absolute
+    assert sheet.print_title_rows == "$1:$1"
 
 
 def test_an_unknown_op_names_the_ones_that_exist(tmp_path):

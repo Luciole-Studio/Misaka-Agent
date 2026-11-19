@@ -81,7 +81,6 @@ class Target:
     poppler: PopplerSource
 
 
-# Order matches the table in misaka/ui/panel/lib/README.md.
 TARGETS: dict[str, Target] = {
     target.name: target
     for target in (
@@ -94,7 +93,6 @@ TARGETS: dict[str, Target] = {
     )
 }
 
-# Binaries the running app looks up. ripgrep and poppler keep these names.
 BUNDLED_BINARIES = ("uv", "git", "rg", "fd", "pdftotext")
 
 
@@ -298,7 +296,7 @@ def poppler_tool_roots(conda_prefix: Path, msys2_prefix: Path | None) -> list[Pa
     conda-forge git for win-arm64 vendors Xpdf 4.06 as
     ``Library/clangarm64/bin/pdftotext.exe``. That file is on the archive
     prefix next to the MSYS2 poppler build. Searching the git prefix picks
-    Xpdf, whose ``-v`` exits 99. The MSYS2 tree is the poppler the README asks
+    Xpdf, whose ``-v`` exits 99. The MSYS2 tree is the poppler MISAKA asks
     for, and its ``bin`` directory also holds the DLLs ``pdftotext.exe`` loads.
     """
     if msys2_prefix is not None:
@@ -530,7 +528,6 @@ def _host_windows_arch() -> str | None:
     return windows_vcvars_arch(platform.machine())
 
 
-# COFF machine field. An x64 CRT object is 0x8664; an ARM64 one is 0xAA64.
 _PE_MACHINE = {"arm64": 0xAA64, "x64": 0x8664}
 
 
@@ -671,10 +668,6 @@ def _wrap(exec_path: str, args: list[str], env: list[tuple[str, str]], prepend: 
     return lines
 
 
-# cryptography stopped publishing win_arm64 wheels after 46.0.3. That wheel is
-# cp311-abi3, so the bundled CPython 3.13 loads it, and google-auth / pyjwt still
-# accept it. tiktoken has never published a win_arm64 wheel; the cp313 build in
-# release/wheels is the one this installer passes via --find-links.
 WIN_ARM64_CRYPTOGRAPHY = "46.0.3"
 VENDORED_WHEELS = ROOT / "release" / "wheels"
 
@@ -727,9 +720,6 @@ def _install_project(uv: Path, python: Path) -> None:
     env["PYTHONNOUSERSITE"] = "1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["UV_PYTHON_DOWNLOADS"] = "never"
-    # setuptools reads VSCMD_ARG_TGT_ARCH before the interpreter. The x64 developer
-    # prompt on an ARM64 runner otherwise builds wheels as win-amd64, and
-    # setuptools-rust then passes --target x86_64-pc-windows-msvc.
     windows_arch = _host_windows_arch()
     if windows_arch is not None:
         env["VSCMD_ARG_TGT_ARCH"] = windows_arch
@@ -746,8 +736,6 @@ def _install_project(uv: Path, python: Path) -> None:
         str(requirements),
     ]
     if windows_arch == "arm64":
-        # Lock hashes name cryptography 50.0.0 and the tiktoken sdist. Neither
-        # matches the win_arm64 wheels this install uses.
         export.append("--no-hashes")
     exported = subprocess.run(
         export,
@@ -759,8 +747,6 @@ def _install_project(uv: Path, python: Path) -> None:
         check=False,
     )
     install = [str(uv), "pip", "install", "--python", str(python), "--link-mode", "copy"]
-    # --only-binary applies to third-party requirements. The local project is
-    # installed afterwards with --no-deps and is not a published wheel.
     dependencies = pip_install_command(uv, python, windows_arch)
     if exported.returncode == 0:
         if windows_arch == "arm64":
@@ -798,7 +784,7 @@ def _write_bundled(
             f"target: {target.name}",
             f"python: {versions['python']} (astral-sh/python-build-standalone {versions['python_release']})",
             "",
-            "Tools required by the README, in tools/, on PATH when bin/misaka runs:",
+            "Tools MISAKA requires, in tools/, on PATH when bin/misaka runs:",
             f"uv         {versions['uv']}     https://github.com/astral-sh/uv",
             f"git        {git_version}     https://git-scm.com (conda-forge, GPL-2.0)",
             f"rg         {versions['ripgrep']}     ripgrep, https://github.com/BurntSushi/ripgrep",
@@ -931,8 +917,6 @@ def build(target_name: str) -> Path:
         _wrap(
             _rel(bin_dir, python_executable(stage)),
             ["-m", "misaka"],
-            # ``-m`` puts the working directory first on sys.path, so a folder holding a
-            # ``misaka`` package (a source checkout) would be run instead of the archive's own.
             [*shared_env, ("PYTHONNOUSERSITE", "1"), ("PYTHONSAFEPATH", "1")],
             ["../tools"],
         ),
@@ -1134,7 +1118,7 @@ def render_notes(version: str) -> str:
     )
     return f"""MISAKA {version}
 
-Each archive is one architecture and includes the tools named in the README: uv, git, ripgrep (`rg`), fd and poppler (`pdftotext`). `bin/misaka` puts `tools/` on PATH for that process.
+Each archive is one architecture and includes the tools MISAKA requires: uv, git, ripgrep (`rg`), fd and poppler (`pdftotext`). `bin/misaka` puts `tools/` on PATH for that process.
 
 | Archive | Built on |
 |---|---|

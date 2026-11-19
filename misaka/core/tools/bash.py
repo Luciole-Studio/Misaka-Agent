@@ -85,8 +85,6 @@ bashToolSystemPromptContribution = {
 }
 
 
-# MISAKA fork: the background-capable input misaka's managed bash uses (CCB's run_in_background/description);
-# pi's schema is BashToolInput alone.
 class BackgroundBashToolInput(BashToolInput):
     # CCB semanticBoolean accepts exactly the two boolean strings, not 0/1/yes. A model's tool call is converted first,
     # as every tool's is upstream (pi's `Value.Convert`, misaka.ai.utils.typebox_convert), which also reads "0"/"1"
@@ -178,7 +176,6 @@ def createLocalShellOperations(shellName: str, resolveShellConfig: Callable[[], 
         stdinError: BaseException | None = None
         if commandFromStdin:
             try:
-                # MISAKA fork: lone UTF-16 surrogates are replaced as Node's stream encoder does.
                 child.write_stdin(normalize_command_for_stdin(command).encode("utf-8"))
             except OSError:
                 pass
@@ -223,7 +220,6 @@ def createLocalShellOperations(shellName: str, resolveShellConfig: Callable[[], 
                     raise RuntimeError(f"timeout:{formatNumber(timeout)}")
                 # A signal-killed shell has no exit code. Use the standard shell convention so
                 # callers do not mistake the termination for a successful command.
-                # MISAKA fork: asyncio reports a signal death as the negative signal number.
                 if exitCode is not None and exitCode < 0:
                     return {"exitCode": 128 + (-exitCode)}
                 return {"exitCode": exitCode if exitCode is not None else 1}
@@ -303,7 +299,6 @@ def resolveSpawnContext(
             env["PI_MODEL"] = read_field(model, "id")
         if read_field(ctx, "thinkingLevel"):
             env["PI_REASONING_LEVEL"] = read_field(ctx, "thinkingLevel")
-    # MISAKA fork: a skill's runtime (its venv, a remote host) shapes the environment the command runs in.
     runtime = getattr(read_field(ctx, "sessionManager"), "_skill_runtime", None) if ctx is not None else None
     if runtime is not None:
         env = runtime.execution_env(env)
@@ -323,7 +318,6 @@ class BashToolOptions:
     exposeSessionEnvironment: bool | None = None
     # Hook to adjust command, cwd, or env before execution
     spawnHook: BashSpawnHook | None = None
-    # MISAKA fork: managed background commands (see the module docstring).
     startBackground: Callable[..., AgentToolResult] | None = None
     registerForeground: Callable[..., Any] | None = None
 
@@ -350,7 +344,6 @@ class ShellToolConfig:
     prompt: str
     promptSnippet: str
     promptGuidelines: tuple[str, ...] | None = None
-    # MISAKA fork: a default, where upstream requires the field; output files are named after misaka.
     tempFilePrefix: str = "misaka-shell"
 
 
@@ -368,7 +361,6 @@ def createShellToolDefinition(
         options.exposeSessionEnvironment if options and options.exposeSessionEnvironment is not None else True
     )
     spawnHook = options.spawnHook if options else None
-    # MISAKA fork: managed background commands.
     startBackground = options.startBackground if options else None
     registerForeground = options.registerForeground if options else None
     inputModel = BackgroundBashToolInput if startBackground is not None else BashToolInput
@@ -390,7 +382,6 @@ def createShellToolDefinition(
             exposeSessionEnvironment,
             ctx,
         )
-        # MISAKA fork: a skill whose runtime is remote gets its host ready before the command runs.
         runtime = getattr(read_field(ctx, "sessionManager"), "_skill_runtime", None) if ctx is not None else None
         if runtime is not None and runtime.remote is not None:
             from misaka.utils.async_lifecycle import run_in_thread
@@ -398,8 +389,6 @@ def createShellToolDefinition(
         if isinstance(parsed, BackgroundBashToolInput) and parsed.run_in_background:
             if signal_aborted(signal):
                 raise RuntimeError("Command aborted")
-            # MISAKA fork: a backgrounded command has not finished, so its result carries a task
-            # id rather than the declared `structuredContent`; the output arrives later.
             return startBackground(  # type: ignore[misc]
                 command=command, description=parsed.description, context=ctx,
                 spawn_context=spawnContext, operations=ops, timeout=_resolve_timeout_seconds(timeout),
@@ -494,7 +483,6 @@ def createShellToolDefinition(
 
         startedAt = time.perf_counter()
 
-        # MISAKA fork: a managed foreground command registers so it can move to the background at its timeout.
         foreground = None
         if registerForeground is not None:
             if signal_aborted(signal):
@@ -512,7 +500,6 @@ def createShellToolDefinition(
                     if result is None:
                         from misaka.core.subagent.shell import background_result
                         clearUpdateTimer()
-                        # MISAKA fork: moved to the background, as above; no `structuredContent` yet.
                         return background_result(foreground, by_user=foreground.backgrounded_by_user)
                 else:
                     result = await ops.exec(
@@ -569,7 +556,6 @@ def createShellToolDefinition(
         label=config.label,
         description=(
             f"Execute a {config.shellName} command in the current working directory. Returns stdout and stderr. Output is truncated to last {DEFAULT_MAX_LINES} lines or {formatNumber(DEFAULT_MAX_BYTES / 1024)}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds."
-            # MISAKA fork: the background sentence appears only when the session runs managed background commands.
             + (" run_in_background=true returns a task ID immediately; completion arrives automatically. "
                "TaskOutput reads output and TaskStop stops the command. Eligible foreground commands also continue "
                "in the background when the foreground wait times out (default 120 seconds; BASH_DEFAULT_TIMEOUT_MS overrides)." if startBackground is not None else "")
@@ -593,7 +579,6 @@ bashToolConfig = ShellToolConfig(
     prompt="$",
     promptSnippet=bashToolSystemPromptContribution["snippet"],
     promptGuidelines=tuple(bashToolSystemPromptContribution["guidelines"]),
-    # MISAKA fork: output files are named after misaka (upstream: `pi-bash`).
     tempFilePrefix="misaka-bash",
 )
 
@@ -613,8 +598,6 @@ def createBashTool(cwd: str, options: BashToolOptions | Mapping[str, Any] | None
     return tool
 
 
-# MISAKA fork: misaka/core/subagent imports these names and that package is not edited. Its background tasks count
-# their timeout in seconds, so the check is resolveTimeoutMs's and the value stays in seconds.
 def _resolve_timeout_seconds(timeout: float | None) -> float | None:
     resolveTimeoutMs(timeout)
     return timeout

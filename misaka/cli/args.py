@@ -103,8 +103,6 @@ def parseArgs(args: list[str]) -> Args:
             # End of options. A message is prose the author wrote -- a card contract whose
             # body opens with "-" or "---" is the case that forced this -- so past the
             # terminator nothing is read as a flag again.
-            # MISAKA fork: pi still reads an `@path` argument after `--` as a file; here it stays
-            # message text, since a contract opening with "@" would otherwise be opened as a file.
             result.messages.extend(args[index + 1:])
             break
         if arg in {"--help", "-h"}:

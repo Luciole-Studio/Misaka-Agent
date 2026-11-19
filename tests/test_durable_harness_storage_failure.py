@@ -571,8 +571,6 @@ class TestListenerAndReportErrors:
         try:
             errors: list[Any] = []
 
-            # MISAKA fork: upstream's thenable, like some libraries' promises, calls only the handler it settles with. A
-            # Python awaitable has no handlers; the counterpart is an awaitable of no asyncio type that completes.
             class Thenable:
                 def __await__(self) -> Any:
                     yield
@@ -589,8 +587,6 @@ class TestListenerAndReportErrors:
         unhandled = Unhandled()
         try:
 
-            # MISAKA fork: Python has no realms; the counterpart of a `Promise` of another realm, which is no instance of
-            # this realm's `Promise`, is an awaitable of no asyncio type that fails.
             class Foreign:
                 def __await__(self) -> Any:
                     raise RuntimeError("foreign")
@@ -623,8 +619,6 @@ class TestListenerAndReportErrors:
         await harness.close(context)
 
     async def test_faults_only_the_task_and_ends_only_the_watch_for_a_thrown_value_that_cannot_be_formatted(self):
-        # MISAKA fork: JavaScript throws `Object.create(null)`, which `String()` cannot format. Python raises only
-        # exceptions; the counterpart is one whose `str()` throws, formatted as `Object.prototype.toString` would name it.
         class Unformattable(Exception):
             def __str__(self) -> str:
                 raise TypeError("Cannot convert object to primitive value")

@@ -137,8 +137,6 @@ class AssistantMessageEventStream(EventStream[AssistantMessageEvent, AssistantMe
     def __init__(self) -> None:
         self._startedAt = time.time_ns() // 1_000_000
         self._startedAtMonotonic = time.perf_counter()
-        # MISAKA fork: live control data only, never serialized into the message or session: the exception behind an
-        # `error` event, and the producer task `settled()` joins.
         self.error_cause: BaseException | None = None
         self._producer: asyncio.Task[Any] | None = None
 
@@ -156,7 +154,6 @@ class AssistantMessageEventStream(EventStream[AssistantMessageEvent, AssistantMe
             self._time(event.message)
         elif event.type == "error":
             self._time(event.error)
-            # MISAKA fork: keep the live exception behind the error.
             if not self._done:
                 self.error_cause = cause
         super().push(event)
@@ -190,7 +187,6 @@ def createAssistantMessageEventStream() -> AssistantMessageEventStream:
     return AssistantMessageEventStream()
 
 
-# MISAKA fork: provider tasks need a strong reference while they run.
 _live_stream_tasks: set[asyncio.Task[Any]] = set()
 
 

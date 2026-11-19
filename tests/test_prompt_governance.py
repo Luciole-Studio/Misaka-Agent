@@ -62,7 +62,6 @@ class PromptGovernanceTests(unittest.TestCase):
     def test_base_prompt_tool_selection_and_exact_dedup(self):
         common = {"cwd": "/fixture", "toolSnippets": {"bash": "Shell", "grep": "Search"}}
         empty = buildSystemPrompt({**common, "selectedTools": []})
-        # pi 0.87: the prompt is built from tagged, independently replaceable sections.
         self.assertIn("<tools>\n(none)", empty)
         self.assertNotIn("Use bash for file operations", empty)
         shell = buildSystemPrompt({**common, "selectedTools": ["bash"]})
@@ -159,7 +158,7 @@ class PromptGovernanceTests(unittest.TestCase):
         self.assertNotIn("lifts only at final", workflow.RESEARCH_DISCIPLINE)
         self.assertIn("Node synthesis produces a working conclusion", workflow.RESEARCH_DISCIPLINE)
         self.assertIn(planner.MARKDOWN_OUTPUT, planner.SYNTHESIS_CONTRACT)
-        for text in (report.DRAFT_CONTRACT, report.FINAL_CONTRACT):   # the report tool delivers these
+        for text in (report.DRAFT_CONTRACT, report.FINAL_CONTRACT):
             self.assertNotIn(planner.MARKDOWN_OUTPUT, text)
             self.assertIn(planner.SOURCES_FOOTER, text)
         self.assertIn("doc_read", report.STAGE_OUTPUT)
@@ -234,7 +233,6 @@ class PromptGovernanceTests(unittest.TestCase):
             self.assertIn("critique.md", review)
             self.assertIn("Use issues=[] explicitly", review)
         self.assertIn("it opens no new node of the graph", " ".join(report.FINAL_CONTRACT.split()))
-        # 2026-09-29 (user): the report is a humanities research article, complete and traceable.
         draft, final = (" ".join(text.split()) for text in (report.DRAFT_CONTRACT, report.FINAL_CONTRACT))
         self.assertIn("Write for a reader of the humanities and social sciences", draft)
         self.assertIn("The body carries no run vocabulary or identifiers", draft)

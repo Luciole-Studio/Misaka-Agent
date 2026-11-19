@@ -57,7 +57,6 @@ def test_returns_a_session_resume_command_for_default_session_dirs(setStdoutIsTT
 
 
 def test_names_no_session_dir_for_non_default_session_dirs(setStdoutIsTTY, tmp_path):
-    # MISAKA fork: pi adds `--session-dir /tmp/custom-pi-sessions`.
     setStdoutIsTTY(True)
     sessionManager = createSessionManager(
         sessionFile=createTempFile(tmp_path),
@@ -70,7 +69,6 @@ def test_names_no_session_dir_for_non_default_session_dirs(setStdoutIsTTY, tmp_p
 
 
 def test_a_sister_window_names_the_sister(setStdoutIsTTY, tmp_path, monkeypatch):
-    # MISAKA fork: a Sister's sessions live in her own store.
     setStdoutIsTTY(True)
     monkeypatch.setenv("MISAKA_WHO", "Sister 10032")
     sessionManager = createSessionManager(sessionFile=createTempFile(tmp_path), sessionId="test-session")

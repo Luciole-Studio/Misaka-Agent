@@ -25,7 +25,7 @@ def test_a_stop_that_reached_only_the_card_file_is_reopened_by_the_resume(lab): 
     clean = _linked(lab, "Clean", needs=[parent])
     torn = _linked(lab, "Torn", needs=[parent])
     tasks.mark_stopped(con, clean, generation=1)
-    cards.set_fields(str(lab.tmp), torn, status="stopped", generation=1)    # the commit never came
+    cards.set_fields(str(lab.tmp), torn, status="stopped", generation=1)
     con.commit()
     assert tasks.get(con, torn)["status"] == "todo"
 
@@ -35,7 +35,7 @@ def test_a_stop_that_reached_only_the_card_file_is_reopened_by_the_resume(lab): 
         row = tasks.get(con, card)
         assert (row["status"], row["generation"]) == ("todo", 2), card
         assert tasks.latest_payload(con, card, "research_resumed", generation=2) is not None
-    cards.reconcile(con, str(lab.tmp))                                       # the next tick
+    cards.reconcile(con, str(lab.tmp))
     assert tasks.get(con, torn)["status"] == "todo" and _file_status(lab, torn) == "todo"
 
 

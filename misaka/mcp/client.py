@@ -103,8 +103,6 @@ class PendingRequest:
     cancellable: bool
     onProgress: Callable[[ProgressNotification], None] | None
     progressToken: JsonRpcId | None
-    # MISAKA fork: `removeEventListener("abort", ...)`, which a signal without listeners (one of misaka's
-    # flag-style signals) answers with the watcher that stands in for the listener.
     removeAbortListener: Callable[[], None] = field(default=lambda: None)
 
 
@@ -223,7 +221,6 @@ class McpClient:
         self._errorListeners: dict[ErrorListener, None] = {}
         self._closeListeners: dict[CloseListener, None] = {}
         self._disposers: list[Callable[[], Any]] = []
-        # MISAKA fork: asyncio holds tasks weakly; fire-and-forget sends live here until they finish.
         self._tasks: set[asyncio.Task[Any]] = set()
         self._requestHandlers["ping"] = lambda _params, _context: {}
         roots = options.get("roots")
@@ -267,8 +264,6 @@ class McpClient:
             transport.onClose(lambda: self._handleTransportClose()),
         ]
 
-        # MISAKA fork: a cancelled connect closes the transport too (a JavaScript promise cannot be
-        # cancelled), or the stdio server it started keeps running.
         try:
             await transport.start()
             capabilities: ClientCapabilities = {**(self.options.get("capabilities") or {})}  # type: ignore[typeddict-item]
@@ -501,8 +496,6 @@ class McpClient:
 
         def abortRequest() -> None:
             reason = abortReason(signal)
-            # MISAKA fork: misaka's own signals carry no reason, which upstream would print as the
-            # DOMException; "Aborted" is upstream's fallback for an absent one.
             self._cancelPending(
                 id, McpAbortError(), method != "initialize", jsString(reason if reason is not None else "Aborted")
             )
@@ -531,8 +524,6 @@ class McpClient:
             if not task.cancelled() and task.exception() is not None
             else None
         )
-        # MISAKA fork: a cancelled caller cancels the request (a JavaScript promise cannot be cancelled),
-        # or its timer and progress mapping outlive it.
         try:
             return await future
         except asyncio.CancelledError:

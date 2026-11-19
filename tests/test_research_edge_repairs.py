@@ -59,7 +59,6 @@ async def test_parent_spawn_reply_does_not_restore_released_runner(state):
     assert runs.claim_runner(con, "research_execution", root["id"], key)
     runs.set_node(con, root["id"], status="closed")
     runs.release_runner(con, "research_execution", root["id"], key)
-    # A late pane.create reply still names the living resident window.
     workflow._record_runner(
         con, "research_execution", root["id"], SimpleNamespace(pid=os.getpid()), key=key
     )
@@ -103,7 +102,6 @@ async def test_one_clarifying_node_does_not_revoke_its_sibling(
             progress=None,
         )
         assert result["reason"] == "waiting_input"
-    # Sibling was already running before node A paused the level.
     accepted = runs.record_action(
         con,
         run,

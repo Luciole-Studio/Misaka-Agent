@@ -174,7 +174,6 @@ async def test_registers_codemode_and_tool_search_inactive_until_they_are_named(
     extensionFactories = [createCodemodeExtension(), createToolSearchExtension()]
     async with createHarness(extensionFactories=extensionFactories) as plain:
         assert {"codemode", "tool_search"} <= {tool.name for tool in plain.session.getAllTools()}
-        # MISAKA fork: MISAKA's eight default tools.
         assert plain.session.getActiveToolNames() == ["read", "bash", "edit", "write", "office", "grep", "find", "ls"]
 
     # --tools and the defaultTools setting name them explicitly.
@@ -217,7 +216,6 @@ def _probe_run() -> list:
 
 
 async def test_a_nested_call_answers_to_the_tool_scope(tmp_path):
-    # MISAKA fork: codemode/deferred exposure must not reach past a research window's tool scope.
     outcomes: list = []
     async with harness(tmp_path, [orchestrator_extension, _probe_extension("helper", outcomes)]) as session:
         await session.bindExtensions({})
@@ -234,8 +232,6 @@ async def test_a_nested_call_answers_to_the_tool_scope(tmp_path):
 
 
 async def test_a_nested_call_answers_to_the_parts_tool_boundaries(tmp_path):
-    # MISAKA fork: the parts' projections (for example driver-owned tools in a research card)
-    # narrow what ctx.executeTool can reach.
     from misaka.core.moments import Moments
 
     class HideHelper:

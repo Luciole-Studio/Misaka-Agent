@@ -195,9 +195,6 @@ def test_accepts_zero_in_ordinary_settings_and_model_overrides():
 # Tests for the fix to a bug where external file changes to arrays were overwritten: the manager tracks which fields
 # were explicitly modified during the session, and only those fields override file values during save().
 #
-# MISAKA fork: pi's `packages` case is not translated (MISAKA's package manager has no `packages` sources), and the two
-# project cases use project prompt paths where pi uses project extension paths (MISAKA never enables extensions from
-# project settings).
 
 
 @pytest.fixture

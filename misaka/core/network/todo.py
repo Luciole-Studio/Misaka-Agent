@@ -158,8 +158,8 @@ def _turn_failure(event):
     return None
 
 
-PROGRESS_SECONDS = 60     # how often a busy Sister stamps progress on its card
-UNSETTLED_GRACE_SECONDS = 30   # how long a card told it is still running may sit with nothing to wake it
+PROGRESS_SECONDS = 60
+UNSETTLED_GRACE_SECONDS = 30
 
 
 def _review_record(submission):
@@ -179,7 +179,7 @@ def _review_record(submission):
 class TodoPart:
     """The ``misaka_todo`` tools and reminder nudges for one task card."""
 
-    _consultation = None                  # (run_id, lock) while a finished card answers in this session
+    _consultation = None
 
     def __init__(self, task_id, sender):
         from typing import Literal
@@ -203,16 +203,16 @@ class TodoPart:
         self._stale_nags = 0
         self._summary = None
         self._summary_token = None
-        self._nudged_generation = None    # the generation already given its one extra turn
-        self._held_generation = None      # the generation already told that a turn without misaka_card_complete leaves the card running
-        self._turn_clean = False          # the last agent_end was a plain stop (not error/aborted/length)
-        self._failure = None              # (stop, reason) when the last agent_end was an error or a cut reply
-        self._continued_generation = None # the generation already given its one turn after a cut reply
-        self._idle_watch = None           # the wait that ends an attempt left idle after that notice
-        self._refusal = None              # what misaka_card_complete last refused with
+        self._nudged_generation = None
+        self._held_generation = None
+        self._turn_clean = False
+        self._failure = None
+        self._continued_generation = None
+        self._idle_watch = None
+        self._refusal = None
         self._touched = 0.0
-        self._in_flight = 0               # tool calls started and not yet answered
-        self._stamper = None              # the task that stamps progress while one is
+        self._in_flight = 0
+        self._stamper = None
 
         def con():
             return self.con()
@@ -279,8 +279,6 @@ class TodoPart:
         from misaka.core.platform import owners
 
         class BaseNoteParams(BaseModel):
-            # A field the tool does not know is refused, never dropped: findings sent flat beside
-            # `text` were ignored and every declaration of a run was lost (2026-09-27).
             model_config = {"extra": "forbid"}
             text: str = Field(description="One line for the card's log: a decision, a change of course, a dead end.")
             findings: list[Finding] = Field(default_factory=list, description=(
@@ -288,8 +286,6 @@ class TodoPart:
                 "not erase earlier notes."))
             uncertain: list[str] = Field(default_factory=list, description="Concrete uncertainties, one per item.")
 
-        # The fields of the workflows that own cards (a red team's issues, a divergence review's
-        # alternatives), each answered by the owner that declared it.
         owned_fields = {name: (owner, spec) for owner in owners.registered()
                         for name, spec in owner.note_fields().items()}
         NoteParams = create_model("NoteParams", __base__=BaseNoteParams,
@@ -308,8 +304,6 @@ class TodoPart:
             def record(kind, payload):
                 generation, claim_lock = self._ownership()
                 if generation is not None and claim_lock is None:
-                    # A review's issues or alternatives are its round's answer; changing them
-                    # after the card finished is a re-review, which Last Order asks for.
                     raise ValueError("This card is finished: its review is not revised in an answer to a "
                                      "message. Say what you would change with SendMessage; Last Order "
                                      "asks for a re-review if it should be recorded.")
@@ -326,11 +320,6 @@ class TodoPart:
                     owner_records += owner.note(c, task_id, context if card_owner is owner else None, mine, record)
             if {"findings", "uncertain"} & p.model_fields_set:
                 generation, claim_lock = self._ownership()
-                # A finished card whose session works on -- a Sister's question, a note from Last
-                # Order -- records under the generation it finished, fenced by that generation:
-                # its claim went with the completion, and the turn's end declares the findings
-                # again with its outputs (``_redeclare_if_done``). Before, they stayed only in the
-                # message she sent (2026-10-01, B110).
                 finished = self._completed_row() is not None
                 if generation is None or not bdb.add_event(
                     c,
@@ -366,13 +355,7 @@ class TodoPart:
             if missing:
                 raise ValueError(f"Cannot complete: the contract deliverable `{missing}` is not under "
                                  f"`{row['output_dir']}` yet. Write it, then call misaka_card_complete again.")
-            # The same checks the submission will make, so a red-team card without its issue
-            # list hears it now rather than at the end of the turn.
             submission = worker.build_submission(con(), row, p.summary.strip())
-            # A review acts on what was recorded, never on the file: a divergence review that
-            # wrote five gaps and recorded one left four that nobody answered, and no later
-            # review found them (2026-10-01, B117). Once per attempt, before the review is
-            # submitted, its author checks her own file against her record.
             recorded = _review_record(submission)
             if recorded is not None and worker.attempt_payload(con(), row, "review_record_checked") is None:
                 bdb.add_event(con(), task_id, "review_record_checked", {"items": recorded[1], "claim_lock": row["claim_lock"]},
@@ -499,8 +482,6 @@ class TodoPart:
             return {}
         workspace = Path(self._bdb.workspace_for(row)).resolve()
         output = Path(row["output_dir"]).resolve()
-        # A missing/invalid output directory must not fall back to the entire project.
-        # Board paths are canonical at creation; a replaced symlink must not move the grant.
         if output != Path(row["output_dir"]) or output == workspace or not output.is_relative_to(workspace):
             return {}
         tools = {name.casefold() for name in self.session.getActiveToolNames()}
@@ -548,8 +529,6 @@ class TodoPart:
                 return
         live = self._bdb.live_consultation(con, self.task_id)
         if live is not None:
-            # The daemon opens the consultation for a message to her open window before the
-            # message reaches this session; the pane's process is this one.
             if int(live["generation"]) == generation and live["pid"] in (None, pid):
                 if live["pid"] is None:
                     self._bdb.bind_consultation(con, live["id"], live["claim_lock"], pid,
@@ -574,10 +553,6 @@ class TodoPart:
         self._failure = _turn_failure(event)
         row = self._owned_row() if self._turn_clean else None
         from misaka.core.network import worker
-        # A declaration is an event of this attempt's generation: one from an earlier attempt
-        # never counts. Only a turn that declared completion submits (2026-09-18, B27): before
-        # this, any turn ending in plain text completed the card, so every note Last Order sent
-        # a running Sister ended it -- even one whose reply said "not submitting yet".
         completion = worker.declared_completion(self.con(), row) if row is not None else None
         self._summary = (completion or text) if completion is not None else None
         self._summary_token = object() if self._summary is not None else None
@@ -594,7 +569,6 @@ class TodoPart:
                 self._hold_if_running()
                 await self._redeclare_if_done()
             if self._consultation is not None:
-                # Esc in her window is the only unclean end that is not a failure (_turn_failure).
                 await asyncio.to_thread(self._end_consultation, *(
                     ("done",) if self._turn_clean else ("stopped", "interrupted in her window")))
             return
@@ -642,8 +616,6 @@ class TodoPart:
             if (isinstance(error, worker.IncompleteSubmission)
                     and self._nudged_generation != int(row["generation"])
                     and self._owned_row() is not None):
-                # What is missing is the model's to supply: one more turn, in this session,
-                # before the miss costs an attempt. The second miss fails like any other.
                 self._nudged_generation = int(row["generation"])
                 self._prompt(f"Submission incomplete: {error} Then call misaka_card_complete again and "
                              "end the turn with the plain-text summary.")
@@ -680,7 +652,6 @@ class TodoPart:
         generation = int(row["generation"])
         from misaka.core.network import worker
         if worker.stopped_at_cap(reason):
-            # The run's token cap, not this card: it waits, ready, for a resume.
             if self._bdb.back_to_ready(self.con(), self.task_id, generation=generation,
                                        claim_lock=row["claim_lock"]):
                 self._bdb.add_event(self.con(), self.task_id, "budget_stop", {"reason": reason},
@@ -740,7 +711,7 @@ class TodoPart:
 
         await asyncio.sleep(UNSETTLED_GRACE_SECONDS)
         while subagent.has_background_tasks() or subagent.has_async_hooks():
-            await asyncio.sleep(UNSETTLED_GRACE_SECONDS)     # their notices start her next turn
+            await asyncio.sleep(UNSETTLED_GRACE_SECONDS)
         if self.session.isStreaming:
             return
         try:
@@ -749,7 +720,7 @@ class TodoPart:
                 return
             self._bdb.mark_unsettled(self.con(), self.task_id, generation=generation, claim_lock=row["claim_lock"],
                                      reason=worker.unsettled_reason(row, self._refusal))
-        except Exception:  # logged; the card stays running, as it did before this watch
+        except Exception:
             logging.getLogger(__name__).warning("Could not end idle card %s unsettled", self.task_id, exc_info=True)
 
     def _record_artifact(self, value):
@@ -840,7 +811,7 @@ class TodoPart:
         self._in_flight = max(0, self._in_flight - 1)
         self._touch()
         name = str(_field(event, "toolName", "") or "")
-        if name == "misaka_card_complete":      # what a refusal said, for the reason an idle attempt ends on
+        if name == "misaka_card_complete":
             said = " ".join(str(_field(block, "text", "")) for block in (_field(event, "content", []) or [])
                             if _field(block, "type") == "text")
             self._refusal = _flat(said, 300) if _field(event, "isError", False) else None

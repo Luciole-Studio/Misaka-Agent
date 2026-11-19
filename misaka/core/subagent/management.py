@@ -150,7 +150,6 @@ async def manage(argv: list[str], catalog, ctx, role_context) -> bool:
             if text is None:
                 return True
         await asyncio.to_thread(validate_markdown, text, name)
-    # Trust may change while an editor/confirmation is open.
     if action == 'create':
         if path.parent != writable_root(scope, ctx, role_context):
             raise ValueError('Agent location changed during editing')
@@ -191,7 +190,6 @@ async def memory_command(argv, manager, ctx):
     if operation == 'status' or state['action'] == 'none':
         ctx.ui.notify(f"Memory: {local}\nSnapshot: {snapshot}\nAction: {state['action']}", 'info')
         return
-    # A task actively writing memory must finish before this operator replaces it.
     def require_idle():
         if any(other.status not in TERMINAL_STATUSES and other.definition.memory
                and manager._memory_directory(other) == local for other in manager._tasks.values()):
@@ -207,7 +205,7 @@ async def memory_command(argv, manager, ctx):
         latest = await asyncio.to_thread(check_snapshot, snapshot, local)
         if latest.get('snapshotTimestamp') != timestamp:
             raise ValueError('Snapshot changed during confirmation; inspect it again')
-        require_idle()  # An agent may have started while confirmation was open.
+        require_idle()
         await run_in_thread(copy_snapshot, snapshot, local, timestamp, replace=True)
     else:
         await run_in_thread(mark_synced, local, timestamp)

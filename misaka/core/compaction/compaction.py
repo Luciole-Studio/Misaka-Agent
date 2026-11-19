@@ -124,11 +124,7 @@ class CompactionResult:
     usage: Usage | dict[str, Any] | None = None
     # Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction)
     details: Any | None = None
-    # MISAKA fork: a context engine's whole-context replacement. None keeps pi's prefix/tail form; even [] is a
-    # complete engine-owned view.
     contextMessages: list[AgentMessage] | None = None
-    # MISAKA fork: indexes into contextMessages of what the engine wrote itself (its summaries) rather
-    # than kept from the transcript -- shown as compaction summaries, not as turns someone took.
     contextSummaries: list[int] | None = None
 
 
@@ -861,7 +857,6 @@ def prepareCompaction(
     )
 
     previousSummary: str | None = None
-    # MISAKA fork: the messages of a context engine's checkpoint, summarized ahead of the rest.
     checkpointMessages: list[AgentMessage] = []
     boundaryStart = 0
     if prevCompactionIndex >= 0:
@@ -870,10 +865,6 @@ def prepareCompaction(
         # The canonical projection has already selected the previous compaction's retained tail.
         boundaryStart = prevCompactionIndex + 1
         if _entryField(previousCompaction, "contextMessages") is not None:
-            # MISAKA fork: a complete checkpoint (the LCM plugin's whole-context replacement)
-            # may still contain raw backlog and a changed tail. On a native compaction,
-            # summarize that view, never its display label or the pre-checkpoint archive
-            # that it already replaced.
             checkpointMessages = [
                 message
                 for message in projectedEntries[prevCompactionIndex].messages

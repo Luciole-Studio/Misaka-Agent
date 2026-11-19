@@ -12,7 +12,6 @@ def test_a_cancelled_card_stays_cancelled_when_the_node_plans_again(executing, m
     change(tool, ctx, cancel=[{"card": "c", "reason": "covered elsewhere"}])
     asyncio.run(workflow._apply_plan_changes(con, run, root, 1, [0], None, (run, root)))
     assert sorted(workflow._round_cards(con, run, root, 1)) == ["a", "b"]
-    # The node fails later and is resumed: runs._resume puts a failed node back to `planning`.
     con.execute("UPDATE research_execution SET status='failed' WHERE id=?", (root["id"],))
     runs.resume(con, run["id"], driver_lock="driver")
     monkeypatch.setattr(planner, "plan_needs_user", lambda *a, **k: False)

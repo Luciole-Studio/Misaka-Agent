@@ -181,8 +181,6 @@ def checkClassifierContext(context: Any) -> ClassifierContext:
                 raise fail(f'{at} is a "bool" question, so criteria must be {{ true: string, false: string }}')
         else:
             raise fail(f'{at}.type must be "choice", "score", or "bool", got {_shown(kind)}')
-    # MISAKA fork: upstream casts the checked object, so keys it does not know reach the service, which ignores them;
-    # misaka.ai's models forbid extra keys, so only the checked ones are kept (as the product's code mode does).
     return ClassifierContext.model_validate(
         {
             "state": context["state"],
@@ -231,7 +229,6 @@ def checkImagesContext(context: Any) -> ImagesContext:
         ):
             continue
         raise fail(f"context.input[{index}] must be a text or image block, got {describeValue(block)}")
-    # MISAKA fork: only the checked keys are kept, as for the classifier context.
     return ImagesContext.model_validate(
         {
             "input": [

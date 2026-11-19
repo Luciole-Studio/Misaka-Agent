@@ -19,7 +19,6 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-# Rebuildable or meaningless once processes exit: not part of what a release leaves behind.
 LEFT_OUT = ("cache", "logs", "run")
 
 
@@ -74,7 +73,6 @@ def build(version: str) -> Path:
                     ignore=lambda folder, names: [name for name in names
                                                   if (Path(folder) == scratch / "home" and name in LEFT_OUT)
                                                   or name.endswith(("-wal", "-shm"))])
-    # The project's .gitignore (which ignores .misaka/) would keep its settings out of this repository.
     shutil.copytree(project, target / "project", symlinks=True, ignore=shutil.ignore_patterns(".gitignore"))
     shutil.rmtree(scratch)
     return target

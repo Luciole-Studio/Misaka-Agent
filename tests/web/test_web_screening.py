@@ -35,7 +35,7 @@ def test_an_ordinary_url_passes_and_comes_back_normalised():
     assert screened.refusal is None
     assert screened.policy is None
     assert screened.url.startswith("https://example.com/K")
-    assert "Köln" not in screened.url  # percent-encoded on the way through
+    assert "Köln" not in screened.url
 
 
 def test_a_bare_api_key_in_the_path_is_refused():

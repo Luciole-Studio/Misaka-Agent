@@ -29,7 +29,6 @@ from misaka.utils.js import (
 from misaka.utils.node_fs import readdirEntries
 from misaka.utils.paths import resolvePath
 
-# MISAKA fork: misaka.core.subagent imports this name from here (a set it tests characters against).
 _ECMASCRIPT_WHITESPACE = frozenset(ECMASCRIPT_WHITESPACE)
 
 
@@ -168,8 +167,6 @@ def loadTemplateFromFile(filePath: str, sourceInfo: SourceInfo) -> _LoadedTempla
         firstLine = next((line for line in body.split("\n") if jsTrim(line)), None)
         if firstLine:
             # Truncate if too long
-            # MISAKA fork: a cut through a surrogate pair becomes U+FFFD here (Node writes U+FFFD for it on output;
-            # Python cannot encode a lone surrogate at all).
             description = toWellFormed(jsSlice(firstLine, 0, 60))
             if jsLength(firstLine) > 60:
                 description += "..."
@@ -258,7 +255,6 @@ def loadPromptTemplates(options: LoadPromptTemplatesOptions) -> LoadPromptTempla
         diagnostics.extend(result.diagnostics)
 
     globalPromptsDir = os.path.join(resolvedAgentDir, "prompts")
-    # MISAKA fork: the project's MISAKA home, which a cwd at $HOME has none of.
     projectDir = home.project_dir(resolvedCwd)
     projectPromptsDir = str(projectDir / "prompts") if projectDir is not None else None
 

@@ -72,10 +72,8 @@ def test_a_node_forks_the_lowest_node_its_parents_share(board, tmp_path):
     x = make("X", a)
     assert views.fork_source(board, x)["id"] == a["id"]
     assert views.fork_source(board, make("A and B", a, b))["id"] == root["id"]
-    # A parent that the other descends from is what both lines stand on.
     k = make("K", make("X and B", x, b))
     assert views.fork_source(board, make("K and X", k, x))["id"] == x["id"]
-    # P and Q both rest on X and on B, and neither of those on the other: only the root is shared.
     p, q = make("P", x, b), make("Q", x, b)
     assert views.fork_source(board, make("P and Q", p, q))["id"] == root["id"]
 
@@ -117,7 +115,6 @@ def test_reconcile_is_needed_for_pending_options_or_new_conclusions_only(board, 
     assert views.reconcile_state(board, run) == (False, [])
     root = _finish(board, root)
     _conclude(board, run, root)
-    # One concluded node and nothing pending: no join or relation can exist.
     assert views.reconcile_state(board, run)[0] is False
     _decide(board, run, root, "Fiscal", "Coalition")
     needed, considered = views.reconcile_state(board, run)
@@ -144,12 +141,10 @@ def test_reconciliation_merges_same_question_options_into_one_node_with_two_pare
     merged = runs.node(board, receipt["nodes"][0])
     assert merged["depth"] == 2 and views.kind(board, merged) == "join"
     assert {o["id"] for o in runs.origin_options(board, merged["id"])} == {a_options[0], b_options[0]}
-    # Two edges ending at one node: the paths list sends both options to it.
     paths = views.render_paths(views.snapshot(board, runs.get(board, run["id"])))
     assert paths.count(f"→ node `{merged['id']}`") == 2
     assert runs.pending_options(board, run["id"]) == []
     assert runs.option(board, b_options[1])["reason"] == "the node limit"
-    # Applied once: a replay returns the same receipt and creates nothing.
     assert runs.apply_reconcile(board, run, 1, resolved, considered=[]) == receipt
     assert len(runs.nodes(board, run["id"])) == 4
 
@@ -200,7 +195,6 @@ def test_joins_carry_finished_unrelated_nodes_only(board, tmp_path):
     receipt = runs.apply_reconcile(board, run, 1, resolved, considered=[a["id"], b["id"]])
     joined = runs.node(board, receipt["joins"][0])
     assert joined["depth"] == 2 and views.kind(board, joined) == "join"
-    # A closed node that gains a child stays closed: the child runs on its own.
     assert runs.node(board, b["id"])["status"] == "closed"
 
 
@@ -217,10 +211,9 @@ def test_a_closed_node_is_read_by_document_id_at_the_reconciliation(board, tmp_p
     workflow._close(board, run, runs.node(board, root["id"]), "closed")
     path = views.syntheses(board, run, root)[-1]["path"]
     doc_id = corpus.sha256_file(path)[:12]
-    assert corpus.resolve_doc(doc_id, workspace=run["workspace"])           # indexed at close
+    assert corpus.resolve_doc(doc_id, workspace=run["workspace"])
     [finished] = workflow._reconcile_material(board, run)["finished_nodes"]
     assert finished["conclusion_doc"] == doc_id
-    # Indexing is derived: when it fails, the node closes all the same.
     monkeypatch.setattr(report, "index_run", lambda *a, **k: 1 / 0)
     child = runs.create_node(board, run["id"], question="A", parents=[root["id"]])
     assert runs.prepare_runner(board, "research_execution", child["id"])
@@ -256,7 +249,6 @@ def test_a_node_closes_when_its_own_work_is_done_and_its_options_wait_for_the_ba
     assert workflow._close(board, run, root, "closed") == "closed"
     assert runs.node(board, root["id"])["status"] == "closed"
     assert {o["id"] for o in views.reconcilable_options(board, run)} == {first, _second}
-    # The barrier waits for the whole level: a node still running keeps the reconciliation off.
     child = runs.create_node(board, run["id"], question="One", parents=[root["id"]])
     assert views.reconcile_state(board, run)[0] is False
     _finish(board, child)
@@ -275,7 +267,6 @@ def test_views_are_written_from_the_records_and_never_read_back(board, tmp_path)
     assert "synthesis.md" in node_view and "Decisions made here" in node_view
     snapshot = json.loads((tmp_path / runs.run_path(run, views.GRAPH_SNAPSHOT)).read_text(encoding="utf-8"))
     assert snapshot["nodes"][0]["id"] == root["id"]
-    # A view is rewritten, never trusted: editing it changes nothing the run reads.
     (tmp_path / views.graph_path(run)).write_text("tampered", encoding="utf-8")
     assert views.snapshot(board, run)["nodes"][0]["question"] == root["question"]
 
@@ -357,5 +348,5 @@ def test_an_issue_records_where_it_went_in_a_column_of_its_own(board, tmp_path):
     assert (rows["covered"]["option_id"], rows["covered"]["covered_by"]) == (None, other)
     assert [runs.destination(rows[q]) for q in ("taken", "covered", "declined")] == [
         f"option {option}", f"node {other}", None]
-    with pytest.raises(graph_core.ConstraintError):              # an issue goes only where something is
+    with pytest.raises(graph_core.ConstraintError):
         runs.dispose(board, declined, "covered", covered_by="b_nowhere")

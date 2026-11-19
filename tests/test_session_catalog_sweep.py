@@ -157,7 +157,6 @@ async def test_the_daemon_sweeps_after_it_reaps_a_process(monkeypatch):
     panel = daemon.Daemon.__new__(daemon.Daemon)
     await panel._reap(SimpleNamespace(poll=lambda: 0, pid=-1))
     assert swept == [True]
-    # The startup pass is a loop that never returns; its wiring is read rather than run.
     assert "self._sweep_catalog()" in inspect.getsource(daemon.Daemon._watch_cards)
 
 
@@ -169,14 +168,12 @@ def test_control_parents_cover_the_directory_session_control_uses(monkeypatch):
 
     from misaka.core import session_control
 
-    monkeypatch.undo()          # read the real value, not this file's isolated one
+    monkeypatch.undo()
     assert "dir=_CONTROL_PARENT" in inspect.getsource(session_control.SessionControl.start)
     parent = tempfile.gettempdir() if sys.platform == "win32" else "/tmp"
     assert session_catalog._CONTROL_PARENT == parent
     assert Path(parent).resolve().as_posix() in {Path(p).as_posix() for p in session_catalog._CONTROL_PARENTS}
 
-
-# ── control directories nothing is listening in ────────────────────────────────────────
 
 @pytest.fixture
 def control_parent(monkeypatch):
@@ -203,7 +200,6 @@ def _socket_dir(parent, name, *, listening):
     path = str(directory / "control.sock")
     server = None
     if listening and sys.platform == "win32":
-        # What utils/local_socket leaves at the path of a listening server: a marker, and a pipe.
         import _winapi
         from types import SimpleNamespace
         Path(path).write_text("marker", encoding="utf-8")
@@ -216,7 +212,7 @@ def _socket_dir(parent, name, *, listening):
         server.listen(1)
     else:
         Path(path).write_text("", encoding="utf-8")
-    os.utime(directory, (0, 0))          # older than the start-up grace period
+    os.utime(directory, (0, 0))
     return directory, server
 
 

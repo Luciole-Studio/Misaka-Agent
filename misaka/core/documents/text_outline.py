@@ -22,9 +22,9 @@ from collections import Counter
 MIN_NODES = 3
 MAX_TITLE_CHARS = 120
 MAX_TITLE_WORDS = 14
-LOOKAHEAD_LINES = 3          # a numbered heading's title may follow on the next non-blank line
-RUNNING_HEAD_REPEATS = 3     # the same capital line this often is a page header, not a heading
-CAPS_NOISE_RATIO = 0.4       # more capital lines than 40 % of the pages: OCR shouting, not structure
+LOOKAHEAD_LINES = 3
+RUNNING_HEAD_REPEATS = 3
+CAPS_NOISE_RATIO = 0.4
 
 _LEVEL_KEYWORDS = {
     1: ("BOOK", "PART", "VOLUME", "VOL", "TOME", "LIVRE", "PARTIE", "BUCH", "TEIL", "LIBRO", "PARTE"),
@@ -37,15 +37,15 @@ _ORDINALS = ("FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH|SEVENTH|EIGHTH|NINTH|TENTH|E
              "PREMIER|PREMIÈRE|PREMIERE|DEUXIÈME|DEUXIEME|SECONDE?|TROISIÈME|TROISIEME|QUATRIÈME|QUATRIEME|"
              "CINQUIÈME|CINQUIEME|SIXIÈME|SIXIEME|SEPTIÈME|SEPTIEME|HUITIÈME|HUITIEME|NEUVIÈME|NEUVIEME|"
              "DIXIÈME|DIXIEME|DERNIER|DERNIÈRE|DERNIERE")
-_NUMBER = rf"(?:[IVXLCDM]+|\d+|(?-i:[A-Z])|{_ORDINALS})"     # a single letter only as a capital: APPENDIX A
+_NUMBER = rf"(?:[IVXLCDM]+|\d+|(?-i:[A-Z])|{_ORDINALS})"
 _STRUCTURAL = re.compile(
     r"^(?P<kw>" + "|".join(re.escape(word) for word in sorted(_KEYWORD_LEVEL, key=len, reverse=True)) + r")"
-    rf"(?:\.\s*|\s+|(?<=§)\s*)(?P<num>{_NUMBER})(?![A-Za-z])\.?:?(?P<rest>.*)$",   # CHAPTER I, CHAP. I, § 3
+    rf"(?:\.\s*|\s+|(?<=§)\s*)(?P<num>{_NUMBER})(?![A-Za-z])\.?:?(?P<rest>.*)$",
     re.IGNORECASE)
 _ORDINAL_FIRST = re.compile(rf"^(?P<num>{_ORDINALS})\s+(?P<kw>LIVRE|PARTIE|CHAPITRE|LETTRE|TOME|BOOK|PART|CHAPTER)\b\.?:?(?P<rest>.*)$",
                             re.IGNORECASE)
 _MARKDOWN = re.compile(r"^(#{1,6})\s+(\S.*?)\s*#*\s*$")
-_ROMAN_LINE = re.compile(r"^(?:[IVXLCDM]{2,8}\.?|[IVXLCDM]\.)$")   # a bare single letter is not a number
+_ROMAN_LINE = re.compile(r"^(?:[IVXLCDM]{2,8}\.?|[IVXLCDM]\.)$")
 _CAPS_LINE = re.compile(r"^[A-Z0-9À-Þ][A-Z0-9À-Þ ,.;:'’\-—–()&]{3,}$")
 _STANDALONE = frozenset({
     "CONTENTS", "TABLE OF CONTENTS", "PREFACE", "INTRODUCTION", "INDEX", "EPILOGUE", "PROLOGUE",
@@ -59,9 +59,6 @@ def build_text_tree(pages, *, markdown=False):
     states no structure worth a tree. ``markdown`` reads ``#`` headings as well."""
     candidates = _without_running_heads(_candidates(pages, markdown=markdown))
     if sum(1 for c in candidates if c["kind"] != "caps") >= MIN_NODES:
-        # The numbering is the outline. A free-standing capital line beside it is a title
-        # page, a dedication, an epigraph or a subtitle (an OCR'd title page yields a dozen
-        # of them), not a section; only the conventional front- and back-matter words stay.
         candidates = [c for c in candidates if c["kind"] != "caps" or c["standalone"]]
     elif sum(1 for c in candidates if c["kind"] == "caps") > CAPS_NOISE_RATIO * max(1, len(pages)):
         candidates = [c for c in candidates if c["kind"] != "caps"]
@@ -81,8 +78,6 @@ def _dedup(candidates):
     return out
 
 
-# -- finding the headings ---------------------------------------------------------------------
-
 def _candidates(pages, *, markdown):
     found = []
     for page_number, page in enumerate(pages, 1):
@@ -91,7 +86,7 @@ def _candidates(pages, *, markdown):
         for index, raw in enumerate(lines):
             if index in taken:
                 continue
-            line = " ".join(raw.split())          # OCR sets words two spaces apart
+            line = " ".join(raw.split())
             if not line or len(line) > MAX_TITLE_CHARS:
                 continue
             if not _standalone_line(lines, index):
@@ -172,8 +167,6 @@ def _without_running_heads(candidates):
     repeats = Counter(c["key"] for c in candidates if headish(c))
     return [c for c in candidates if not (headish(c) and repeats[c["key"]] >= RUNNING_HEAD_REPEATS)]
 
-
-# -- shaping the tree --------------------------------------------------------------------------
 
 def _nest(candidates, page_count):
     """Nest by level (a heading goes under the nearest earlier heading of a smaller level) and

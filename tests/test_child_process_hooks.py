@@ -21,7 +21,6 @@ async def test_the_draining_check_and_the_child_are_in_place_before_the_child_ca
 
     async def late(*args: Any, **kwargs: Any) -> Any:
         created = await create(*args, **kwargs)
-        # The child prints and exits meanwhile; the 100 ms post-exit grace starts before this call returns.
         await asyncio.sleep(0.25)
         return created
 
@@ -29,7 +28,6 @@ async def test_the_draining_check_and_the_child_are_in_place_before_the_child_ca
     spawned: list[ChildProcess] = []
     chunks: list[tuple[int, bytes]] = []
     holdUntil = time.monotonic() + 0.6
-    # The shell exits at once; a background `sleep` keeps its stdout open, so only the grace (or the check) ends the wait.
     child = await spawn_child_process(
         "/bin/sh",
         "-c",
@@ -41,10 +39,7 @@ async def test_the_draining_check_and_the_child_are_in_place_before_the_child_ca
     )
     await child.wait()
     assert spawned == [child]
-    # `on_spawn` ran before the first chunk was delivered.
     assert chunks[0][0] == 1
-    # The check, in place from the start, held the pipes open past the grace that began before the call returned
-    # (without it the wait ends 100 ms after the exit, while the call is still returning).
     assert time.monotonic() >= holdUntil
 
 
@@ -73,11 +68,9 @@ async def test_output_waiting_in_a_pipe_resumed_in_the_turn_the_grace_ends_is_st
         is_draining=lambda: state["draining"],
         on_spawn=lambda spawned: spawned.pause_output(),
     )
-    # `b` waits in the paused pipe (`a` may have been read before `on_spawn` paused it: asyncio reads the pipes from
-    # before `connection_made`); the grace keeps going while the consumer drains.
     await asyncio.sleep(0.5)
     state["draining"] = False
     child.resume_output()
-    child._protocol._idle_expired()  # the grace ends in this same turn, before the pipe is polled again
+    child._protocol._idle_expired()
     await asyncio.wait_for(child.wait(), 5)
     assert b"".join(chunks) == b"a\nb\n"

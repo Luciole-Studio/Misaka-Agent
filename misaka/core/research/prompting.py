@@ -50,8 +50,6 @@ def system_context(session, names, system_prompt, *, sister_id=None):
     default prompt they are all there already, and nothing is repeated.
     """
     if sister_id is None:
-        # The base's own rules whose tools Research leaves out; the board warning rides on
-        # misaka_card_requeue, but a research Last Order still has bash (2026-10-01).
         sections = [RESEARCH_LO_ORCHESTRATION, COORDINATOR_APPROVAL, COORDINATOR_RECEIPTS,
                     COORDINATOR_BOARD_STATUS]
     else:
@@ -61,5 +59,4 @@ def system_context(session, names, system_prompt, *, sister_id=None):
     for name in dict.fromkeys(names):
         definition = session.getToolDefinition(name)
         sections.extend(getattr(definition, "promptGuidelines", ()) or ())
-    # Exact owned strings only: no fuzzy deletion or rewriting of custom text.
     return "\n".join(section for section in dict.fromkeys(sections) if section not in system_prompt)

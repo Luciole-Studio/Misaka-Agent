@@ -165,8 +165,6 @@ async def test_resolves_built_in_extensions_with_user_exclusions_and_project_ove
     ]
 
 
-# #10765. MISAKA fork: pi's case uses the `skills` setting, which misaka does not have (its skills are
-# core/skills); prompt templates go through the same pattern matching.
 async def test_expands_tilde_in_exclusion_and_exact_patterns(tmp_path, monkeypatch):
     monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -354,8 +352,6 @@ def test_a_lone_surrogate_argument_is_recorded_without_raising():
 
 
 async def test_only_the_sessions_own_tool_calls_may_nest(tmp_path):
-    # MISAKA fork: a tool run by another Agent built from the session's tools must not reach the
-    # session's callable tools through its hooks.
     async with harness(tmp_path, []) as session:
         await session.bindExtensions({})
         session.agent.streamFunction = _replies([_done])
@@ -378,7 +374,6 @@ def test_mcp_names_and_types_are_checked_as_upstream_checks_them():
 
 async def test_restoring_the_transcript_loadout_sets_the_selection_outside_a_scope(tmp_path):
     # Upstream: the transcript's loadout is the branch's selection, so a later registry refresh keeps it.
-    # MISAKA fork: inside a tool scope it only sets the loadout, keeping the user's selection.
     from misaka.ai.types import SystemMessage
 
     async with harness(tmp_path, []) as session:

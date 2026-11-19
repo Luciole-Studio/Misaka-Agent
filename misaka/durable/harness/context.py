@@ -86,8 +86,6 @@ async def readContextFrom(
         minEntryId = idFromNumber(previous["bounds"]["tail"] + 1)
         added = await scanRange(storage, conversationId, {"minEntryId": minEntryId, "maxEntryId": bounds["tail"]}, context)
         range_ = extendRange(previous, bounds, added)
-    # MISAKA fork: a detached copy in place of upstream's frozen objects; one memo keeps the view's sharing (a message
-    # in `contributions` is the one in `messages`, as upstream).
     view = range_["view"]
     memo: dict[int, Any] = {}
     return {

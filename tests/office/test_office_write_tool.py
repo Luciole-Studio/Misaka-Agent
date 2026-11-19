@@ -29,8 +29,6 @@ async def _office(cwd, **params):
     return "\n".join(part.text for part in result.content if hasattr(part, "text"))
 
 
-# ---- the ops contract ------------------------------------------------------------------
-
 async def test_a_batch_of_ops_is_one_call_and_one_receipt(tmp_path):
     receipt = await _office(
         tmp_path, path="book.xlsx",
@@ -89,8 +87,6 @@ async def test_a_format_this_tool_does_not_write_is_refused_by_name(tmp_path):
     assert ".docx" in str(caught.value)
 
 
-# ---- the shorthand ---------------------------------------------------------------------
-
 async def test_content_alone_writes_a_whole_text_file(tmp_path):
     """Writing a report should not require knowing the ops grammar."""
     await _office(tmp_path, path="report.md", content="# Findings\n\nbody\n")
@@ -142,8 +138,6 @@ async def test_an_ops_file_outside_the_working_directory_is_refused(tmp_path):
         await _office(tmp_path / "work", path="x.md", ops=f"@{outside}")
     assert "outside the working directory" in str(caught.value)
 
-
-# ---- what the receipt promises ----------------------------------------------------------
 
 async def test_create_refuses_a_path_that_exists(tmp_path):
     await _office(tmp_path, path="report.md", content="original")
@@ -224,8 +218,6 @@ async def test_markdown_in_a_markdown_file_gets_no_hint(tmp_path):
     assert "hint" not in receipt
 
 
-# ---- the archive ------------------------------------------------------------------------
-
 async def test_every_call_is_archived_so_a_wrong_deliverable_can_be_explained(tmp_path, monkeypatch):
     """The ops that produced a file are gone the moment the call returns; afterwards there
     is only the file and a receipt saying it worked."""
@@ -236,7 +228,7 @@ async def test_every_call_is_archived_so_a_wrong_deliverable_can_be_explained(tm
     await _office(tmp_path, path="report.md", ops=[{"append": {"content": "\ntwo"}}])
 
     buckets = list((tmp_path / ".office-intent").iterdir())
-    assert len(buckets) == 1                      # both calls named the same file
+    assert len(buckets) == 1
     names = sorted(entry.name for entry in buckets[0].iterdir())
     assert names == ["001_create.json", "002_append.json"]
     record = json.loads((buckets[0] / "001_create.json").read_text(encoding="utf-8"))
@@ -244,7 +236,6 @@ async def test_every_call_is_archived_so_a_wrong_deliverable_can_be_explained(tm
 
 
 async def test_archiving_never_fails_the_write_that_succeeded(tmp_path, monkeypatch):
-    # A path that cannot be a directory: the archive has to give up quietly.
     blocker = tmp_path / "blocked"
     blocker.write_text("not a directory", encoding="utf-8")
     (tmp_path / ".office-intent").symlink_to(blocker)
@@ -252,8 +243,6 @@ async def test_archiving_never_fails_the_write_that_succeeded(tmp_path, monkeypa
     await _office(tmp_path, path="report.md", content="body")
     assert (tmp_path / "report.md").read_text(encoding="utf-8") == "body"
 
-
-# ---- how it sits beside the other tools -------------------------------------------------
 
 def test_office_is_a_registered_tool_with_a_prompt_snippet():
     """A tool with no snippet is invisible in the prompt's tool list, so the model never

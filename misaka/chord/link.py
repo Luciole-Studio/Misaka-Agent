@@ -380,10 +380,6 @@ class MemoryLink(BaseLink):
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            # MISAKA fork: JavaScript always has a microtask queue; Python has no loop outside `asyncio.run`, so the
-            # steps of a link sent on or closed from plain code wait in one queue (`_microtasks`, the microtask queue's
-            # stand-in) and run, in order, once the outermost `send`/`close` returned: the closing side ends with its
-            # own reason before the peer's `peer closed` reaches it, and the peer is told.
             if self._step is not None:
                 self._step.cancel()
                 self._step = None

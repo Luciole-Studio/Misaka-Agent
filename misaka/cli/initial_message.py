@@ -29,8 +29,6 @@ def buildInitialMessage(
     if parsed.messages:
         parts.append(parsed.messages.pop(0))
 
-    # MISAKA fork: pi joins the parts with "". Blank-line separated: piped stdin, @file text and the CLI message are distinct
-    # inputs, and joining them with "" glued the last stdin line to the prompt.
     message = "\n\n".join(part.strip("\n") for part in parts if part.strip())
     return InitialMessageResult(
         initialMessage=message or None,

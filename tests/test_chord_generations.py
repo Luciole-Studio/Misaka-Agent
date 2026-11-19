@@ -173,9 +173,6 @@ async def test_disposed_objects_are_not_kept_once_their_disposal_finished():
     implementations = Tracker()
 
     def factory(input: Any, _principal: Any, _self: Any) -> dict[str, Any]:
-        # MISAKA fork: the normalized input (a dict) cannot be weakly referenced. What holds it stands for it: the
-        # object (`object.input` is that input), tracked by `use`, and the implementation, through a sentinel in the
-        # factory's closure.
         sentinel = implementations.track(input["id"], Sentinel(input["id"]))
         return {"id": lambda _ctx: sentinel.generation}
 

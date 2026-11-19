@@ -147,7 +147,6 @@ class Agent:
 async def main():
     agent = Agent()
     try:
-        # A thread reads stdin: a Windows event loop cannot watch the pipe its parent handed it.
         while line := await asyncio.to_thread(sys.stdin.buffer.readline):
             await agent.handle(json.loads(line))
     finally:

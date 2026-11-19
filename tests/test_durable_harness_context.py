@@ -799,8 +799,6 @@ async def test_keeps_returned_views_and_kept_ranges_apart():
         view = await runtime.context(root.id, taskContext)
         view["messages"].clear()
         view["entries"].pop()
-        # MISAKA fork: upstream's kept entries are frozen, so this assignment throws there; here the view is a
-        # detached copy, so it changes only the view.
         view["contributions"][0][0]["content"] = "changed"
         assert await runtime.context(root.id, taskContext) == await root.context(taskContext)
         await runtime.commit(lambda tx, current: DONE, taskContext)
@@ -828,8 +826,6 @@ class SharingStorage(MemoryStorage):
 
 
 async def test_keeps_kept_entries_apart_from_returned_views_even_when_storage_shares_its_records():
-    # MISAKA fork of "freezes kept entries deeply even when storage freezes them shallowly": a change to a returned
-    # view reaches neither the kept range nor the records storage handed out.
     storage = SharingStorage()
     registry = createRegistry()
     harness = await Harness.open(storage, {"models": createModels(), "registry": registry}, context)
@@ -895,8 +891,6 @@ async def test_does_not_keep_a_read_that_finishes_after_its_task_ended():
 
 
 async def test_drops_an_idle_conversations_context_read_on_a_timer_when_nothing_else_runs():
-    # MISAKA fork: vitest's fake timers count Node timers; here a short real retention runs the asyncio timer, and
-    # the scheduler's pending expiry stands in for the timer count.
     s = await countingSetup({"settings": {"contextRetentionMs": 50}})
     harness, root, storage = s.harness, s.root, s.storage
     rows: dict[str, int] = {}

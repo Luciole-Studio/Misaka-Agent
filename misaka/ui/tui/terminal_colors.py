@@ -108,9 +108,6 @@ def parseTerminalColorSchemeReport(data: str) -> TerminalColorScheme | None:
     return "light" if match[1] == "2" else "dark"
 
 
-# MISAKA fork: MISAKA picks its light or dark palette from the terminal's background (OSC 11, mode 2031), which
-# pi 1.x replaced with its system theme (not ported). These two are pi 0.87.1's coding-agent theme helpers
-# (`theme.ts`), kept here beside the parsers that feed them.
 def getRgbColorLuminance(rgb: RgbColor) -> float:
     def toLinear(channel: float) -> float:
         value = channel / 255

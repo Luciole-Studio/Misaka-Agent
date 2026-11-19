@@ -54,10 +54,10 @@ async def test_a_message_larger_than_the_queue_lands_whole_once_the_program_read
     daemon = _daemon(tmp_path)
     reader, writer = _pipe()
     pane = _pane(writer)
-    data = bytes(range(256)) * 1200     # 300 KiB: several times the pipe buffer, hundreds of pty queues
+    data = bytes(range(256)) * 1200
     try:
         async def slow_program():
-            await asyncio.sleep(0.2)     # busy repainting, as a CPython TUI is after a paste
+            await asyncio.sleep(0.2)
             return await _read_all(reader, len(data))
 
         program = asyncio.create_task(slow_program())
@@ -82,7 +82,7 @@ async def test_pane_send_reports_and_drops_what_the_program_never_read(tmp_path)
         assert "bytes entered the pane within 0.2s and the rest was dropped" in text
         assert pane.writes == [] and not pane.writer_armed
         landed = _read_available(reader)
-        assert 0 < len(landed) < len(data)          # what entered stays in; nothing follows it
+        assert 0 < len(landed) < len(data)
         assert f"{len(landed)} of {len(data)} bytes" in text
     finally:
         os.close(reader)
@@ -93,13 +93,13 @@ async def test_pane_input_stays_queued_and_arrives_when_the_program_reads(tmp_pa
     daemon = _daemon(tmp_path)
     reader, writer = _pipe()
     pane = _pane(writer)
-    data = bytes(range(256)) * 400      # 100 KiB paste through the panel
+    data = bytes(range(256)) * 400
     try:
         result = await daemon._deliver(pane, data, timeout=0.1, drop_on_timeout=False)
         assert result["sent"] is True and result["queued"] > 0
         assert pane.writes and pane.writer_armed
         assert await _read_all(reader, len(data)) == data
-        await asyncio.sleep(0.05)       # the writer callback retires itself once the queue is empty
+        await asyncio.sleep(0.05)
         assert pane.writes == [] and not pane.writer_armed
     finally:
         os.close(reader)
@@ -144,7 +144,7 @@ async def test_the_queue_has_a_ceiling(tmp_path):
     pane = _pane(writer)
     try:
         await daemon._deliver(pane, b"z" * d.WRITE_QUEUE_LIMIT, timeout=0.05, drop_on_timeout=False)
-        queued = sum(len(item.view) for item in pane.writes)   # what the pipe did not take
+        queued = sum(len(item.view) for item in pane.writes)
         assert 0 < queued < d.WRITE_QUEUE_LIMIT
         with pytest.raises(RuntimeError, match="Pane input queue is full"):
             await daemon._deliver(pane, b"m" * (d.WRITE_QUEUE_LIMIT - queued + 1), timeout=0.05,
@@ -161,7 +161,7 @@ async def test_pane_send_delivers_text_and_enter_as_one_message(tmp_path):
     daemon.panes[pane.id] = pane
     try:
         pending = daemon._api("pane.send", {"id": "p1", "text": "hello", "enter": True})
-        assert asyncio.iscoroutine(pending)      # _serve_client awaits delivery
+        assert asyncio.iscoroutine(pending)
         assert await pending == {"sent": True}
         assert _read_available(reader) == b"hello\r"
     finally:

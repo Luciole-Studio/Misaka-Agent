@@ -31,8 +31,6 @@ PAGE = (
 )
 PDF = b"%PDF-1.7\n" + b"x" * 200
 
-# A query and two URLs written the way the dangerous ones are: the first carries what the
-# user typed, the other two carry a live credential in plain sight.
 QUERY = "acetaminophen hepatotoxicity threshold"
 PAGE_URL = "https://example.com/report?session=secret-token"
 FILE_URL = "https://files.example/paper.pdf?X-Amz-Signature=deadbeefcafe"
@@ -144,9 +142,6 @@ async def _download(workspace, url=FILE_URL):
     return await definition.execute("call-1", {"url": url}, None, None, None)
 
 
-# --- one row per paid call ----------------------------------------------------------
-
-
 async def test_search_records_backend_query_hash_and_attempt(monkeypatch, ledger):
     _stub_search(monkeypatch, _hit(3))
 
@@ -208,9 +203,6 @@ async def test_download_records_the_url_hash_and_attempt(
         "unit": "http_request",
         "subject_sha256": _sha(FILE_URL),
     }]
-
-
-# --- what the ledger must never hold, and what it must never break ------------------
 
 
 async def test_the_ledger_holds_no_query_and_no_url_in_the_clear(
@@ -309,7 +301,7 @@ async def test_failed_vendor_and_rescue_are_separate_attempts(monkeypatch, ledge
     calls = _vendor_wire(monkeypatch, handle)
     result = json.loads(await extract.web_extract_tool(urls, cwd=str(tmp_path)))
     assert all(row["content"] == "rescued" for row in result["results"])
-    assert len(calls) == 4  # Tavily batch, two Exa URL attempts, Parallel batch
+    assert len(calls) == 4
     assert [row["backend"] for row in ledger.rows()] == ["tavily", "exa", "exa", "parallel"]
 
 

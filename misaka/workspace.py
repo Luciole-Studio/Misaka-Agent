@@ -10,8 +10,8 @@ from misaka.utils.markdown import atx_headings
 _OUTLINE_SCAN_CHARS = 256 * 1024
 _OUTLINE_MAX_HEADINGS = 120
 _OUTLINE_MAX_TITLE_CHARS = 200
-_FOLD_FILES_OVER = 100      # files (artifacts, documents) under one node beyond which they are listed by folder
-_FOLDER_KEEPS_FILES = 10    # a folder holding at most this many of them still lists each one
+_FOLD_FILES_OVER = 100
+_FOLDER_KEEPS_FILES = 10
 
 
 def _doc_node(m, workspace=None):
@@ -48,7 +48,7 @@ def _artifact_node(row):
     except (OSError, UnicodeError):
         return node
     if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", text):
-        return node  # A misleading .md suffix must not turn binary controls into prose.
+        return node
     node["nodes"], truncated = _heading_nodes(text, f"artifact:{row['id']}")
     if truncated:
         node["summary"] += " · heading preview truncated; read the file for more"
@@ -60,7 +60,7 @@ def _heading_nodes(text, node_id):
     bounded in count and title length, and whether anything was left out or cut short."""
     truncated = len(text) > _OUTLINE_SCAN_CHARS
     if truncated:
-        text = text[:_OUTLINE_SCAN_CHARS].rpartition("\n")[0]  # Only complete physical lines.
+        text = text[:_OUTLINE_SCAN_CHARS].rpartition("\n")[0]
     nodes = []
     for index, _level, title in atx_headings(text.split("\n")):
         if not title:
@@ -195,8 +195,6 @@ def outline(bcon, task_id=None, *, workspace=None, run_id=None, research_store=N
                           ]})
 
     project_node = _project_file(workspace)
-    # The board first: the view is cut at 200 KB, and on a large project the runs' registered
-    # files used to fill all of it before a single card (2026-10-27).
     top_nodes = ([project_node] if project_node else []) + [
         {"node_id": "board", "title": "Task board", "summary": f"{len(card_nodes)} cards",
          "nodes": card_nodes},
@@ -236,8 +234,6 @@ def _file_location(node):
 
 
 def _render_lines(tree, depth, out):
-    # Joined once by ``render``: a join at every level copied the whole text per node, which on
-    # a 214,587-node project took 746 s against 0.07 s (2026-10-27, R33).
     pad = "  " * depth
     s = tree.get("summary")
     out.append(f"{pad}{tree.get('title','')}  [{tree.get('node_id','')}]" + (f"  — {s}" if s else ""))

@@ -45,7 +45,6 @@ def test_the_extension_activates_for_every_kind_it_declares():
 
 @pytest.mark.parametrize("kind", sorted(web.SESSION_KINDS))
 def test_assembly_reaches_the_tools_in_each_declared_kind(kind):
-    # web is core: its tools take Pi's customTools door rather than the extension list.
     assert "web_fetch" in [tool.name for part in parts_for(_spec(kind)) for tool in part.tools]
 
 

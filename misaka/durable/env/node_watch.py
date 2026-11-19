@@ -146,7 +146,7 @@ def _entryOf(stats: os.stat_result, hash: str | None = None) -> _Entry:
         and sys.platform == "win32"
         and getattr(stats, "st_reparse_tag", 0) == statModule.IO_REPARSE_TAG_MOUNT_POINT  # type: ignore[attr-defined]
     ):
-        kind = "symlink"  # MISAKA fork: libuv reports a junction as a symbolic link (as fileInfoFromStats does).
+        kind = "symlink"
     entry: _Entry = {
         "kind": kind,
         "dev": stats.st_dev,
@@ -623,8 +623,6 @@ async def _anyUnreliable(paths: list[str]) -> bool:
             break
     return False
 
-
-# --- MISAKA fork: the native primitives (fs.watch, fs.statfs) --------------------------------------------------------
 
 
 class _NativeWatcher:

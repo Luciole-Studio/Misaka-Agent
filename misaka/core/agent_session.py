@@ -221,7 +221,6 @@ class AgentSessionConfig:
     scopedModels: list[dict[str, Any]] = field(default_factory=list)
     customTools: list[Any] = field(default_factory=list)
     cacheWarmer: CacheWarmer | None = None
-    # MISAKA fork: the session's own subsystems, called from core.moments ahead of extensions.
     parts: list[Any] = field(default_factory=list)
     initialActiveToolNames: list[str] | None = None
     # Whether the initial tools come from the `defaultTools` setting. When true, a resumed session
@@ -346,7 +345,6 @@ def parseSkillBlock(text: str) -> ParsedSkillBlock | None:
 
 
 class AgentSession:
-    # MISAKA fork: a session built without __init__ (test doubles) has no parts.
     moments: Moments = Moments(None, [])
     # Class-level defaults for doubles built without __init__, as `moments`.
     _nestedToolCalls: NestedToolCallRunner | None = None
@@ -355,7 +353,6 @@ class AgentSession:
     def __init__(self, config: AgentSessionConfig | dict[str, Any]) -> None:
         resolved = config if isinstance(config, AgentSessionConfig) else AgentSessionConfig(**config)
         self.agent = resolved.agent
-        # MISAKA fork: queued background-task notifications go in together, in one turn (R28).
         self.agent.deliverTogether = _is_task_notification
         self.sessionManager = resolved.sessionManager
         self.settingsManager = resolved.settingsManager
@@ -368,7 +365,7 @@ class AgentSession:
         self._cacheWarmer = resolved.cacheWarmer
         if self._cacheWarmer is not None:
             self._cacheWarmer.onWarmed = lambda entry: self._emit({"type": "entry_appended", "entry": entry})
-        self.moments = Moments(self, list(resolved.parts))  # MISAKA fork
+        self.moments = Moments(self, list(resolved.parts))
         self._initialActiveToolNames = (
             list(resolved.initialActiveToolNames) if resolved.initialActiveToolNames is not None else None
         )
@@ -433,9 +430,6 @@ class AgentSession:
         # Failed response that the next request repeats, set by auto-retry and overflow recovery. The
         # retry is routed with it as `failed`, since the context no longer contains it.
         self._failedResponse: AssistantMessage | None = None
-        # MISAKA fork: the model the current request goes to, routed or not. A context engine sizes
-        # itself from it at the provider boundary; under a virtual selection `self.model` has no
-        # window of its own.
         self._requestModel: Model[Any] | None = None
         self._turnIndex = 0
         # pi keys these by message object in a WeakMap; pydantic messages are neither
@@ -463,7 +457,6 @@ class AgentSession:
         self._runSystemPromptOptions: dict[str, Any] | None = None
         self._toolScopes: list[dict[str, Any]] = []
         self._unscopedToolNames: list[str] = []
-        # MISAKA fork: the last tool scope ended while a run was working; see `toolScope`.
         self._recordLoadoutAfterRun = False
 
         self._installAgentToolHooks()
@@ -516,7 +509,6 @@ class AgentSession:
     @property
     def routedModel(self) -> RoutedModel | None:
         """Under a virtual selection, the physical model and thinking level of the latest successful response."""
-        # MISAKA fork: an MoA preset reports its aggregator the same way.
         if self.model is None or not answersAsOtherModels(self.model):
             return None
         latest = findLatestResponse(self.agent.state.messages)
@@ -801,7 +793,6 @@ class AgentSession:
         """The model whose limits apply to `message`, or None when the message came from another
         model. Under a virtual selection, that is the physical model that produced it."""
         model = self.model
-        # MISAKA fork: under an MoA preset the aggregator produced the message.
         if model is not None and answersAsOtherModels(model):
             return self._modelRuntime.getPhysicalModel(message.provider, message.model)
         return model if model is not None and model.provider == message.provider and model.id == message.model else None
@@ -820,8 +811,6 @@ class AgentSession:
         if recorded is None or (recorded["provider"] == model.provider and recorded["modelId"] == model.id):
             return
         recorded_model = get_model(recorded["provider"], recorded["modelId"])
-        # MISAKA fork: MoA presets are recorded like virtual models while they are in the catalog. One
-        # that left it still answers through an aggregator, so recording it would repeat every prompt.
         holds = isVirtualModel(model) or (answersAsOtherModels(model) and get_model(model.provider, model.id) is not None)
         if not holds and not (recorded_model is not None and answersAsOtherModels(recorded_model)):
             return
@@ -856,15 +845,13 @@ class AgentSession:
                     "Wait for compaction to finish and retry."
                 )
 
-        # MISAKA fork: skill commands prepare text for this same submission.
-        # Keep its images, delivery mode, preflight and cancellation ownership.
         prompt_command = self.getCorePromptCommand(text) if resolved.expandPromptTemplates else None
         if (
             resolved.expandPromptTemplates
             and prompt_command is None
             and text.startswith("/")
             and (
-                await self._tryExecuteCoreCommand(text)  # MISAKA fork: a part's command first
+                await self._tryExecuteCoreCommand(text)
                 or await self._tryExecuteExtensionCommand(text)
             )
         ):
@@ -934,16 +921,12 @@ class AgentSession:
         await self._startRun(
             {"messageType": "user", "prompt": current_text, "images": current_images},
             lambda: report_preflight("started"),
-            # MISAKA fork: a core prompt command's text must not land in a conversation that a
-            # compaction started during the hooks is about to replace.
             admit=assert_not_compacting if prompt_command is not None else None,
         )
 
     async def _emitBeforeAgentStart(self, trigger: BeforeAgentStartTrigger):
         """The before_agent_start hooks: the messages they contribute and the run's prompt options."""
         selected_tools_before = list(self._baseSystemPromptOptions["selectedTools"])
-        # MISAKA fork: the session's own parts run first; an extension sees the prompt
-        # options and the messages as core left them.
         core = await self.moments.before_agent_start(trigger, self._baseSystemPromptOptions)
         if core.block:
             _raiseRunBlocked(trigger, core.reason or "a core part blocked the turn")
@@ -1000,7 +983,7 @@ class AgentSession:
     async def _queueUserInput(
         self, text: str, images: Sequence[ImageContent] | None, behavior: str, source: Any
     ) -> QueuedInputDisposition:
-        command = self.getCorePromptCommand(text)  # MISAKA fork: a part's prompt command first
+        command = self.getCorePromptCommand(text)
         if command is not None:
             expanded = await self._expandCorePromptCommand(command, text)
             if expanded is None:
@@ -1124,8 +1107,6 @@ class AgentSession:
 
         previousModel = self.model
         thinkingLevel = self._getThinkingLevelForModelSwitch(model)
-        # MISAKA fork: the settings write goes first; a role whose default cannot be saved here refuses it and the
-        # session keeps its model.
         if options.get("persist"):
             self.settingsManager.setDefaultModelAndProvider(model.provider, model.id)
         self.agent.state.model = model
@@ -1251,8 +1232,6 @@ class AgentSession:
             scoped_models[next_index].get("thinkingLevel"),
         )
 
-        # MISAKA fork: the settings write goes first; a role whose default cannot be saved here refuses it and the
-        # session keeps its model.
         if options.get("persist"):
             self.settingsManager.setDefaultModelAndProvider(next_model.provider, next_model.id)
         # Apply model
@@ -1288,8 +1267,6 @@ class AgentSession:
         next_model = available_models[next_index]
 
         thinking_level = self._getThinkingLevelForModelSwitch(next_model)
-        # MISAKA fork: the settings write goes first; a role whose default cannot be saved here refuses it and the
-        # session keeps its model.
         if options.get("persist"):
             self.settingsManager.setDefaultModelAndProvider(next_model.provider, next_model.id)
         self.agent.state.model = next_model
@@ -1312,7 +1289,6 @@ class AgentSession:
     ) -> ThinkingLevel:
         if explicitLevel is not None:
             return explicitLevel
-        # MISAKA fork: the agent's own default comes before the shared per-model table.
         own = self.settingsManager.getRoleThinkingLevel()
         if own is not None:
             return own
@@ -1346,8 +1322,6 @@ class AgentSession:
         raise ValueError("This session has no agent permission policy part")
 
     def registerCustomTools(self, definitions: list[Any]) -> None:
-        # MISAKA fork: a part adding tools after startup (an MCP server that answered late)
-        # takes the door ``customTools`` took, then the refresh an extension's registerTool gets.
         self._customTools.extend(definitions)
         self.refreshTools()
 
@@ -1358,8 +1332,6 @@ class AgentSession:
         self.refreshTools()
 
     def refreshTools(self) -> None:
-        # MISAKA fork: the runtime action of the same name, callable by a part that changed a
-        # definition it already registered (a description that depends on the session).
         self._refreshToolRegistry()
 
     def getActiveToolNames(self) -> list[str]:
@@ -1419,7 +1391,7 @@ class AgentSession:
                 )
             )
 
-        for core_command in self.moments.commands():  # MISAKA fork: the parts' commands
+        for core_command in self.moments.commands():
             commands.append(
                 _make_slash_command_info(
                     core_command.name,
@@ -1455,9 +1427,6 @@ class AgentSession:
         """
         previous = self.getActiveToolNames()
         if self._toolScopes:
-            # MISAKA fork: a caller inside a scope sees only the scoped loadout (`[...active, x]`).
-            # Selected tools the scope hides from it stay selected underneath, in place; tools the
-            # scope itself granted (visible before the call) do not outlive it.
             names = list(dict.fromkeys(toolNames))
             visible, chosen = set(previous), set(names)
             self._unscopedToolNames = [
@@ -1495,8 +1464,6 @@ class AgentSession:
             names = self._toolScopes[-1]["active"] if self._toolScopes else self._unscopedToolNames
             self._setActiveTools(names)
             if not self._toolScopes:
-                # MISAKA fork: a run inside the scope declared the scope's tools in the transcript,
-                # which a resume or `/tree` restores as the lasting loadout.
                 self.recordLoadout()
 
     def recordLoadout(self) -> bool:
@@ -1558,9 +1525,6 @@ class AgentSession:
             if (exposure := self._getToolExposure(tool.name)) in ("codemode", "deferred")
             or (exposure == "direct" and tool.name in active)
         ]
-        # MISAKA fork: a nested call answers to the same boundaries as a model-issued one. The
-        # registry is already inside the admission, allow and deny lists; a tool scope (a
-        # research window) and the parts' projections (driver-owned tools) narrow it further.
         for scope in self._toolScopes:
             tools = [tool for tool in tools if scope["allowed"](tool.name)]
         return self.moments.project_tools(tools)
@@ -1573,8 +1537,6 @@ class AgentSession:
 
         The active tools are a set: tools that stay active keep their current order and newly active
         ones are appended, so reordering the same names does not change the prompt (#11495)."""
-        # MISAKA fork: the tool scopes, the browser_exec/bash pairing and the parts' projections
-        # apply to every loadout, so every path that sets the agent's tools honours them.
         for scope in self._toolScopes:
             toolNames = [name for name in toolNames if scope["allowed"](name)]
         requested = dict.fromkeys(toolNames)
@@ -1678,7 +1640,7 @@ class AgentSession:
         if resolved.onError is not None:
             self._extensionErrorListener = resolved.onError
         self._applyExtensionBindings(self._extensionRunner)
-        await self.moments.session_start(dict(self._sessionStartEvent))  # MISAKA fork
+        await self.moments.session_start(dict(self._sessionStartEvent))
         await self._extensionRunner.emit(dict(self._sessionStartEvent))
         self._extensionRunner.reportUnhandledMcpServers()
         await self.extendResourcesFromExtensions(
@@ -1688,7 +1650,7 @@ class AgentSession:
 
     async def reload(self, options: dict[str, Any] | None = None) -> None:
         previous_flag_values = self._extensionRunner.getFlagValues()
-        await self.moments.session_shutdown({"type": "session_shutdown", "reason": "reload"})  # MISAKA fork
+        await self.moments.session_shutdown({"type": "session_shutdown", "reason": "reload"})
         await emitSessionShutdownEvent(self._extensionRunner, {"type": "session_shutdown", "reason": "reload"})
         # The old runner must unsubscribe from the shared event bus, or every
         # /reload leaks one more layer of handlers (pi #7656/6ca423447).
@@ -1709,7 +1671,6 @@ class AgentSession:
         # during the session stay disabled unless the setting newly adds them.
         added_default_tools = [name for name in getDefaultTools() if name not in previous_default_tools]
         # Tools the new extensions register later, such as MCP tools, are pending until then.
-        # MISAKA fork: the user's selection, not the loadout a tool scope shows.
         selected_tool_names = self._unscopedToolNames if self._toolScopes else self.getActiveToolNames()
         for name in selected_tool_names:
             self._pendingToolNames[name] = None
@@ -1826,7 +1787,6 @@ class AgentSession:
                     async def deferred_route() -> None:
                         await self._routeCustomMessage(app_message, resolved_options)
 
-                    # MISAKA fork: a route a cancellation keeps from running is handed back (`_emitAgentSettled`).
                     deferred_route.handBack = lambda error: self._keepOrFailCustomMessage(  # type: ignore[attr-defined]
                         app_message, resolved_options, error, keepWithoutReceipt=True
                     )
@@ -1881,9 +1841,6 @@ class AgentSession:
         receipt = self._customMessageReceipts.pop(delivery_id, None)
         if receipt and receipt.get("_onError"):
             if not isinstance(error, Exception):
-                # MISAKA fork: a sender never gets the `CancelledError` (or another exit) of the task that was
-                # delivering its message: it would take it for its own cancellation (the mail inbox's pump ended
-                # with it, and the session read no more mail). It gets an ordinary failure and redelivers.
                 logging.getLogger(__name__).warning(
                     "delivery %s was interrupted (%s); handed back to its sender", delivery_id, type(error).__name__)
                 error = RuntimeError(f"The delivery was interrupted ({type(error).__name__}); it is to be redelivered")
@@ -2086,7 +2043,6 @@ class AgentSession:
                  "tools": [{"name": tool.name, "description": tool.description, "parameters": tool.parameters}
                            for tool in self.agent.state.tools],
                  "allowCompression": reason == "manual" or bool(self.settingsManager.getCompactionSettings(self.model).get("enabled")),
-                 # MISAKA fork: the model whose window applies, routed under a virtual selection.
                  "model": self._compactionLimitsModel(preflight)}
         decision = await self.moments.session_context_prepare(event)
         if decision is None and self._extensionRunner.hasHandlers("session_context_prepare"):
@@ -2117,9 +2073,6 @@ class AgentSession:
                 if current_tokens is None
                 else current_tokens
             )
-            # MISAKA fork: the caller passes the window of the model that produced the checked
-            # response (upstream checks in `_checkCompaction` itself); the preflight uses the model
-            # the request goes to, and an unknown window never compacts (`_exceedsCompactionThreshold`).
             limits_model = self._compactionLimitsModel(preflight)
             window = limits_model.contextWindow if context_window is None else context_window
             if (preflight and window <= 0) or not shouldCompact(tokens, window, settings):
@@ -2206,7 +2159,7 @@ class AgentSession:
             saved_entry = self._publishCompaction(result, from_hook, source)
             published_result = result
             if saved_entry is not None:
-                await self.moments.session_compact({  # MISAKA fork
+                await self.moments.session_compact({
                     "type": "session_compact", "compactionEntry": saved_entry, "fromExtension": from_hook,
                     "reason": "manual", "willRetry": False,
                 })
@@ -2283,7 +2236,6 @@ class AgentSession:
             "willRetry": will_retry,
             "fromExtension": from_extension,
         }
-        # MISAKA fork: core parts hear it whether or not an extension is listening.
         await self.moments.session_compact_failed(failed_event)
         if not self._extensionRunner.hasHandlers("session_compact_failed"):
             return
@@ -2449,7 +2401,7 @@ class AgentSession:
             self._refreshFinalizedContext()
             self._restoreToolsFromTranscript()
 
-            await self.moments.session_tree({"type": "session_tree"})  # MISAKA fork
+            await self.moments.session_tree({"type": "session_tree"})
             await self._extensionRunner.emit(
                 {
                     "type": "session_tree",
@@ -2695,21 +2647,11 @@ class AgentSession:
 
         if event_type == "turn_end":
             self._lastAssistantToolResults = list(_event_field(event, "toolResults") or [])
-            # MISAKA fork: a turn boundary is the first place a message queued mid-turn can
-            # land safely: every toolCall the turn made has its result by now. Waiting for
-            # the end of the run instead would keep a research run's progress off disk and
-            # off screen for hours. A turn that errored, aborted or was cut at the output
-            # cap is skipped -- its tail is still being rewritten, by _prepareRetry, by
-            # the abort itself, or by the truncated-response recovery in _checkCompaction
-            # /_runAutoCompaction. A custom message flushed on top of it would hide the
-            # tail and leave it in the conversation for the retry to re-send.
             turn_message = _as_assistant_message(_event_field(event, "message"))
             if turn_message is not None and turn_message.stopReason not in ("error", "aborted", "length"):
                 self._flushPendingCustomMessages()
 
     def _emit(self, event: Any) -> None:
-        # MISAKA fork: iterate a snapshot so listeners that unsubscribe during dispatch do not
-        # cause later listeners to miss this event (pi applies this to its RPC client's listeners).
         for listener in list(self._eventListeners):
             listener(event)
 
@@ -2728,7 +2670,6 @@ class AgentSession:
         return result
 
     async def _tryExecuteCoreCommand(self, text: str) -> bool:
-        # MISAKA fork: a part's command runs like an extension command, without the runner.
         if not text.startswith("/"):
             return False
         command_name, _, raw_args = text[1:].partition(" ")
@@ -2835,14 +2776,13 @@ class AgentSession:
         event_type = _event_type(event)
         if event_type == "agent_start":
             self._turnIndex = 0
-            await self.moments.agent_start({"type": "agent_start"})  # MISAKA fork
+            await self.moments.agent_start({"type": "agent_start"})
             await self._extensionRunner.emit({"type": "agent_start"})
         elif event_type == "agent_end":
             agent_end_event = {
                 "type": "agent_end",
                 "messages": list(_event_field(event, "messages", []) or []),
             }
-            # MISAKA fork: a core part may block first; extensions are asked only if none did.
             hook_result = await self.moments.agent_end(agent_end_event)
             if not _event_field(hook_result, "block", False):
                 hook_result = await self._extensionRunner.emitAgentEnd(agent_end_event)
@@ -3042,8 +2982,8 @@ class AgentSession:
         self._bindExtensionCore(runner)
         if self._extensionRunnerRef is not None:
             self._extensionRunnerRef["current"] = runner
-            self._extensionRunnerRef["session"] = self  # MISAKA fork: sdk.transform_context reaches the parts
-            runner.moments = self.moments  # MISAKA fork: the runner's own ui_prompt events reach the parts
+            self._extensionRunnerRef["session"] = self
+            runner.moments = self.moments
         return runner
 
     def _registerProvider(self, name: str, config: dict[str, Any]) -> None:
@@ -3086,7 +3026,6 @@ class AgentSession:
         previous_activated_on_registration = {
             name for name in self._toolRegistry if self._isActivatedOnRegistration(name)
         }
-        # MISAKA fork: the user's selection, not the loadout a tool scope shows.
         previous_active_tool_names = list(self._unscopedToolNames) if self._toolScopes else self.getActiveToolNames()
 
         registered_tools = self._extensionRunner.getAllRegisteredTools()
@@ -3181,7 +3120,6 @@ class AgentSession:
         # Pending tools that are registered now become active.
         next_active_tool_names.extend(self._pendingToolNames)
 
-        # MISAKA fork: inside a tool scope the scoped loadout stays active; the selection changes underneath it.
         if self._toolScopes:
             self._unscopedToolNames = [name for name in dict.fromkeys(next_active_tool_names) if name in self._toolRegistry]
             self._setActiveTools(self._toolScopes[-1]["active"])
@@ -3191,8 +3129,6 @@ class AgentSession:
     def _isAllowedTool(self, name: str) -> bool:
         """Whether `--tools` and `--exclude-tools` keep the tool registered. MCP tools stay registered
         unless the allowlist filters them (see `_allowlistFiltersMcp`)."""
-        # MISAKA fork: misaka also asks the tool admission hook, keeps browser_exec behind bash, and
-        # honours the disallowed and always-allowed sets.
         if self._toolAdmission is not None and not self._toolAdmission(name):
             return False
         if name == "browser_exec" and ("bash" not in self._baseToolDefinitions or not self._isAllowedTool("bash")):
@@ -3251,7 +3187,6 @@ class AgentSession:
         self._extensionRunner = self._createExtensionRunner(resolved_options.get("flagValues"))
         self._applyExtensionBindings(self._extensionRunner)
 
-        # MISAKA fork: MISAKA's default tools (`DEFAULT_TOOL_NAMES`), where pi lists read/bash/edit/write here.
         default_active_tool_names = (
             list(self._baseToolsOverride)
             if self._baseToolsOverride is not None
@@ -3303,8 +3238,6 @@ class AgentSession:
         loader_system_prompt = self._resourceLoader.getSystemPrompt()
         loader_append_system_prompt = self._resourceLoader.getAppendSystemPrompt()
         append_system_prompt = "\n\n".join(loader_append_system_prompt) if loader_append_system_prompt else ""
-        # MISAKA fork: no `skills` option -- misaka's layered skill index (misaka/core/skills) replaces pi's
-        # skills.ts and reaches the model through its own tools, not a prompt section.
         self._baseSystemPromptOptions = normalizeBuildSystemPromptOptions(
             {
                 "cwd": self._cwd,
@@ -3429,9 +3362,6 @@ class AgentSession:
             return
         recorded = [read_field(tool, "name") for tool in getCurrentTools(system_messages)]
         if self._toolScopes:
-            # MISAKA fork: inside a tool scope (a research window) the transcript's loadout is the
-            # scope's own; it must not become the user's lasting selection, nor wait as pending. Tools
-            # new to the branch stay out of it: a scope's `callable` tools are not declared.
             self._setActiveTools(applyToolModifiers(recorded, modifiers))
             return
         # Tools the branch ever added or removed. Removed tools stay inactive.
@@ -3493,12 +3423,10 @@ class AgentSession:
             return {"block": True, "reason": f"Tool {name!r} is outside the current agent tool policy."}
         if getattr(self, "_toolScopes", ()):
             name = read_field(_event_field(payload, "toolCall"), "name")
-            # MISAKA fork: a nested call reaches callable tools, which need not be active.
             reachable = self.getCallableToolNames() if parent_tool_call_id else self.getActiveToolNames()
             if name not in reachable:
                 return {"block": True, "reason": f"Tool {name!r} is outside the current tool scope."}
         runner = self._extensionRunner
-        # MISAKA fork: the parts are asked first; a block from them is final.
         if not self.moments.parts and not runner.hasHandlers("tool_call"):
             return None
         tool_call = _event_field(payload, "toolCall")
@@ -3542,7 +3470,6 @@ class AgentSession:
                 "isError": bool(_event_field(payload, "isError")),
                 "usage": _event_field(result, "usage"),
             }
-            # MISAKA fork: the parts rewrite the result first; extensions see their version.
             hook_result = await self.moments.tool_result(event)
             if hook_result is not None:
                 event.update(hook_result)
@@ -3612,9 +3539,6 @@ class AgentSession:
         """Run a call that the tool call ``parent_tool_call_id`` made through
         ``ctx.executeTool()``. It goes through the agent's tool pipeline with the session's hooks,
         against the callable tools."""
-        # MISAKA fork: a tool run by another Agent built from this session's tools (a verifier
-        # with its own filter and hooks) would otherwise reach the session's callable tools
-        # through the session's hooks. Only calls the session's agent issued may nest.
         caller_root = parent_tool_call_id.split("/", 1)[0]
         issuing_message = self._findLastAssistantMessage()
         issued_ids = {
@@ -3718,7 +3642,6 @@ class AgentSession:
     ) -> AgentContext:
         projection = self.sessionManager.buildSessionProjection()
         if self._hasContextEngine():
-            # MISAKA fork: engine preparation runs at the provider boundary.
             return replace(context, messages=list(projection.messages))
         # A virtual selection is checked in prepareRequest, against the model the request is routed to.
         model = self.model
@@ -3782,8 +3705,6 @@ class AgentSession:
                 if entry is not None:
                     self._emit({"type": "entry_appended", "entry": entry})
             # The route stands: the router already decided this request. The state entry does not change
-            # the projection. MISAKA fork: a context engine prepares the context at the provider
-            # boundary instead, sized from the routed model (`_requestModel`).
             if not self._hasContextEngine() and self._exceedsCompactionThreshold(route.model, projection):
                 await self._runAutoCompaction("threshold", False)
                 previous, context, _ = await prepare()
@@ -4070,9 +3991,6 @@ class AgentSession:
             self._flushPendingCustomMessages()
             self._handBackQueuedReceipts(error)
             if isinstance(error, _CustomRunBlocked):
-                # MISAKA fork: a hook that blocks a run a custom message starts does not lose the
-                # message. It is recorded, and its receipt acknowledged, without a turn: failing it
-                # would have the durable outbox redeliver it into the same block indefinitely.
                 try:
                     self._appendCustomMessage(trigger["message"])
                     self._refreshFinalizedContext()
@@ -4192,7 +4110,6 @@ class AgentSession:
                 )
             update_message = self._preparePromptAndToolLoadout(options)
         except BaseException:
-            # MISAKA fork: the run did not start; its notifications wait for the next one.
             self._pendingNextTurnMessages = [*pending_next_turn, *self._pendingNextTurnMessages]
             raise
         self._runSystemPromptOptions = options
@@ -4211,8 +4128,6 @@ class AgentSession:
         """
         if self._isAgentRunActive:
             return
-        # MISAKA fork: a tool scope that ended while a run was working records the loadout it gave
-        # back now that no run can still declare it (see `toolScope`).
         if self._recordLoadoutAfterRun:
             self._recordLoadoutAfterRun = False
             self._recordUnscopedLoadout()
@@ -4247,8 +4162,6 @@ class AgentSession:
         # `agent_start` during the same notification dispatch.
         deferred, self._deferredSettledActions = self._deferredSettledActions, []
         if deferred and _beingCancelled():
-            # MISAKA fork: this settle is the cleanup of a cancelled run (its `_startRun` finally): no new run
-            # starts inside the cancellation. The deferred routes are handed back instead (`_handBackDeferred`).
             try:
                 self._handBackDeferred(deferred)
             finally:
@@ -4256,12 +4169,6 @@ class AgentSession:
             return
         if deferred:
             try:
-                # MISAKA fork: every deferred action runs even when an earlier one fails, and the first error is
-                # raised after them. Upstream stops at the failure; here a skipped route keeps its delivery
-                # receipt, so its outbox redeliveries are dropped as duplicates and the notification is lost.
-                # Each failure is logged, so the ones after the first are not lost either. A `CancelledError` the
-                # route raised itself is such a failure. A cancellation of this task stops the loop at once: the
-                # routes not run yet are handed back, so none keeps its receipt held.
                 failure: BaseException | None = None
                 for index, action in enumerate(deferred):
                     try:
@@ -4317,11 +4224,6 @@ class AgentSession:
             self._stopHookContinuationPending = False
             return True
 
-        # MISAKA fork: a credential the provider refused is replaced once, and the turn is retried
-        # with the replacement. pi ends the turn here -- a 401 is not retryable and auth is resolved
-        # on a clock, never on a rejection -- which is what left four cards' first request dead after
-        # another client rotated the OAuth token they shared, until a person restarted each one by
-        # hand (2026-09-18, B7).
         if (self._isRetryableError(message) or await self._recoverRejectedCredential(message)) \
                 and await self._prepareRetry(message):
             if self._agentRunAbortRequested:
@@ -4735,7 +4637,7 @@ class AgentSession:
             saved_entry = self._publishCompaction(result, from_hook, source)
             published_result = result
             if saved_entry is not None:
-                await self.moments.session_compact({  # MISAKA fork
+                await self.moments.session_compact({
                     "type": "session_compact", "compactionEntry": saved_entry, "fromExtension": from_hook,
                     "reason": reason, "willRetry": will_retry,
                 })
@@ -4770,8 +4672,6 @@ class AgentSession:
                 self._emit({"type": "compaction_end", "reason": reason,
                             "result": published_result, "aborted": published_result is None,
                             "willRetry": False})
-            # MISAKA fork: reported even before compaction_start (pi: only once started), because the context
-            # engine's session_context_prepare has already run and pairs with this terminal event.
             if published_result is None:
                 await self._emitSessionCompactFailed(
                     reason=reason, aborted=True, will_retry=False, from_extension=from_hook)
@@ -4780,7 +4680,6 @@ class AgentSession:
             error_message = str(error) if str(error) else "compaction failed"
             aborted = (
                 (abort_controller is not None and abort_controller.signal.aborted)
-                # MISAKA fork: a preflight compaction also stops with the request it runs for.
                 or (parent_signal is not None and parent_signal.aborted)
                 or isinstance(error, _CompactionCancelledByExtension)
             )
@@ -4802,7 +4701,6 @@ class AgentSession:
                         "errorMessage": formatted_error,
                     }
                 )
-            # MISAKA fork: reported even before compaction_start, as above (session_context_prepare has run).
             if published_result is None:
                 await self._emitSessionCompactFailed(
                     reason=reason, aborted=aborted, will_retry=False,

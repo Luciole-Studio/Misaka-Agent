@@ -111,7 +111,7 @@ async def _quota_restored(registry, token, base_url, signal):
         elif response.status_code == 429:
             result = False
     except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-        pass  # Probe failures are unknown, never proof that a cooldown expired.
+        pass
     with _QUOTA_LOCK:
         cache[key] = (now, result)
     return result
@@ -147,11 +147,9 @@ class _Selection:
         self._restored = restored
 
     def _persist(self, **kwargs):
-        # The enclosing native auth transaction commits the complete mutation.
         pass
 
     def _resync_stale_entry(self, entry):
-        # Entries were hydrated from the latest native credential snapshot.
         return entry
 
     def _codex_quota_restored_upstream(self, entry):
@@ -188,8 +186,6 @@ class Pool:
         return cls(registry, provider, refs, strategy)
 
     async def select(self, *, failed_key=None, error=None, signal=None):
-        # A competing owner may rotate a grant between the read and write lock.
-        # Reread, never commit metadata computed from the old credential revision.
         for _ in range(3):
             execution.check_cancelled()
             chosen = await self._select(failed_key=failed_key, error=error, signal=signal)
@@ -201,8 +197,6 @@ class Pool:
 
     async def _select(self, *, failed_key, error, signal):
         options = AuthOperationOptions(signal=signal)
-        # Resolve native config values before taking the write lock (a value may
-        # invoke a configured key command). Recheck the snapshot under that lock.
         snapshot = _coerce_storage_object(await self.storage.readLatestData(options))
         credentials, runtime_keys, restored = {}, {}, set()
         for ref in self.refs:
@@ -211,13 +205,10 @@ class Pool:
                 if credential is None or getattr(credential, 'last_auth_error', None):
                     continue
                 if isinstance(credential, OAuthCredential):
-                    # Expired grants are refreshed under the native lock only after
-                    # selection. Deriving their inference JWT now can fail too early.
                     runtime_keys[ref] = (credential.access if credential.expires <= time.time() * 1000 + 300_000
                                         else runtime_key(await self._oauth().toAuth(credential)))
                 else:
                     if credential.key is None:
-                        # The store reads a key it cannot resolve as no key (pi's auth-storage).
                         raise ValueError('Stored API key could not be resolved')
                     runtime_keys[ref] = credential.key
             except Exception as candidate_error:
@@ -242,7 +233,7 @@ class Pool:
                     if await _quota_restored(self.registry, runtime_keys[ref], endpoint, signal) is True:
                         restored.add(ref)
 
-        written = []   # the data a write leaves on disk, which the store's snapshot then takes
+        written = []
 
         async def mutate(raw):
             data = _coerce_storage_object(self.storage.parseStorageData(raw))
@@ -266,8 +257,6 @@ class Pool:
             selected = _Selection(self.provider, entries, self.strategy, restored)
             selected._current_id = self.current
             selected._unmatched_rotation_streak = self._unmatched_rotation_streak
-            # A removed/terminal issuing slot is already unavailable. Do not
-            # let unmatched-key rotation reject the sole remaining healthy slot.
             retired_issuer = (self.current is not None and self.current not in credentials
                               and failed_key not in runtime_keys.values())
             if error is None or retired_issuer:
@@ -276,7 +265,6 @@ class Pool:
                 entry = selected.mark_exhausted_and_rotate(
                     status_code=getattr(error, 'status_code', None), api_key_hint=failed_key,
                     error_context={'message': str(error)})
-            # No raw credential is duplicated into the pool metadata.
             states[self.provider] = {item.id: {
                 **{key: getattr(item, key) for key in (*policy._CLEAR_STATUS, 'priority', 'request_count')},
                 'digest': hashlib.sha256(str(credentials[item.id].access if isinstance(credentials[item.id], OAuthCredential)
@@ -322,8 +310,6 @@ class Pool:
             from misaka.ai.auth.resolve import AuthResolutionOverrides
             return await self.registry.getApiKeyAndHeaders(model,
                 AuthResolutionOverrides(apiKey=credential.key, env=credential.env, signal=signal))
-        # Native OAuth resolver provides provider-specific headers/endpoints and
-        # serializes token rotation under the SAME named AuthStorage record.
         from misaka.ai.auth.resolve import _resolveStoredOAuth
         oauth = self._oauth()
         mapped = _RefreshStore(self.credentials, entry.id, signal)
@@ -332,7 +318,7 @@ class Pool:
                 if not isinstance(current, OAuthCredential):
                     return None
                 if current.expires <= time.time() * 1000 + 300_000:
-                    return None  # native expiry resolution below refreshes once, without deriving a stale JWT
+                    return None
                 current_auth = await oauth.toAuth(current)
                 return await oauth.refresh(current, mapped) if runtime_key(current_auth) == rejected_key else None
             credential = await mapped.modify(entry.id, refresh)

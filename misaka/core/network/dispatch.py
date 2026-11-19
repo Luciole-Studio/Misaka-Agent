@@ -127,7 +127,6 @@ def reconcile(con, cfg, *, task_ids=None, workspace=None):
 
     wanted = set(task_ids) if task_ids is not None else None
     now = int(_time.time())
-    # A consultation whose process went with its daemon: settled, and its sender told.
     from misaka.core.network import messages
     for run in db.abandon_consultations(con, now=now):
         messages.tell_asker(con, run, run["summary"])
@@ -145,15 +144,11 @@ def reconcile(con, cfg, *, task_ids=None, workspace=None):
             alive = process_tree.identity_is_alive(t["worker_pid"], leader)
             if idle is None and alive:
                 continue
-            # A dead leader's group is fenced before its lease goes; a wedged live group is
-            # stopped the same way (SIGTERM, then SIGKILL) and reclaimed only once it is gone.
             if not process_tree.terminate_orphaned_group(int(t["worker_pid"]), leader):
                 continue
             if idle is not None and alive:
                 reason = f"the worker showed no progress for {idle} s and was stopped"
         elif _owner_alive(t):
-            # A recorded identity is checked against the PID that holds it now, so a reused
-            # PID does not read as the original worker.
             continue
         from misaka.utils import loop_watchdog
         stall = loop_watchdog.report(f"card-{t['id']}", t["worker_pid"])
@@ -162,13 +157,6 @@ def reconcile(con, cfg, *, task_ids=None, workspace=None):
         try:
             finish_abandoned(con, t, reason=reason)
         except Exception as error:  # noqa: BLE001 - one card must not strand the rest
-            # A card whose workspace has gone (project deleted or moved) cannot have its file
-            # rewritten, so settling it raises. Without this guard that exception leaves the
-            # loop and every card after it keeps its expired lease forever -- which is how two
-            # cards on this author's board sat `running` for 111 hours behind one card whose
-            # directory no longer existed. The lease is the thing that must not outlive its
-            # worker, so release it in the database even when the file cannot be updated, and
-            # record why. `board()` already models this shape as `missing_file`.
             db.add_event(con, t["id"], "reconcile_failed",
                          {"error": f"{type(error).__name__}: {error}"[:500]},
                          generation=t["generation"])
@@ -185,7 +173,7 @@ def run_task(con, t, cfg, *, say=None):
     ally = t["assignee"] in presets.names()
     profile_dir = None if ally else _profile_dir(cfg, t["assignee"])
     if not ally and not profile_dir:
-        if (t["id"], t["generation"]) not in _skipped_logged:    # a reopened card gets a fresh look
+        if (t["id"], t["generation"]) not in _skipped_logged:
             _skipped_logged.add((t["id"], t["generation"]))
             lock = f"{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
             generation = int(t["generation"])
@@ -220,7 +208,7 @@ def run_task(con, t, cfg, *, say=None):
     ):
         return False
     workspace = db.workspace_for(t)
-    if not os.path.isdir(workspace):          # the card's folder is the project; a gone one is never recreated in silence
+    if not os.path.isdir(workspace):
         db.block_task(con, t["id"], "needs_input", f"the project folder no longer exists: {workspace}",
                       generation=generation)
         return False
@@ -280,8 +268,6 @@ def run_task(con, t, cfg, *, say=None):
             con=con,
         )
     except BaseException as error:
-        # Cancellation may be retried; an actual startup/runtime fault must not spawn
-        # the same broken card every scheduler tick. Preserve its actionable cause.
         with db.write_txn(con):
             settle = db.mark_failed if isinstance(error, Exception) else db.back_to_ready
             reason = f"{type(error).__name__}: {error}"[:2000]
@@ -335,13 +321,10 @@ def _run_ally(con, task, generation, lock, usage_db, say):
     run_coro(ally_card.run_attempt(task, generation, lock, db_path=usage_db, say=say))
     row = db.get(con, task["id"])
     if row is not None and row["status"] == "running" and row["claim_lock"] == lock:
-        return {"exit_code": 0}                  # idle without completing: unsettled
+        return {"exit_code": 0}
     return {"settled": True}
 
 
-# A review card's typed record, frozen with its submission: a red team's issues, a divergence
-# review's alternatives. Whatever ``worker.build_submission`` attaches must pass through here --
-# the alternatives once did not, and every divergence review failed its node (2026-09-27).
 REVIEW_FIELDS = ("issues", "alternatives")
 
 
@@ -364,7 +347,7 @@ def finish_abandoned(con, t, *, reason=db.ABANDONED_REASON):
                  "worker_identity": t["worker_identity"], "claim_expires": t["claim_expires"]}
     outcome = db.reclaim_abandoned(con, t["id"], reason=reason, **fence)
     if outcome != "ready":
-        return outcome            # None: the fence moved on; "failed": out of attempts, gave_up recorded
+        return outcome
     db.add_event(
         con,
         t["id"],
@@ -397,7 +380,6 @@ class _PreparedSubmission:
 
 def prepare_submission(t, submission):
     """Freeze attachment bytes before acceptance; async hosts call this off their loop."""
-    # Hash outside the short ownership transaction. Caller-provided digests are never trusted.
     root = Path(t["workspace"]).resolve()
     digests = {}
     for name in submission.get("artifacts") or []:
@@ -407,7 +389,6 @@ def prepare_submission(t, submission):
             with path.open("rb") as source:
                 digests[str(name)] = hashlib.file_digest(source, "sha256").hexdigest()
         except (OSError, ValueError):
-            # Record absence too: a file appearing later is not an accepted attachment.
             digests[str(name)] = None
     return _PreparedSubmission((t["id"], t["generation"], t["claim_lock"], t["workspace"]),
                                _submitted(submission, artifact_digests=digests))
@@ -418,7 +399,7 @@ def accept_state(con, t, submission, *, generation, claim_lock):
     prepared = submission if isinstance(submission, _PreparedSubmission) else prepare_submission(t, submission)
     if prepared.owner != (t["id"], generation, claim_lock, t["workspace"]):
         raise ValueError("Prepared submission belongs to a different card attempt")
-    with db.write_txn(con):                                # done and its submitted payload land together
+    with db.write_txn(con):
         if not db.submit_task(con, t["id"], generation=generation, claim_lock=claim_lock):
             return False
         db.add_event(con, t["id"], "submitted", prepared.payload, generation=generation)
@@ -466,7 +447,6 @@ def redeclare(con, row):
         db.add_event(con, row["id"], "redeclare_failed", {"reason": str(error)[:200]}, generation=generation)
         return False
     payload = prepared.payload
-    # Findings recorded after the completion change the declaration as much as a file does.
     if all(payload.get(key) == last.get(key) for key in ("artifact_digests", "artifacts", "findings", "uncertain")):
         return False
     with db.write_txn(con):
@@ -481,7 +461,7 @@ def index_artifacts(con, task_id, artifacts, generation):
     """A done card's artifacts join the corpus (PageIndex); an index failure never blocks the card."""
     row = db.get(con, task_id)
     if row is None or row["status"] != "done" or int(row["generation"]) != int(generation):
-        return                                # a newer generation owns the card: nothing of ours to index
+        return
     try:
         got = ws_index.ingest_artifacts(con, row, artifacts=artifacts)
     except Exception as error:  # noqa: BLE001 - a derived index must not undo an acceptance
@@ -489,12 +469,6 @@ def index_artifacts(con, task_id, artifacts, generation):
         return
     if got:
         db.add_event(con, task_id, "indexed", {"docs": [item[0] for item in got]}, generation=generation)
-    # ingest_artifacts refuses a deliverable by *returning without it* (no extractor for the
-    # suffix, a scanned PDF with no OCR, an unreadable EPUB, an escaping or missing path) --
-    # only an infrastructure fault reaches the except above. Recording just the successes left a
-    # card that delivered three files and indexed none with no trace on the board, in the card
-    # file, or in the ledger, while every later reader assumed the corpus had them. The failure
-    # still must not undo the acceptance: it is an event, not a status.
     landed = {item[1] for item in got}
     missed = [str(name) for name in (artifacts or []) if str(name) not in landed]
     if missed:

@@ -12,7 +12,11 @@ from pathlib import Path
 
 from misaka.ai.utils._output_limit import hit_output_limit
 from misaka.config import home
-from misaka.core.network.card_contract import format_deliverable, one_file, split_deliverable
+from misaka.core.network.card_contract import (
+    format_deliverable,
+    one_file,
+    split_deliverable,
+)
 from misaka.core.platform import prompt_guard
 from misaka.core.platform import tasks as task_store
 from misaka.core.research import commands, ledger, runs
@@ -96,8 +100,6 @@ MATERIAL_TOOLS = ("read", "misaka_research_view", "web_search", "web_fetch", "we
                   *OPTIONAL_MATERIAL_TOOLS)
 RESEARCH_TOOLS = (*MATERIAL_TOOLS, "skills_list", "skill_view")
 
-# A research Sister's working rules, appended once to her system prompt (worker.card_session_setup)
-# rather than repeated in every card. The card body keeps only what is specific to that task.
 RESEARCH_SISTER_DISCIPLINE = """[Research card]
 You are one researcher on a research graph that Last Order coordinates. How to work:
 - Read relevant available method Skills as needed to generate, compare or revise explanations for this assignment.
@@ -577,7 +579,6 @@ available from the next turn on, so this turn ends with your summary.
 
 
 def sister_catalog(root=None, *, workspace=None):
-    # Compatibility entry for CLI callers; parsing and filtering have one owner.
     from misaka.core.network.roster import capability_catalog
     return capability_catalog(root, workspace=workspace)
 
@@ -604,12 +605,9 @@ def _call(worker, cfg, prompt, *, cwd, session_dir, continue_session=False,
     if sister_catalog is not None:
         kwargs["sister_catalog"] = sister_catalog
     if continue_truncated:
-        # The reply is the phase's deliverable: one cut at the output cap is continued (window.py).
         kwargs["continue_truncated"] = True
     if model:
         kwargs["model"] = model
-    # Waiting for room under the cap happens per request, in the meter; a run whose cap is
-    # spent comes back with budget.EXHAUSTED_MESSAGE and stops there.
     return worker.run_llm_json(
         os.path.join(cfg["roles_root"], profile), prompt,
         cfg["provider"], cfg["default_model"], **kwargs,
@@ -642,7 +640,7 @@ def _validate_task(raw, roster, index):
             raise ValueError(f"Task {index} is missing {key!r}.")
         task[key] = task[key].strip()
     try:
-        one_file(split_deliverable(task["deliverable"])[0])  # validate the artifact gate before any cards are created
+        one_file(split_deliverable(task["deliverable"])[0])
     except ValueError as error:
         raise ValueError(f"Task {task['local_id']}: {error}") from error
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", task["local_id"]):
@@ -734,8 +732,7 @@ def validate_plan(obj, roster, *, decisions_allowed=False, root=False, red_team_
         raise ValueError("A clarify plan must ask at least one question.")
     red_team = obj.get("red_team") if isinstance(obj.get("red_team"), dict) else {}
     if not red_team_required:
-        red_team = {}   # a follow-up round keeps the red team the node's first plan named
-    # The root's red team also reviews the final report, so the root names one even as a pure branch point.
+        red_team = {}
     elif status == "ready" and (tasks or root) and red_team.get("assignee") not in roster_ids:
         raise ValueError("Last Order must name one roster Sister as the red team.")
     return {
@@ -961,8 +958,6 @@ def task_sources(con, run, rows):
         for finding in ledger.findings(con, run["id"], task_id=row["id"]):
             finds.append({"text": finding["text"], "claim_type": finding["claim_type"],
                           "claims": [_located(claim, run) for claim in ledger.claims(con, finding["id"])]})
-        # The ledger already holds what it accepted; only a submitted finding it does not hold
-        # (rejected, or never ingested) is worth a second listing.
         recorded = {item["text"] for item in finds}
         submitted = [item for item in payload.get("findings", [])
                      if not (isinstance(item, dict) and item.get("text") in recorded)]
@@ -1096,8 +1091,6 @@ def synthesize(con, run, cfg, worker, node, task_rows, *, followup=None, round=1
             + prompt_guard.untrusted("dispositions", revision["dispositions"]) + "\n" + rounds
     if not runs.is_root(node):
         rounds += "\n# How this node was reached\n" + position(con, run, node) + errata_above(con, run, node)
-    # The material map lists every card's ledger findings with their claims; the ledger block
-    # the red team gets would repeat all of them here, so it is left out of this turn.
     prompt = (SYNTHESIS_CONTRACT + rounds + f"""
 # Question
 {node['question']}
@@ -1115,7 +1108,7 @@ def synthesize(con, run, cfg, worker, node, task_rows, *, followup=None, round=1
         continue_truncated=True,
     )
     if followup is not None and runs.plan_round(con, run["id"], node["id"]) > round:
-        return ""                                     # she asked for another round instead of concluding
+        return ""
     if err or not text or not text.strip():
         raise RuntimeError(f"Synthesis for node {node['id']} is empty or failed: {err or ''}")
     return text.strip() + "\n"
@@ -1169,7 +1162,7 @@ def fork_session(source, target_dir):
     inherited = next((entry.get("id") for entry in reversed(manager.getBranch(leaf)) if entry.get("type") != "label"), None)
     branched = manager.createBranchedSession(leaf)
     if branched and not os.path.isfile(branched):
-        manager.rewrite_file()  # the write is deferred until an assistant turn; the fork resumes from disk
+        manager.rewrite_file()
     return branched, inherited
 
 
@@ -1293,7 +1286,7 @@ Decide what the node does now with `misaka_research_cards_failed`, then end in p
 - fail: the node fails; the root Last Order may run it again later.
 """
 
-RETRY_CARDS_LIMIT = 2   # ponytail: a fixed cap; cards failing a third time are the root's and the user's to judge
+RETRY_CARDS_LIMIT = 2
 
 
 def cards_failed(con, run, cfg, worker, node, *, kind, lost):
@@ -1525,8 +1518,6 @@ when evidence warrants it and explain why. No separate planning submission, file
                 return "starts after yours is done"
             return "in parallel with yours"
 
-        # Cards get their ids one by one as they are created, so a sibling made after this one has none
-        # yet: name her Sister, which inside the run reaches her card on this node (2026-10-01).
         company += ("\n## sibling cards\nOther cards on the same node. To reach one's Sister, `SendMessage` "
                     "her number: inside the run it reaches her card on this node, and if she holds several "
                     "the refusal lists their card ids. A card that has not started gets the message when it "

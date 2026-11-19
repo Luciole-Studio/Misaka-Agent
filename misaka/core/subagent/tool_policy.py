@@ -23,8 +23,6 @@ IN_PROCESS_TEAMMATE_ALLOWED_TOOLS = frozenset({
     "CronCreate", "CronDelete", "CronList",
 })
 
-# Native MISAKA equivalents. Unknown extensions are NOT automatically trusted as
-# an async-safe tool. These aliases do not bypass role/skill/project restrictions.
 _ALIASES = {
     "read": "Read", "edit": "Edit", "write": "Write", "bash": "Bash",
     "powershell": "PowerShell", "grep": "Grep", "find": "Glob", "glob": "Glob", "ls": "Glob",
@@ -33,9 +31,6 @@ _ALIASES = {
     "doc_list": "Glob", "doc_outline": "Read", "doc_read": "Read", "doc_page_image": "Read",
     "doc_find": "Grep", "doc_verify": "Grep", "doc_add": "Write",
     "browser_exec": "ExecuteExtraTool", "ask_user": "AskUserQuestion",
-    # The MCP extension's doors to tools it does not declare directly (exposure `codemode`, `deferred`): to an
-    # async child they are what CCB's extra-tool search and execution are, so MCP stays in reach as it was when
-    # every MCP tool was an `mcp__` tool.
     "tool_search": "SearchExtraTools", "codemode": "ExecuteExtraTool",
 }
 _CANONICAL = {name.casefold(): name for name in (
@@ -64,7 +59,6 @@ def tool_allowed_for_agent(
         return False
     if workflow_scripts and name == "Workflow":
         return False
-    # CUSTOM_AGENT_DISALLOWED_TOOLS is an exact copy of the global set at this pin.
     if is_async and name not in ASYNC_AGENT_ALLOWED_TOOLS:
         return agent_swarms and in_process_teammate and (name == "Agent" or name in IN_PROCESS_TEAMMATE_ALLOWED_TOOLS)
     return True

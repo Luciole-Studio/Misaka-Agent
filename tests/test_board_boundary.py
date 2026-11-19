@@ -10,7 +10,6 @@ from pathlib import Path
 PACKAGE = Path(__file__).resolve().parents[1] / "misaka"
 BOARD = [*sorted((PACKAGE / "core" / "platform").rglob("*.py")), *sorted((PACKAGE / "core" / "network").rglob("*.py")),
          PACKAGE / "core" / "session_catalog.py"]
-# The one line that still says it: the migration of the event kind v9 named after research.
 CARRIED = "UPDATE events SET kind='card_evidence' WHERE kind='research_evidence'"
 
 

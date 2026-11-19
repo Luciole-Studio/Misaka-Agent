@@ -398,9 +398,6 @@ class Installed:
     service: Service
     implementation: dict[str, Any]
     decls: Decls
-    # MISAKA fork: upstream's per-reference `views` WeakMap, kept with the implementation (see the module docstring):
-    # its adapter view for each reference, shared by every record of this implementation (`dataclasses.replace` and
-    # `install` pass it on).
     views: weakref.WeakKeyDictionary[RefImpl, dict[str, Any]] = field(
         default_factory=weakref.WeakKeyDictionary, compare=False, repr=False
     )
@@ -901,8 +898,6 @@ class RefImpl:
         # Weak: a retired code version's service (and the factory code it holds) must not be kept alive by its
         # consumers.
         self.bindings: weakref.WeakKeyDictionary[Service, Adapter | None] = weakref.WeakKeyDictionary()
-        # MISAKA fork: upstream's `views` WeakMap (implementation -> view) is `Installed.views` (see the module
-        # docstring).
         self.callers: dict[str, Callable[..., Any]] = {}
         self._statusListeners: dict[StatusListener, None] = {}
 
@@ -1149,7 +1144,6 @@ def sameSelect(a: Any, b: Any) -> bool:
         return True
     if a is None or b is None:
         return False
-    # MISAKA fork: equal code objects stand in for upstream's equal source text (`String(fn)`).
     codeA = getattr(a, "__code__", None)
     codeB = getattr(b, "__code__", None)
     return codeA is not None and codeA == codeB
@@ -1204,8 +1198,6 @@ class ObjectImpl:
         # The one object of a `lifetime: "host"` type: only such objects may register.
         self.hostLifetime = identity.hostLifetime
         self.status: ObjectStatus = "activating"
-        # MISAKA fork: `Promise.resolve()` is a future of the running loop (``_promise``): objects are made inside one,
-        # as `start`, which replaces it at once, needs one too.
         self.ready: asyncio.Future[None] = resolved()
         self.service: Service | None = None
         # Calls carrying an older code version are rejected upgrade_conflict (state bump or exclusive resource
@@ -1808,7 +1800,6 @@ class ObjectImpl:
 
         async def invoke() -> Any:
             result = fn()
-            # MISAKA fork: a promise resolved with a promise adopts it; an awaited coroutine may return a future.
             while inspect.isawaitable(result):
                 result = await result
             return result

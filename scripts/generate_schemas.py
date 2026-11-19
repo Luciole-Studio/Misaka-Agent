@@ -70,8 +70,6 @@ generatedComment = (
     "This file is generated from Python source. Do not edit it manually; run python scripts/generate_schemas.py."
 )
 
-# MISAKA fork: the bundled extensions' settings sections, by key. Core describes only its own; an extension's section
-# is otherwise left to `additionalProperties`.
 _EXTENSION_SETTINGS_SECTIONS: dict[str, str] = {
     "lcm": (
         "The long-conversation context engine (bundled extension): context_threshold is the share of the context "
@@ -103,7 +101,6 @@ class SchemaArtifact:
     filename: str
     schema: SchemaSource
     definitions: Mapping[str, SchemaSource] | None = None
-    # MISAKA fork: properties added after the schema's own, by name.
     extraProperties: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -205,7 +202,6 @@ def splitAnnotations(schema: Mapping[str, Any]) -> tuple[dict[str, Any], dict[st
 
 
 def _shapeKey(shape: Mapping[str, Any]) -> str:
-    # MISAKA fork: key order does not decide a match (pydantic and TypeBox order a schema's keys differently).
     return json.dumps(shape, sort_keys=True)
 
 

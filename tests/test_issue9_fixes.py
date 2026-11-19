@@ -21,8 +21,6 @@ from misaka.core.wiring import ToolCollector
 SPECIALTY = "Economic history: late imperial China, the salt monopoly"
 
 
-# -- a description with a colon in it -----------------------------------------------------------------
-
 def test_a_colon_in_the_description_no_longer_breaks_the_profile(tmp_path):
     ok, message = roster.create_sister("10077", root=str(tmp_path), specialty=SPECIALTY)
     assert ok, message
@@ -41,8 +39,6 @@ def test_a_profile_that_does_not_read_back_is_not_reported_created(tmp_path, mon
     assert not ok and "did not read back" in message
     assert not (tmp_path / "10078").exists(), "no half-made Sister is left in the roster"
 
-
-# -- pages with no text ---------------------------------------------------------------------------------
 
 def _indexed(tmp_path, monkeypatch, pages):
     workspace = tmp_path / "ws"
@@ -73,8 +69,6 @@ async def test_doc_read_points_a_range_with_no_text_at_the_page_image(tmp_path, 
     assert "No text was extracted from p2-3" in result["content"][0]["text"]
 
 
-# -- deliverables the corpus never reads ------------------------------------------------------------------
-
 def test_a_helper_script_is_not_warned_about_but_a_refused_document_is(tmp_path, caplog):
     root = tmp_path / "card"
     root.mkdir()
@@ -89,12 +83,10 @@ def test_a_helper_script_is_not_warned_about_but_a_refused_document_is(tmp_path,
     assert "empty.pdf" in warned, "a document the corpus reads and refused is still named"
 
 
-# -- reasoning tokens -------------------------------------------------------------------------------------
-
 @pytest.mark.parametrize("raw, reasoning, cache_read", [
     ({"prompt_tokens": 100, "completion_tokens": 80, "completion_tokens_details": {"reasoning_tokens": 60},
-      "prompt_cache_hit_tokens": 40}, 60, 40),                               # DeepSeek
-    ({"prompt_tokens": 100, "completion_tokens": 80, "cached_tokens": 25}, 0, 25),  # Kimi
+      "prompt_cache_hit_tokens": 40}, 60, 40),
+    ({"prompt_tokens": 100, "completion_tokens": 80, "cached_tokens": 25}, 0, 25),
 ])
 def test_reasoning_tokens_are_recorded_as_part_of_the_output(raw, reasoning, cache_read):
     from misaka.ai.api.openai_completions import _parseChunkUsage as parse_chunk_usage
@@ -109,8 +101,6 @@ def test_the_roster_comment_names_a_tool_that_exists():
     assert "misaka_sisters" not in inspect.getsource(roster)
     assert os.path.exists(roster.__file__)
 
-
-# -- PDF outlines in every install ------------------------------------------------------------------------
 
 def test_every_install_has_what_pdf_outlines_need():
     """The outline packages were an extra, and a release archive cannot add one: no archive install

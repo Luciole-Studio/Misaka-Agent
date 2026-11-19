@@ -28,7 +28,6 @@ SUFFIXES = frozenset({".pptx"})
 LAYOUTS = {"title": 0, "title_and_content": 1, "section_header": 2,
            "two_content": 3, "title_only": 5, "blank": 6}
 
-# Fallback placeholder index per role, used only when the semantic lookup finds nothing.
 _ROLE_INDEX = {"title": 0, "body": 1, "subtitle": 1, "content": 1}
 
 SHAPES = {"rectangle": "RECTANGLE", "rounded_rectangle": "ROUNDED_RECTANGLE",
@@ -255,7 +254,6 @@ def _duplicate(presentation, source):
     from pptx.parts.embeddedpackage import EmbeddedPackagePart
 
     def copy_content(old, new):
-        # Keep the spTree object: python-pptx caches the shapes collection around it.
         new.shapes._spTree[:] = copy.deepcopy(list(old.shapes._spTree))
         new._element.attrib.update(old._element.attrib)
         new._element.cSld.attrib.update(old._element.cSld.attrib)
@@ -274,8 +272,6 @@ def _duplicate(presentation, source):
 
     new = presentation.slides.add_slide(source.slide_layout)
     copy_content(source, new)
-    # Copying shape XML alone leaves every ``r:embed`` pointing at a relationship the new
-    # slide does not have: the images vanish and PowerPoint reports the file as corrupt.
     cloned = {}
 
     def copy_links(old_part, new_part, root, skip):
@@ -296,17 +292,15 @@ def _duplicate(presentation, source):
                                                         target.content_type, package, target.blob)
                         fresh_chart = True
                     else:
-                        # Reloaded embedded workbooks are generic Part instances.
                         path = PurePosixPath(str(target.partname))
                         template = str(path.with_name(re.sub(r"\d+$", "", path.stem) + "%d" + path.suffix))
                         cloned[target] = type(target).load(package.next_partname(template),
                                                           target.content_type, package, target.blob)
                 copied = cloned[target]
             else:
-                copied = target  # Layouts, media and styles are immutable shared resources.
+                copied = target
             mapping[relation_id] = new_part.relate_to(copied, relation.reltype)
             if fresh_chart:
-                # Attach first, so package.next_partname sees every newly allocated part.
                 copy_links(target, copied, copied._element, ())
         for element in root.iter():
             for name, value in list(element.attrib.items()):
@@ -350,7 +344,6 @@ def _format_text(slide, args):
                 if args.get(field) is not None:
                     setattr(font, field, bool(args[field]))
             if args.get("strike") is not None:
-                # python-pptx has no font.strike; the attribute lives on rPr.
                 run._r.get_or_add_rPr().set(
                     "strike", "sngStrike" if args["strike"] else "noStrike")
             size = args.get("font_size") or args.get("size")
@@ -420,7 +413,6 @@ def write(path, op, args, *, overwrite=False):
             for paragraph in _paragraphs(slide.shapes):
                 runs = []
                 for run in paragraph.runs:
-                    # A soft break or field is a boundary, not an invisible join.
                     if runs and runs[-1]._r.getnext() is not run._r:
                         done += splice_runs(runs, find, args.get("replace", ""), [-1])
                         runs = []
@@ -451,9 +443,6 @@ def write(path, op, args, *, overwrite=False):
         order.remove(identifiers[index])
         return saved(f"deleted slide {args['slide']}")
 
-    # Everything below addresses one existing slide. The op name is checked first: a typo
-    # would otherwise be reported as a missing 'slide', which sends the model looking for
-    # the wrong mistake.
     if op not in OPS:
         return f"[error] unknown pptx op {op!r}: this writes {', '.join(OPS)}."
     try:
@@ -549,6 +538,6 @@ def write(path, op, args, *, overwrite=False):
         presentation.save(path)
         return outcome
 
-    _duplicate(presentation, slide)                  # the last op in OPS reaching here
+    _duplicate(presentation, slide)
     return saved(f"duplicated slide {args['slide']} -> "
                  f"slide {len(presentation.slides._sldIdLst)}")

@@ -199,8 +199,6 @@ async def test_ignores_an_invalid_misaka_codemode_max_workers(terminations, monk
     await asyncio.gather(*pending)
 
 
-# MISAKA fork: a worker releases its slot on its own thread, so the waiter's loop may run the delivery before the
-# grant returns. The outcome was recorded after scheduling it, and the waiter then never woke (seen on Windows).
 async def test_a_slot_granted_before_the_grant_returns_still_reaches_its_waiter(monkeypatch):
     loop = asyncio.get_running_loop()
     monkeypatch.setattr(codemode_execute, "activeCodemodeWorkers", codemode_execute.maxCodemodeWorkers())

@@ -39,7 +39,7 @@ def _deliver(lab, tid, text="Finding one"):  # noqa: F811
 def test_a_stopped_consultation_leaves_the_cards_built_on_her_waiting(lab):  # noqa: F811
     con, run = lab.con, lab.run
     ea = _linked(lab, "Ea")
-    fa = _linked(lab, "Fa")                                   # still working
+    fa = _linked(lab, "Fa")
     x3 = _linked(lab, "X3", needs=[ea, fa])
     _deliver(lab, ea)
     consultation = tasks.start_consultation(con, ea, generation=1, lock=LOCK)

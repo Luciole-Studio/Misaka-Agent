@@ -87,7 +87,6 @@ async def captureHeaders(
     if telemetryEnabled is False:
         settingsManager.setEnableInstallTelemetry(False)
     else:
-        # MISAKA fork: install telemetry defaults off (pi: on), so pi's default state is set explicitly.
         settingsManager.setEnableInstallTelemetry(True)
 
     authStorage = AuthStorage.inMemory({model.provider: {"type": "api_key", "key": "test-api-key"}})

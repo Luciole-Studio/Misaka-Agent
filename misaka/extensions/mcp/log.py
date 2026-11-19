@@ -35,7 +35,6 @@ def formatData(data: Any) -> str:
 
 
 def _toISOString(now: datetime) -> str:
-    # MISAKA fork: `Date.prototype.toISOString`.
     utc = now.astimezone(UTC) if now.tzinfo is not None else now.replace(tzinfo=UTC)
     return f"{utc.strftime('%Y-%m-%dT%H:%M:%S')}.{utc.microsecond // 1000:03d}Z"
 
@@ -69,7 +68,6 @@ class McpServerLog:
                 if self._currentSize() > MAX_LOG_BYTES:
                     os.replace(self.path, f"{self.path}.1")
                 self._size = self._currentSize()
-            # MISAKA fork: `appendFileSync` writes a string as UTF-8, a lone surrogate as U+FFFD.
             data = toWellFormed(line).encode("utf-8")
             if sys.platform == "win32":
                 from misaka.utils import libuv_windows

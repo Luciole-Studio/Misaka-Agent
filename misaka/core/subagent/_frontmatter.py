@@ -31,9 +31,6 @@ _SPECIAL = re.compile(r'[{}[\]*&#!|>%@`]|: ')
 
 
 class _CoreResolver(VersionedResolver):
-    # yaml 2.8.3 dist/schema/core/{bool,int,float}.js and common/null.js.
-    # add_implicit_resolver_base is class-local; its non-base counterpart would
-    # also mutate ruamel's global versioned resolver registry.
     yaml_implicit_resolvers: ClassVar[dict] = {}
 
     @property
@@ -52,7 +49,6 @@ for _tag, _pattern, _first in (
 
 class _CoreConstructor(SafeConstructor):
     def construct_unknown(self, node):
-        # npm yaml warns for unknown tags but keeps the node's ordinary value.
         logging.getLogger(__name__).warning('Unresolved agent YAML tag: %s', node.tag)
         if isinstance(node, ScalarNode):
             return self.construct_scalar(node)
@@ -68,13 +64,8 @@ class _CoreReader(Reader):
     in_plain_scalar = False
 
     def peek(self, index=0):
-        # yaml 2.8.3 lexer treats only CR/LF as line breaks. ruamel's scanner
-        # still classifies NEL/LS/PS as YAML 1.1 breaks. Give classification a
-        # non-break sentinel; prefix() continues returning the original bytes
-        # for every scalar token. No input/output replacement or global patch.
         char = super().peek(index)
         if char == '\t':
-            # YAML 1.2 permits separation tabs, but not indentation tabs.
             end = self.pointer + index
             start = self.buffer.rfind('\n', 0, end) + 1
             if self.in_plain_scalar or self.buffer[start:end].strip(' \t\r'):
@@ -84,7 +75,6 @@ class _CoreReader(Reader):
 
 class _CoreScanner(Scanner):
     def scan_plain(self):
-        # Continuation tabs are scalar separation, not block indentation.
         self.reader.in_plain_scalar = True
         try:
             return super().scan_plain()
@@ -111,13 +101,11 @@ def _alias_count(node):
 class _CoreComposer(Composer):
     def __init__(self, loader=None):
         super().__init__(loader)
-        self.warn_double_anchors = False  # Source aliases resolve the latest anchor.
+        self.warn_double_anchors = False
         self._alias_anchors = {}
         self._alias_stack = []
 
     def compose_node(self, parent, index):
-        # Preserve ruamel's actual node identities and recursive aliases. This
-        # parallel shape stores only the source alias-cost graph, not YAML data.
         event = self.parser.peek_event()
         if isinstance(event, AliasEvent):
             anchor = self._alias_anchors.get(event.anchor)
@@ -182,6 +170,4 @@ def split_frontmatter(raw: str) -> tuple[dict[str, Any], str] | None:
             data = _load(_quote_problematic_values(match[1]))
         except (YAMLError, ValueError, TypeError) as error:
             logging.getLogger(__name__).warning('Failed to parse agent YAML frontmatter: %s', error)
-    # Source parseFrontmatter retains the body even when YAML is invalid.
-    # parseAgentFromMarkdown owns trim; the native parser returns that final body.
     return data if isinstance(data, dict) else {}, raw[match.end():].strip(_SPACE)

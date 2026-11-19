@@ -41,7 +41,7 @@ def test_a_keyword_is_a_whole_word_of_the_id():
 @pytest.mark.parametrize("parent, expected", [
     ("eu.anthropic.claude-sonnet-5-5", "eu.anthropic.claude-haiku-5-5"),
     ("anthropic.claude-sonnet-4-6-v1", "anthropic.claude-haiku-5-5"),
-    ("apac.anthropic.claude-sonnet-5-5", "anthropic.claude-haiku-5-5"),      # no apac profile listed
+    ("apac.anthropic.claude-sonnet-5-5", "anthropic.claude-haiku-5-5"),
 ])
 def test_bedrock_keeps_the_parent_region_when_the_catalog_has_it(parent, expected):
     ids = ["anthropic.claude-haiku-4-5-20251001-v1:0", "us.anthropic.claude-haiku-5-5",

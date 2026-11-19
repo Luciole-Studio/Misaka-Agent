@@ -51,7 +51,6 @@ async def test_declares_the_prompt_and_tools_once_and_reuses_them_across_resume(
         head = harness.session.messages[0]
         assert read_field(head, "role") == "system", "expected system message"
         assert read_field(head, "content") == ""
-        # MISAKA fork: no `docs` section, and MISAKA's eight default tools (pi: read, bash, edit, write).
         assert list(read_field(head, "sections") or {}) == ["preamble", "tools", "rules", "cwd"]
         assert toolNames(read_field(head, "toolsAdded")) == list(DEFAULT_TOOL_NAMES)
         assert getSystemMessageText(head) == harness.session.systemPrompt

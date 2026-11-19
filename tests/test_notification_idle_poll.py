@@ -43,7 +43,6 @@ def test_a_poll_still_says_the_subscriber_is_there_once_a_day(tmp_path):
         _poll(con)
         refreshed = con.execute("SELECT updated_at FROM notification_subscriptions WHERE id=?", (sid,)).fetchone()[0]
         assert refreshed > stale
-        # Polled daily, a subscriber that has seen nothing for longer than the idle limit is kept.
         notifications.init(con)
         assert con.execute("SELECT 1 FROM notification_subscriptions WHERE id=?", (sid,)).fetchone()
 

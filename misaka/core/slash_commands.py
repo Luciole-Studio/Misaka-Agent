@@ -15,7 +15,7 @@ from typing import Literal, NotRequired, TypedDict
 from misaka.config import APP_NAME
 from misaka.core.source_info import SourceInfo
 
-type SlashCommandSource = Literal["extension", "prompt", "skill", "core"]  # MISAKA fork: "core" = a part's command
+type SlashCommandSource = Literal["extension", "prompt", "skill", "core"]
 
 
 class SlashCommandInfo(TypedDict):
@@ -36,7 +36,6 @@ BUILTIN_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
     BuiltinSlashCommand(name="settings", description="Open settings menu"),
     BuiltinSlashCommand(name="model", description="Select model (opens selector UI)", argumentHint="<provider/model>"),
     BuiltinSlashCommand(name="tree", description="Navigate session tree (switch branches)"),
-    # MISAKA fork: --default also saves the level as the startup default (pi 496185f6).
     BuiltinSlashCommand(name="thinking", description="Select thinking level (--default persists it)", argumentHint="[--default] <level>"),
     BuiltinSlashCommand(name="scoped-models", description="Enable/disable models for Ctrl+P cycling"),
     BuiltinSlashCommand(name="export", description="Export session (HTML default, or specify path: .html/.jsonl)"),
@@ -49,10 +48,8 @@ BUILTIN_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
     BuiltinSlashCommand(name="fork", description="Create a new fork from a previous user message"),
     BuiltinSlashCommand(name="clone", description="Duplicate the current session at the current position"),
     BuiltinSlashCommand(name="trust", description="Save project trust decision for future sessions"),
-    # MISAKA fork: --account names an OAuth account.
     BuiltinSlashCommand(name="login", description="Configure provider authentication", argumentHint="<provider> [--account NAME]"),
     BuiltinSlashCommand(name="logout", description="Remove provider authentication"),
-    # MISAKA fork: --carry keeps the context engine's summaries.
     BuiltinSlashCommand(name="new", description="Start a new session (--carry keeps the context engine's summaries)"),
     BuiltinSlashCommand(name="compact", description="Manually compact the session context"),
     BuiltinSlashCommand(name="resume", description="Resume a different session"),
@@ -60,7 +57,6 @@ BUILTIN_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
     BuiltinSlashCommand(name="quit", description=f"Quit {APP_NAME}"),
 )
 
-# MISAKA fork: MISAKA's local commands.
 _LOCAL_ALIAS_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
     # /clear wipes the current session in place (same id, same file, history erased); /new starts a new session
     BuiltinSlashCommand(name="clear", description="Wipe current session in place (same id, history erased)"),

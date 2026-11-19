@@ -150,7 +150,6 @@ class CreateModelRuntimeOptions(TypedDict, total=False):
 
 ModelRuntimeAuthOverrides = AuthResolutionOverrides
 
-# MISAKA fork: "recoverRejectedCredential" is the B7 recovery below.
 type CredentialSynchronizationOperation = Literal[
     "login", "logout", "setRuntimeApiKey", "removeRuntimeApiKey", "recoverRejectedCredential"
 ]
@@ -208,14 +207,6 @@ class _InteractionWithSignal:
         return getattr(self._interaction, name)
 
 
-# MISAKA fork (B7): what a provider says when the credential itself was refused, as opposed to
-# a transient failure: the account is fine, the token in hand is not. An OAuth access token
-# rotated by another client on the same account reads exactly like this (2026-09-18: the Codex
-# CLI refreshed the shared refresh token, and four cards' first request came back "Encountered
-# invalidated oauth token for user" while misaka's copy was still inside its own expiry window,
-# so nothing refreshed and a person had to restart each card by hand).
-# The status only counts where it is a status (leading, "error code: 401", "status 401", "(401)"),
-# never as a count or an index ("max_tokens: 401", "messages.401", "input[401]", "~401 min").
 _REJECTED_CREDENTIAL_PATTERN = re.compile(
     r"(?:^|error\s+code:?\s*|status(?:\s+code)?:?\s*|http\s*|\()401(?![\w\].])|"
     r"\b(?:unauthorized|invalidated\s+oauth|invalid[_ -]?api[_ -]?key|invalid_token|"
@@ -255,8 +246,6 @@ def personalizedCatalogHint(providerId: str | None) -> str:
 
 
 def _modelsStorePath(modelsPath: str) -> str:
-    # MISAKA fork: pi keeps the store beside models.json. The home keeps it with its state; a
-    # models.json somewhere else still gets its store as a sibling.
     if os.path.realpath(modelsPath) == os.path.realpath(home.path("models")):
         return str(home.path("models_store"))
     return os.path.join(os.path.dirname(modelsPath), "models-store.json")
@@ -285,7 +274,6 @@ class ModelRuntime:
         authStorage: AuthStorage | None = None,
     ) -> None:
         # Private by convention: build one with `ModelRuntime.create`.
-        # MISAKA fork: `authStorage` is the auth.json store kept reachable as `runtime.authStorage`.
         self._credentials = credentials
         self._config = config
         self._modelsPath = modelsPath
@@ -303,16 +291,10 @@ class ModelRuntime:
         self._providerAvailabilitySeq: dict[str, int] = {}
         self._availabilityError: str | None = None
         self._credentialOperations: dict[str, asyncio.Future[Any]] = {}
-        # MISAKA fork: the auth.json store, for the code that reads its cached records directly (LCM pools, the
-        # nous gateway); None when the credentials are another CredentialStore.
         self.authStorage = authStorage
-        # MISAKA fork (B7): the stored token each session's last request to a provider carried,
-        # keyed by (provider, sessionId), and the tokens already replaced after a provider
-        # refused them.
         self._lastResolvedApiKey: dict[tuple[str, str | None], str] = {}
         self._recoveredCredentials: dict[str, set[str]] = {}
         self._backgroundRefreshes: set[asyncio.Task[Any]] = set()
-        # MISAKA fork: core's own providers (core/wiring.py), registered by create().
         self._coreProviderIds: list[str] = []
         self._models = createModels(CreateModelsOptions(credentials=credentials, modelsStore=modelsStore))
         self._rebuildProviders()
@@ -339,7 +321,6 @@ class ModelRuntime:
         elif authStorage is None and isinstance(credentials, AuthStorage):
             authStorage = credentials
         runtimeCredentials = RuntimeCredentials(credentials)
-        # MISAKA fork: the default models.json is the home's.
         resolvedModelsPath = str(home.path("models")) if modelsPath is _UNSET else modelsPath
         config = await ModelConfig.load(resolvedModelsPath)
         if modelsStore is None:
@@ -355,17 +336,12 @@ class ModelRuntime:
                 return provider
             # OpenRouter narrows the catalog to the models, limits and prices of the user's key.
             if provider.id == "openrouter":
-                # MISAKA fork: without a `catalogBaseUrl` the built-in catalog alone is personalized: the one
-                # request is OpenRouter's own `/models/user`, with the user's key (remote_catalog_provider.py).
                 return withPersonalizedCatalog(
                     provider,
                     personalizeOpenRouterCatalog,
                     catalogBaseUrl,
                     builtinModelDataGeneratedAt,
                 )
-            # MISAKA fork: the remote catalog overlay needs an endpoint named by the caller; upstream
-            # defaults to its own service, which misaka does not send users' traffic to (no endpoint:
-            # `withRemoteCatalog` returns the provider as it is).
             return withRemoteCatalog(provider, catalogBaseUrl, builtinModelDataGeneratedAt)
 
         providers = [wrap(provider) for provider in builtinProviders()]
@@ -375,14 +351,11 @@ class ModelRuntime:
             resolvedModelsPath,
             modelsStore,
             providers,
-            # MISAKA fork: offline mode is `MISAKA_OFFLINE`, where upstream reads `PI_OFFLINE`.
             os.environ.get("MISAKA_OFFLINE") is None,
             authStorage,
         )
         runtime._configureRadiusProviders()
         runtime._rebuildProviders()
-        # MISAKA fork: core's own providers (core/wiring.py) are part of every runtime, as
-        # built-ins are; their refreshModels keeps what they publish in step with the credentials.
         from misaka.core.wiring import core_providers
 
         for providerId, providerConfig in core_providers(runtime):
@@ -849,8 +822,6 @@ class ModelRuntime:
             model.model_copy(update={"baseUrl": resolution.auth.baseUrl}) if resolution.auth.baseUrl else model
         )
         apiKey = read_field(options, "apiKey")
-        # MISAKA fork (B7): remember the stored token this session's request carries, for
-        # recoverRejectedCredential. A key the caller passed in is not the store's to replace.
         tokenKey = (model.provider, read_field(options, "sessionId"))
         token = _authToken(ModelAuth(apiKey=resolution.auth.apiKey, headers=headers)) if apiKey is None else None
         if token:
@@ -1001,9 +972,6 @@ class ModelRuntime:
     async def refresh(self, options: ModelsRefreshOptions | None = None) -> ModelsRefreshResult:
         options = options if options is not None else ModelsRefreshOptions()
         if options.providers is not None and self._coreProviderIds:
-            # MISAKA fork: a core provider's catalog follows other providers' credentials (a MoA
-            # preset runs only while its aggregator's provider is configured), so it refreshes
-            # with any of them: a /login or /logout reaches it.
             options = replace(options, providers=[*options.providers, *self._coreProviderIds])
         self._config = await ModelConfig.load(self._modelsPath)
         self._configureRadiusProviders()
@@ -1099,8 +1067,6 @@ class ModelRuntime:
         )
 
     def registerProvider(self, providerId: str, config: ProviderConfigInput) -> None:
-        # MISAKA fork: a model definition may be a model object (pi's models are plain objects, so a
-        # registered provider's `models` can be another provider's models); the composer reads mappings.
         if config.get("models") is not None:
             config = {
                 **config,
@@ -1227,8 +1193,6 @@ class ModelRuntime:
         """A catalog chat model that is not virtual."""
         model = self._models.getModel(providerId, modelId)
         return model if model is not None and not isVirtualModel(model) else None
-
-    # -- MISAKA fork (B7) -------------------------------------------------------------------
 
     async def recoverRejectedCredential(self, providerId: str, sessionId: str | None = None) -> bool:
         """Replace a stored OAuth token this provider has just refused. True if it changed.

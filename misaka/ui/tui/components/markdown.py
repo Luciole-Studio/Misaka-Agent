@@ -255,9 +255,6 @@ class _CachedTokens(TypedDict):
     tokens: list[Any]
 
 
-# MISAKA fork: model and user prose reaches the terminal through this renderer, and a C0 control character in it is
-# written verbatim (an `\x1b[10A` in a reply moves the cursor and breaks the renderer's line accounting). C1 goes with
-# them: a UTF-8 terminal still reads U+009B as CSI and U+009C as ST. Tab, newline and carriage return stay.
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
 
@@ -278,7 +275,6 @@ class Markdown(Component):
         self.cachedWidth: int | None = None
         self.cachedLines: list[str] | None = None
         # Parsed tokens depend only on the source, so they survive theme and width invalidation.
-        # MISAKA fork: held strongly (see the module docstring).
         self.cachedTokens: _CachedTokens | None = None
 
         self.text = text

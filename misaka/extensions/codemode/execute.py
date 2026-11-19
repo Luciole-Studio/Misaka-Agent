@@ -78,9 +78,6 @@ MAX_CONCURRENT_MODEL_CALLS = 4
 # `InternalError: out of memory` inside the script.
 CODEMODE_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024
 # Shared across calls and sessions. Allow one replacement while a cancelled worker is still exiting.
-# MISAKA fork: "sessions" are those of one OS process; every Sister card, headless node, and subagent runs in a
-# process of its own, so one Sister's stuck workers never block another's. A worker thread cannot be killed, so a
-# cancelled one counts until its built-in returns.
 DEFAULT_MAX_CODEMODE_WORKERS = 2
 
 
@@ -99,9 +96,6 @@ CODEMODE_WORKER_WAIT_MS = 60_000
 activeCodemodeWorkers = 0
 # Scripts waiting for a worker, in arrival order.
 codemodeWorkerWaiters: list[Callable[[], bool]] = []
-# MISAKA fork: workers are reserved on whichever event loop thread runs the session and released on the worker's own
-# thread as it ends (see `CodemodeSandboxOptions.acquireWorker`), so the counter and the queue are guarded, and a
-# waiter's one outcome -- reserved, aborted or timed out -- is decided under this lock.
 _activeCodemodeWorkersLock = threading.Lock()
 
 
@@ -323,8 +317,6 @@ def checkClassifierContext(context: Any) -> ClassifierContext:
                 raise fail(f'{at} is a "bool" question, so criteria must be {{ true: string, false: string }}')
         else:
             raise fail(f'{at}.type must be "choice", "score", or "bool", got {"undefined" if type is UNDEFINED else jsonStringify(type)}')
-    # MISAKA fork: upstream casts the checked object, so keys it does not know reach the service, which
-    # ignores them; the models forbid extra keys, so only the checked ones are kept.
     return ClassifierContext.model_validate({
         "state": context["state"],
         **(
@@ -373,7 +365,6 @@ def checkImagesContext(context: Any) -> ImagesContext:
         ):
             continue
         raise fail(f"context.input[{index}] must be a text or image block, got {describeValue(block)}")
-    # MISAKA fork: only the checked keys are kept, as for the classifier context.
     return ImagesContext.model_validate({
         "input": [
             {"type": "text", "text": block["text"]}
@@ -539,7 +530,6 @@ def formatError(result: CodemodeFailure, calls: Sequence[CodemodeNestedCall]) ->
     return f"{head}\n\n{formatCallSummary(calls)}"
 
 
-# MISAKA fork: `misaka-codemode` rather than `pi-codemode`, as misaka names its files.
 _OUTPUT_FILE_PREFIX = "misaka-codemode"
 
 

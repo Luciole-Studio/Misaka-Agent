@@ -110,7 +110,6 @@ async def test_does_not_retry_caller_cancellation(monkeypatch):
 
 
 async def test_an_aborted_fetch_cancels_its_request(monkeypatch):
-    # MISAKA: `fetch` aborts the request itself; a raced request must not keep its socket open.
     cancelled = asyncio.Event()
 
     async def hang(self, request, **kwargs):

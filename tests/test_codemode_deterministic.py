@@ -118,7 +118,6 @@ def timezone():
 
     def set_(value: str) -> None:
         os.environ["TZ"] = value
-        # MISAKA fork: Python reads TZ when tzset() runs; Node reads it when it is assigned.
         time.tzset()
 
     yield set_

@@ -86,7 +86,6 @@ def createTreeUI():
         showStatus=Mock(),
         showError=Mock(),
         flushCompactionQueue=AsyncMock(return_value=None),
-        # MISAKA fork: `void promise` calls are tasks.
         _schedule_task=lambda coroutine: tasks.append(asyncio.ensure_future(coroutine)),
     )
     InteractiveMode.showTreeSelector(ui)

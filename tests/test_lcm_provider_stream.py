@@ -41,8 +41,6 @@ def test_an_api_mode_override_goes_by_the_api_it_names(monkeypatch):
     assert calls == [("api", "anthropic-messages")]
 
 
-# --- pi 1.3.0: kimi-coding moved to openai-completions -----------------------------------------
-
 _DONE_CHUNKS = [
     {
         "choices": [{"delta": {}, "finish_reason": "stop"}],
@@ -94,20 +92,14 @@ async def test_kimi_aux_calls_send_thinking_or_reasoning_effort_never_both(monke
     sent_by_pi, payload = await _kimi_aux_payload(monkeypatch, model_id, reasoning)
 
     assert not {"thinking", "reasoning_effort"} <= payload.keys()
-    # pi's catalog decides which of the two a model takes; the Kimi profile's projection does not override it.
     assert sent_by_pi <= payload.keys()
 
 
 @pytest.mark.parametrize("model_id", ["k3", "kimi-for-coding", "kimi-for-coding-highspeed"])
 async def test_disabled_reasoning_sends_no_thinking_toggle_to_a_model_that_always_thinks(monkeypatch, model_id):
-    # pi's catalog: no Kimi Code model can turn thinking off (`thinkingLevelMap.off` is null), and pi sends none of
-    # them `thinking: disabled`; the Kimi profile's projection of disabled reasoning must not either.
     _sent_by_pi, payload = await _kimi_aux_payload(monkeypatch, model_id, {"enabled": False})
 
     assert "thinking" not in payload and "reasoning_effort" not in payload
-
-
-# --- the whole auxiliary call (``_complete``) on Kimi Code ------------------------------------------
 
 
 async def _kimi_aux_call(monkeypatch, model_id, *, reasoning, timeout=30.0, delay=0.0, chunks=None):
@@ -148,8 +140,6 @@ async def _kimi_aux_call(monkeypatch, model_id, *, reasoning, timeout=30.0, dela
 
 @pytest.mark.parametrize("model_id", ["k3", "k3-256k", "kimi-for-coding-highspeed"])
 async def test_kimi_code_aux_calls_leave_temperature_to_the_server(monkeypatch, model_id):
-    # Hermes' Kimi profile omits temperature (server-managed); its name rule `kimi-*` missed the bare `k3`, and since
-    # pi 1.3.0 openai-completions sends whatever LCM asks for (vendor extraction asks for 0.3).
     request = await _kimi_aux_call(monkeypatch, model_id, reasoning={"enabled": False})
 
     assert "temperature" not in request
@@ -157,8 +147,6 @@ async def test_kimi_code_aux_calls_leave_temperature_to_the_server(monkeypatch, 
 
 
 async def test_a_kimi_code_aux_call_keeps_streaming_past_its_timeout_while_tokens_arrive(monkeypatch):
-    # Hermes streams Kimi Code auxiliary calls (its Anthropic client): the timeout is an idle window re-armed by each
-    # delta, under a generous total ceiling, not one flat budget for the whole answer.
     drip = [{"choices": [{"delta": {"content": "x"}}]} for _ in range(6)] + [
         {"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 6}},
     ]

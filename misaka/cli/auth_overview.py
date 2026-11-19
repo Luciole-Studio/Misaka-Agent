@@ -16,13 +16,6 @@ from misaka.config import get_auth_path
 from misaka.core.auth_storage import AuthStorage, ReadOnlyAuthStorage
 from misaka.core.model_runtime import ModelRuntime
 
-# Which vendor SDK each wire protocol needs, as ``api -> (module, PyPI package)``. The
-# provider modules import these behind ``try/except ImportError`` and only fail at the first
-# request, through ``misaka.ai.api._sdk.require`` -- so a credential alone proves
-# nothing about whether the provider can serve a call. An api absent from this table
-# (``pi-messages``, ``openai-codex-responses``, ``mistral-conversations``) speaks its
-# protocol over httpx and needs no extra. ``EXTRAS`` turns the package into the extra name
-# for the pip command.
 API_SDK_REQUIREMENTS = {
     "anthropic-messages": ("anthropic", "anthropic"),
     "openai-completions": ("openai", "openai"),
@@ -43,8 +36,6 @@ def sdk_installed(module: str) -> bool:
     try:
         return importlib.util.find_spec(module) is not None
     except (ImportError, ValueError):
-        # A namespace parent without the child (``google`` without ``google.genai``), or a
-        # package whose own import machinery is broken: either way it cannot serve a call.
         return False
 
 
@@ -60,7 +51,7 @@ def missing_sdk_extras(runtime: ModelRuntime, provider: str) -> list[str]:
         if model.provider == provider
     }
     if not requirements or None in requirements:
-        return []  # unknown provider, or an api that needs no SDK: claim nothing
+        return []
     if any(sdk_installed(module) for module, _package in requirements):
         return []
     return sorted({EXTRAS[package] for _module, package in requirements})
@@ -98,8 +89,6 @@ async def print_provider_overview() -> int:
     for target in sorted(known):
         status = auth.runtime.getProviderAuthStatus(target)
         ready = bool(status.configured or status.source)
-        # "!" rather than "✗": the credential is fine, the install is not. Both count as not
-        # ready, so the exit code still refuses to call this provider usable.
         missing = missing_sdk_extras(auth.runtime, target) if ready else []
         mark = "!" if missing else "✓" if ready else "✗"
         detail = status.source or "not configured"

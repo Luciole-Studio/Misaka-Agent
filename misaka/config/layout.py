@@ -124,29 +124,22 @@ def ensure():
 
     made: list[str] = []
     try:
-        # The shared layer, at the root of the home: the identity every role loads before
-        # its own SOUL.md, and the skills every role sees.
         _mkdir(str(home.home()), made)
         _seed(str(home.path("shared_soul")), profiles.SHARED_SOUL_TEMPLATE, made)
         if _mkdir(str(home.path("shared_skills")), made):
             _seed(str(home.path("shared_skills") / "README.md"), SKILLS_README.format(who="every role"), made)
         if _mkdir(str(home.path("shared")), made):
             _seed(str(home.path("shared") / "README.md"), SHARED_README, made)
-        # The roles. Sisters are created on demand, but the folder they go in is part of the
-        # layout: `misaka sister list` on a fresh install should read empty, not missing.
         roles = home.path("roles_root")
         _mkdir(str(roles), made)
         _seed(str(roles / "README.md"), README, made)
         _mkdir(str(home.path("profiles_root")), made)
         last_order = roles / "last_order"
         if _mkdir(str(last_order), made):
-            # Only with her folder: a SOUL.md she is missing afterwards was taken out on purpose.
             _seed(str(last_order / "SOUL.md"), LAST_ORDER_SOUL, made)
         if _mkdir(str(last_order / "skills"), made):
             _seed(str(last_order / "skills" / "README.md"), SKILLS_README.format(who="Last Order only"), made)
     except OSError:
-        # A read-only or full home: every reader of this tree already treats a missing
-        # directory as "no entries", so the session still starts.
         pass
     return made
 

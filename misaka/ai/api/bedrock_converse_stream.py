@@ -251,10 +251,6 @@ def stream(
         )
         useBearerToken = bearerToken is not None and not skipAuth
 
-        # MISAKA fork: upstream's Node.js/Bun branch; Python always resolves config files and env.
-        # Region resolution: ARN-embedded > explicit option > env vars > SDK default chain.
-        # When the model ID is an inference profile ARN, extract the region from it.
-        # This avoids conflicts with AWS_REGION set for other services.
         arnRegionMatch = re.match(r"^arn:aws(?:-[a-z0-9-]+)?:bedrock:([a-z0-9-]+):", model.id)
         if arnRegionMatch:
             config["region"] = arnRegionMatch.group(1)
@@ -278,11 +274,9 @@ def stream(
 
         proxyUrl = resolveHttpProxyUrlForTarget(model.baseUrl, env)
         if proxyUrl:
-            # MISAKA fork: botocore's `proxies` config stands for the NodeHttpHandler with proxy agents.
             config["requestHandler"] = _bedrock_sdk.proxyRequestHandler(proxyUrl.geturl())
         elif getProviderEnvValue("AWS_BEDROCK_FORCE_HTTP1", env) == "1":
             # Some custom endpoints require HTTP/1.1 instead of HTTP/2
-            # MISAKA fork: botocore only speaks HTTP/1.1, so there is no handler to swap.
             pass
 
         if useBearerToken:
@@ -292,7 +286,6 @@ def stream(
         # Kept outside the try so the catch can still correlate a mid-stream failure:
         # exceptions delivered as stream events carry no HTTP metadata of their own.
         responseRequestId: str | None = None
-        # MISAKA fork: the response this request opened, closed in `finally`.
         response: Any = None
 
         try:
@@ -360,7 +353,6 @@ def stream(
             async for item in response.stream:
                 if onProviderStreamEvent:
                     await maybe_await(onProviderStreamEvent(item, model))
-                # MISAKA fork: botocore's stream does not stop on the abort signal by itself.
                 if signal_aborted(signal):
                     raise RuntimeError("Request was aborted")
                 if "messageStart" in item:
@@ -408,7 +400,6 @@ def stream(
         except Exception as error:  # noqa: BLE001 - every failure becomes an error event on the stream
             for index in range(len(output.content)):
                 _finalizeStreamingBlock(blocks, index)
-            # MISAKA fork: what the JavaScript SDK would have thrown (see `_bedrock_sdk._thrown_value`).
             thrown = _bedrock_sdk._thrown_value(error)
             output.stopReason = "aborted" if signal_aborted(signal) else "error"
             output.errorMessage = _formatBedrockError(thrown)
@@ -417,7 +408,6 @@ def stream(
             stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
             stream.end()
         finally:
-            # MISAKA fork: release the event stream's connection while the loop still runs.
             await _close_stream(response)
 
     spawn_stream_task(run(), stream=stream)
@@ -448,8 +438,6 @@ def _formatBedrockError(error: Any) -> str:
     extend BedrockRuntimeServiceException. We map the `.name` to a stable
     human-readable prefix so downstream consumers (retry logic, context-overflow
     detection) can distinguish error categories via simple string matching."""
-    # MISAKA fork: botocore's `ClientError` stands for `BedrockRuntimeServiceException`; its `Error.Message` is the
-    # message, and the parsed `Error` object is no HTTP body (the JS SDK's `$response.body` is an unread stream).
     serviceException = _bedrock_sdk._service_exception(error)
     if serviceException is not None:
         core = serviceException[1]
@@ -491,7 +479,6 @@ def _extractBedrockErrorCode(error: Any) -> str | None:
     """The SDK puts the modeled code on `error.name` for service exceptions and unmodeled stream errors alike, so
     do not narrow to `BedrockRuntimeServiceException`. Modeled Bedrock errors all end in `Exception`, unlike
     transport names such as `TimeoutError`."""
-    # MISAKA fork: `_bedrock_sdk._error_name` reads botocore's spellings of `error.name`.
     name = _bedrock_sdk._error_name(error)
     if name is None or not name.endswith("Exception"):
         return None
@@ -502,7 +489,6 @@ def _appendBedrockFailureDiagnostic(output: AssistantMessage, error: Any, fallba
     """Structured metadata alongside `errorMessage`, which stays byte-identical because `isRetryableAssistantError`
     matches against it. Unknown fields are omitted, never guessed: a modeled mid-stream exception reaches us as
     a bare object literal, leaving only `fallbackRequestId`. `details` only, as the throw is not always `Error`."""
-    # MISAKA fork: `error.$metadata` is botocore's `ResponseMetadata` (`_bedrock_sdk._sdk_error_metadata`).
     metadata = _bedrock_sdk._sdk_error_metadata(error)
     details: dict[str, Any] = {}
 
@@ -698,7 +684,6 @@ def _handleContentBlockDelta(
             block.text += delta["text"]
             stream.push(TextDeltaEvent(contentIndex=index, delta=delta["text"], partial=output))
     elif delta.get("toolUse") is not None and block and block.type == "toolCall":
-        # MISAKA fork: the buffer is a StreamingArgs (sparing re-parses); `arguments` is its current view.
         partialJson = blocks.scratchOf(index).partialJson or StreamingArgs()
         blocks.scratchOf(index).partialJson = partialJson
         partialJson.append(delta["toolUse"].get("input") or "")
@@ -765,7 +750,6 @@ def _finalizeStreamingBlock(blocks: _Blocks, index: int) -> None:
         return
     scratch.index = None
     # partialJson is only a streaming scratch buffer; never persist it.
-    # MISAKA fork: a still-open buffer gets its exact parse first (the streamed view is throttled).
     block = blocks.at(index)
     if scratch.partialJson is not None and scratch.partialJson.raw and block is not None and block.type == "toolCall":
         scratch.partialJson.finish_into(block)
@@ -810,8 +794,6 @@ def _handleContentBlockStop(
             _flushRedactedContent(blocks, index)
             stream.push(ThinkingEndEvent(contentIndex=index, content=block.thinking, partial=output))
         case "toolCall":
-            # MISAKA fork: only a streamed buffer replaces the block's arguments (a start block that inlined the
-            # input and got no delta keeps it), and the exact parse goes through `finish_into`.
             if scratch.partialJson is not None and scratch.partialJson.raw:
                 scratch.partialJson.finish_into(block)
             # Finalize in-place and strip the scratch buffer so replay only
@@ -1183,7 +1165,6 @@ def _convertToolConfig(
             if isinstance(toolChoice, Mapping) and toolChoice.get("type") == "tool":
                 bedrockToolChoice = {"tool": {"name": toolChoice.get("name")}}
 
-    # MISAKA fork: botocore rejects an explicit `toolChoice: None`, which the Smithy serializer drops.
     return {"tools": bedrockTools, **({"toolChoice": bedrockToolChoice} if bedrockToolChoice is not None else {})}
 
 
@@ -1395,7 +1376,6 @@ def _decodeRedactedContent(signature: str | None) -> bytes | None:
 
 
 def _bytesToBase64(chunks: Sequence[bytes]) -> str:
-    # MISAKA fork: Python encodes the joined bytes at once (no argument-count limit to slice around).
     return base64.b64encode(b"".join(chunks)).decode("ascii")
 
 

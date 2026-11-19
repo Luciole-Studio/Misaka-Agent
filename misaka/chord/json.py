@@ -19,8 +19,6 @@ from misaka.utils.js import UNDEFINED
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
 # Strict-JSON representation of an application data type. Unknown payloads become JsonValue.
-# MISAKA fork: upstream computes it with a TypeScript conditional type (and its `IsAny` helper), which has no runtime
-# counterpart: here it is the JSON value type itself.
 type JsonRepresentation[T] = JsonValue
 
 

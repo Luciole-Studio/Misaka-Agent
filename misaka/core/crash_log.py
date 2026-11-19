@@ -33,7 +33,6 @@ def stackContainsPath(stack: str, targetPath: str, includeDescendants: bool) -> 
     index = haystack.find(needle)
     while index != -1:
         next_ = jsIndex(haystack, index + len(needle))
-        # MISAKA fork: a traceback quotes the path, so a closing quote ends it too.
         if next_ is None or next_ in (":", ")", '"') or next_.isspace():
             return True
         index = haystack.find(needle, index + len(needle))
@@ -44,7 +43,6 @@ def findExtensionStackMatches(stack: str | None, extensions: Sequence[Any]) -> l
     """Find loaded extensions with source files in a stack trace."""
     if not stack:
         return []
-    # MISAKA fork: Python traceback frame lines; their paths are not URI-encoded, so nothing is decoded.
     normalizedStack = "\n".join(line for line in stack.split("\n")[1:] if re.match(r'^\s+File "', line)).replace(
         "\\", "/"
     )
@@ -54,7 +52,6 @@ def findExtensionStackMatches(stack: str | None, extensions: Sequence[Any]) -> l
     for extension in extensions:
         sourceInfo = extension.sourceInfo
         resolvedPath = normalizeStackPath(extension.resolvedPath)
-        # MISAKA fork: a single-file package is a Python file.
         singleFilePackage = (
             sourceInfo.origin == "package"
             and re.match(r"^(?:npm:|git:|https?://|ssh://)", sourceInfo.source) is None
@@ -64,7 +61,6 @@ def findExtensionStackMatches(stack: str | None, extensions: Sequence[Any]) -> l
             sourceInfo.baseDir if sourceInfo.origin == "package" and not singleFilePackage and sourceInfo.baseDir else None
         )
         slashIndex = resolvedPath.rfind("/")
-        # MISAKA fork: a directory extension's entry is `index.py`.
         directoryEntry = re.search(r"/index\.py$", resolvedPath) is not None
         if packageRoot:
             matched = stackContainsPath(normalizedStack, packageRoot, True)

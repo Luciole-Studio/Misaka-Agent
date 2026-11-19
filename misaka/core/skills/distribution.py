@@ -90,9 +90,6 @@ def _install(identifier, *, sources, category='', force=False, update=False):
     if total > 64 * 1024 * 1024 or len(bundle.files) > 4096:
         raise ValueError('Skill bundle exceeds the byte/file budget.')
     stage = native.quarantine_bundle(bundle)
-    # A shipped official bundle scans under Hermes' reserved label "official" (skills_hub.
-    # _scan_quarantined); its trust_level "builtin" is no label the scanner knows and read as
-    # community. Live third-party content behind an official entry ("trusted") stays as it was.
     label = ("official" if bundle.source == "official" and bundle.trust_level == "builtin"
              else bundle.metadata.get('repo') or (bundle.identifier.rsplit("/", 1)[0] if bundle.source == "github" else bundle.trust_level))
     scan, provenance = guard.scan_skill_cached(stage, source=label, source_url=bundle.identifier)
@@ -277,7 +274,6 @@ def _run(operation, name, **kw):
 
 
 def _validate_metadata(root):
-    # Operational state corruption is not an empty registry. Never replace it silently.
     write._safe_parents(root)
     if root.exists():
         for child in root.iterdir():
@@ -304,7 +300,6 @@ def _pre_publish(before, after, scope, operation):
                 name = Path(path).parent.as_posix()
                 if name in referenced or skill_usage.get_record(name).get("pinned", False):
                     raise ValueError('Removal would break a pinned/referenced Skill: ' + name)
-        # A remote pull is not a route for adding/changing external-library links.
         for path in old.keys() | new.keys():
             if any(items.get(path, {}).get('symlink') is not None for items in (old, new)) and old.get(path) != new.get(path):
                 raise ValueError('Distribution must preserve external-library links: ' + path)
@@ -323,8 +318,6 @@ def _scan_publication(old, new, after):
     for path, item in new.items():
         if item.get('symlink') is not None and any(Path(path).is_relative_to(root) for root in affected):
             raise ValueError('Changed Skill contains a library link; detached scan requires regular files: ' + path)
-    # ponytail: reuse the already owned image store; only changed Skill directories
-    # are scanned. The whole-role transaction already pays for one detached image.
     with tempfile.TemporaryDirectory(prefix='misaka-skill-scan-') as temporary:
         root = Path(temporary) / 'skills'
         write._materialize(root, after)
@@ -344,7 +337,6 @@ def execute(operation, name=None, *, scope=None, **kwargs):
             if operation in READS:
                 _validate_metadata(scope.profile / 'skills')
                 return _receipt(_run(operation, name, **kwargs))
-            # Verified account withdrawal changes visibility metadata, never Skill content.
             decision, reason = ('allow', '') if operation == 'org-clear' else write.evaluate_gate()
             if decision == 'off':
                 return {'success': False, 'error': reason}
@@ -352,8 +344,6 @@ def execute(operation, name=None, *, scope=None, **kwargs):
                 return {'success': True, 'dry_run': True, 'remote_requests': 0, 'operation': operation}
             if operation in REMOTE_WRITES and decision != 'allow':
                 return {'success': False, 'error': 'Remote publication requires the write gate to allow it; no request was sent.'}
-            # ponytail: one Skill writer lock through native I/O. Split publication into
-            # optimistic phases only if measured latency justifies another protocol.
             with write.mutation_lock():
                 check_active(scope)
                 write.recover_transactions()
@@ -368,8 +358,6 @@ def execute(operation, name=None, *, scope=None, **kwargs):
                         shutil.copytree(target, home / 'skills', symlinks=True)
                     else:
                         (home / 'skills').mkdir()
-                    # Native code must never write through a copied link into a live library.
-                    # Hide links while it runs, then restore only untouched link slots.
                     links = [item for item in before['files'] if item.get('symlink') is not None]
                     for item in links:
                         (home / 'skills' / item['path']).unlink()
@@ -389,7 +377,6 @@ def execute(operation, name=None, *, scope=None, **kwargs):
                     _pre_publish(before, after, scope, operation)
                     if write.tree_image(target, store=False) != before:
                         raise ValueError('Role Skill tree changed concurrently; staged publication was discarded.')
-                    # Replace temp paths only in declared path fields, not arbitrary Skill content.
                     for field in ('path', 'marker', 'dest'):
                         if isinstance(result.get(field), str):
                             path = Path(result[field])

@@ -51,7 +51,6 @@ def reportSettingsErrors(settingsManager: SettingsManager, context: str) -> None
 
 
 def printConfigCommandHelp() -> None:
-    # MISAKA fork: the home's settings.json, where upstream names `~/.pi/agent/settings.json`.
     print(f"""{chalk.bold("Usage:")}
   {CONFIG_COMMAND_USAGE}
 
@@ -158,7 +157,6 @@ async def handleConfigCommand(args: list[str]) -> int | None:
         _error(chalk.red("Project is not trusted. Use --approve to modify local resource config."))
         return 1
     reportSettingsErrors(settingsManager, "config command")
-    # MISAKA fork: every built-in extension, whatever role loads it (upstream: the CLI's built-in factories).
     builtinExtensions = extensions.builtin_names()
     globalSettingsManager = SettingsManager.create(cwd, agentDir, {"projectTrusted": False})
     globalResolvedPaths = await DefaultPackageManager({

@@ -74,7 +74,7 @@ async def test_append_during_the_wait_folds_onto_the_recorded_plan(state):
     assert recorded["payload"]["plan_markdown"] == "design"
     assert "append" not in recorded["payload"]
     assert recorded["tool_call_id"] == "c2"
-    assert runs.action(con, run["id"], root["id"], "start") is None    # a changed plan needs a fresh go-ahead
+    assert runs.action(con, run["id"], root["id"], "start") is None
     assert "Recorded 2 card(s) and 0 decision(s)." in result["content"][0]["text"]
 
 
@@ -104,7 +104,6 @@ async def test_phase_tool_appends_within_the_planning_turn(state):
     recorded = runs.action(con, run["id"], root["id"], "plan")
     assert [t["local_id"] for t in recorded["payload"]["tasks"]] == ["a", "b"]
     assert recorded["tool_call_id"] == "c2"
-    # A first call marked append, with nothing recorded yet, is an ordinary first submission.
     runs.delete_action(con, run["id"], root["id"], "plan")
     await tool.execute("c3", {**first_plan(), "append": True}, None, None, ctx(session_file))
     assert runs.action(con, run["id"], root["id"], "plan")["payload"]["tasks"][0]["local_id"] == "a"

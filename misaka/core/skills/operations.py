@@ -130,8 +130,6 @@ def relocate(src, dest, skill_name, action):
         from .distribution import execute
         result = execute(action, skill_name, scope=scope)
         return result.get("success", False), result.get("message", result.get("error", str(result)))
-    # Only the private distribution tree reaches this branch; bytes and telemetry
-    # publish in the SAME journal, including archive origin and suppression aliases.
     import shutil
     try:
         write._safe_parents(src); write._safe_parents(dest.parent)
@@ -177,7 +175,6 @@ def restore_archive(name):
             dest = _skills_dir() / dest.relative_to(scope.profile / "skills")
         if source.exists():
             return relocate(source, dest, name, "restore")
-    # Legacy Hermes archives have no MISAKA receipt; native name/suffix matching remains readable.
     from .vendor import skill_usage
     return skill_usage.restore_skill(name)
 
@@ -243,7 +240,6 @@ async def _run_review_session(scope, prompt):
             return iterations >= _REVIEW_MAX_ITERATIONS
         session.agent.finishTurn = finish_turn_from_stop_predicate(stop_after_turn, session.agent.finishTurn)
         install_guards(session, metering.allowance, wall_seconds=600)
-        # The review's own budget, with nothing on the board behind it; reasoning stays on.
         with metering.local_allowance(_REVIEW_MAX_INPUT_TOKENS_DEFAULT):
             async with asyncio.timeout(600):
                 await session.prompt(prompt)

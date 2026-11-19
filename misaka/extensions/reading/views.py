@@ -58,9 +58,6 @@ def open_questions(run):
     return [(node.id, question) for node in run.readings() for question in node.attrs["questions"]]
 
 
-# -- notes ------------------------------------------------------------------------------------
-
-
 def note_header(node_id, question, lens):
     return f"# {node_id} · {question}\n" + (f"\n- Lens: {lens}\n" if lens else "")
 
@@ -102,9 +99,6 @@ def note(run, node_id, limit=None):
     return note_header(node_id, node.attrs["question"], node.attrs.get("lens")) + omitted + "".join(kept)
 
 
-# -- the rendered files ------------------------------------------------------------------------
-
-
 def session_record(path, role, fallback, **label):
     """A conversation as PR #12's ``graph.json`` lists it: its id and creation time, which pi
     writes into the file's name (``<time>_<id>.jsonl``)."""
@@ -130,7 +124,6 @@ def graph_data(run):
                 **({"outlineNode": item["node"]} if item.get("node") else {})}
 
     def line(node):
-        # PR #12 starts a line with every node (L0 for N0) and a continuation stays on its node.
         return f"L{node.id[1:]}" if re.fullmatch(r"N\d+", node.id) else node.id
 
     sessions = []

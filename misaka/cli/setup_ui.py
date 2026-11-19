@@ -41,35 +41,17 @@ class SetupGoBack(Exception):
 
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
 
-# dark.json's vars, used when the theme file cannot be read. Its accent is the studio's own
-# rose: the master artwork's ground is #cb3862 to the byte.
 _FALLBACK_VARS = {"accent": "#cb3862", "roseLite": "#e8698c", "roseDeep": "#8f2545", "green": "#7fa87f",
                   "amber": "#d99a4e", "red": "#e05252", "selectedBg": "#3d2029"}
-_EMBLEM_INK = (255, 255, 255)      # the mark's white, as in the master
+_EMBLEM_INK = (255, 255, 255)
 
 WORDMARK = ("█▀▄▀█ █ █▀▀ ▄▀█ █▄▀ ▄▀█",
             "█ ▀ █ █ ▄██ █▀█ █ █ █▀█")
 
-# Luciole Studio's mark: a white disc with a round notch bitten out of the top and a larger one
-# out of the bottom, which is what leaves the crescent and its spark. Three concentric circles,
-# least-squares fitted to the studio's 4800x4800 master -- the same file ``assets/logo.svg``
-# transcribes, and the fit differs from it only along the antialiased rim -- and written here as
-# fractions of the outer disc's radius, so the mark can be drawn at whatever size the window
-# allows instead of being frozen into one bitmap:
-#
-#   outer disc   centre (2400, 2441.27)  r 1159.78  ->  (0,  0      )  r 1
-#   top notch    centre (2400, 1571.18)  r  291.00  ->  (0, -0.75022)  r 0.25091
-#   bottom bite  centre (2400, 2934.44)  r  726.19  ->  (0,  0.42523)  r 0.62615
-#
-# The notch is a quarter of the disc's radius and tangent to its top: that tangency is what
-# breaks the outline into two horns. The master frames the mark at 2.07 radii of rose; the badge
-# here crops to 1.30 because 22 terminal cells are not 4800 pixels.
 _NOTCH = (0.0, -0.75022, 0.25091)
 _BITE = (0.0, 0.42523, 0.62615)
-_MARGIN = 1.30                 # half-width of the drawn square, in outer radii
+_MARGIN = 1.30
 
-
-# -- palette ----------------------------------------------------------------------------------
 
 def _tty() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
@@ -181,8 +163,6 @@ def color(text: str, code: str) -> str:
     return f"{code}{text}{RESET}" if code and _palette()[0] != "mono" else text
 
 
-# -- the logo ---------------------------------------------------------------------------------
-
 @cache
 def _coverage(size: int, samples: int = 4) -> tuple[tuple[float, ...], ...]:
     """The mark over a ``size``x``size`` pixel grid, each pixel its 0..1 ink coverage. Sampled
@@ -219,7 +199,7 @@ def _emblem_rows(size: int) -> list[str]:
             if mode == "mono":
                 cells.append("█" if above >= 0.5 and below >= 0.5 else "▀" if above >= 0.5 else "▄" if below >= 0.5 else " ")
                 continue
-            if mode == "256color":                 # no smooth blends in the cube: hard edges beat speckle
+            if mode == "256color":
                 above, below = float(above >= 0.5), float(below >= 0.5)
             paint = (_blend(ground, _EMBLEM_INK, above), _blend(ground, _EMBLEM_INK, below))
             if paint != last:
@@ -235,7 +215,7 @@ def _wordmark_row(row: str) -> str:
     mode, colours = _palette()
     if mode == "mono":
         return row
-    if mode != "truecolor":       # a gradient over two or three palette entries only bands
+    if mode != "truecolor":
         return BOLD + ink("accent") + row + RESET
     start, end = _rgb(colours["roseLite"]), _rgb(colours["accent"])
     span = max(1, len(row) - 1)
@@ -275,8 +255,6 @@ def print_logo(title: str, *lines: str) -> None:
                     print(f"  {color(piece, DIM)}")
     print()
 
-
-# -- lines ------------------------------------------------------------------------------------
 
 def print_banner(*lines: str) -> None:
     rule = "─" * max(60, min(72, max(len(line) for line in lines) + 2))
@@ -340,7 +318,7 @@ def _line_editing(text: str) -> str:
     """
     try:
         import readline  # noqa: F401 - importing it is what makes input() use it
-    except ImportError:  # Windows: the console edits the line itself
+    except ImportError:
         return text
     return re.sub(r"\x1b\[[0-9;]*m", lambda m: f"\x01{m.group()}\x02", text)
 
@@ -353,8 +331,6 @@ def prompt_cancellable(question: str, cancel: threading.Event) -> str:
     be answered by a thread still sitting in ``input()``. A plain ``input()`` cannot be
     interrupted, so this polls instead.
     """
-    # The flows word their own prompts and some end in a colon already ("...paste the
-    # authorization code / redirect URL here:"); appending a second one reads as a typo.
     label = question.rstrip().rstrip(":")
     sys.stdout.write(f"  {label}: ")
     sys.stdout.flush()
@@ -377,8 +353,6 @@ def prompt_cancellable(question: str, cancel: threading.Event) -> str:
                     sys.stdout.write("\b \b")
                     sys.stdout.flush()
                 continue
-            # Echoed, not masked: this is an authorization code being pasted back, and a
-            # row of stars makes a mistyped one impossible to spot.
             decoded = char.decode("utf-8", "replace")
             typed += decoded
             sys.stdout.write(decoded)
@@ -420,13 +394,11 @@ def run_steps(steps: list[tuple[str, Callable[[], None]]]) -> None:
         index += 1
 
 
-# -- the menu --------------------------------------------------------------------------------
-
 def _menu_usable() -> bool:
     if not _tty() or os.environ.get("MISAKA_SETUP_PLAIN"):
         return False
     if os.name == "nt":
-        return True                     # the console stands in for termios (see _cbreak)
+        return True
     try:
         import termios  # noqa: F401
         import tty  # noqa: F401
@@ -528,9 +500,9 @@ def _cbreak() -> _TtyKeys | _ConsoleKeys | None:
 def _read_key(keys: _TtyKeys | _ConsoleKeys) -> str:
     data = keys.read(1)
     if not data:
-        return "esc"                                  # stdin closed under us
+        return "esc"
     if data == b"\x1b":
-        if not keys.ready(0.05):                     # a bare Esc, not the head of an arrow sequence
+        if not keys.ready(0.05):
             return "esc"
         data += keys.read(8)
         return _ARROWS.get(data[1:3].decode("ascii", "replace"), "")
@@ -553,11 +525,11 @@ def _radiolist(question: str, choices: list[str], default: int, description: str
         header.append("  " + color(description, DIM))
     header.append("  " + color("↑↓ move · Enter select · ← back · Esc cancel · 1-9 jump", DIM))
     size = shutil.get_terminal_size((80, 24))
-    room = max(1, size.lines - len(header) - 2)        # the block is redrawn in place: it has to fit
+    room = max(1, size.lines - len(header) - 2)
     visible = min(len(choices), room)
     scrolls = len(choices) > visible
     if scrolls:
-        visible = max(1, visible - 2)                  # the two "N more" rows share the same room
+        visible = max(1, visible - 2)
     block = len(header) + visible + (2 if scrolls else 0)
     cursor, top = default, 0
 
@@ -620,6 +592,6 @@ def _radiolist(question: str, choices: list[str], default: int, description: str
         keys.restore()
         out.write("\x1b[?25h")
         if drawn:
-            out.write(f"\x1b[{block}A\r\x1b[J")   # the menu goes; the caller's echo takes its place
+            out.write(f"\x1b[{block}A\r\x1b[J")
         out.flush()
     return result

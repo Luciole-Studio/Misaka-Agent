@@ -65,7 +65,6 @@ def display_catalog(catalog: AgentDefinitionsResult) -> str:
 
 
 def list_in_messages() -> bool:
-    # Native host has no GrowthBook gate; explicit opt-in mirrors source default false.
     from misaka.config.product import setting
 
     return setting("subagents", "agent_list_in_messages", False, bool)

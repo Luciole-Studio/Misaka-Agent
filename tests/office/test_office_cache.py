@@ -68,8 +68,6 @@ def test_editing_the_file_re_renders_it(tmp_path):
     stat = os.stat(path)
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(" and then some more text")
-    # Put the timestamp back: only the size now differs, which is the case a mtime-only key
-    # would serve stale.
     os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
     second = cache.render_cached(path, lambda: "second")
     assert (first, second) == ("first", "second")

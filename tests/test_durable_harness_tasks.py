@@ -581,8 +581,6 @@ async def test_phases_observe_a_failed_agent_resolution_whose_only_caller_stoppe
         await catching(runtime.agent(caller.context))
         # Let an unobserved rejection surface before the task ends.
         await asyncio.sleep(0.01)
-        # MISAKA fork: vitest fails the run on an unhandled rejection; asyncio reports an unretrieved task exception only when
-        # the task is collected, so the observation that the shared resolution's failure was retrieved is checked directly.
         holder["observed"] = runtime._phase.agent is not None and runtime._phase.agent._log_traceback is False
         holder["resolved"] = await catching(runtime.agent(ctx))
         await runtime.commit(lambda tx, current: completed(None), ctx)

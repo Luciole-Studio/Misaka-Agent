@@ -84,7 +84,6 @@ def abortableSleep(ms: float, signal: Any, cancelMessage: str) -> asyncio.Future
             result.set_result(None)
 
     timeout = loop.call_later(max(0.0, ms) / 1000, finish)
-    # MISAKA fork: without a signal nothing can abort the sleep.
     removeAbortListener = addAbortListener(signal, onAbort) if signal is not None else (lambda: None)
     return result
 

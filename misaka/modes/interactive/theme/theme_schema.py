@@ -31,7 +31,6 @@ def colorValue(description: str | None = None) -> dict[str, Any]:
         "anyOf": [
             {
                 "type": "string",
-                # MISAKA fork: no OKLCH or OKHSL colors (D11).
                 "description": "Hex color (#RGB or #RRGGBB), variable reference, or empty string for terminal default",
             },
             {
@@ -108,7 +107,6 @@ ThemeJsonSchema: dict[str, Any] = {
             "additionalProperties": False,
         },
     },
-    # MISAKA fork: MISAKA's title and description.
     "title": "MISAKA Coding Agent Theme",
     "description": "Theme schema for the MISAKA coding agent",
     "additionalProperties": False,
@@ -158,8 +156,6 @@ def validateThemeJson(label: str, json: Any) -> ValidatedThemeJson:
 
             path = "".join(f"/{part}" for part in error.absolute_path) or "/"
             if error.validator == "additionalProperties" and error.validator_value is False:
-                # MISAKA fork: one line per rejected key at its own path, as TypeBox reports it (jsonschema reports
-                # the object once).
                 parent = path.rstrip("/")
                 for key in error.instance:
                     if key not in error.schema.get("properties", {}):

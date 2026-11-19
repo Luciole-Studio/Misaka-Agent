@@ -65,7 +65,6 @@ def test_choosing_a_backend_clears_that_backend_s_stale_tier_pin(web_home):
 
     config.set_config("provider_tier.keenable", "paid")
     config.set_config("backend", "exa")
-    # Another vendor's pin is somebody's deliberate choice and is left alone.
     assert json.loads(web_home.read_text())["provider_tier"] == {"keenable": "paid"}
 
 

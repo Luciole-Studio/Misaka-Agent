@@ -49,9 +49,6 @@ SETTINGS_DEFAULTS: Mapping[str, Any] = _readOnly({
     "quietStartup": False,
     "defaultProjectTrust": "ask",
     "collapseChangelog": False,
-    # MISAKA fork: off. The setting answers "may this install be identified to a service"; all that rides on it is
-    # `core/provider_attribution.py` naming the client "misaka" to aggregator gateways. Upstream defaults its install
-    # ping on; being named is something a MISAKA user turns on rather than something they find.
     "enableInstallTelemetry": False,
     "enableSkillCommands": True,
     "terminal": {

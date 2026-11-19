@@ -334,8 +334,6 @@ async def acceptsOnlyHostKeysForTheAlias(root: str, target: dict[str, Any]) -> N
     assert Path(knownHosts).read_text(encoding="utf-8") == f"pi-env-test {second}\n"
 
 
-# MISAKA: the same path without sshd.
-
 needsPosix = pytest.mark.skipif(windows, reason="the stand-in ssh runs remote commands with a POSIX sh")
 needsKeygen = pytest.mark.skipif(which("ssh-keygen") is None, reason="no ssh-keygen")
 

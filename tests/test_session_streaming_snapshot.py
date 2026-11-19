@@ -38,7 +38,6 @@ def fixture_session(tmp_path):
 
     def emit(kind, message=None):
         event = SimpleNamespace(type=kind, message=message)
-        # Native source of streamingMessage (the reduction `Agent._processEvents` does); no parallel buffer.
         if kind in ('message_start', 'message_update'):
             agent.state.streamingMessage = message
         elif kind in ('message_end', 'agent_end'):
@@ -120,7 +119,6 @@ async def test_reconnect_seeds_existing_stream_and_lifecycle_has_one_subscriptio
         assert len(listeners) == 1
         initial = await snapshot(control)
         assert initial['streaming']['content'][1]['text'] == 'already generating'
-        # Native bookkeeping changes history while the same assistant keeps streaming.
         session.sessionManager.appendCustomEntry('progress', {'value': 1})
         updated = await snapshot(control, initial)
         assert updated['entries'] is not None

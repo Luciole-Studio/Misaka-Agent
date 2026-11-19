@@ -75,8 +75,6 @@ async def executeBashWithOperations(
         nonlocal tempFilePath, tempFileStream
         if tempFilePath:
             return
-        # MISAKA fork: output files are named after misaka (upstream: `pi-bash`); the stream is binary, so text is
-        # written as UTF-8.
         tempFilePath, tempFileStream = createOutputFileStream("misaka-bash", ".log")
         for chunk in outputChunks:
             tempFileStream.write(chunk.encode("utf-8"))
@@ -154,7 +152,6 @@ async def executeBashWithOperations(
             fullOutputPath=tempFilePath,
         )
     finally:
-        # MISAKA fork: the stream is also closed when the task is cancelled (a Node stream would stay open).
         endTempFile()
 
 

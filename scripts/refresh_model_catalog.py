@@ -30,7 +30,6 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-# The generated modules are the generator's.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from generate_models import renderAggregator, renderShard
@@ -137,7 +136,6 @@ def main() -> int:
                         for name in files)
                 and {path.name for path in provider_files(DATA)} == set(manifest["files"]))
         if same:
-            # The committed files are the published ones; they must also be what the loader accepts.
             validateGeneratedModelData(ROOT)
         print("up to date" if same else "OUT OF DATE")
         if not same:
@@ -145,7 +143,7 @@ def main() -> int:
         return 0 if same else 1
 
     old = chat_models(DATA)
-    if data_dir.resolve() != DATA.resolve():   # rewriting the list from the committed data copies nothing
+    if data_dir.resolve() != DATA.resolve():
         for stale in [*provider_files(DATA), DATA / MANIFEST]:
             stale.unlink(missing_ok=True)
         DATA.mkdir(parents=True, exist_ok=True)
@@ -155,7 +153,7 @@ def main() -> int:
         if stale not in rendered:
             stale.unlink()
     for path, text in rendered.items():
-        path.write_text(text, encoding="utf-8", newline="\n")  # LF on Windows too
+        path.write_text(text, encoding="utf-8", newline="\n")
     validateGeneratedModelData(ROOT)
     report(old, chat_models(DATA))
     print(f"\nwrote {DATA}, {len(rendered) - 1} provider modules and {TARGET.name}  "

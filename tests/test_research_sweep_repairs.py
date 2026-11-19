@@ -142,7 +142,6 @@ def test_research_registration_does_not_relabel_post_submission_bytes(state, mut
     path.write_text("accepted bytes", encoding="utf-8")
     rel = str(path.relative_to(run["workspace"]))
     original_sha = hashlib.sha256(path.read_bytes()).hexdigest()
-    # Match the real submit_task ownership fence, without spawning a worker.
     con.execute(
         "UPDATE tasks SET status='running',claim_lock='fixture',claim_expires=? WHERE id=?",
         (10**12, tid),
@@ -157,8 +156,6 @@ def test_research_registration_does_not_relabel_post_submission_bytes(state, mut
     if mutated:
         path.write_text("changed after acceptance", encoding="utf-8")
     if mutated:
-        # 2026-09-24: changed bytes send the card back to its Sister to declare again instead
-        # of failing the run; nothing is registered under the stale declaration.
         workflow.settle_done_tasks(con, run_id=run["id"])
         assert (
             tasks.latest_payload(
@@ -525,7 +522,6 @@ async def test_office_guard_checks_secondary_exports_and_freezes_ops(
     from misaka.core.platform.home_guard import HomeGuard
     from misaka.core.tools.office import prepare_office_input
 
-    # A place this card may not write: MISAKA's home outside `shared`, reached through a link.
     monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
     walled = tmp_path / "home" / "state"
     walled.mkdir(parents=True)
@@ -772,7 +768,6 @@ async def test_office_executes_the_approved_ops_not_later_file_bytes(
     protected.write_text("keep", encoding="utf-8")
     project = tmp_path / "project"
     project.mkdir()
-    # Every checked kind runs the ops it was shown, a person's session too (it may write the home).
     guard = HomeGuard(kind, str(project), guard_paths=True)
     ops = project / "ops.json"
     ops.write_text(json.dumps([{"create": {"content": "approved"}}]), encoding="utf-8")
@@ -815,7 +810,7 @@ def test_attachment_manifest_boundary(state, change):
     )
     payload = json.loads(tasks.latest_payload(con, tid, "submitted", generation=1))
     assert payload["artifact_digests"][rel] == hashlib.sha256(b"accepted").hexdigest()
-    if change == "undigested":                 # a submission another build wrote: refused, not trusted
+    if change == "undigested":
         payload.pop("artifact_digests")
         con.execute(
             "UPDATE events SET payload=? WHERE task_id=? AND kind='submitted'",
@@ -825,10 +820,8 @@ def test_attachment_manifest_boundary(state, change):
         path.unlink()
     elif change == "outside":
         path.unlink()
-        # The target need not exist: the path escape must be rejected before any read.
         path.symlink_to(Path(run["workspace"]).parent / "outside-fixture.md")
     if change == "deleted":
-        # 2026-09-24: a missing deliverable is drift, and drift reopens the card for its Sister.
         workflow.settle_done_tasks(con, run_id=run["id"])
         assert not runs.artifacts(con, run["id"], task_id=tid)
         assert int(tasks.get(con, tid)["generation"]) == 2
@@ -940,7 +933,6 @@ def test_caller_owned_sqlite_connection_uses_shared_transaction_callback(
 ):
     con = sqlite3.connect(":memory:", isolation_level=None)
     con.row_factory = sqlite3.Row
-    # The shared Board schema initializes the same supported caller-owned connection.
     con.executescript(tasks.SCHEMA)
     try:
         run = runs.create(con, workspace=str(tmp_path), question="fixture")

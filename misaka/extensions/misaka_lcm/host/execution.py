@@ -54,9 +54,9 @@ def install_worker_ownership():
         try:
             return original(owned, **kwargs)
         except TimeoutError:
-            raise  # The abandoned worker releases its own ticket when it settles.
+            raise
         except (RuntimeError, OSError):
-            finish()  # Capacity/start failure; no worker owns the ticket.
+            finish()
             raise
     run._misaka_owned = True
     tools._run_within_deadline = run
@@ -78,7 +78,6 @@ class _Signal:
 
     @property
     def aborted(self):
-        # Read the parent's flag, never await an Event owned by another loop.
         return self.cancelled.is_set() or signal_aborted(self.parent)
 
 
@@ -88,7 +87,6 @@ def current_signal():
 
 def check_cancelled():
     if signal_aborted(current_signal()):
-        # Exception would enter upstream's next-model/deterministic fallback.
         raise asyncio.CancelledError("LCM operation cancelled")
 
 

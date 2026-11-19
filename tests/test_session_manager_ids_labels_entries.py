@@ -491,7 +491,6 @@ def test_takes_the_session_identity_from_a_header_among_the_entries():
 
 
 def test_refuses_entries_restored_with_an_older_header():
-    # MISAKA fork: pi migrates a version-2 header in place; MISAKA reads only version-3 sessions.
     entries = [
         {"type": "session", "version": 2, "id": "v2-session", "timestamp": "2026-01-01T00:00:00Z", "cwd": "/project"},
         {

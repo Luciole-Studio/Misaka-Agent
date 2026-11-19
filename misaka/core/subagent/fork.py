@@ -48,7 +48,6 @@ def in_fork_child(messages: list[Any]) -> bool:
 
 
 def child_message(directive: str) -> str:
-    # Source wording, with the commit instruction adapted for shared dirty trees.
     return f"""<{FORK_TAG}>
 STOP. READ THIS FIRST.
 
@@ -101,8 +100,6 @@ def capture(task: Any, session: Any, *, seed: bool) -> None:
     history = copy.deepcopy(to_jsonable(session.agent.state.messages))
     if in_fork_child(history):
         raise ValueError("Fork children execute directly; recursive forks are disabled")
-    # Concurrent calls must clone the same assistant prefix, not whichever sibling
-    # happens to have finished first. Search by this call's identity.
     if seed and task.tool_call_id:
         index = next((index for index in range(len(history) - 1, -1, -1)
                       if history[index].get("role") == "assistant"
@@ -122,8 +119,6 @@ def capture(task: Any, session: Any, *, seed: bool) -> None:
              if canonical_tool_name(tool.name) not in ALL_AGENT_DISALLOWED_TOOLS]
     payload = {
         "schemaVersion": 1, "agentId": task.id, "parentSessionId": task.parent_session_id,
-        # The effective prompt of the parent's current run: a `before_agent_start` handler
-        # may force one that the transcript's replayed sections do not show.
         "systemPrompt": session.systemPrompt,
         "tools": [{"name": tool.name, "description": tool.description,
                    "parameters": tool.parameters_json_schema(),
@@ -135,8 +130,6 @@ def capture(task: Any, session: Any, *, seed: bool) -> None:
         writer = SessionManager(task.cwd, str(task.transcript.parent), str(task.transcript), True)
         for message in history:
             writer.appendMessage(message)
-        # A command may fork before the first assistant response. Native UI
-        # sessions intentionally defer that write; a child seed must be durable.
         writer._rewriteFile()
     task.definition = definition(session)
 
@@ -150,8 +143,6 @@ def install(session: Any, snapshot: dict[str, Any]) -> None:
     wire_tools = [Tool.model_validate(item) for item in snapshot["tools"]]
     names = [tool.name for tool in wire_tools]
     session.setActiveToolsByName(names)
-    # Missing tools are fatal for an exact fork, unlike an ordinary worker's
-    # best-effort missing-tool warning. Do not silently claim a cache-identical fork.
     assembled = {tool.name: tool for tool in session.agent.state.tools}
     missing = set(names) - assembled.keys()
     if missing:
@@ -164,13 +155,8 @@ def install(session: Any, snapshot: dict[str, Any]) -> None:
         for tool in wire_tools:
             if tool.name not in active:
                 raise ValueError(f"Fork tool became unavailable: {tool.name}")
-            # Advertised tool descriptions can legitimately differ by role. Input
-            # schemas may not: otherwise the child could execute different args.
             if tool.parameters_json_schema() != active[tool.name].parameters_json_schema():
                 raise ValueError(f"Fork tool schema differs from the parent: {tool.name}")
-        # The request context is a transcript: its system messages carry the prompt and
-        # the tool declarations (the parent's copied head plus whatever this worker
-        # patched in). They collapse into one head holding the parent's rendered bytes.
         current = getCurrentSystemMessage(context.messages)
         head = SystemMessage(
             content=snapshot["systemPrompt"], toolsAdded=wire_tools,

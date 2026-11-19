@@ -32,8 +32,6 @@ def dm_dir(role: str) -> str:
     return os.path.join(role_dir(role), "dm")
 
 
-# A role's contact session is the one in her dm folder named this: Hermes' canonical Bot Chat, which
-# Bot Mode finds by its exact title (hermes_state.py CANONICAL_BOT_CHAT_TITLE, ``get_session_by_title``).
 CONTACT_TITLE = "Bot Chat"
 
 

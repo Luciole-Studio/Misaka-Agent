@@ -684,7 +684,7 @@ def _render_spaces(canvas, spaces, area, scroll, hits, reveal=False):
             for y in range(row_y, min(row_y + height, list_bottom + 1)):
                 canvas.fill_bg(card.x, card.x + card.width, y, P["surface_dim"])
         name = ({"fg": hui.TEXT, "bold": True} if space["active"]
-                else {"fg": hui.OVERLAY0} if space.get("dormant")    # MISAKA: remembered, no panes
+                else {"fg": hui.OVERLAY0} if space.get("dormant")
                 else {"fg": P["subtext0"]})                # 1094-1098
         glyph, color = hui.state_dot(space["state"], space["seen"])
         canvas.put(card.x, row_y, " ", clip=card.x + card.width)   # 1137-1139: one-column prefix
@@ -736,7 +736,7 @@ def _render_agents(canvas, agents, area, scroll, sort, hits):
                    clip=toggle.x + toggle.width)
         hits.append((toggle, ("sort",)))
     heights = [2] * len(agents)
-    footer = area.height >= 4                          # MISAKA: the last row holds " sisters"
+    footer = area.height >= 4
     body = hui.agent_panel_body_rect(area, False)
     body = hui.Rect(body.x, body.y, body.width, max(0, body.height - int(footer)))
     state["body"] = body                               # client/shell/mouse.rs: the wheel scrolls the body only
@@ -3918,7 +3918,7 @@ def launch():
                 draw_prefix_bar()
         elif hit[0] == "sisters":                 # agents footer: summon a Sister as a new tab.
             open_menu()
-        elif hit[0] == "sessgroup":               # MISAKA: the Last Order / Sisters groups fold.
+        elif hit[0] == "sessgroup":
             sess_folds.symmetric_difference_update({hit[1]})
             refresh_sessions()
             draw_sidebar()
@@ -4257,10 +4257,6 @@ def launch():
             return
         if (apple_terminal_host and key.code == "enter" and key.kind == "press"
                 and not key.mods & ~hin.LOCK_MASK and isNativeModifierPressed("shift")):
-            # MISAKA: Terminal.app sends a bare CR for Shift+Enter. MISAKA's TUI tells them
-            # apart by the live modifier state when TERM_PROGRAM is Apple_Terminal; panes
-            # carry TERM_PROGRAM=misaka (pane.rs apply_pane_terminal_env), so the panel,
-            # which owns the host terminal, makes the call and sends the pane a real Shift+Enter.
             key = hin.Key("enter", hin.SHIFT | (key.mods & hin.LOCK_MASK))
         data = pin.encode_key(key, state)
         if data:

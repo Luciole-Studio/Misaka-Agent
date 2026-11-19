@@ -34,7 +34,7 @@ def _paper(tmp_path, name="paper.docx"):
     document.add_heading("Quarterly Review", 1)
     paragraph = document.add_paragraph()
     paragraph.add_run("Total ")
-    for part in ("reven", "ue"):          # Word splits a phrase at spell-check boundaries
+    for part in ("reven", "ue"):
         run = paragraph.add_run(part)
         run.bold = True
     paragraph.add_run(" rose ")
@@ -93,8 +93,6 @@ def _hand_built(tmp_path, body, extra=None, name="notes.docx"):
             archive.writestr(member, text)
     return path
 
-
-# ---- structure -------------------------------------------------------------------------
 
 def test_a_table_sits_where_the_document_puts_it(tmp_path):
     """``doc.paragraphs`` skips tables and ``doc.tables`` collects them at the end, so the
@@ -189,8 +187,6 @@ def _png(tmp_path):
     return path
 
 
-# ---- footnotes -------------------------------------------------------------------------
-
 _FOOTNOTES = {
     "word/footnotes.xml": (
         f'<?xml version="1.0"?><w:footnotes {W}>'
@@ -245,8 +241,6 @@ def test_the_separator_rules_are_not_read_as_notes(tmp_path):
     out = reader.render(str(_hand_built(tmp_path, _NOTE_BODY, extra=_FOOTNOTES)))
     assert out.count("[^1]:") == 1
 
-
-# ---- what stays quotable ----------------------------------------------------------------
 
 def test_a_sentence_with_a_bold_phrase_in_it_still_verifies(tmp_path):
     """The whole reason emphasis does not go inline. Under ``**revenue**`` the page folds
@@ -305,8 +299,6 @@ def test_a_hyperlink_target_is_kept_without_splitting_the_sentence(tmp_path):
     assert "<https://example.org/q3>" in out
     assert fold("See the third quarter figures.") in fold(out)
 
-
-# ---- edges -------------------------------------------------------------------------------
 
 def test_the_document_title_comes_from_its_own_properties(tmp_path):
     document = docx.Document()

@@ -47,8 +47,6 @@ async def _backoff(seconds):
     try:
         await sleep(seconds * 1000, execution.current_signal())
     finally:
-        # Native sleep reports a signal as RuntimeError; LCM cancellation must
-        # bypass Exception handlers, including deterministic-summary fallback.
         execution.check_cancelled()
 
 
@@ -102,13 +100,9 @@ async def recover(primary, *, task, base_url, temperature, max_tokens, extra_bod
     try:
         return await _transient(credit_aware, task) if retries else await call(params)
     except Exception as error:  # noqa: BLE001 - final ladder error is rethrown
-        # The unchanged parameter ladder only reads client.base_url (ZAI's
-        # unlabelled 1210 error), task, and tag. No SDK client or second auth owner.
         route = SimpleNamespace(client=SimpleNamespace(base_url=base_url), task=task, tag='')
 
         async def perform(step):
-            # Parameter retries are ONE raw request, not another transient or
-            # affordable-token retry tree (same ordering as Hermes' sync driver).
             return await call(step.args[1])
 
         response, remaining_error, recovered_params = await policy._drive_ladder_async(

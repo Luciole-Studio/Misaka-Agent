@@ -245,8 +245,6 @@ async def test_reports_a_handler_that_drops_the_leading_system_message_but_honor
 
 # --- extension factory cache --------------------------------------------------------------------
 #
-# MISAKA fork: pi's counting extension keeps its counters on `globalThis`; a MISAKA extension is a Python module, and
-# `builtins` is the namespace every module shares.
 
 STATE_NAME = "__extensionFactoryCacheTest"
 

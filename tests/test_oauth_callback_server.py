@@ -205,7 +205,6 @@ async def test_fails_instead_of_picking_another_port_when_the_requested_port_is_
 
 
 async def test_close_drops_sockets_that_never_sent_a_request(start):
-    # MISAKA fork: a browser preconnect holds a socket open without speaking.
     server = await start()
     port = int(urlsplit(server.redirectUri).port)
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
@@ -289,8 +288,6 @@ async def test_propagates_manual_prompt_failures():
 
 
 async def test_cancelling_the_login_while_a_stubborn_prompt_retires_still_cancels_it():
-    # MISAKA fork: the prompt task is cancelled as well as signalled; waiting for it must not
-    # swallow a cancellation of the login itself.
     server = await startOAuthCallbackServer(OAuthCallbackServerOptions(
         providerName="Example", host="127.0.0.1", port=0, path="/callback", complete=_identity,
     ))

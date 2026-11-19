@@ -16,8 +16,6 @@ from misaka.extensions.misaka_lcm.vendor.tools import _lcm_grep_full_text_with_d
 @pytest.mark.parametrize("sort", ["recency", "relevance", "hybrid"])
 @pytest.mark.parametrize("quoted", [False, True])
 def test_message_search_keeps_last_term_ranking_and_scope(tmp_path, sort, quoted):
-    # More terms than SQLite's normal 1000-node expression depth, without
-    # exceeding its independent bound on SQL variables.
     missing = " ".join(f"缺失{i:04d}" for i in range(1100))
     tail = '"tail phrase"' if quoted else "🚀tail_100%"
     text = "tail phrase" if quoted else tail
@@ -39,7 +37,6 @@ def test_message_search_keeps_last_term_ranking_and_scope(tmp_path, sort, quoted
         filters = {"session_id": "s", "role": "user", "source": "fixture",
                    "conversation_id": "c", "time_from": 999, "time_to": 1001,
                    "sort": sort, "limit": 1}
-        # The small oracle uses the identical LIKE branch, not FTS ranking.
         oracle = store._search_like(tail, **filters)
         result = store.search(missing + " " + tail, **filters)
         assert len(result) == 1
@@ -76,7 +73,6 @@ def test_like_search_still_obeys_sqlite_cancellation(tmp_path):
 def test_balanced_sql_respects_depth_and_parameter_order(operator, count):
     with closing(sqlite3.connect(":memory:")) as conn:
         conn.setlimit(sqlite3.SQLITE_LIMIT_EXPR_DEPTH, 64)
-        # Unlike OR / + alone, this operand notices reordered parameters.
         parts = [f"(? = {i})" for i in range(count)]
         expression = balanced_sql_expr(parts, operator)
         value = conn.execute(f"SELECT {expression}", list(range(count))).fetchone()[0]

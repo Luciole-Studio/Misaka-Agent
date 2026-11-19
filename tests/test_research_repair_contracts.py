@@ -83,8 +83,6 @@ def message(content=()):
         ('{"note":"C:\\q"}', True),
         ('{"note":"hello', False),
         ("not-json", False),
-        # Repaired since 2026-09-23 (a gateway delivered Claude's arguments this way; see
-        # json_parse._escape_stray_quotes): the quotes stay in the text, the call executes.
         ('{"note":"an "unescaped" quote"}', True),
         ("null", False),
         ("[]", False),
@@ -139,8 +137,6 @@ async def test_invalid_call_gets_receipt_without_blocking_valid_sibling(executio
         lambda e: None,
     )
     assert called == [("good", {})]
-    # pi 1.3.0 order: the tool lookup and `prepareArguments` run for the malformed call too, and argument validation
-    # then fails with its `argumentsError`.
     assert prepared == [{}, {}]
     assert [(r.toolCallId, r.isError) for r in result.messages] == [
         ("bad", True),
@@ -464,7 +460,7 @@ async def test_a_level_starts_its_nodes_one_at_a_time(state, tmp_path):
     for index in range(3):
         node = runs.create_node(con, run["id"], question=f"Q{index}", parents=[root["id"]])
         conversation = tmp_path / f"node-{index}.jsonl"
-        conversation.write_text(_reply("stop"), encoding="utf-8")          # inherited from the parent: not this node's reply
+        conversation.write_text(_reply("stop"), encoding="utf-8")
         runs.set_node(con, node["id"], session_file=str(conversation))
         nodes.append(runs.node(con, node["id"]))
     handles, started = {}, []
@@ -493,7 +489,7 @@ async def test_a_level_starts_its_nodes_one_at_a_time(state, tmp_path):
         assert await eventually(lambda: started == ids[:1])
         await asyncio.sleep(0.02)
         assert started == ids[:1]
-        answer(nodes[0], "error")                         # refused: the provider is not taking it yet
+        answer(nodes[0], "error")
         await asyncio.sleep(0.02)
         assert started == ids[:1]
         answer(nodes[0], "toolUse")
@@ -524,7 +520,7 @@ async def test_a_node_that_has_planned_does_not_hold_the_next_start(state, tmp_p
     for node in nodes[:2]:
         runs.record_action(con, run, node, runs.plan_key(1), {"status": "ready"},
                            session_file=str(tmp_path / "s.jsonl"), tool_call_id="plan")
-        runs.set_node(con, node["id"], status="planning")    # queued again by misaka_research_retry
+        runs.set_node(con, node["id"], status="planning")
     handles, started = {}, []
 
     async def start(node):
@@ -544,9 +540,9 @@ async def test_a_node_that_has_planned_does_not_hold_the_next_start(state, tmp_p
         con, {}, SimpleNamespace(alive=lambda h: True), run, handles, poll_seconds=0.001, progress=None,
         pending=nodes, width=10, start=start))
     try:
-        assert await eventually(lambda: started == ids[:3])   # neither planned node waited for a reply
+        assert await eventually(lambda: started == ids[:3])
         await asyncio.sleep(0.02)
-        assert started == ids[:3]                             # the unplanned one still holds the next start
+        assert started == ids[:3]
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -654,7 +650,6 @@ def test_no_shell_command_is_refused_for_a_skill_path_or_an_expansion(tmp_path, 
 
 @pytest.mark.parametrize("bridge", ["proxy", "pi-messages"])
 def test_native_argument_error_is_persisted_and_sent_on_wire_as_upstream(bridge):
-    # pi 1.3.0 made `argumentsError` a ToolCall field and its proxy and pi-messages bridges send `context` whole.
     from misaka.agent import proxy
     from misaka.ai.api import pi_messages
     from misaka.ai.types import UserMessage
@@ -962,7 +957,7 @@ def test_a_failed_node_is_retried_with_its_failed_cards_and_the_loop_is_capped(s
                                tool_call_id=f"call-{attempt}") == attempt
         current = runs.node(con, node["id"])
         assert (current["status"], current["last_error"]) == ("planning", None)
-        assert tasks.get(con, tid)["status"] == "ready"           # its failed card went back to its Sister
+        assert tasks.get(con, tid)["status"] == "ready"
     con.execute("UPDATE research_execution SET status='failed' WHERE id=?", (node["id"],))
     with pytest.raises(ValueError, match="already retried 3 times"):
         runs.retry_node(con, run, node["id"], session_file=str(tmp_path / "s.jsonl"), tool_call_id="call-4")
@@ -970,7 +965,7 @@ def test_a_failed_node_is_retried_with_its_failed_cards_and_the_loop_is_capped(s
 
 async def test_a_retried_node_re_enters_its_level_without_a_resume(state, tmp_path):
     con, run, root = state
-    runs.set_node(con, root["id"], status="closed")      # the level below the root is the frontier
+    runs.set_node(con, root["id"], status="closed")
     nodes = []
     for index in range(2):
         node = runs.create_node(con, run["id"], question=f"Q{index}", parents=[root["id"]])
@@ -1005,11 +1000,9 @@ async def test_a_retried_node_re_enters_its_level_without_a_resume(state, tmp_pa
         answer(a)
         assert await eventually(lambda: started == [a["id"], b["id"]])
         answer(b)
-        # a's process ends mid-plan: the level marks it failed and goes on without it.
         runs.release_runner(con, "research_execution", a["id"], runs.node(con, a["id"])["runner_key"])
         assert await eventually(lambda: runs.node(con, a["id"])["status"] == "failed")
         assert "its process ended while queued" in runs.node(con, a["id"])["last_error"]
-        # Last Order retries it: it is queued again and started, no resume needed.
         runs.retry_node(con, run, a["id"], session_file=str(tmp_path / "root.jsonl"), tool_call_id="call-1")
         assert await eventually(lambda: started == [a["id"], b["id"], a["id"]])
         assert runs.node(con, a["id"])["status"] == "planning"

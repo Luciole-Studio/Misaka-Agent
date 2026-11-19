@@ -216,7 +216,6 @@ async def walkDirectoryWithFd(
 
     def onData(fd: int, data: bytes) -> None:
         nonlocal stdout
-        # MISAKA fork: stderr is read and dropped; Node leaves that pipe unread.
         if fd == 1:
             stdout += decoder.decode(data)
 

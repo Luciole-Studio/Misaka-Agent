@@ -40,7 +40,6 @@ exitHookInstalled = False
 
 
 def _taskkill() -> str:
-    # MISAKA fork: the system's own taskkill, not whatever `taskkill` the PATH finds first.
     systemRoot = os.environ.get("SystemRoot") or r"C:\Windows"
     return os.path.join(systemRoot, "System32", "taskkill.exe")
 
@@ -194,7 +193,6 @@ class StdioTransport(TransportEvents):
         child.on("error", lambda error: None if self._closed else self._emitError(error))
 
     async def send(self, message: JsonRpcMessage, options: McpTransportSendOptions | None = None) -> None:
-        # MISAKA fork: `options` is accepted and ignored, as upstream's `send(message)` ignores it (see `McpTransport`).
         stdin = self._child.stdin if self._child is not None else None
         if not self._started or self._closed or stdin is None or not stdin.writable:
             raise McpConnectionClosedError()

@@ -271,7 +271,6 @@ def test_config_transaction_preserves_concurrent_writes_and_invalid_documents(tm
     assert len(config.web_config()["env"]) == 18
     if os.name != "nt":
         assert stat.S_IMODE(home.path("env").stat().st_mode) == 0o600
-    # A malformed file refuses the writes that target it and is left as it is.
     for path, key in ((home.path("env"), "env.VENDOR_1_API_KEY"), (home.path("settings"), "backend")):
         path.write_text("{malformed original", encoding="utf-8")
         with pytest.raises(ValueError):
@@ -348,7 +347,7 @@ async def test_real_sdk_publishes_extension_provider_and_headless_reload_removes
         result = await session._toolRegistry["web_search"].execute("call", {"query": "one"}, None, None)
         assert "loaded-owner" in str(result)
         loader.extensionFactories = []
-        await session.reload()  # Deliberately no bindExtensions/UI/session_start.
+        await session.reload()
         assert "web_search" not in session.getActiveToolNames()
         assert "web_search" not in session._toolRegistry
         assert "web_fetch" in session._toolRegistry
@@ -473,7 +472,7 @@ def test_cli_discovers_explicit_plugin_once_and_does_not_leak_it(tmp_path, capsy
     plugin_file(path, marker)
     app.main(["web", "providers", "--extension", str(path)])
     assert "external: search" in capsys.readouterr().out
-    assert marker.read_text(encoding="utf-8") == "1"  # Trust bootstrap and final load share one factory.
+    assert marker.read_text(encoding="utf-8") == "1"
     assert registry.get_provider("external") is None
     app.main(["web", "setup", "external", "--extension", str(path), "--yes"])
     assert config.config_name("search_backend") == "external"
@@ -491,7 +490,7 @@ def test_cli_project_extension_requires_explicit_selection_even_when_trusted(tmp
     assert "external: search" not in capsys.readouterr().out
     ProjectTrustStore(str(tmp_path / "agent")).set(str(tmp_path), True)
     app.main(["web", "providers"])
-    assert not marker.exists()  # MISAKA deliberately does not auto-execute project Python.
+    assert not marker.exists()
     assert "external: search" not in capsys.readouterr().out
     app.main(["web", "providers", "--extension", str(path)])
     assert marker.read_text(encoding="utf-8") == "1"

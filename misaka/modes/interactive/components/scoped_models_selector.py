@@ -354,9 +354,6 @@ class ScopedModelsSelectorComponent(Container):
                     self.isDirty = True
                     self.selectedIndex += delta
                     self.refresh()
-                    # MISAKA fork: `selectedIndex` indexes the filtered view while the move is in
-                    # the global order; the two only agree without a search query, so the moved
-                    # row is found again rather than stepped to by delta.
                     self.selectedIndex = next(
                         (index for index, candidate in enumerate(self.filteredItems) if candidate.fullId == item.fullId),
                         self.selectedIndex,

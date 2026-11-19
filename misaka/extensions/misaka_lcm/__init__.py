@@ -6,8 +6,6 @@ host/. Upstream notices and pins remain intact. Namespaced imports at existing
 host seams are the only relocation changes in the upstream Python sources.
 """
 EXTENSION_NAME = "misaka_lcm"
-# `builtin:misaka_lcm`, like every bundled extension: hidden from the startup list, and disabled with
-# `-builtin:misaka_lcm` in the `extensions` setting.
 BUILTIN = True
 
 SESSION_KINDS = {"foreground", "dm", "card", "beast", "child", "bare"}
@@ -36,7 +34,7 @@ def identity(spec) -> str:
     from misaka.core.wiring import sender_address
 
     if getattr(spec, "sender", None) is None and not getattr(spec, "role", None):
-        return "misaka"  # a spec with no address at all (a bare fixture): the engine's own name
+        return "misaka"
     address = sender_address(spec)
     if unit := getattr(spec, "task_id", None) or getattr(spec, "node", None):
         return f"{address}@{unit}"
@@ -49,7 +47,6 @@ def activate(spec):
 
     from .host import storage
     from .host.extension import register
-    # A subagent joins its parent session's project store, which the parent set on subagent_start.
     workspace = (os.environ.get(storage.PROJECT_ENV) if os.environ.get("MISAKA_SUBAGENT_ID") else None) or spec.workspace
     source = identity(spec)
 

@@ -114,7 +114,6 @@ THEME_TOKENS: dict[str, ThemeTokenDescriptor] = defineThemeTokens({
         "fallback": "thinkingXhigh",
     },
     "bashMode": {"slot": "foreground", "description": "Editor border color in bash mode"},
-    # MISAKA fork: startup section titles and the app title, on dark and light terminals.
     "sectionTitle": {
         "slot": "foreground",
         "description": "Startup-screen section titles (falls back to accent when omitted)",
@@ -184,7 +183,6 @@ type ThemeColor = Literal[
     "thinkingXhigh",
     "thinkingMax",
     "bashMode",
-    # MISAKA fork: startup section titles and the app title.
     "sectionTitle",
     "appTitle",
     "appTitleOnLight",

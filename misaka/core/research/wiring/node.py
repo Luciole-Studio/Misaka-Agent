@@ -43,7 +43,7 @@ class NodePart:
         self.session = session
 
     async def session_start(self, _event, _ctx):
-        if self.routine is None:            # once per process: a later session switch is not a new node
+        if self.routine is None:
             self.routine = asyncio.create_task(self.run())
 
     async def session_shutdown(self, _event, _ctx):
@@ -97,7 +97,7 @@ class NodePart:
         def progress(event):
             branch = runs.node(con, self.node_id)
             payload = {**event, "node_id": branch["id"], "depth": branch["depth"]}
-            notifications.publish(con, "research", self.run_id, "progress", payload)   # the root window's feed
+            notifications.publish(con, "research", self.run_id, "progress", payload)
             content = f"Research `{self.run_id}` | {event['message']}"
             for item in event.get("tasks") or []:
                 content += f"\n- {item['title']} → Sister {item['assignee']}"
@@ -113,7 +113,7 @@ class NodePart:
             window = WindowLO(self.session, check_active, describe=lambda: node_description(con, self.node_id))
             runs.set_node(con, self.node_id, session_file=window.session_file)
             control = for_session(self.session)
-            if control is not None:         # a chat attached from elsewhere sees the node, not just a session
+            if control is not None:
                 previous_check = control.check_active
                 control.check_active = check_active
             runner = PaneRunner(con, cfg, label, os.environ.get("MISAKA_NET_PANE"))
@@ -137,8 +137,6 @@ class NodePart:
                 if window is not None:
                     await window.close()
             finally:
-                # The conversation outlives this runner and its connection. Do not
-                # detach callbacks installed by a subsequent owner during cleanup.
                 if control is not None and control.check_active is check_active:
                     control.check_active = previous_check
                 try:

@@ -204,8 +204,6 @@ FrameSchema: Final = Type.Union(
 # A frame: a dict with a string `t` and that frame type's fields.
 type Frame = dict[str, Any]
 
-# MISAKA fork: the union's branch for each `t`, so a frame is checked against its own branch only (the same answer
-# as checking the whole union, without trying every branch per received frame).
 _BRANCHES: Final[dict[str, TSchema]] = {branch["properties"]["t"]["const"]: branch for branch in FrameSchema["anyOf"]}
 
 

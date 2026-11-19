@@ -114,8 +114,6 @@ def _acyclic(name: str, kind: EdgeKind, edges: tuple[Edge, ...]) -> list[Violati
         successors.setdefault(edge.source, []).append(edge.target)
         successors.setdefault(edge.target, [])
         indegree[edge.target] += 1
-    # Kahn's order. A node leaves it only once every edge into it has, so its depth is final by then;
-    # a node it never reaches lies on a cycle or downstream of one.
     depth = {node_id: 0 for node_id in successors if not indegree[node_id]}
     ready = list(depth)
     remaining = Counter(indegree)

@@ -13,10 +13,6 @@ from .vendor.guard_patterns import (
     _shell_write_re,
 )
 
-# ---------------------------------------------------------------------------
-# Caller-supplied source labels
-# ---------------------------------------------------------------------------
-
 TRUSTED_REPOS = {
     "openai/skills",
     "anthropics/skills",
@@ -25,28 +21,20 @@ TRUSTED_REPOS = {
 }
 
 INSTALL_POLICY = {
-    #                  safe      caution    dangerous
     "builtin":       ("allow",  "allow",   "allow"),
     "trusted":       ("allow",  "allow",   "block"),
     "community":     ("allow",  "block",   "block"),
-    # Agent-created: a dangerous verdict surfaces as an error to the agent,
-    # which can retry without the flagged content. skill_manage treats the
-    # "ask" decision as a block (see misaka/core/skills/manage.py::_security_scan).
     "agent-created": ("allow",  "allow",   "ask"),
 }
 
 VERDICT_INDEX = {"safe": 0, "caution": 1, "dangerous": 2}
 
 
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
-
 @dataclass
 class Finding:
     pattern_id: str
-    severity: str       # "critical" | "high" | "medium" | "low"
-    category: str       # "exfiltration" | "injection" | "destructive" | "persistence" | "network" | "obfuscation"
+    severity: str
+    category: str
     file: str
     line: int
     match: str
@@ -57,20 +45,15 @@ class Finding:
 class ScanResult:
     skill_name: str
     source: str
-    trust_level: str    # "builtin" | "trusted" | "community" | "agent-created"
-    verdict: str        # "safe" | "caution" | "dangerous"
+    trust_level: str
+    verdict: str
     findings: list[Finding] = field(default_factory=list)
     scanned_at: str = ""
     summary: str = ""
     scan_provenance: dict = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
-# Threat patterns — (regex, pattern_id, severity, category, description)
-# ---------------------------------------------------------------------------
-
 THREAT_PATTERNS = [
-    # ── Exfiltration: shell commands leaking secrets ──
     (r'curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)',
      "env_exfil_curl", "critical", "exfiltration",
      "curl command interpolating secret environment variable"),
@@ -87,7 +70,6 @@ THREAT_PATTERNS = [
      "env_exfil_requests", "critical", "exfiltration",
      "requests library call with secret variable"),
 
-    # ── Exfiltration: reading credential stores ──
     (r'base64[^\n]*env',
      "encoded_exfil", "high", "exfiltration",
      "base64 encoding combined with environment access"),
@@ -109,25 +91,13 @@ THREAT_PATTERNS = [
     (r'\$HOME/\.hermes/\.env|\~/\.hermes/\.env',
      "hermes_env_access", "critical", "exfiltration",
      "directly references Hermes secrets file"),
-    # Match `cat <secrets-file>` (reading credentials) but NOT `cat > <file>`
-    # or `cat >> <file>`, which are output redirections that WRITE a file
-    # (e.g. a setup doc telling the user to write their own keys into their
-    # own local `.env` via a heredoc). Writing your own config in is the
-    # opposite of exfiltrating secrets out.
     (r'cat\s+(?!>)[^\n]*(\.env|credentials|\.netrc|\.pgpass|\.npmrc|\.pypirc)',
      "read_secrets_file", "critical", "exfiltration",
      "reads known secrets file"),
 
-    # ── Exfiltration: programmatic env access ──
     (r'printenv|env\s*\|',
      "dump_all_env", "high", "exfiltration",
      "dumps all environment variables"),
-    # `os.environ` bare access (dict dump / iteration) is suspicious, but the
-    # common `os.environ.get("SOME_CONFIG")` form is just a config read and is
-    # the OPPOSITE of exfiltration (it reads a local var, sends nothing). The
-    # lookahead exempts `os.environ.get("<name>")` only when <name> is NOT a
-    # secret-shaped identifier — `os.environ.get("OPENAI_API_KEY")` still trips
-    # via the dedicated secret pattern just below.
     (r'os\.environ\b(?!\s*\.get\s*\(\s*["\'](?![^"\']*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)))',
      "python_os_environ", "high", "exfiltration",
      "accesses os.environ (potential env dump)"),
@@ -144,8 +114,6 @@ THREAT_PATTERNS = [
      "ruby_env_secret", "critical", "exfiltration",
      "reads secret via Ruby ENV[]"),
 
-    # ── Exfiltration: DNS and staging ──
-    # Do not match flag names such as llama.cpp `--host 127.0.0.1 --port $PORT`.
     (r'(?<![-/])\b(dig|nslookup|host)\s+[^\n]*\$',
      "dns_exfil", "critical", "exfiltration",
      "DNS lookup with variable interpolation (possible DNS exfiltration)"),
@@ -153,7 +121,6 @@ THREAT_PATTERNS = [
      "tmp_staging", "critical", "exfiltration",
      "writes to /tmp then exfiltrates"),
 
-    # ── Exfiltration: markdown/link based ──
     (r'!\[.*\]\(https?://[^\)]*\$\{?',
      "md_image_exfil", "high", "exfiltration",
      "markdown image URL with variable interpolation (image-based exfil)"),
@@ -161,7 +128,6 @@ THREAT_PATTERNS = [
      "md_link_exfil", "high", "exfiltration",
      "markdown link with variable interpolation"),
 
-    # ── Prompt injection ──
     (r'ignore\s+(?:\w+\s+)*(previous|all|above|prior)\s+instructions',
      "prompt_injection_ignore", "critical", "injection",
      "prompt injection: ignore previous instructions"),
@@ -199,7 +165,6 @@ THREAT_PATTERNS = [
      "hidden_div", "high", "injection",
      "hidden HTML div (invisible instructions)"),
 
-    # ── Destructive operations ──
     (r'rm\s+-rf\s+/',
      "destructive_root_rm", "critical", "destructive",
      "recursive delete from root"),
@@ -225,7 +190,6 @@ THREAT_PATTERNS = [
      "truncate_system", "critical", "destructive",
      "truncates system file to zero bytes"),
 
-    # ── Persistence ──
     (r'\bcrontab\b',
      "persistence_cron", "medium", "persistence",
      "modifies cron jobs"),
@@ -254,7 +218,6 @@ THREAT_PATTERNS = [
      "git_config_global", "medium", "persistence",
      "modifies global git configuration"),
 
-    # ── Network: reverse shells and tunnels ──
     (r'\bnc\s+-[lp]|ncat\s+-[lp]|\bsocat\b',
      "reverse_shell", "critical", "network",
      "potential reverse shell listener"),
@@ -283,7 +246,6 @@ THREAT_PATTERNS = [
      "paste_service", "medium", "network",
      "references paste service (possible data staging)"),
 
-    # ── Obfuscation: encoding and eval ──
     (r'base64\s+(-d|--decode)\s*\|',
      "base64_decode_pipe", "high", "obfuscation",
      "base64 decodes and pipes to execution"),
@@ -327,7 +289,6 @@ THREAT_PATTERNS = [
      "unicode_escape_chain", "medium", "obfuscation",
      "chain of unicode escapes (possible obfuscation)"),
 
-    # ── Process execution in scripts ──
     (r'subprocess\.(run|call|Popen|check_output)\s*\(',
      "python_subprocess", "medium", "execution",
      "Python subprocess execution"),
@@ -347,14 +308,10 @@ THREAT_PATTERNS = [
      "backtick_subshell", "medium", "execution",
      "backtick string with command substitution"),
 
-    # SKILL.md's own inline-shell form: `!`cmd`` runs when the skill body is read, before
-    # the model sees a word of it. The known-bad patterns above catch a hostile command;
-    # this catches the fact that there is a command at all, so a reviewer is told.
     (r'!`[^`\n]+`',
      "skill_inline_shell", "medium", "execution",
      "inline shell snippet — runs when the skill is loaded"),
 
-    # ── Path traversal ──
     (r'\.\./\.\./\.\.',
      "path_traversal_deep", "high", "traversal",
      "deep relative path traversal (3+ levels up)"),
@@ -371,7 +328,6 @@ THREAT_PATTERNS = [
      "dev_shm", "medium", "traversal",
      "references shared memory (common staging area)"),
 
-    # ── Crypto mining ──
     (r'xmrig|stratum\+tcp|monero|coinhive|cryptonight',
      "crypto_mining", "critical", "mining",
      "cryptocurrency mining reference"),
@@ -379,7 +335,6 @@ THREAT_PATTERNS = [
      "mining_indicators", "medium", "mining",
      "possible cryptocurrency mining indicators"),
 
-    # ── Supply chain: curl/wget pipe to shell ──
     (r'curl\s+[^\n]*\|\s*(ba)?sh',
      "curl_pipe_shell", "critical", "supply_chain",
      "curl piped to shell (download-and-execute)"),
@@ -390,7 +345,6 @@ THREAT_PATTERNS = [
      "curl_pipe_python", "critical", "supply_chain",
      "curl piped to Python interpreter"),
 
-    # ── Supply chain: unpinned/deferred dependencies ──
     (r'#\s*///\s*script.*dependencies',
      "pep723_inline_deps", "medium", "supply_chain",
      "PEP 723 inline script metadata with dependencies (verify pinning)"),
@@ -404,7 +358,6 @@ THREAT_PATTERNS = [
      "uv_run", "medium", "supply_chain",
      "uv run (may auto-install unpinned dependencies)"),
 
-    # ── Supply chain: remote resource fetching ──
     (r'(curl|wget|httpx?\.get|requests\.get|fetch)\s*[\(]?\s*["\']https?://',
      "remote_fetch", "medium", "supply_chain",
      "fetches remote resource at runtime"),
@@ -415,11 +368,6 @@ THREAT_PATTERNS = [
      "docker_pull", "medium", "supply_chain",
      "pulls a Docker image at runtime"),
 
-    # ── Privilege escalation ──
-    # `allowed-tools:` is REQUIRED SKILL.md frontmatter per the agent-skill
-    # spec — every compliant skill declares it, so it cannot be a threat
-    # signal on its own. Keep it as an informational (low) finding for
-    # auditability; it no longer drives the verdict.
     (r'^allowed-tools\s*:',
      "allowed_tools_field", "low", "privilege_escalation",
      "skill declares allowed-tools (standard frontmatter; informational)"),
@@ -436,7 +384,6 @@ THREAT_PATTERNS = [
      "suid_bit", "critical", "privilege_escalation",
      "sets SUID/SGID bit on a file"),
 
-    # ── Agent config persistence ──
     (_prose_modify_re(_AGENT_CONFIG_FILES),
      "agent_config_mod", "critical", "persistence", "instructs modification of agent config files (could persist instructions across sessions)"),
     (_shell_write_re(_AGENT_CONFIG_FILES),
@@ -452,7 +399,6 @@ THREAT_PATTERNS = [
      "other_agent_config", "high", "persistence",
      "references other agent configuration files"),
 
-    # ── Hardcoded secrets (credentials embedded in the skill itself) ──
     (r'(?:api[_-]?key|token|secret|password)\s*[=:]\s*["\'][A-Za-z0-9+/=_-]{20,}',
      "hardcoded_secret", "critical", "credential_exposure",
      "possible hardcoded API key, token, or secret"),
@@ -475,7 +421,6 @@ THREAT_PATTERNS = [
      "gitlab_token_leaked", "critical", "credential_exposure",
      "GitLab personal access token in skill content"),
 
-    # ── Additional prompt injection: jailbreak patterns ──
     (r'\bDAN\s+mode\b|Do\s+Anything\s+Now',
      "jailbreak_dan", "critical", "injection",
      "DAN (Do Anything Now) jailbreak attempt"),
@@ -498,7 +443,6 @@ THREAT_PATTERNS = [
      "fake_policy", "medium", "injection",
      "claims new policy/guidelines (may be social engineering)"),
 
-    # ── Context window exfiltration ──
     (r'(include|output|print|send|share)\s+(?:\w+\s+)*(conversation|chat\s+history|previous\s+messages|context)',
      "context_exfil", "high", "exfiltration",
      "instructs agent to output/share conversation history"),
@@ -512,78 +456,52 @@ _COMPILED_THREAT_PATTERNS = [
     for pattern, pid, severity, category, description in THREAT_PATTERNS
 ]
 
-# Structural limits for skill directories
-MAX_FILE_COUNT = 50       # skills shouldn't have 50+ files
-MAX_TOTAL_SIZE_KB = 1024  # 1MB total is suspicious for a skill
-MAX_SINGLE_FILE_KB = 1024  # individual file > 256KB is suspicious
+MAX_FILE_COUNT = 50
+MAX_TOTAL_SIZE_KB = 1024
+MAX_SINGLE_FILE_KB = 1024
 
-# File extensions to scan (text files only — skip binary)
-# Known binary extensions that should NOT be in a skill
 SUSPICIOUS_BINARY_EXTENSIONS = {
     '.exe', '.dll', '.so', '.dylib', '.bin', '.dat', '.com',
     '.msi', '.dmg', '.app', '.deb', '.rpm',
 }
 
-# Zero-width and invisible unicode characters used for injection.
-#
-# Kept as an explicit set (not `unicodedata.category(ch) == "Cf"`) so the answer
-# does not move when the interpreter's Unicode tables do, but it must cover the
-# carriers actually used to hide instructions from a reader while leaving them
-# legible to the model — the Unicode Tag block above all, which maps the whole
-# of ASCII into codepoints that render as nothing. `_INVISIBLE_RE` is what the
-# scan runs; this set is the single-codepoint part of it, kept for callers that
-# ask "is this one character invisible?".
 INVISIBLE_CHARS = {
-    '\u200b',  # zero-width space
-    '\u200c',  # zero-width non-joiner
-    '\u200d',  # zero-width joiner
-    '\u2060',  # word joiner
-    '\u2061',  # function application
-    '\u2062',  # invisible times
-    '\u2063',  # invisible separator
-    '\u2064',  # invisible plus
-    '\ufeff',  # zero-width no-break space (BOM)
-    '\u202a',  # left-to-right embedding
-    '\u202b',  # right-to-left embedding
-    '\u202c',  # pop directional formatting
-    '\u202d',  # left-to-right override
-    '\u202e',  # right-to-left override
-    '\u2066',  # left-to-right isolate
-    '\u2067',  # right-to-left isolate
-    '\u2068',  # first strong isolate
-    '\u2069',  # pop directional isolate
-    '\u00ad',  # soft hyphen
-    '\u034f',  # combining grapheme joiner
-    '\u061c',  # arabic letter mark
-    '\u115f',  # hangul choseong filler
-    '\u1160',  # hangul jungseong filler
-    '\u17b4',  # khmer vowel inherent aq
-    '\u17b5',  # khmer vowel inherent aa
-    '\u180e',  # mongolian vowel separator
-    '\u200e',  # left-to-right mark
-    '\u200f',  # right-to-left mark
-    '\u3164',  # hangul filler
-    '\uffa0',  # halfwidth hangul filler
+    '\u200b',
+    '\u200c',
+    '\u200d',
+    '\u2060',
+    '\u2061',
+    '\u2062',
+    '\u2063',
+    '\u2064',
+    '\ufeff',
+    '\u202a',
+    '\u202b',
+    '\u202c',
+    '\u202d',
+    '\u202e',
+    '\u2066',
+    '\u2067',
+    '\u2068',
+    '\u2069',
+    '\u00ad',
+    '\u034f',
+    '\u061c',
+    '\u115f',
+    '\u1160',
+    '\u17b4',
+    '\u17b5',
+    '\u180e',
+    '\u200e',
+    '\u200f',
+    '\u3164',
+    '\uffa0',
 }
 
-# The same judgement as a scannable pattern, plus the two ranges that are the
-# point of the exercise: U+E0000-U+E007F (Unicode Tag block: every ASCII
-# character has a rendering-free twin there, so a whole instruction can be
-# hidden inside visible prose) and U+E0100-U+E01EF (variation selectors
-# supplement, the byte-smuggling channel of the same family). Both are matched
-# as ranges rather than listed, because the unassigned codepoints between the
-# assigned ones carry a payload just as well.
-#
-# Deliberately NOT matched: U+FE00-U+FE0F. VS15/VS16 sit inside ordinary emoji,
-# so flagging that range would fire on prose rather than on hiding.
 _INVISIBLE_RE = re.compile(
     "[" + "".join(sorted(INVISIBLE_CHARS)) + "\\U000e0000-\\U000e007f\\U000e0100-\\U000e01ef]"
 )
 
-
-# ---------------------------------------------------------------------------
-# Scanning functions
-# ---------------------------------------------------------------------------
 
 def scan_file(file_path: Path, rel_path: str = "") -> list[Finding]:
     """
@@ -600,12 +518,12 @@ def scan_file(file_path: Path, rel_path: str = "") -> list[Finding]:
         rel_path = file_path.name
 
     if file_path.suffix.lower() in SUSPICIOUS_BINARY_EXTENSIONS:
-        return []                                  # the structural check flags it; it is not text to read
+        return []
 
     try:
         content = file_path.read_text(encoding='utf-8-sig')
     except (UnicodeDecodeError, OSError) as error:
-        return [Finding(              # fail closed: an unscannable text file is a finding, not a pass
+        return [Finding(
             pattern_id="unreadable_file", severity="high", category="structure", file=rel_path, line=0,
             match=type(error).__name__,
             description="file could not be read as UTF-8 text, so it was not scanned",
@@ -613,13 +531,8 @@ def scan_file(file_path: Path, rel_path: str = "") -> list[Finding]:
 
     findings = []
     lines = content.split('\n')
-    seen = set()  # (pattern_id, line_number) for deduplication
+    seen = set()
 
-    # Regex pattern matching. Every pattern is single-line, so a shell command
-    # split across a backslash continuation would otherwise show each pattern
-    # only a fragment of itself: `curl ... \` + newline + `| sh` matches no rule
-    # while the one-line spelling is critical. The scan therefore sees both the
-    # physical lines and the logical ones, joined the way the shell joins them.
     candidates = [(i, line) for i, line in enumerate(lines, start=1)]
     candidates.extend(_continued_lines(lines))
     for pattern, pid, severity, category, description in _COMPILED_THREAT_PATTERNS:
@@ -641,7 +554,6 @@ def scan_file(file_path: Path, rel_path: str = "") -> list[Finding]:
                     description=description,
                 ))
 
-    # Invisible unicode character detection
     for i, line in enumerate(lines, start=1):
         hit = _INVISIBLE_RE.search(line)
         if hit:
@@ -685,26 +597,6 @@ def _continued_lines(lines):
             parts.append(piece)
             run_len += len(piece)
             i += 1
-            # A file whose every line ends in a backslash would otherwise join
-            # into one string as long as the file, and several patterns here are
-            # `verb\s+[^\n]*\|...`, which costs O(len²) on a line that has no
-            # match. The run is emitted in windows instead; a genuine
-            # continuation is a handful of lines, so nothing real is cut.
-            #
-            # The window closes on either measure. Length alone is not enough: a
-            # file of bare `\` lines strips to empty pieces, so the joined length
-            # stays 0 forever and `parts` grows to the length of the file — and
-            # re-measuring it each round (the earlier `sum(map(len, parts))`)
-            # made that O(N²) on an untrusted input path. `run_len` is carried
-            # instead of recomputed, and the part count is capped outright.
-            #
-            # Windows overlap by one piece. A window boundary is otherwise a free
-            # alignment point: pad a run to exactly the cap and the terminating
-            # line — the part carrying the payload — lands in no window at all,
-            # and a physical line on its own matches nothing. Both caps are
-            # constants in open source, so aligning to one costs an attacker a
-            # line count. Carrying the last piece forward means a payload split
-            # across a boundary is still joined with what precedes it.
             if run_len >= _MAX_JOINED_LINE or len(parts) >= _MAX_JOINED_PARTS:
                 joined.append((start + 1, " ".join(p for p in parts if p)))
                 carry = parts[-1]
@@ -786,12 +678,8 @@ def scan_skill(skill_path: Path, source: str = "community", *, honor_ignore: boo
     if skill_path.is_dir():
         ignore = _load_skill_ignore(skill_path) if honor_ignore else _ignore_nothing
 
-        # Structural checks see every file. `ignore` is passed only so an
-        # excluded binary can be reported informationally instead of as a
-        # critical finding; it cannot suppress anything else.
         all_findings.extend(_check_structure(skill_path, ignore))
 
-        # Pattern scanning on each file
         for f in skill_path.rglob("*"):
             if f.is_file():
                 rel = str(f.relative_to(skill_path))
@@ -843,14 +731,11 @@ def should_allow_install(result: ScanResult, force: bool = False) -> tuple[bool 
         )
 
     if decision == "ask":
-        # Return None to signal "needs user confirmation"
         return None, (
             f"Requires confirmation ({result.trust_level} source + {result.verdict} verdict, "
             f"{len(result.findings)} findings)"
         )
 
-    # Dangerous verdicts cannot be overridden by --force (community/trusted);
-    # other blocks can.
     if result.verdict == "dangerous" and result.trust_level in ("community", "trusted"):
         return False, (
             f"Blocked ({result.trust_level} source + dangerous verdict, "
@@ -874,7 +759,6 @@ def format_scan_report(result: ScanResult) -> str:
     lines.append(f"Scan: {result.skill_name} ({result.source}/{result.trust_level})  Verdict: {verdict_display}")
 
     if result.findings:
-        # Group and sort: critical first, then high, medium, low
         severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
         sorted_findings = sorted(result.findings, key=lambda f: severity_order.get(f.severity, 4))
 
@@ -897,10 +781,6 @@ def format_scan_report(result: ScanResult) -> str:
 
     return "\n".join(lines)
 
-
-# ---------------------------------------------------------------------------
-# Structural checks
-# ---------------------------------------------------------------------------
 
 def _check_structure(skill_dir: Path, ignore) -> list[Finding]:
     """
@@ -932,7 +812,6 @@ def _check_structure(skill_dir: Path, ignore) -> list[Finding]:
         rel = str(f.relative_to(skill_dir))
         file_count += 1
 
-        # Symlink check — must resolve within the skill directory
         if f.is_symlink():
             try:
                 resolved = f.resolve()
@@ -958,14 +837,12 @@ def _check_structure(skill_dir: Path, ignore) -> list[Finding]:
                 ))
             continue
 
-        # Size tracking
         try:
             size = f.stat().st_size
             total_size += size
         except OSError:
             continue
 
-        # Single file too large
         if size > MAX_SINGLE_FILE_KB * 1024:
             findings.append(Finding(
                 pattern_id="oversized_file",
@@ -977,7 +854,6 @@ def _check_structure(skill_dir: Path, ignore) -> list[Finding]:
                 description=f"file is {size // 1024}KB (limit: {MAX_SINGLE_FILE_KB}KB)",
             ))
 
-        # Binary/executable files
         ext = f.suffix.lower()
         if ext in SUSPICIOUS_BINARY_EXTENSIONS:
             excluded = ignore(rel)
@@ -996,7 +872,6 @@ def _check_structure(skill_dir: Path, ignore) -> list[Finding]:
                 ),
             ))
 
-        # Executable permission on non-script files
         if ext not in {'.sh', '.bash', '.py', '.rb', '.pl'} and f.stat().st_mode & 0o111:
             findings.append(Finding(
                 pattern_id="unexpected_executable",
@@ -1008,7 +883,6 @@ def _check_structure(skill_dir: Path, ignore) -> list[Finding]:
                 description="file has executable permission but is not a recognized script type",
             ))
 
-    # File count limit
     if file_count > MAX_FILE_COUNT:
         findings.append(Finding(
             pattern_id="too_many_files",
@@ -1020,7 +894,6 @@ def _check_structure(skill_dir: Path, ignore) -> list[Finding]:
             description=f"skill has {file_count} files (limit: {MAX_FILE_COUNT})",
         ))
 
-    # Total size limit
     if total_size > MAX_TOTAL_SIZE_KB * 1024:
         findings.append(Finding(
             pattern_id="oversized_skill",
@@ -1067,17 +940,8 @@ def _unicode_char_name(char: str) -> str:
 
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-# Ignore-file names a skill may ship to exclude dev/docs artifacts from the
-# scan. `.skillignore` is the native name; `.clawhubignore` is honored for
-# compatibility with skills published through ClawHub.
 SKILL_IGNORE_FILENAMES = (".skillignore", ".clawhubignore")
 
-# Paths that are NEVER scanned regardless of ignore patterns, and SKILL.md
-# which can never be un-scanned via the ignore file.
 _ALWAYS_IGNORED_NAMES = set(SKILL_IGNORE_FILENAMES)
 _NEVER_IGNORABLE = {"SKILL.md"}
 
@@ -1134,26 +998,21 @@ def _load_skill_ignore(skill_dir: Path):
                 continue
 
             if is_dir:
-                # Directory pattern: match the dir itself or anything under it.
                 if rel_posix == p or rel_posix.startswith(p + "/"):
                     return True
                 if not anchored and ("/" + rel_posix + "/").find("/" + p + "/") != -1:
                     return True
                 continue
 
-            # File/glob pattern.
             if fnmatch.fnmatch(rel_posix, p):
                 return True
             if not anchored:
-                # Unanchored: also match the basename and any path segment.
                 if fnmatch.fnmatch(base, p):
                     return True
                 if "/" not in p and any(
                     fnmatch.fnmatch(seg, p) for seg in rel_posix.split("/")
                 ):
                     return True
-                # Match a prefix directory component (e.g. `docs` ignores
-                # `docs/plans/x.md`).
                 if rel_posix.startswith(p + "/"):
                     return True
         return False
@@ -1175,13 +1034,10 @@ def _resolve_trust_level(source: str) -> str:
             normalized_source = normalized_source[len(prefix):]
             break
 
-    # Agent-created skills get their own permissive trust level
     if normalized_source == "agent-created":
         return "agent-created"
-    # The reserved label is supplied by the product's own call path.
     if normalized_source == "official":
         return "builtin"
-    # Match only the configured labels or their paths; labels do not verify repository identity.
     for trusted in TRUSTED_REPOS:
         if normalized_source == trusted or normalized_source.startswith(f"{trusted}/"):
             return "trusted"
@@ -1200,7 +1056,6 @@ def _determine_verdict(findings: list[Finding]) -> str:
         return "dangerous"
     if has_high:
         return "caution"
-    # medium/low findings alone are informational, not blocking
     return "safe"
 
 

@@ -370,7 +370,7 @@ class Progress:
         onError: Callable[[BaseException], None],
         minIntervalMs: float,
         *,
-        clock: Any = None,  # MISAKA fork: a test clock in place of vitest's fake timers.
+        clock: Any = None,
     ) -> None:
         self._write = write
         self._onError = onError

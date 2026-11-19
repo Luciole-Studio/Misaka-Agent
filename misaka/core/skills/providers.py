@@ -56,4 +56,4 @@ async def prepare(loader, name, activated, source=None):
             raise ValueError('Skill provider activation failed: ' + namespace)
         activated.add(namespace)
         return
-    activated.discard(namespace)  # Withdrawal also invalidates prior successful activation.
+    activated.discard(namespace)

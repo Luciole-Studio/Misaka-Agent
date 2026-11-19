@@ -107,7 +107,6 @@ def test_coverage_by_another_line_is_a_claim_and_by_the_own_line_is_not(level):
     [claim] = views.coverage_claims(con, run)
     assert (claim["proposal"], claim["raised_at"], claim["covered_by"]["node"]) == (across, a["id"], b["id"])
     assert claim["covered_by"]["conclusion"].endswith("synthesis.md") and not claim["covered_by"]["revised_since_claim"]
-    # It goes to the reconciliation the level's new conclusions call for.
     assert views.reconcile_state(con, run)[0] is True
     material = workflow._reconcile_material(con, run)
     assert [item["proposal"] for item in material["coverage_claims"]] == [across]
@@ -137,7 +136,7 @@ def test_a_claim_records_the_covering_conclusion_written_after_it(level):
     issue = _proposal(con, run, a, "Patronage networks")
     _decide(con, run, a, {"declined": [
         {"issue_id": issue, "disposition": "covered", "covered_by": b["id"], "reason": "B studies it"}]}, level.tmp)
-    _conclude(con, run, b, "synthesis-2.md")       # B revises after A decided
+    _conclude(con, run, b, "synthesis-2.md")
     con.execute("UPDATE research_artifacts SET created_at=created_at+100 WHERE path LIKE '%synthesis-2.md'")
     [claim] = views.coverage_claims(con, run)
     assert claim["covered_by"]["revised_since_claim"] is True
@@ -175,8 +174,6 @@ def test_every_claim_gets_one_verdict_and_a_reopened_one_an_outcome(level):
     assert resolved["nodes"][0]["parents"] == [a["id"]]
     child = runs.node(con, receipt["nodes"][0])
     assert child["depth"] == 2 and [p["id"] for p in runs.parents(con, child["id"])] == [a["id"]]
-    # The reopened proposal is now an option of a decision the reconciliation recorded at the node that raised it,
-    # on the proposal's own question and premise; the verdict's note is the record of why it was reopened.
     [option] = runs.origin_options(con, child["id"])
     assert (option["decided_at"], option["decision_origin"], option["label"], option["premise"]) == (
         a["id"], "reconcile", "Moral economy", "Moral economy")
@@ -186,7 +183,6 @@ def test_every_claim_gets_one_verdict_and_a_reopened_one_an_outcome(level):
     assert issue["coverage_review"]["verdict"] == "reopen" and issue["coverage_review"]["claimed"] == b["id"]
     assert receipt["reopened"] == {reopened: option["id"]}
     assert f"takes up `{reopened}` (raised at node {a['id']})" in planner.position(con, run, child)
-    # The claim that held keeps its pointer and says so; neither claim is asked about again.
     assert runs.issue(con, held)["covered_by"] == b["id"]
     assert views.coverage_claims(con, run) == []
     assert "the coverage claim held at reconciliation 2: B's section 2 reads the networks" in _paths(con, run)
@@ -219,7 +215,7 @@ def test_a_claim_on_another_node_s_waiting_option_is_reviewed_too(level):
     destinations = views.snapshot(con, runs.get(con, run["id"]))["destinations"]
     [group] = [g for g in destinations["nodes"] if g["node"] == receipt["nodes"][0]]
     [via] = [m for m in group["members"] if m["id"] == issue]
-    assert via["via"] == [salt]                      # the proposal reaches the node through the option
+    assert via["via"] == [salt]
 
 
 def test_an_option_left_unopened_names_what_answers_it(level):
@@ -245,7 +241,6 @@ def test_an_option_left_unopened_names_what_answers_it(level):
     paths = _paths(con, run)
     assert f"not pursued, answered by node `{b['id']}`: complements B" in paths
     assert f"not pursued, answered by option `{salt}`: same as salt" in paths
-    # Followed to its end, the option left unopened stands with the node that answers it.
     data = views.snapshot(con, runs.get(con, run["id"]))
     under_b = next(g for g in data["destinations"]["nodes"] if g["node"] == b["id"])
     assert customs in [m["id"] for m in under_b["members"]]
@@ -386,8 +381,6 @@ def test_a_v19_board_gets_the_v20_graph_schema(tmp_path):
         assert runs.option(con, x)["covered_by"] == root["id"]
 
 
-# --- through the driver: decide, the reconciliation, the node it reopens ------------------
-
 @pytest.fixture
 def driven(tmp_path, monkeypatch):
     """A run with the root's conversation, as the driver runs it; model turns are scripted."""
@@ -499,10 +492,8 @@ async def test_a_claim_across_lines_is_reopened_through_the_driver(driven):
     line = planner.on_your_line(con, run, c)
     [reopened] = [entry for entry in line if entry["went"] == "this node"]
     assert reopened["deliberation"]["session_file"] == run["root_session"]
-    # Premises, not labels, tell possibilities apart: the line gives a declined proposal's.
     [declined] = [entry for entry in line if entry["id"] == climate["id"]]
     assert (declined["premise"], declined["went"]) == ("Climate shock?", "declined: no harvest data survives")
-    # Everything that reads the run renders it.
     run = runs.get(con, run["id"])
     assert "Villagers' norms?" in context.render(context.build(con, run, node=c))
     data = views.snapshot(con, run)
@@ -514,7 +505,6 @@ async def test_a_claim_across_lines_is_reopened_through_the_driver(driven):
     paths = Path(run["workspace"], views.paths_path(run)).read_text(encoding="utf-8")
     assert "(the coverage claim was reopened at reconciliation 2: norms, not elites)" in paths
     assert f"brought back by option `{runs.pending_options(con, run['id'])[0]['id']}`" in paths
-    # The option that brings the declined path back reaches the reconciliation with that path's record.
     material, _said = await _reconciled(lab, lambda m: {"nodes": [
         {"question": "Climate?", "options": [o["option"] for o in m["pending_options"]], "rationale": "r"}]})
     [waiting] = material["pending_options"]

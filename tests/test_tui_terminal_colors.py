@@ -46,8 +46,6 @@ def test_parses_osc_10_11_and_4_replies():
     assert parseOscColorResponse("\x1b]12;#ffffff\x07") is None
 
 
-# --- TUI.queryTerminalBackgroundColor (MISAKA fork D11, in place of TUI.queryTerminalColors) -----------------
-
 
 class InputRecorder:
     def __init__(self) -> None:

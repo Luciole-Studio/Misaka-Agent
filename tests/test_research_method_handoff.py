@@ -46,7 +46,6 @@ class ResearchMethodHandoffTests(unittest.TestCase):
 
     def test_previous_and_sibling_cards_are_both_preserved(self):
         sibling = {"local_id": "r2/b", "title": "Other task", "assignee": "10032"}
-        # Board queries return sqlite3.Row, not dictionaries.
         with closing(sqlite3.connect(":memory:")) as con:
             con.row_factory = sqlite3.Row
             previous = con.execute("SELECT 'old-card' AS id, 'Current task' AS title, "
@@ -71,7 +70,6 @@ class ResearchMethodHandoffTests(unittest.TestCase):
         task = {"instructions": "Review the saved draft.\n", "method": "Ordinary research method"}
         for run_id in (None, "fixture-run"):
             with self.subTest(run_id=run_id):
-                # Internal review cards need no ordinary research fields or context rows.
                 body = planner.task_body(task, run_id=run_id, node={}, siblings=[{}], previous=[{}])
                 self.assertTrue(body.startswith("Review the saved draft.\n\n## Execution approach"))
                 self.assertEqual(body.count("## Execution approach"), 1)

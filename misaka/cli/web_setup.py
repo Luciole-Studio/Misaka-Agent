@@ -17,8 +17,6 @@ from misaka.cli import setup_ui as ui
 from misaka.core.web import config, dispatch, registry
 from misaka.core.web.scope import current_scope
 
-# Names here are runtime settings, not another provider list. Providers and credentials
-# come from the registries so trusted extensions get the same setup path as built-ins.
 BROWSER_KEYS = (
     'enabled', 'cloud_provider', 'backend', 'engine', 'command', 'exec_command',
     'executable_path', 'lightpanda_path', 'headed', 'use_real_profile', 'real_profile_path',
@@ -82,8 +80,6 @@ def _validate(document):
             if isinstance(value, bool):
                 raise ValueError(f'{key} takes a positive number')
             _seconds(float(value), key, positive=True)
-            # The runtime uses int(), not float(): "2000.0" otherwise silently
-            # falls back to 15000 despite a successful-looking save.
             if key == 'extract_char_limit' and int(value) != float(value):
                 raise ValueError('extract_char_limit takes an integer')
     for key in ('backend', 'search_backend', 'extract_backend'):
@@ -126,8 +122,6 @@ def _validate(document):
 
 
 def save(changes, *, remove=()):
-    # Build the preview from layers, not from effective settings: deleting a profile
-    # override must reveal the inherited value, just as the real writer does.
     from misaka.core.settings_manager import deepMergeSettings
 
     own = config.own_section()
@@ -234,8 +228,6 @@ def _search(capability):
     if index is None:
         return
     if index == 0:
-        # Empty scalars mask inherited capability pins. One capability falls through
-        # to the shared backend; resetting both also clears that shared selection.
         changes = {f'{cap}_backend': '' for cap in caps}
         if capability == 'both':
             changes['backend'] = ''

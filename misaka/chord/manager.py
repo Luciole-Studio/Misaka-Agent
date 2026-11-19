@@ -492,8 +492,6 @@ def _tap(
     """``child[stream].on("data", ...)``: each chunk goes to ``onOutput``, then to this process's own stream; the pipe
     closes at its end, as a Node stream does."""
     descriptor = stream.fileno()
-    # MISAKA fork: a text stream without a byte buffer (one a program put in place of `sys.stdout`) gets the bytes as
-    # UTF-8 text, as Node's streams take any chunk.
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
     def readable() -> None:

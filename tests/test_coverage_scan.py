@@ -45,7 +45,7 @@ def test_terms_are_alternatives_within_a_facet_and_facets_are_required_together(
     war = '("Continental System" OR "blocus continental" OR "Kontinentalsperre")'
     assert naval in queries and war in queries and '("Napoleonic Wars")' in queries
     assert f'{naval} AND {war} AND ("Napoleonic Wars")' in queries
-    assert f"{naval} AND {war}" in queries                     # a pair
+    assert f"{naval} AND {war}" in queries
     groups = {params.get("group_by") for _path, params in api.calls}
     assert {"primary_topic.subfield.id", "primary_topic.id", "language", "type", "keywords.id"} <= groups
     assert "## Facet 1 · naval balance — 1,000 works" in text and "## All facets together — 7 works" in text
@@ -159,7 +159,7 @@ def test_a_full_answer_is_marked_as_where_openalex_stopped(monkeypatch):
     line = next(line for line in text.splitlines() if line.startswith("Topics"))
     assert line.startswith("Topics (200+, the 200 with most works): Topic0 900 · ")
     assert line.endswith(" · Topic199 701") and "Topic200 " not in text
-    assert "Subfields (1): " in text                 # a short answer carries its own count instead
+    assert "Subfields (1): " in text
 
 
 def test_a_smaller_page_than_asked_for_is_marked_as_full_too(monkeypatch):
@@ -174,7 +174,7 @@ def test_a_smaller_page_than_asked_for_is_marked_as_full_too(monkeypatch):
     line = next(line for line in text.splitlines() if line.startswith("Topics"))
     assert line.startswith("Topics (100+, the 100 with most works): Topic0 900 · ")
     assert line.endswith(" · Topic99 801") and "Topic100 " not in text
-    assert "Languages (55): Lang0 60 · " in text     # under the smaller page, so all of them
+    assert "Languages (55): Lang0 60 · " in text
 
 
 def test_a_group_openalex_has_no_name_for_keeps_its_key(monkeypatch):
@@ -209,7 +209,7 @@ def test_heavy_searches_are_spaced_and_a_rate_limit_is_asked_again(monkeypatch):
         if query.count(" OR ") + query.count(" AND ") > coverage.HEAVY_OPERATORS:
             with lock:
                 heavy_times.append(time.monotonic())
-                if query not in refused:              # the first ask of every heavy search is refused once
+                if query not in refused:
                     refused.add(query)
                     raise coverage.RateLimited("HTTP 429: more than 5 operators")
         groups = [{"key_display_name": "g", "count": 3}] if params.get("group_by") else []
@@ -220,7 +220,7 @@ def test_heavy_searches_are_spaced_and_a_rate_limit_is_asked_again(monkeypatch):
     text = coverage.scan(facets)
     assert "request failed" not in text and "Failed requests" not in text
     gaps = [b - a for a, b in itertools.pairwise(heavy_times)]
-    assert gaps and min(gaps) >= 0.03              # unpaced they would come back to back
+    assert gaps and min(gaps) >= 0.03
 
 
 def test_the_scans_rules_promise_no_work_and_no_verdict():
@@ -229,7 +229,7 @@ def test_the_scans_rules_promise_no_work_and_no_verdict():
     from misaka.core.wiring import ToolCollector
 
     collector = ToolCollector()
-    collector.on = lambda name, handler: None     # the maps come through resources_discover
+    collector.on = lambda name, handler: None
     coverage.register(collector)
     scan = " ".join(next(d for d in collector.tools if d.name == "coverage_scan").promptGuidelines)
     assert "two or three" not in scan

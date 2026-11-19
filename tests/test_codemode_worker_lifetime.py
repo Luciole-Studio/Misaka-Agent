@@ -98,7 +98,6 @@ async def test_does_not_start_a_worker_when_admission_is_denied():
 
 # #10748: a failed Worker constructor must return its reserved capacity.
 async def test_releases_admission_when_worker_construction_fails(monkeypatch):
-    # MISAKA fork: there is no worker URL to get wrong; the thread is what fails to start.
     def failing(_workerData):
         raise RuntimeError("can't start new thread")
 
@@ -335,8 +334,6 @@ def test_terminate_requests_termination_without_being_awaited():
     assert asyncio.run(run()) < 10
 
 
-# MISAKA fork: a VM that fails to start (QuickJS refuses to initialize, the instance cannot be made, a wasm allocation
-# fails) closes its store at once. Its host functions keep it alive in the process-wide table, so nothing else would.
 @pytest.mark.parametrize("failure", ["qjs_init", "instantiate"])
 def test_a_vm_that_fails_to_start_releases_its_store(monkeypatch, failure):
     import wasmtime

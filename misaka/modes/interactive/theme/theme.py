@@ -104,7 +104,6 @@ def resolveVarRefs(
 ) -> str | int:
     if visited is None:
         visited = set()
-    # MISAKA fork: no oklch() / okhsl() values (D11).
     if not isinstance(value, str) or value == "" or value.startswith("#"):
         return value
     if value in visited:
@@ -150,7 +149,6 @@ type ThemeAppearance = TerminalTheme
 
 # The terminal's reported colors. Replaced (never mutated) on update, so themes can cache resolved colors
 # by identity.
-# MISAKA fork: never replaced. Its only writer, `setTerminalColors()`, serves the system theme (D11).
 terminalColors: TerminalColors = {}
 
 
@@ -278,14 +276,12 @@ class Theme:
                 colors[token] = foreground
             for token in self.defaultBackgroundTokens:
                 colors[token] = background
-            # MISAKA fork: no faint tokens to mix toward the background (D11).
             self.resolvedColors = {"terminal": terminal, "colors": MappingProxyType(colors)}
         return self.resolvedColors["colors"]
 
     def style(self, text: str, options: ThemeStyle) -> str:
         fg = options.get("fg")
         bg = options.get("bg")
-        # MISAKA fork: no faint tokens (D11).
         return styleTextWithAnsi(
             text,
             None
@@ -410,7 +406,6 @@ def getAvailableThemesWithPaths() -> list[ThemeInfo]:
         result.append(themeInfo)
 
     # Built-in themes.
-    # MISAKA fork: no system theme (D11).
     for name in getBuiltinThemes():
         addTheme({"name": name, "path": os.path.join(themesDir, f"{name}.json")})
 
@@ -524,7 +519,6 @@ def loadThemeFromPath(themePath: str, mode: TerminalColorMode | None = None) -> 
 
 
 def loadTheme(name: str, mode: TerminalColorMode | None = None) -> Theme:
-    # MISAKA fork: no system theme (D11).
     registeredTheme = registeredThemes.get(name)
     if registeredTheme is not None:
         return registeredTheme
@@ -620,7 +614,6 @@ def detectTerminalTheme(
 
 def getTerminalTheme() -> TerminalTheme:
     """Whether the terminal is dark or light, from everything it reported so far. See ``detectTerminalTheme()``."""
-    # MISAKA fork: no mode-2031 report is recorded (D11).
     return detectTerminalTheme(terminalColors, None)
 
 
@@ -630,7 +623,6 @@ def getTerminalTheme() -> TerminalTheme:
 
 
 def setGlobalTheme(t: Theme) -> None:
-    # MISAKA fork: copy the new theme into the shared object (see the module docstring).
     global theme
     prior = globals().get("theme")
     if isinstance(prior, Theme) and prior is not t:
@@ -670,7 +662,6 @@ def _loadFallbackTheme(error: Exception) -> None:
 
 def initTheme(themeName: str | None = None, enableWatcher: bool = False) -> None:
     global currentThemeName
-    # MISAKA fork: the default is the built-in theme matching the terminal (D11).
     name = _nullish(themeName, getTerminalTheme())
     currentThemeName = name
     try:
@@ -726,7 +717,6 @@ def startThemeWatcher() -> None:
     stopThemeWatcher()
 
     # Only watch if it's a custom theme (not built-in)
-    # MISAKA fork: there is no system theme to skip (D11).
     if not currentThemeName or currentThemeName == "dark" or currentThemeName == "light":
         return
 
@@ -842,7 +832,6 @@ def getThemeExportColors(themeName: str | None = None) -> ThemeExportColors:
                 return colorToHex(indexedColor(resolved))
             if resolved == "":
                 return None
-            # MISAKA fork: no okhsl() values to convert (D11).
             return resolved
 
         return {

@@ -24,7 +24,6 @@ class ToolConfig:
     name: str
     binaryName: str  # Name of the binary
     systemBinaryNames: tuple[str, ...] | None = None  # Alternative system command names to try
-    # MISAKA fork: where it lives, in place of the release download; ``install_command`` has the line to run.
     installHint: str = ""
 
 
@@ -44,8 +43,6 @@ TOOLS: dict[str, ToolConfig] = {
 }
 
 
-# MISAKA fork: one table for ``misaka setup`` and for a tool that finds its program missing. The
-# grep tool named `brew` and `apt` on Windows, where the wizard already said `winget`.
 _BREW = {"git": "xcode-select --install", "rg": "brew install ripgrep", "fd": "brew install fd",
          "pdftotext": "brew install poppler", "ocrmypdf": "brew install ocrmypdf tesseract-lang",
          "tesseract": "brew install tesseract"}
@@ -125,7 +122,6 @@ async def ensureTool(
     if not config:
         return None
 
-    # MISAKA fork: never downloaded; the status says how to install it.
     if onStatus is not None:
         onStatus(ToolStatus(type="warning", message=(
             f"{config.name} not found. Install it: {config.installHint} (`{install_command(tool)}`)")))

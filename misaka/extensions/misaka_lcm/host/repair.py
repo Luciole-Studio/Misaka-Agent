@@ -20,7 +20,7 @@ from misaka.utils import atomic
 
 from .ingest import _text_of
 
-_ESCAPED = "UNTRUSTED-DATA-ESCAPED"     # what the fence makes of a fence word inside a summary
+_ESCAPED = "UNTRUSTED-DATA-ESCAPED"
 
 
 def _plain(text):

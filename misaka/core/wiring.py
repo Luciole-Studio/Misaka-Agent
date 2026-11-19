@@ -44,7 +44,6 @@ type SessionKind = Literal["foreground", "dm", "card", "child", "beast", "bare"]
 
 KINDS = frozenset({"foreground", "dm", "card", "child", "beast", "bare"})
 DEFAULT_KINDS = KINDS - {"bare"}
-# The two roles the registry tells apart: the coordinator, and everyone she dispatches.
 ROLE_KEYS = frozenset({"last_order", "sisters"})
 
 
@@ -57,32 +56,16 @@ class SessionSpec:
     sender: str | None = None
     mcp_role: str | None = None
     receive_messages: bool = False
-    # Whether this session also collects the workspace's card notifications; None = as
-    # ``receive_messages``. A workflow node's window reads its own mail but leaves the card
-    # notifications to the root's window (B123).
     receive_notifications: bool | None = None
     task_id: str | None = None
-    # The workflow node whose Last Order this session is, for a session that works no card.
     node: str | None = None
     tool_ceiling: tuple[str, ...] | None = None
     startup_skills: tuple[str, ...] = ()
-    # Optional one-call catalog snapshot shared with a workflow's assignment validator.
     sister_catalog: tuple[dict[str, Any], ...] | None = None
-    # Whether this session works inside a workflow that owns cards (``platform.owners``): its
-    # driver holds the board tools, and the owner's context joins the system prompt.
     workflow_context: bool = False
-    # Settings this session runs with instead of the global ones, as ``(key, value)`` pairs
-    # (``misaka.core.session_overrides``): a workflow run's compaction threshold and output limit.
     overrides: tuple[tuple[str, Any], ...] = ()
 
 
-# Shared entries by name, then Last Order's, then the Sisters': the folder scan's order.
-
-
-# Core modules whose whole contribution is tools. Pi's built-ins reach the tool table by
-# direct construction; the SDK door for an embedder's tools is ``customTools``, which lands
-# in the same table under ``<sdk:name>``. These take that door and never appear as
-# extensions. Order is the tools-array order.
 TOOL_MODULES: tuple[str, ...] = (
     "misaka.core.ask_user",
     "misaka.core.documents.wiring.documents",
@@ -108,9 +91,6 @@ class ToolCollector:
         raise AttributeError(f"a tool-only module asked the harness for {name!r}; only registerTool is available here")
 
 
-# Core modules the kernel calls at its moments (``core.moments``): each exposes
-# ``part(spec) -> object | None`` with a ``tools`` list and the moment methods it needs.
-# Their tools take the same ``customTools`` door as ``TOOL_MODULES``. Order is call order.
 PART_MODULES: tuple[str, ...] = (
     "misaka.core.session_catalog",
     "misaka.core.moa",
@@ -133,9 +113,6 @@ PART_MODULES: tuple[str, ...] = (
 )
 
 
-# Core modules that are providers (``provider_config(runtime) -> (name, config)``): part of every
-# model runtime, registered when it is created, as pi's built-in providers are. A config's
-# ``refreshModels`` keeps what it publishes in step with the credentials of the moment.
 PROVIDER_MODULES: tuple[str, ...] = (
     "misaka.core.moa",
 )
@@ -234,7 +211,6 @@ class Assembly:
 
     @property
     def model_profile(self) -> str | None:
-        # A generic child owns its agent definition, not its parent's role pin.
         return self.spec.profile_dir if self.spec and self.spec.kind != "child" else None
 
     @property
@@ -274,7 +250,6 @@ def role_session_setup(profile_dir, workspace, *, model=None, receive_messages=F
         overrides=spec_overrides(overrides)))
     from misaka.config import env as env_file
 
-    # The role's own .env first (its vendor keys, its plugin knobs), then the hand-off names.
     env = {**env_file.role_overlay(profile_dir),
            "MISAKA_PROFILE_DIR": profile_dir, "MISAKA_WHO": sender,
            "MISAKA_MCP_ROLE": sender, "MISAKA_WORKSPACE": workspace}
@@ -319,9 +294,6 @@ def _no_bundled(spec: SessionSpec) -> list[dict[str, Any]]:
     return []
 
 
-# The bundled extensions, composed in by the process entry (``misaka.cli.bootstrap``) --
-# core does not import ``misaka.extensions``. A process that never runs an entry, such
-# as a bare kernel run in a test, builds sessions without them.
 bundled: Callable[[SessionSpec], list[dict[str, Any]]] = _no_bundled
 
 

@@ -22,7 +22,6 @@ from misaka.core.trust_manager import (
     hasTrustRequiringProjectResources,
 )
 
-# MISAKA fork: no RPC mode.
 type AppMode = Literal["interactive", "print", "json"]
 
 
@@ -37,7 +36,6 @@ class ResolveProjectTrustedOptions(TypedDict, total=False):
 
 
 def formatProjectTrustPrompt(cwd: str) -> str:
-    # MISAKA fork: what trusting loads (see trust_manager.hasTrustRequiringProjectResources).
     return (
         f"Trust project folder?\n{cwd}\n\n"
         f"This allows {APP_NAME} to load {home.DIR_NAME}/settings.json, {home.DIR_NAME}/mcp.json, "

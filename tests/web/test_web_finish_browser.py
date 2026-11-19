@@ -164,7 +164,7 @@ def test_webpart_profile_schema_and_real_registry(monkeypatch, isolated):
     part = WebPart(SessionSpec(str(isolated), 'sister', str(isolated), 'bare'))
     tools = {tool.name: tool for tool in part.tools}
     assert {'browser_exec', 'browser_cdp', 'browser_dialog'} <= tools.keys()
-    assert 'browser_click' in tools  # Registry fallback, filtered by the final session ceiling.
+    assert 'browser_click' in tools
     assert 'local' in tools['browser_exec'].parameters['properties']
     assert all(not {'oneOf', 'allOf', 'anyOf'} & tool.parameters.keys() for tool in tools.values() if isinstance(tool.parameters, dict))
 
@@ -312,8 +312,6 @@ def test_recording_retention_excludes_active_and_unrelated_files(isolated):
 
 
 def test_recording_retention_always_keeps_the_finished_recording(isolated):
-    # Linux filesystems stamp files at the kernel clock's resolution, so an older recording can
-    # carry the same mtime as the one just finished, or (clock steps) a later one.
     session = BrowserSession(str(isolated), {'recording_retention': 1}, 'local')
     session.recording_path = isolated / f'recording-{session.id}.partial.webm'
     old = isolated / 'recording-old.webm'
@@ -526,7 +524,6 @@ def test_real_cli_browser_setup_and_explicit_install_flags(monkeypatch, isolated
         return SimpleNamespace(extensions=[], errors=[], runtime=SimpleNamespace(invalidate=lambda: None))
     monkeypatch.setattr(web, '_discover', discover)
     monkeypatch.setattr(web_browser, 'status', lambda: None)
-    # Given a directory, answer as Windows does: the .cmd npm writes, never the bare shell script.
     monkeypatch.setattr(web_browser.shutil, 'which',
                         lambda name, path=None: f'{path}/{name}.cmd' if path else '/fixture/' + name)
     commands = []

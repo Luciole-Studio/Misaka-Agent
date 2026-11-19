@@ -36,19 +36,12 @@ from __future__ import annotations
 
 import os
 
-# Text shapes sharing this many backtick bits collapse into one group, with the shared bits
-# hoisted to the group header. Below three, unrelated shapes that merely happen to share a
-# font size would be merged.
 GROUP_MIN_COMMON = 3
 
-# The tolerance, in inches, for "this box contains that label" and "this arrow ends at that
-# shape's edge". A deck is drawn by hand, so nothing lines up exactly.
 CONTAIN_TOLERANCE = 0.2
 EDGE_TOLERANCE = 0.35
 LABEL_CHARS = 24
 
-# Beyond this many characters of echoed run text on one line, the trailing note names the
-# deviations without repeating the words.
 MAX_RUN_ECHO = 200
 
 _PLAIN = (False, False, False)
@@ -60,11 +53,6 @@ _A_CNVPR = "{http://schemas.openxmlformats.org/drawingml/2006/main}cNvPr"
 
 _EMU_PER_INCH = 914400
 
-# What python-pptx raises when an accessor does not apply to the shape at hand: a text box
-# has no ``.table``, a connector has no ``.auto_shape_type``, a theme-inherited colour has
-# no ``.rgb``. Probing is the only way to ask. FrontierAgent catches bare ``Exception`` at
-# every one of these; naming the range instead keeps a real bug in this module from being
-# swallowed along with them.
 _ABSENT = (AttributeError, IndexError, KeyError, TypeError, ValueError)
 
 
@@ -237,7 +225,7 @@ def _fill(shape):
     """Solid fill colour as RRGGBB, or ""."""
     try:
         fill = shape.fill
-        if fill.type is not None and int(fill.type) == 1:  # MSO_FILL.SOLID
+        if fill.type is not None and int(fill.type) == 1:
             return str(fill.fore_color.rgb)
     except _ABSENT:
         pass
@@ -323,9 +311,6 @@ def _text_md(shape):
         text = "".join(part for part, _, _ in runs).strip() or paragraph.text.strip()
         if not text:
             continue
-        # Uniform across the line: the markers land at the two ends, where a quotation of
-        # anything inside the line steps over neither. Otherwise the whole thing moves to a
-        # trailing note -- see the module docstring.
         styles = {(marks, tuple(notes)) for part, marks, notes in runs if part.strip()}
         if len(styles) == 1:
             marks, notes = styles.pop()
@@ -431,7 +416,7 @@ def _chart_md(shape):
                 row += [str(values[index]) if index < len(values) else ""
                         for _, values in series]
                 lines.append("\t".join(row))
-        elif series:  # scatter and bubble have no category axis
+        elif series:
             for name, values in series:
                 lines.append(f'- series "{name}": ' + ", ".join(str(v) for v in values))
         custom = _custom_labels(chart)
@@ -445,8 +430,6 @@ def _chart_md(shape):
 def _picture_alt(shape):
     """A picture's alt text -- the only textual description it has."""
     try:
-        # An lxml element with no children is falsy, so ``a or b`` would silently discard a
-        # childless cNvPr; the check has to be ``is None``.
         node = shape._element.find(f".//{_P_CNVPR}")
         if node is None:
             node = shape._element.find(f".//{_A_CNVPR}")
@@ -494,7 +477,6 @@ def _is_line(shape):
             try:
                 kind = str(shape.auto_shape_type).upper()
             except _ABSENT as error:
-                # A 'line' preset raises on auto_shape_type; the message names it.
                 return "line" in str(error).lower()
             if "ARROW" in kind and not _shape_text(shape):
                 return True
@@ -585,7 +567,7 @@ def _arrow_info(shape, index, shapes, boxes):
             src = _label_at_edge(right_end, "left", shapes, boxes)
             dst = _label_at_edge(left_end, "right", shapes, boxes)
             arrow = "←"
-        else:  # a plain connector has no direction of its own; left to right is the default
+        else:
             src = _label_at_edge(left_end, "right", shapes, boxes)
             dst = _label_at_edge(right_end, "left", shapes, boxes)
             arrow = "→"
@@ -646,8 +628,6 @@ def _records(shapes, boxes, pairs, used, skip):
                 record["lines"] = [_tag(bits)]
                 record["needs_vlm"] = True
             elif shape.shape_type == MSO.GROUP:
-                # A group is left whole: decomposing it loses the alignment that made the
-                # author group it, and the slide goes to a vision model anyway.
                 try:
                     count = len(shape.shapes)
                 except _ABSENT:
@@ -747,8 +727,6 @@ def _slide_lines(shapes, boxes, pairs, used, skip):
         if record.get("consumed"):
             continue
         if record.get("needs_vlm"):
-            # Purely visual elements are gathered at the end rather than interleaved: they
-            # carry no text, so in reading order they only interrupt what does.
             visual.extend([record["info"]["line"]] if record["kind"] == "arrow"
                           else record["lines"])
             continue
@@ -862,8 +840,6 @@ def render(path):
         if slide.has_notes_slide:
             note = slide.notes_slide.notes_text_frame.text.strip()
             if note:
-                # At the end of the slide, not the top: the speaker's aside should not sit
-                # between the slide's title and the slide's own words.
                 out.append("")
                 out.append("> **notes:** " + note.replace("\n", "\n> "))
     if visual_slides:

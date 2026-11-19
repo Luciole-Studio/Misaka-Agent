@@ -39,8 +39,6 @@ class Loader(Text):
         self.frames = [*DEFAULT_FRAMES]
         self.intervalMs = DEFAULT_INTERVAL_MS
         self.currentFrame = 0
-        # MISAKA fork: `setInterval` is a timer that re-arms itself (see `_scheduleNextFrame`), so this holds the
-        # pending one; `_animationToken` drops a tick already under way when `stop` runs.
         self.intervalId: asyncio.TimerHandle | threading.Timer | None = None
         self._animationToken = 0
         self.ui: TUI | None = None

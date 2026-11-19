@@ -149,8 +149,6 @@ def _parseBridgeJson(json: str, what: str) -> Any:
     try:
         return jsonParse(json)
     except RecursionError:
-        # MISAKA fork: Python's decoder gives up on values nested a few thousand levels deep, which V8's
-        # decodes; that is the host's limit, not a broken bridge.
         raise
     except Exception:  # noqa: BLE001 - upstream `catch {}`
         raise _BridgeError(f"{what} is not valid JSON") from None
@@ -277,8 +275,6 @@ class Execution:
         # Whether the execution has its outcome.
         self.finished = False
         self._tasks: set[asyncio.Task[Any]] = set()
-        # MISAKA fork: cancelling the task that awaits the result cancels this future, which has no
-        # counterpart for a promise. The run is then abandoned: stop it, and end its VM.
         self.promise.add_done_callback(self._onSettled)
 
         if math.isfinite(options.timeoutMs):
@@ -480,9 +476,6 @@ class Execution:
             reply = {"type": "result", "id": id, "ok": False, "payload": errorMessage(error)}
             status = "error"
         except asyncio.CancelledError:
-            # MISAKA fork: a tool that ends in a cancellation nobody asked this call for (it awaited a
-            # future another component cancelled) rejects like any other failure; unanswered, the
-            # script's promise would never settle. A cancellation of this task passes through.
             task = asyncio.current_task()
             if self.finished or (task is not None and task.cancelling() > 0):
                 raise

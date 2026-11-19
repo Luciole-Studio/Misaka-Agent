@@ -773,7 +773,6 @@ class _Tokenizer:
             endReg.lastIndex = 0
 
             # Clip maskedSrc to same section of string as src (move to lexer?)
-            # MISAKA fork: in UTF-16 code units, as upstream mixes `.length` (units) with code point counts.
             maskedSrc = jsSlice(maskedSrc, -1 * jsLength(src) + lLength)
 
             while (match := endReg.exec(maskedSrc)) is not None:
@@ -869,7 +868,6 @@ class _Tokenizer:
             endReg.lastIndex = 0
 
             # Clip maskedSrc to same section of string as src
-            # MISAKA fork: in UTF-16 code units (see emStrong).
             maskedSrc = jsSlice(maskedSrc, -1 * jsLength(src) + lLength)
 
             while (match := endReg.exec(maskedSrc)) is not None:

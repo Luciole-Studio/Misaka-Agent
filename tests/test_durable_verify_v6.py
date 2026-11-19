@@ -54,9 +54,6 @@ async def toolOutcomes(storage: MemoryStorage) -> list[Any]:
     return [task["state"].get("outcome") for task in page["items"]]
 
 
-# --- V6-SCH-B01: tool execute and tool hooks see a cancelled await as a throw ------------------------------------------
-
-
 async def test_sch_b01_a_tool_that_awaits_a_cancelled_future_fails_with_its_partial_output() -> None:
     setup = chatSetup()
 
@@ -163,16 +160,12 @@ async def test_sch_b01_thrown_by_maps_a_cancelled_await_and_reraises_the_tasks_o
     assert isinstance(asThrown(KeyboardInterrupt()), Exception)
 
 
-# --- V4-B15 (durable side): chord's `Progress.stop()` hands back `Deferred` waiters ---------------------------------
-
-
 async def test_v4_b15_details_still_waiting_when_execute_returns_settle_with_the_terminal_commit() -> None:
     setup = chatSetup()
     holder: dict[str, Any] = {}
 
     async def slow(_args: Any, api: Any, _context: Any) -> dict[str, Any]:
         api.output("first\n")
-        # The output commit is in flight, so these details wait for the next window: the terminal commit settles them.
         holder["pending"] = api.details({"step": 1}, context)
         consume(holder["pending"])
         return {}
@@ -211,15 +204,11 @@ async def test_v4_b15_details_still_waiting_reject_when_the_call_is_aborted() ->
     await asyncio.wait_for(inAfterTool.wait(), 10)
     taskId = (await opened.harness.snapshot(LiveDoc, opened.root.id, context))["tools"][0]["taskId"]
     await opened.harness.abortTask(taskId, context)
-    # Rejected, not left waiting (a wait that times out would raise TimeoutError).
     with pytest.raises(Exception) as rejected:
         await asyncio.wait_for(holder["pending"], 10)
     assert not isinstance(rejected.value, TimeoutError)
     await asyncio.wait_for(submission.wait(context), 10)
     await opened.harness.close(context)
-
-
-# --- V6-SCH-B02 / B03: waiters and the scheduler's ordered sets -----------------------------------------------------
 
 
 async def test_sch_b02_a_waiter_its_awaiter_gave_up_on_leaves_its_set() -> None:
@@ -247,8 +236,6 @@ async def test_sch_b03_fail_fast_checks_keep_insertion_order() -> None:
     checks.clear()
     await opened.harness.close(context)
 
-
-# --- V6-SES-B01 / B02: the Storage guard and `failed` -------------------------------------------------------------
 
 Counter = defineDoc(
     {"kind": "t.v6.counter", "version": 1, "scope": "session", "history": "latest", "initial": lambda: {"count": 0}}
@@ -335,9 +322,6 @@ async def test_ses_b02_failed_does_not_reject_for_a_storage_that_cannot_close(ea
     assert (await session.closed)["reason"] == "failed"
 
 
-# --- V6-SES-B03: the forced retention reads like JavaScript's `Number()` ------------------------------------------
-
-
 @pytest.mark.parametrize("value", ["", "junk", "0", " 25 "])
 def test_ses_b03_a_forced_retention_reads_like_number(value: str) -> None:
     import subprocess
@@ -359,9 +343,6 @@ def test_ses_b03_a_forced_retention_reads_like_number(value: str) -> None:
     retention = float(done.stdout.strip())
     expected = {"": 0.0, "junk": float("nan"), "0": 0.0, " 25 ": 25.0}[value]
     assert retention == expected or (math.isnan(retention) and math.isnan(expected))
-
-
-# --- V6-CM-B01: usage counters a provider left unset stay absent ---------------------------------------------------
 
 
 async def test_cm_b01_a_later_call_reporting_reasoning_adds_to_usage_that_had_none() -> None:
@@ -405,9 +386,6 @@ def test_cm_b01_add_usage_treats_a_stored_null_counter_as_zero() -> None:
     assert (total["reasoning"], total["cacheWrite1h"]) == (2, 5)
 
 
-# --- V6-HAR-B01: an input entry of `None` is `null`, which upstream rejects -----------------------------------------
-
-
 async def test_har_b01_an_input_whose_entry_is_none_is_rejected_and_nothing_is_written() -> None:
     setup = chatSetup()
     setup.faux.setResponses([fauxAssistantMessage([fauxText("ok")])])
@@ -417,9 +395,6 @@ async def test_har_b01_an_input_whose_entry_is_none_is_rejected_and_nothing_is_w
         await opened.root.submit({"type": "input", "content": "x", "entry": None}, context)
     assert await allEntries(opened.root) == before
     await opened.harness.close(context)
-
-
-# --- V6-ME-B02: a watched file rewritten in place is reported (macOS: FSEvents, as libuv) ----------------------------
 
 
 @pytest.mark.skipif(sys.platform not in ("darwin", "linux"), reason="native watching")
@@ -460,12 +435,10 @@ async def test_me_b02_a_watched_file_rewritten_in_place_is_reported_without_any_
     watcher = (await env.watch([{"path": "AGENTS.md"}, {"path": "dir"}], changes.append, context))["value"]
     os.mkdir(os.path.join(root, "dir"))
     writeFile(os.path.join(root, "dir", "inner.txt"), "a", "w")
-    # Past the debounce and macOS's settle rescan: nothing but the rewrite itself can report the change now.
     await asyncio.sleep(1.2)
 
     async def rewrite(path: str, content: str) -> bool:
         start = len(changes)
-        # In place: the file keeps its inode, its directory's entries do not change.
         writeFile(path, content, "r+")
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
@@ -481,9 +454,6 @@ async def test_me_b02_a_watched_file_rewritten_in_place_is_reported_without_any_
         await watcher.close(context)
 
 
-# --- R2-N6 (applied to the new BaseException sites): a closed coroutine is neither a rejection nor a cancellation ---
-
-
 async def test_closing_a_coroutine_that_waits_on_a_commit_does_not_fail_the_session() -> None:
     session = SessionImpl(MemoryStorage())
     guarded = session.storage
@@ -492,7 +462,6 @@ async def test_closing_a_coroutine_that_waits_on_a_commit_does_not_fail_the_sess
     async def run() -> Any:
         return await pending
 
-    # The undecorated body: a coroutine that can be closed while it waits, as a loop closed without cancelling does.
     body = type(guarded)._call.__wrapped__(guarded, None, run)
     body.send(None)
     body.close()

@@ -12,7 +12,7 @@ def test_sdist_and_wheel_keep_package_with_ignored_source_symlink(tmp_path):
     root = Path(__file__).resolve().parents[1]
     project = tmp_path / "project"
     project.mkdir()
-    for name in ("pyproject.toml", ".gitignore", "README.md", "LICENSE"):
+    for name in ("pyproject.toml", ".gitignore", "LICENSE"):
         shutil.copyfile(root / name, project / name)
 
     expected = {
@@ -25,8 +25,6 @@ def test_sdist_and_wheel_keep_package_with_ignored_source_symlink(tmp_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
 
-    # Hatchling visits build/ before misaka/. Its inode deduplication used to
-    # skip the real package after following this excluded directory's symlink.
     shadow = project / "build" / "old-acceptance"
     shadow.mkdir(parents=True)
     (shadow / "misaka").symlink_to(project / "misaka", target_is_directory=True)
@@ -38,7 +36,6 @@ def test_sdist_and_wheel_keep_package_with_ignored_source_symlink(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
-    # uv's default path builds the wheel FROM the sdist, not directly from source.
     [sdist] = dist.glob("*.tar.gz")
     with tarfile.open(sdist) as archive:
         packaged = {}

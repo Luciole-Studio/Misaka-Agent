@@ -36,7 +36,6 @@ def test_the_menu_offers_provider_qualified_references(product_provider):
     assert choices[0] == roster.DEFAULT_CHOICE and choices[-1] == roster.CUSTOM_CHOICE
     concrete = choices[1:-1]
     assert concrete and all(item.startswith(f"{product_provider}/") for item in concrete)
-    # Every menu entry is a valid pin as-is.
     for item in concrete:
         assert roster.resolve_pin(item, runtime) == item
 
@@ -45,7 +44,6 @@ def test_an_invalid_pin_creates_nothing(tmp_path, product_provider):
     ok, message = roster.create_sister("10077", root=str(tmp_path), specialty="x", model="no-such-model")
     assert ok is False and "Unknown model" in message
     assert not os.path.exists(tmp_path / "10077")
-    # The ID is still free: a retry with a good pin succeeds.
     ok, message = roster.create_sister("10077", root=str(tmp_path), model="anthropic/claude-opus-5")
     assert ok is True and "Pinned model: anthropic/claude-opus-5" in message
 
@@ -59,8 +57,6 @@ def test_a_bare_id_pins_on_the_product_provider(tmp_path, product_provider):
 def test_a_gateway_id_with_slashes_pins_on_the_gateway_not_the_vendor(tmp_path, product_provider):
     from misaka.ai.compat import getModels, getProviders
 
-    # A raw ID that exists on exactly one provider and whose first segment names another
-    # real provider: the shape that used to be split and pinned to the vendor's account.
     providers = set(getProviders())
     owners: dict[str, set[str]] = {}
     for provider in providers:

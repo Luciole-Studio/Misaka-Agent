@@ -46,7 +46,6 @@ class SyncOwner:
 
     async def close(self):
         self.closed = True
-        # A cancelled closer still owns the drain, even behind a reschedule.
         await settle(asyncio.create_task(self.stop()))
 
     async def schedule(self, *, startup=False):
@@ -61,7 +60,7 @@ class SyncOwner:
 
     async def _run(self, startup):
         if not startup:
-            await asyncio.sleep(5.0)  # Exact native _SYNC_PUSH_DEBOUNCE_S.
+            await asyncio.sleep(5.0)
         from . import distribution
         from .vendor import skills_sync_client as sync
         from .vendor import skills_sync_client_org as org

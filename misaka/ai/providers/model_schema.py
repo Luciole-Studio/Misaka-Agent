@@ -35,10 +35,8 @@ ThinkingLevelSchema: TypeAlias = Literal["minimal", "low", "medium", "high", "xh
 ModelThinkingLevelSchema: TypeAlias = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 ModelInputModalitySchema: TypeAlias = Literal["text", "image"]
 CacheRetentionSchema: TypeAlias = Literal["none", "short", "long"]
-# MISAKA fork: `Type.Enum(MODEL_PROMPT_CACHE_RETENTIONS)`, named.
 _ModelPromptCacheRetentionSchema: TypeAlias = Literal["short", "long"]
 
-# MISAKA fork: the `Literal`s spell the constants out; they must name the same values in the same order.
 for _schema, _values in (
     (ThinkingLevelSchema, THINKING_LEVELS),
     (ModelThinkingLevelSchema, MODEL_THINKING_LEVELS),

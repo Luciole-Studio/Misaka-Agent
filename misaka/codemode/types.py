@@ -22,7 +22,6 @@ class CodemodeToolContext(TypedDict):
 type CodemodeJsonSchema = dict[str, Any] | bool
 
 
-# MISAKA fork: keyword-only, so the members keep upstream's order with the required `execute` last.
 @dataclass(slots=True, kw_only=True)
 class CodemodeTool:
     # The script calls tools as `tools.<id>(args)`, where `<id>` is the name with characters that
@@ -77,12 +76,6 @@ class CodemodeCall(TypedDict):
 # "script": the script threw or failed to parse; `name` and `stack` come from the script's error.
 # "timeout": the overall deadline expired, or a VM on the calling thread used up its interrupt budget.
 #   The execution ended and the VM was asked to stop; a worker or remote VM may still be computing.
-#   (MISAKA fork: misaka has no VM on the calling thread, and a worker thread cannot be killed, so its
-#   VM may always still be computing.)
-# "aborted": the caller's signal fired or the sandbox was closed. The execution ended and the VM was
-#   asked to stop.
-# "sandbox": the VM or its transport failed outside the script's control (for example a wasm trap, a
-#   worker that cannot start, or a remote sandbox that failed).
 type CodemodeErrorKind = Literal["script", "timeout", "aborted", "sandbox"]
 
 
@@ -162,15 +155,11 @@ class CodemodeSandboxOptions(CodemodeSandboxBaseOptions, total=False):
     # admission without starting a worker. Return a release callback, called once if worker construction fails or
     # when the worker actually exits, not when the result settles. The release callback must not raise.
     # Reservations can be shared across sandbox instances.
-    # MISAKA fork: the release runs on the worker thread as it ends (upstream: on the worker's "exit" event), so
-    # it must be thread-safe; it runs even when the event loop that started the worker has closed.
     acquireWorker: Callable[[], Callable[[], None]]
     # Called once for each worker started by `execute()` or `start()`. `exited` resolves when that worker actually
     # exits, which may be after the result and `close()` settle: a non-interruptible built-in can delay its end.
     # Use it to keep the worker counted against host concurrency limits until it exits. A raised error fails the
     # execution and requests worker termination.
-    # MISAKA fork: `exited` is a `concurrent.futures.Future` set from the worker thread as it ends (await it with
-    # `asyncio.wrap_future`), so it resolves even after the event loop that started the worker has closed.
     onWorkerStarted: Callable[[concurrent.futures.Future[None]], None]
 
 

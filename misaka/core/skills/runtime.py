@@ -117,7 +117,7 @@ class SkillRuntime:
         with self._lock:
             if self.closed:
                 raise RuntimeError("Skill runtime is closed.")
-            env_file.write({name: value}, self.profile)     # the role's .env, locked and owner-only
+            env_file.write({name: value}, self.profile)
 
     def register_env(self, names):
         from .vendor.readiness import _ENV_VAR_NAME_RE
@@ -210,14 +210,12 @@ class SkillRuntime:
             return result
 
     def prepare_remote(self):
-        # Serialize transport completion with cleanup, including partial uploads.
         with self._lock:
             if self.closed:
                 raise RuntimeError("Skill runtime is closed.")
             if self.remote is None:
                 return []
             mounts = self.credential_mounts()
-            # The host transport owns authentication and remote process identity.
             old = {m["container_path"]: m for m in self._remote_manifest}
             current = {m["container_path"]: m for m in mounts}
             self._remote_manifest = list((old | current).values())
@@ -228,10 +226,8 @@ class SkillRuntime:
             return mounts
 
     def close(self):
-        self.closed = True  # Reject new work while waiting for an in-flight upload.
+        self.closed = True
         with self._lock:
-            # A failed remote deletion remains retryable, but the owner is already
-            # closed to further execution and local copies/secrets are discarded.
             self.closed = True
             try:
                 if self.remote is not None and self._remote_manifest:

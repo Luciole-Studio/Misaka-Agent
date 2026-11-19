@@ -49,30 +49,19 @@ W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 DC = "{http://purl.org/dc/elements/1.1/}"
 
-# A style whose name is one of these is a top-level heading. Word ships localised style
-# names and a document authored in Chinese Word carries "标题 1" where an English one
-# carries "Heading 1"; both are the same style and both have to become "#".
 _HEADING = re.compile(r"^(?:heading|标题|titre|überschrift|encabezado)\s*(\d+)$", re.IGNORECASE)
 _TITLE_STYLES = frozenset({"title", "标题", "subtitle", "副标题"})
 
-# Footnote and endnote ids 0 and 1 are the separator rules Word draws above the notes, not
-# notes. They carry ``w:type``; a real note does not.
 _NOT_A_NOTE = frozenset({"separator", "continuationSeparator", "continuationNotice"})
 
 MAX_ALT_CHARS = 120
 
-# Beyond this many characters of echoed emphasis on one line, the trailing note names the
-# marks instead of repeating the words. A document typeset entirely in bold runs would
-# otherwise double the page.
 MAX_EMPHASIS_ECHO = 200
 
 _PLAIN = (False, False, False, False)
 
-# Footnotes and endnotes number independently in Word, so both would print "[^1]" and a
-# reader could not tell which section to look the marker up in. The endnote takes a prefix.
 _MARKER = {"footnote": "", "endnote": "e"}
 
-# In the order ``_marks`` returns them.
 _MARK_NAMES = ("bold", "italic", "strikethrough", "underline")
 
 
@@ -245,24 +234,19 @@ def _inline(container, notes, rels, state, *, plain=False):
             trailing.extend(inner_trailing)
             target = rels.get(child.get(f"{R}id", ""), "")
             if target and target not in inner:
-                # Autolink form, after the line: ``[text](url)`` would put "](" inside the
-                # sentence. A link whose text already is the URL needs nothing.
                 trailing.append(f"<{target}>")
         elif name in ("ins", "smartTag", "sdt", "sdtContent", "bdo", "dir", "fldSimple"):
-            # Preserve stored field results too; reading does not evaluate field instructions.
             inner, inner_trailing = _inline(child, notes, rels, state, plain=True)
             if inner:
                 pieces.append([_PLAIN, inner])
             trailing.extend(inner_trailing)
         elif name == "del":
-            continue  # a tracked deletion is text the author removed; it is not the document
+            continue
     text = "".join(part for _, part in pieces)
     if plain:
         return text, trailing
     marked = {marks for marks, part in pieces if part.strip()}
     if len(marked) == 1 and any(next(iter(marked))):
-        # Uniform across the whole line: the markers sit at the two ends, where they cost a
-        # quotation of anything inside the line nothing.
         text = _wrap(text, next(iter(marked)))
     else:
         note = _emphasis_note(pieces)
@@ -307,7 +291,7 @@ class _Notes:
     """
 
     def __init__(self, bodies):
-        self.bodies = bodies                    # {(kind, id): rendered text}
+        self.bodies = bodies
         self.order = {"footnote": {}, "endnote": {}}
         self.used = {"footnote": [], "endnote": []}
 
@@ -340,8 +324,6 @@ def _list_of(paragraph, styles):
                 num_id = id_node.get(f"{W}val")
     style = _style_name(paragraph, styles).lower()
     if num_id is not None:
-        # A ``w:numPr`` says a list, but not which kind; the style name is the only hint
-        # python-docx exposes without resolving numbering.xml's abstract definitions.
         return (num_id, level, "number" in style or "numbered" in style)
     if style.startswith("list bullet"):
         return ("style-bullet", level, False)
@@ -371,7 +353,6 @@ def _heading_level(paragraph, styles):
     match = _HEADING.match(name)
     if match:
         return min(int(match.group(1)), 6)
-    # Word also writes headings as the bare style id "Heading1" with no space.
     match = re.match(r"^heading(\d+)$", name.replace(" ", ""), re.IGNORECASE)
     return min(int(match.group(1)), 6) if match else None
 
@@ -386,14 +367,10 @@ def _cell_text(cell, notes, rels, state, styles):
     for child in cell:
         name = _local(child)
         if name == "p":
-            # ``plain``: emphasis markers inside a cell would sit between two cells of the
-            # same row once the tabs fold away, and a row is exactly what gets quoted.
             rendered = _line(*_inline(child, notes, rels, state, plain=True))
             if rendered:
                 parts.append(rendered)
         elif name == "tbl":
-            # A nested table is flattened into its parent cell: its rows would otherwise
-            # claim columns of the outer table they do not belong to.
             for row in child.findall(f"{W}tr"):
                 inner = [_cell_text(c, notes, rels, state, styles)
                          for c in row.findall(f"{W}tc")]

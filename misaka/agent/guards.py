@@ -36,14 +36,6 @@ class GuardDecision:
 _NONE = GuardDecision("none")
 
 
-# --------------------------------------------------------------------------
-# 1. Byte-identical tool calls on consecutive turns
-# --------------------------------------------------------------------------
-
-# borrowed from FrontierAgent(components/observers/repetition_guard.py), see its
-# comment for the measured basis; revisit with local data.
-# Its basis: 71% of sub-agents that exhausted their turn budget did so inside a
-# run of ten or more consecutive byte-identical calls, median 87, worst 198/200.
 REPEATED_CALL_HINT_STREAK = 3
 REPEATED_CALL_STOP_STREAK = 6
 
@@ -103,10 +95,7 @@ class RepeatedToolCallGuard:
         hint_streak: int = REPEATED_CALL_HINT_STREAK,
         stop_streak: int = REPEATED_CALL_STOP_STREAK,
     ) -> None:
-        # 2 is the floor: a hint threshold of 1 would fire on every tool call.
         self.hint_streak = max(2, int(hint_streak))
-        # Always at least one turn of hint before the stop, so the model gets a
-        # chance to act on the warning.
         self.stop_streak = max(self.hint_streak + 1, int(stop_streak))
         self._signature = ""
         self._streak = 0
@@ -142,23 +131,12 @@ class RepeatedToolCallGuard:
         return _NONE
 
 
-# --------------------------------------------------------------------------
-# 2. Near-verbatim assistant prose across recent turns
-# --------------------------------------------------------------------------
-
-# borrowed from FrontierAgent(components/observers/text_repetition_guard.py), see
-# its comment for the measured basis; revisit with local data.
 TEXT_SIMILARITY_THRESHOLD = 0.85
 TEXT_WINDOW_SIZE = 4
 TEXT_MIN_CHARS = 60
 TEXT_HINT_STREAK = 4
 TEXT_STOP_STREAK = 6
 
-# One token per CJK character, one token per run of word characters elsewhere.
-# FrontierAgent splits on whitespace, which collapses a whole Chinese sentence
-# into a single token and leaves the guard comparing punctuation-delimited
-# chunks. Splitting CJK per character turns the bigrams below into the
-# character-bigrams Chinese actually needs, with no segmentation dependency.
 _CJK = "぀-ヿ㐀-䶿一-鿿豈-﫿가-힯"
 _TOKEN_RE = re.compile(f"[{_CJK}]|[^\\W{_CJK}]+")
 
@@ -172,11 +150,6 @@ def _shingles(text: str) -> frozenset[str]:
 
 
 def _jaccard(a: frozenset[str], b: frozenset[str]) -> float:
-    # An empty side means the text carried no comparable tokens at all -- a rule
-    # of dashes, a row of emoji, a box-drawing progress bar. Set-theoretic
-    # Jaccard calls two empty sets identical, which would make any two such
-    # turns "near-verbatim" no matter how different they look. Absence of
-    # evidence is not evidence, so an empty side never matches.
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
@@ -228,8 +201,6 @@ class TextRepetitionGuard:
         self._history.append(current)
 
         if not matched:
-            # 1, not 0: this turn is itself the seed of the next possible run,
-            # so the first turn that matches it brings the streak to 2.
             self._streak = 1
             self._hinted = False
             return _NONE
@@ -252,15 +223,6 @@ class TextRepetitionGuard:
         return _NONE
 
 
-# --------------------------------------------------------------------------
-# 3. Finalization reserve on a shrinking budget or lease
-# --------------------------------------------------------------------------
-
-# borrowed from FrontierAgent(components/observers/finalization_reserve.py and
-# last_turn_forcer.py), see their comments for the measured basis; revisit with
-# local data. FA reserves 8 of ~50 turns (~15%) for finalization and forces the
-# penultimate turn; the two ratios below are those two tiers expressed as a
-# fraction of the remaining allowance, so one guard serves any unit.
 FINALIZATION_HINT_RATIO = 0.15
 FINALIZATION_STOP_RATIO = 0.05
 
@@ -300,7 +262,6 @@ class FinalizationReserve:
         except (TypeError, ValueError):
             ratio = -1.0
         if ratio < 0:
-            # An unknown or nonsensical allowance is not evidence of scarcity.
             return _NONE
 
         tier = 2 if ratio <= self.stop_ratio else 1 if ratio <= self.hint_ratio else 0
@@ -321,23 +282,11 @@ class FinalizationReserve:
         )
 
 
-# --------------------------------------------------------------------------
-# 4. Turns that spend the allowance without doing any work
-# --------------------------------------------------------------------------
-
-# FrontierAgent e4cb2397109c957a2f99c3a5d850b9fc479dbef6 /
-# workflows/agent_team/observers/no_progress_guard.py (Apache-2.0; THIRD_PARTY_NOTICES.md):
-# its thresholds, gate, resets and nudge, with its four tools named in MISAKA's vocabulary.
-NO_PROGRESS_HINT_STREAK = 6            # soft_streak
-NO_PROGRESS_STOP_STREAK = 12           # hard_streak
+NO_PROGRESS_HINT_STREAK = 6
+NO_PROGRESS_STOP_STREAK = 12
 NO_PROGRESS_MIN_REPEATED_CREATES = 3
 NO_PROGRESS_COOLDOWN_TURNS = 3
-# A task prompt shorter than this (after stripping trailing punctuation) is too terse to be a
-# real research instruction -- one of the trivial wind-down markers a spin assigns to
-# throwaway agents ("End.", "OK", "Done", ...).
 _MIN_MEANINGFUL_PROMPT_LEN = 8
-# Trivial task prompts a wind-down spin assigns to throwaway agents. Used only to ACCELERATE
-# the hard stop (strong signal the agent is not doing real work), never as the sole trigger.
 _DEGENERATE_PROMPTS = frozenset({
     "end", "done", "complete", "completed", "final", "finalize", "finish",
     "finished", "x", "ok", "okay", "stop", "confirm", "nothing", "na", "n/a",
@@ -381,8 +330,6 @@ class NoProgressGuard:
         self.cooldown_turns = max(1, int(cooldown_turns))
         self._turn = 0
         self._last_hint_turn = -(10**9)
-        # Agents whose most recent assignment was a trivial wind-down prompt. A report from one
-        # of these is completion of the spin itself, not evidence that substantive work happened.
         self._degenerate_agents: set[str] = set()
         self._reset()
 
@@ -396,8 +343,6 @@ class NoProgressGuard:
         self._turn += 1
         calls = list(tool_calls or ())
         results = list(tool_results or ())
-        # Which agents were assigned substantive vs. trivial work, before reading reports:
-        # a turn can both assign and collect (and a foreground Agent does both in one call).
         self._record_assignment_quality(calls, results)
         reports = self._report_agents(results)
         fresh_report = any(agent not in self._degenerate_agents for agent in reports)
@@ -407,7 +352,6 @@ class NoProgressGuard:
             return _NONE
 
         names = {str(read_field(call, "name", "") or "").casefold() for call in calls}
-        # Empty turn, or any non-management tool: real work or a different mode.
         if not names or not names <= self.management:
             self._reset()
             return _NONE
@@ -417,8 +361,6 @@ class NoProgressGuard:
             self._creates += 1
         if names & self.assign and self._assign_is_degenerate(calls):
             self._degenerate += 1
-        # Not the pathology yet: without REPEATED new-agent creation this is just normal
-        # fan-out / waiting on running sub-agents.
         if self._creates < self.min_repeated_creates:
             return _NONE
 
@@ -512,9 +454,6 @@ class _SessionGuards:
     ):
         self._session = session
         self._allowance = allowance
-        # The wall clock is the one allowance every headless run has: `run_session`
-        # cuts the whole prompt off with `asyncio.wait_for`, and a run cut there has
-        # no assistant text to return. A token cap only exists when one is configured.
         self._wall_total = float(wall_seconds) if wall_seconds else 0.0
         self._wall_start = time.monotonic() if self._wall_total > 0 else 0.0
         self.repeated = RepeatedToolCallGuard()
@@ -588,36 +527,15 @@ class _SessionGuards:
             if read_field(block, "type", "") == "text"
         )
 
-        # Take and clear both flags before anything can return. A request can die
-        # between arming and firing -- an errored or aborted turn returns straight out
-        # of `_run_loop` without ever consulting `finishTurn` -- so a flag left
-        # standing would otherwise be waiting for the *next* request. Whoever reaches
-        # `after_turn` first owns the flags.
         forced, self._forcing, self._forced_turn = self._forced_turn, False, False
 
-        # Clearing alone is not enough: the stranded flag would still be spent on the
-        # next request's first turn, ending it after its tools had already run but
-        # before the model wrote anything. So the flag is confirmed against the one
-        # observable consequence of arming it -- `next_turn` handed this turn an empty
-        # tool list, and a turn with no tools cannot come back with tool calls. A turn
-        # that did call tools was never the wrap-up turn, whatever the flag says; it
-        # falls through and is judged on its own merits.
         if forced and not tool_calls:
-            # The wrap-up turn ran with no tools available. Whatever it produced is the
-            # answer, so no verdict of its own is acted on -- but the guards must still
-            # see it. This is the only tool-free turn the whole request has, and a
-            # tool-free turn is the documented reset (see RepeatedToolCallGuard and
-            # NoProgressGuard): `_run_session` keeps the session alive for follow-up
-            # turns, so a streak left standing here stops the next request's first call.
             self._observe_prose_turn(text)
             return True
 
-        # Every turn is observed, tool-free ones included: that call is what tells
-        # RepeatedToolCallGuard one request ended, so the next request may legitimately
-        # open with the same call.
         decisions = [
             self.repeated.observe(tool_calls),
-            self.text.observe(text),  # index 1: _resolve downgrades this one
+            self.text.observe(text),
             self.no_progress.observe(tool_calls, read_field(context, "toolResults", []) or []),
         ]
         allowance = self._scarcest_allowance()
@@ -630,14 +548,10 @@ class _SessionGuards:
         if verdict.action == "stop":
             self.stopped = verdict.message
             if not tool_calls:
-                # Already a prose turn: the request is ending on its own and the model
-                # has had its say. Nothing left to force.
                 return True
             self._forcing = True
             await self._session.steer(verdict.message)
             return False
-        # A hint is only worth queueing while the loop is still going. A tool-free turn
-        # ends the request; waking it back up to deliver advice would answer nobody.
         if tool_calls:
             await self._session.steer(verdict.message)
         return False
@@ -658,12 +572,8 @@ class _SessionGuards:
 
         current = read_field(context, "context")
         if current is None:
-            # No snapshot to rewrite: the tools were never stripped, so this turn is not
-            # the wrap-up turn and must not be marked as one.
             return None
         self._forced_turn = True
-        # pi 0.87: the transcript's system messages carry the prompt and the tool declarations;
-        # an empty executable set is declared to the model as every tool removed.
         return AgentLoopTurnUpdate(
             context=AgentContext(messages=read_field(current, "messages", []) or [], tools=[])
         )

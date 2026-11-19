@@ -88,7 +88,6 @@ def agentLoop(
         except BaseException as error:  # noqa: BLE001 - handed to the stream's consumer
             _failStream(stream, error)
 
-    # MISAKA fork: the task is held until it finishes (the event loop keeps only a weak reference to a task).
     spawn_stream_task(run())
     return stream
 
@@ -467,8 +466,6 @@ async def _streamAssistantResponse(
     # Convert to LLM-compatible messages (AgentMessage[] → Message[])
     llmMessages = list(await maybe_await(config.convertToLlm(messages)))
 
-    # MISAKA fork: `convertToLlm` may hand back mappings or messages of other model classes; they are validated into
-    # the message models the adapters read (message models pass through as they are).
     llmContext = normalizeContext(
         Context(
             messages=[
@@ -605,7 +602,6 @@ async def _executeToolCalls(
     emit: AgentEventSink,
 ) -> _ExecutedToolCallBatch:
     """Execute tool calls from an assistant message."""
-    # MISAKA fork: duplicate tool-call IDs are normalized before any result is keyed by them.
     _uniquifyToolCallIds(assistantMessage)
     toolCalls = [content for content in assistantMessage.content if content.type == "toolCall"]
     hasSequentialToolCall = any(
@@ -775,7 +771,6 @@ class _ExecutedToolCallOutcome:
 _FinalizedToolCallOutcome = AgentToolCallOutcome
 
 # The `beforeToolCall` and `afterToolCall` hooks of `AgentLoopConfig`.
-# MISAKA fork: upstream's `Pick<AgentLoopConfig, "beforeToolCall" | "afterToolCall">` is anything carrying the two.
 type ToolCallHooks = Any
 
 type _ToolUpdateSink = Callable[[AgentToolResult], Awaitable[None] | None]
@@ -823,8 +818,6 @@ async def _prepareToolCall(
         tools = currentContext.tools or []
     tool = next((t for t in tools if t.name == toolCall.name), None)
     if tool is None:
-        # MISAKA fork: a legacy alias resolves to its tool. Exact names win; permission and schema checks see the
-        # canonical tool, while the transcript keeps its historical wire call and call ID.
         tool = next((t for t in tools if toolCall.name in getattr(t, "aliases", ())), None)
         if tool is not None:
             toolCall = toolCall.model_copy(update={"name": tool.name})
@@ -861,8 +854,6 @@ async def _prepareToolCall(
                 if beforeResult.terminate is True:
                     result.terminate = True
                 return _ImmediateToolCallOutcome(result=result, isError=True)
-            # MISAKA fork: CCB PreToolUse.updatedInput replaces the arguments, validated again. A call whose own
-            # arguments failed to parse never gets here: validateToolArguments refused it above.
             if beforeResult is not None and beforeResult.updatedInput is not None:
                 validatedArgs = validateToolArguments(
                     tool, toolCall.model_copy(update={"arguments": beforeResult.updatedInput})

@@ -46,8 +46,6 @@ def split_deliverable(value):
     return name, "\n".join(([detail] if detail else []) + rest).strip()
 
 
-# A file extension where a name ends: a dot and a letter, not followed by more of a filename.
-# `v1.2 计划.md` and `archive.tar.gz` have one; `credential-sim.md 与 credential-sim.py` has two.
 _EXTENSION = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,15}(?![A-Za-z0-9_.-])")
 
 

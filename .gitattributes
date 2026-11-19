@@ -1,14 +1,9 @@
-# Default to LF for text files across the repo (as pi and herdr do): Git for Windows defaults
-# to core.autocrlf=true, which would hand a Windows install CRLF prompts, skills and fixtures.
 * text=auto eol=lf
 
-# Windows scripts should keep CRLF (pi; Hermes likewise for PowerShell)
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
 
-# Shell scripts should keep LF
 *.sh text eol=lf
 
-# Vendored wheels are zip archives. text=auto must not rewrite them.
 *.whl binary

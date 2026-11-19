@@ -30,9 +30,6 @@ from misaka.ai.types import Tool as AiTool
 from misaka.ai.types import ToolCall as AiToolCall
 from misaka.ai.utils.validation import validateToolArguments
 from misaka.chord._promise import isRejection
-
-# MISAKA fork: upstream compiles `structuredOutputSchema` with the typebox package's `Compile`; chord's TypeBox stand-in
-# checks a JSON schema with TypeBox's semantics and error wording, so durable adds no dependency for it.
 from misaka.chord._typebox import Value as TypeBoxValue
 from misaka.chord.context import Context, awaitWithContext
 from misaka.chord.delta import overlap
@@ -131,8 +128,6 @@ def validate(tool: dict[str, Any], call: dict[str, Any], args: dict[str, Any]) -
     try:
         declared = AiTool(name=tool["name"], description=tool["description"], parameters=tool["parameters"])
         plain = {key: value for key, value in call.items() if key != "parent"}
-        # MISAKA fork: TypeBox lets an optional property hold `undefined` (a repair may set one); misaka.ai's jsonschema
-        # validator would check `UNDEFINED` as a value, so it validates the arguments without such properties.
         defined = definedProperties(args)
         return {"args": validateToolArguments(declared, AiToolCall.model_validate({**plain, "arguments": defined}))}
     except Exception as error:  # noqa: BLE001 - invalid arguments are reported to the model

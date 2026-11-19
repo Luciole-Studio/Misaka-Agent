@@ -27,7 +27,6 @@ from misaka.core.tools._office._receipt import format_receipt, normalise
 from misaka.core.tools._office._runs import md_hint
 from misaka.core.tools._office.paths import pdf_path
 
-# Suffix to writer. Each module owns its op set and its own refusal for an unknown op.
 _WRITERS = {}
 for _module in (_docx, _xlsx, _pptx, _text):
     for _suffix in _module.SUFFIXES:
@@ -35,10 +34,6 @@ for _module in (_docx, _xlsx, _pptx, _text):
 
 SUFFIXES = frozenset(_WRITERS)
 
-# The Markdown hint is for the formats where formatting is structure: writing ``**bold**``
-# into a .docx paragraph produces four literal asterisks. In a .md or .html file the markup
-# IS the content, and in a .csv or .json there are no runs to point the model at, so the
-# hint there would be advice to stop doing the right thing.
 _HINT_FORMATS = frozenset(_docx.SUFFIXES | _pptx.SUFFIXES | _xlsx.SUFFIXES)
 
 __all__ = ["SUFFIXES", "format_of", "run_ops", "validate_ops"]
@@ -200,7 +195,6 @@ def run_ops(path, ops, *, overwrite=False):
                     stopped_at = index
                     break
             if stopped_at is None:
-                # Recalculation is part of staging, never a post-commit mutation.
                 edited_workbook = writer is _xlsx and any(r["op"] != "export_pdf" for r in results)
                 if edited_workbook and _xlsx.cache_empty(source):
                     if _recalculate(source, meta):
@@ -224,7 +218,6 @@ def run_ops(path, ops, *, overwrite=False):
             failure["idx"] = index
             results.append(failure)
             if "rollback incomplete" in str(error):
-                # A filesystem that also rejects restoration breaks the usual rollback promise.
                 return f"[error] {error}"
     hint = md_hint(ops) if os.path.splitext(target)[1].lower() in _HINT_FORMATS else ""
     if cleanup_warnings:

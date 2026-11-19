@@ -45,12 +45,11 @@ def board_text(con, workspace=None):
     if not rows:
         return "(No task cards on the board.)"
     out = []
-    cur = object()   # Sentinel that matches no folder, so the first group always gets a header.
+    cur = object()
     for r in rows:
         if r["workspace"] != cur:
             cur = r["workspace"]
             out.append(f"\n▌{os.path.basename(cur.rstrip(os.sep)) or cur}")
-        # Pad the plain text first: format widths count ANSI escape bytes as visible columns.
         status = f"{r['status']:<18}"
         signal = cards.card_signal(r)
         out.append(f"{r['id']}  {_c(r['status'], status)}  {r['assignee']:<16} p{r['priority']}  {r['title']}"

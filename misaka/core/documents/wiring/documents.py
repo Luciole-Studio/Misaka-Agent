@@ -21,9 +21,6 @@ from misaka.core.documents.prompt import (
 )
 from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.platform.toolkit import register_tool as _register
-
-# The read tool already answers "this model cannot see images" for every attachment MISAKA sends;
-# one wording for the whole product beats a second one that drifts. It has no public alias.
 from misaka.core.tools.read import getNonVisionImageNote
 from misaka.core.tools.truncate import TruncationOptions, formatSize, truncateHead
 from misaka.core.web import vision
@@ -78,21 +75,6 @@ def _printed(hit):
 def _find(query, doc_id, ctx):
     return corpus.search_literal(query, doc_id=doc_id, workspace=_workspace(ctx))
 
-
-# -- what a page is made of -----------------------------------------------------------------------
-#
-# ``meta['ocr']`` says a document's text was read off the page by tesseract rather than lifted
-# from a text layer, and ``meta['ocr_pages']`` says which pages when a book holds both kinds
-# (absent means all of them). index.py has recorded it since OCR existed here and nothing read
-# it, so OCR text and a publisher's text layer looked identical at every tool -- including in
-# doc_verify's answer, which is the one the research ledger records a quotation against. OCR
-# has an error rate; a citation should not carry it silently.
-#
-# ``meta['unread_pages']`` names the pages that needed OCR and did not get it, with the reason
-# (no ocrmypdf, a failed run), and the pages OCR found no text on (a blank scan, a photograph,
-# a map), which ``_unread`` keeps apart; ``meta['reread']`` names the pages a newer extractor
-# rewrote. Both used to be silence: an empty page in doc_read looked like a
-# blank one, and a page whose text changed under a recorded quotation looked like any other.
 
 def _row(doc_id, root):
     """The listing row for one document under ``root`` (its meta.json, as ``docs`` lists it), or ``{}``."""
@@ -152,7 +134,7 @@ def _ocr_note(row):
 
 def _seeing(row):
     """How a reader sees a page the text does not carry."""
-    if str(row.get("orig_path") or "").lower().endswith(_RENDERABLE):     # a DjVu page renders too
+    if str(row.get("orig_path") or "").lower().endswith(_RENDERABLE):
         return "look at them with doc_page_image"
     return "only the source file shows them"
 
@@ -167,8 +149,6 @@ def _page_notes(row, start, end, figs=None):
         lines.append(f"Page {n} has no text here ({why}); {_seeing(row).replace('them', 'it')}.")
     if len(unread) > 10:
         lines.append(f"{len(unread) - 10} more pages in this range have no text here either.")
-    # A page OCR read in an otherwise typeset document is a scan or a picture with little text (a
-    # plate and its caption, a chart): figures() leaves it out, so it is named here instead.
     listed = row.get("ocr_pages") if row.get("ocr") else None
     partly = isinstance(listed, list) and len(listed) < (row.get("pages") or 0)
     if partly and (hit := [n for n in listed if isinstance(n, int) and start <= n <= end]):
@@ -193,8 +173,6 @@ def _page_from_ocr(row, page):
     return bool(row.get("ocr")) and (page in listed if isinstance(listed, list) else True)
 
 
-# -- rendering a page as a picture ----------------------------------------------------------------
-
 _SOURCE_STEM = "source"
 
 
@@ -212,7 +190,6 @@ def _source_path(ddir):
     for name in sorted(names):
         stem, ext = os.path.splitext(name)
         path = os.path.join(ddir, name)
-        # A symlink named source.pdf would read a file outside the corpus; the corpus writes a copy.
         if stem == _SOURCE_STEM and ext and os.path.isfile(path) and not os.path.islink(path):
             return path
     return None
@@ -231,20 +208,11 @@ def _source(doc_id, ctx):
     return root, (_source_path(ddir) if ddir else None), _row(doc_id, root).get("title") or doc_id
 
 
-# One rendered page: what the model needs to read a scan, not a print master. The byte cap
-# sits under the PNG size of a text page at 2000 px, so the resize's candidate list falls
-# through to JPEG (quality 80 first) for those and keeps PNG for small line art.
 OUTLINE_MAX_BYTES = 200 * 1024
-# A search lists every page that matches: stopping at ten looked the same as there being ten. This
-# only stops a word found on nearly every page of a large library from filling one prompt turn.
 FIND_MAX_BYTES = 200 * 1024
 PAGE_IMAGE_MAX_SCALE = 2.0
 PAGE_IMAGE_MAX_SIDE = 2000
 PAGE_IMAGE_MAX_BYTES = 768 * 1024
-# A figure is rendered alone at the scale that brings its longer side to PAGE_IMAGE_MAX_SIDE --
-# axis labels and legends that a whole page at 2x leaves unreadable -- but not past this, where a
-# thumbnail would only be blown up into blur. The margin takes in what sits just outside the
-# box: a vector chart's labels are text, not part of the drawing the box was measured round.
 FIGURE_MAX_SCALE = 6.0
 FIGURE_MARGIN = 0.05
 
@@ -262,8 +230,6 @@ def _figure_line(page, record):
         return (f"Page {page} is slide {record['slide']}, which carries pictures or shapes its text cannot "
                 f"(needs_vlm): doc_page_image(doc_id, {page}) shows the slide.")
     if "embedded" in record:
-        # The alt text is the document's own words and is already on the page as ``![...]``;
-        # repeating it here would let a document speak in this tool's voice.
         count = len(record["embedded"])
         pick = "figure=1" if count == 1 else f"figure=1..{count}, in the order of its ![...] markers"
         return (f"Page {page} holds {'a picture' if count == 1 else f'{count} pictures'} the document embeds "
@@ -310,9 +276,6 @@ def _render_page(pdf_path, page, scale, box=None):
     return (base64.b64decode(value["png"], validate=True) if value["png"] else None), value["pages"]
 
 
-# What doc_page_image can show: a page of a PDF, a DjVu or a deck; a picture a Word document or
-# an EPUB embeds. A deck goes the way FrontierAgent sends one to its vision reader: exported to
-# PDF by LibreOffice, then one page rendered.
 _RENDERABLE = (".pdf", ".djvu", ".pptx", ".ppt", ".docx", ".epub")
 
 
@@ -336,9 +299,6 @@ def _picture_png(data, member):
             return f.read()
 
 
-# A picture is decoded in this process (a PDF page renders in a child, capped): a 41 KB PNG of
-# 12000 x 12000 pixels took 800 MB here. A JPEG is decoded at a reduced size; anything else this
-# large is refused in a sentence.
 PICTURE_PIXELS_AT_MOST = 40_000_000
 
 
@@ -348,7 +308,7 @@ def _pillow_png(data):
 
     from PIL import Image
     try:
-        with warnings.catch_warnings():         # the size is checked here, against a lower bound
+        with warnings.catch_warnings():
             warnings.simplefilter("ignore", Image.DecompressionBombWarning)
             image = Image.open(BytesIO(data))
     except Image.DecompressionBombError as error:
@@ -358,7 +318,7 @@ def _pillow_png(data):
     with image:
         width, height = image.size
         if width * height > PICTURE_PIXELS_AT_MOST:
-            scale = 2                           # what a JPEG decodes at: 1/2, 1/4, 1/8
+            scale = 2
             while width * height > PICTURE_PIXELS_AT_MOST * scale * scale and scale < 8:
                 scale *= 2
             image.draft("RGB", (width // scale, height // scale))
@@ -438,20 +398,12 @@ def register(harn):
         if not rows:
             return _text("No documents are indexed in this workspace.")
         if params.query:
-            # Source paths too: the workspace index lists a large card's documents by folder, and
-            # a title is the name a document was first indexed under -- a card that indexed its
-            # own folder while working keeps the file name, not the declared path (42 of 33,298
-            # documents on one project, and 450 with more than one source).
             needle = params.query.lower()
             rows = [r for r in rows if needle in (r["title"] or "").lower()
                     or any(needle in str(path).lower() for path in r.get("paths") or [r.get("orig_path") or ""])]
         if not rows:
             return _text("No indexed document's title or source path matches this filter. "
                          "Omit query to list all documents.")
-        # A title is the document's own words -- an EPUB's dc:title, an HTML <title>, the name a
-        # card gave its artifact -- and it used to be the file name, which the workspace chose.
-        # doc_outline and doc_find fence theirs; rows read out in the tool's own voice would let
-        # a downloaded book put instructions in the model's context under our byline.
         return _text(untrusted("doc-list", "\n".join(
             f"  {r['doc_id']}  {r['pages']:>4} pages{_ocr_badge(r)}  {r['title']}" for r in rows)))
 
@@ -473,12 +425,9 @@ def register(harn):
         o = await _off_loop(corpus.tree_outline, params.doc_id, workspace=workspace)
         if signal_aborted(signal):
             return _text("Cancelled.")
-        # The fidelity note is ours, so it stays outside the fence the document's headings go in.
         note = _ocr_note(await _off_loop(_row, params.doc_id, workspace))
         note += _figure_summary(await _off_loop(corpus.figures, params.doc_id, workspace=workspace))
         if o:
-            # One tool result is one prompt turn: a heading tree has no natural bound, so it gets
-            # the same kind of cap as the workspace index (misaka_research_view) and find/grep.
             cut = truncateHead(o, TruncationOptions(maxLines=2**31 - 1, maxBytes=OUTLINE_MAX_BYTES))
             tail = ("Use doc_read(doc_id, node=<node-id>) to read a section.\n" if not cut.truncated else
                     f"[{formatSize(OUTLINE_MAX_BYTES)} limit reached: {cut.outputLines} of {cut.totalLines} outline "
@@ -488,15 +437,11 @@ def register(harn):
         st = await _off_loop(corpus.structure, params.doc_id, workspace=workspace)
         if not st:
             return _text("Document not found. Use doc_list to find its document ID.")
-        # Every page, under the guard the heading tree has: eighty lines of a 120-page deck read
-        # as an eighty-page deck.
         heads = "\n".join(f"  p{p['page']}  {p['head']}" for p in st.get("pages", []))
         cut = truncateHead(heads, TruncationOptions(maxLines=2**31 - 1, maxBytes=OUTLINE_MAX_BYTES))
         tail = "" if not cut.truncated else (
             f"[{formatSize(OUTLINE_MAX_BYTES)} limit reached: {cut.outputLines} of {cut.totalLines} pages "
             "shown. Read the rest with doc_read(doc_id, pages=<range>); doc_find locates text beyond the cut.]\n")
-        # Why there is no outline is our note, not the document's, so it stays outside the fence.
-        # Silence here reads as "this document has no structure", which for a book is a lie.
         why = "" if await _off_loop(corpus.pageindex_available) else (
             "This install cannot extract document structure (the pageindex extra is missing), so "
             "every document here is page-navigable only. Report that rather than concluding the "
@@ -535,8 +480,6 @@ def register(harn):
             except ValueError:
                 return _text("pages must be a single page such as '32' or a range such as '32-40'.")
         else:
-            # A short document has no outline, so there is no node to give. One window comes back,
-            # and its note carries on from there with the same call and an offset.
             start, end = 1, (await _off_loop(_row, doc_id, workspace)).get("pages") or 1
         txt = await _off_loop(corpus.read_pages, doc_id, start, end,
                               offset=params.offset, workspace=workspace)
@@ -583,8 +526,6 @@ def register(harn):
             raise ValueError("scale must be finite and greater than 0.")
         box, record, extra = None, None, ""
         if kind in (".docx", ".epub"):
-            # Not a printed page: a Word document or an EPUB is paged at its headings and every
-            # 3,000 characters, so there is no page to render -- only the pictures it embeds.
             if not params.figure:
                 raise ValueError("A Word document or an EPUB has no printed page to show; doc_read names "
                                  "the pictures each page holds, and figure=N shows one of them.")
@@ -602,7 +543,7 @@ def register(harn):
                 png, count, slide = await _off_loop(_render_slide, params.doc_id, source, params.page,
                                                     min(params.scale, PAGE_IMAGE_MAX_SCALE), root)
             except ValueError:
-                raise                       # said in the tool's own words already
+                raise
             except Exception as e:
                 raise RuntimeError(f"Could not render {params.doc_id} p{params.page}: {e}") from e
             extra = f" (slide {slide})"
@@ -618,10 +559,6 @@ def register(harn):
                                      f"them page by page. figure=0 renders the whole page.")
                 if not record.get("rotation"):
                     box = _figure_box(record, params.figure)
-            # A page at scale 3 came back as a 1.7 MB PNG and a Sister asked for the same pages
-            # again and again (2026-09-23, card t_9f10b6: 26 renders, ~25k provider tokens each on
-            # Codex); the transcript and every LCM checkpoint carried each copy. Scale 2 reads the
-            # same, and a byte cap under the PNG size of a text page makes the resize pick JPEG.
             scale = min(params.scale, PAGE_IMAGE_MAX_SCALE)
             if box:
                 scale = min(FIGURE_MAX_SCALE, PAGE_IMAGE_MAX_SIDE / max(box[2] - box[0], box[3] - box[1], 1))
@@ -631,34 +568,24 @@ def register(harn):
                 else:
                     png, count = await _off_loop(_render_page, source, params.page, scale, *([box] if box else []))
             except Exception as e:
-                # Child failures/timeouts are tool errors, with the requested locator attached.
                 raise RuntimeError(f"Could not render {params.doc_id} p{params.page}: {e}") from e
         if signal_aborted(signal):
             return _text("Cancelled.")
         if png is None:
-            # ``count`` is the PDF's own page count, which is what the render is indexed by; the
-            # extracted pages are numbered by pdftotext's form feeds, one per page, so the two
-            # agree and a page number from doc_read/doc_find lands where the model expects.
             raise ValueError(f"Page {params.page} is outside {params.doc_id}: it has {count} page"
                              f"{'' if count == 1 else 's'}, numbered from 1.")
         resized = await resizeImage(png, "image/png", ImageResizeOptions(
             maxWidth=PAGE_IMAGE_MAX_SIDE, maxHeight=PAGE_IMAGE_MAX_SIDE, maxBytes=PAGE_IMAGE_MAX_BYTES))
         note = getNonVisionImageNote(getattr(ctx, "model", None))
-        # The title names the document the way a caption should, but it is the document's own
-        # text (a card names its own artifacts, and an EPUB its own dc:title), so it is shown
-        # fenced rather than spoken inside a sentence of ours -- the same rule doc_list,
-        # doc_outline and doc_find follow. What is left is ours: an id, a page number, pixels.
         titled = untrusted(f"{params.doc_id} title", title)
         caption = f"[{params.doc_id}] page {params.page} of {count}{extra}"
         if params.figure:
             caption += f", figure {params.figure}" + (" (a rotated page: shown whole)" if box is None else "")
         if note and vision.selected_model()[0]:
-            note = None                     # the vision extension reads the image to this model
+            note = None
         elif note:
             note += " Set vision.model to a vision model (provider/model) to have images read to this one."
         if resized is None:
-            # Only reachable for a page that stays over the inline limit at 1x1 px, but the read
-            # tool answers this case rather than failing, and so does this one.
             return _text(titled + f"{caption}\n[Image omitted: could not be resized below the "
                          f"inline image size limit.]" + (f"\n{note}" if note else ""))
         lines = [f"{caption}, rendered at {resized.width}x{resized.height}."]
@@ -722,8 +649,6 @@ def register(harn):
             return _text("Cancelled (the indexing itself completed).")
         lines = [f"  {did}  {posix_relpath(p, ws)}" for did, p in added]
         lines += [f"  skipped  {posix_relpath(p, ws)}: {why}" for p, why in skipped]
-        # A folder walk collects less than the corpus can read: name a file to index one the
-        # walk leaves alone (config.yml, results.json), rather than being told it cannot be read.
         return _text("\n".join(lines) or "Nothing to index: this folder holds no file a scan "
                      f"collects ({' '.join(sorted(corpus.SCAN_SUFFIXES))}). Name a single file "
                      "to index one directly.")
@@ -762,13 +687,11 @@ def register(harn):
             lines[0] = (f"⚠ Not on page {params.page}: the quotation is on page {v['page']}, "
                         f"character {v['offset']}. Cite the page it is on.")
         if v.get("printed"):
-            # The file's page is the locator; the printed number is what a reader looks up.
             lines[0] += f" -- printed page {v['printed']} (from {v['printed_from']})"
             lines[2] = f"Cite as: [{params.doc_id} p{v['page']}; printed p. {v['printed']}]"
         if v.get("continues_on"):
             lines[0] += f"; it runs on to page {v['continues_on']}"
         row = await _off_loop(_row, params.doc_id, root)
-        # OCR is a transcription; locating text in it does not establish what the page says.
         if _page_from_ocr(row, v["page"]):
             lines.append(f"Page {v['page']} was read by OCR, not lifted from a text layer: the "
                          f"quotation matches what OCR read there. Check it against "

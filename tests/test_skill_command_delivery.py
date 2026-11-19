@@ -129,12 +129,9 @@ async def test_streaming_skill_preserves_queue_choice(host, behavior, entry):
 
 
 async def test_skill_preserves_images_and_generated_message_origin(host):
-    # A real 1x1 PNG: pi 0.87 resizes prompt attachments to the model's profile before the
-    # request, and an undecodable image is dropped with a hint rather than sent.
     image = {'type': 'image', 'mimeType': 'image/png',
              'data': 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='}
     await host.session.prompt('/agent-reach inspect', {'images': [image], 'source': 'interactive'})
-    # Keep the generated-message origin: pending /research questions ignore it.
     assert len(host.inputs) == 1 and read_field(host.inputs[0], 'source') == 'extension'
     users = [m for m in host.session.state.messages if read_field(m, 'role') == 'user']
     assert len(users) == 1
@@ -156,7 +153,6 @@ async def test_compaction_rejects_before_loading_and_reports_preflight_failure(h
 
 
 class _UiMode(InteractiveMode):
-    # The session is the fixture's own rather than the runtime host's.
     session = None
 
 
@@ -575,7 +571,5 @@ async def test_skill_preflight_keeps_unaccepted_next_turn_notifications(host, mo
             await host.session.prompt('/agent-reach inspect')
     else:
         await host.session.prompt('/agent-reach inspect')
-    # pi 1.2: the run takes the nextTurn messages once its hooks ran, so one that arrives during them goes
-    # into the starting run too; a run that does not start leaves every one pending.
     assert [text_of(m) for m in host.session._pendingNextTurnMessages] == (
         ['before', 'during'] if fail_preflight else [])

@@ -394,8 +394,6 @@ async def test_answers_roots_list_and_dispatches_notifications(servers):
     await client.close()
 
 
-# -- MISAKA forks ----------------------------------------------------------------------------
-
 
 async def test_a_cancelled_caller_cancels_its_request(servers):
     client, server = await connect(servers)

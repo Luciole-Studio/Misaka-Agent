@@ -118,8 +118,6 @@ def test_a_damaged_member_does_not_crash_the_scan(tmp_path):
     source = tmp_path / "torn.docx"
     _package(source, {"word/document.xml": "<?xml version='1.0'?><d/>"})
     raw = bytearray(source.read_bytes())
-    # Corrupt a member's stored bytes without touching the central directory, so the sizes
-    # still read cleanly and only the decompression fails.
     raw[40:48] = b"\xff" * 8
     torn = tmp_path / "torn2.docx"
     torn.write_bytes(bytes(raw))

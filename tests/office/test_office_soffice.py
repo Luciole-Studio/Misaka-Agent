@@ -27,7 +27,7 @@ class _Recorder:
         self.calls: list[list[str]] = []
         self.kwargs: list[dict] = []
         self.returncode = returncode
-        self.produce = produce            # (suffix) -> write a file next to --outdir
+        self.produce = produce
         self.stderr = stderr
         self.raises = raises
 
@@ -67,8 +67,6 @@ def absent(monkeypatch):
     monkeypatch.setattr(soffice, "binary", lambda: None)
 
 
-# ---- the probe ---------------------------------------------------------------------------
-
 def test_the_binary_is_found_on_the_path(monkeypatch):
     monkeypatch.setattr(soffice.shutil, "which", lambda name: "/usr/bin/soffice")
     assert soffice.binary() == "/usr/bin/soffice"
@@ -78,7 +76,7 @@ def test_the_macos_app_bundle_is_found_when_nothing_is_on_the_path(monkeypatch):
     """``brew install --cask libreoffice`` puts nothing on PATH, which is how most macOS
     users end up with it installed and undetectable."""
     monkeypatch.setattr(soffice.shutil, "which", lambda name: None)
-    monkeypatch.setattr(soffice, "_APP_PATH", str(__file__))     # a path that exists
+    monkeypatch.setattr(soffice, "_APP_PATH", str(__file__))
     assert soffice.binary() == str(__file__)
 
 
@@ -97,8 +95,6 @@ def test_the_probe_is_not_cached(monkeypatch):
     assert soffice.binary() is None
     assert soffice.binary() == "/usr/bin/soffice"
 
-
-# ---- how it is invoked --------------------------------------------------------------------
 
 def test_every_call_gets_its_own_profile(installed, tmp_path):
     """LibreOffice keeps one profile per user and locks it, so two concurrent conversions
@@ -171,8 +167,6 @@ def test_nothing_runs_at_all_when_it_is_not_installed(absent, tmp_path, monkeypa
     assert ran == []
 
 
-# ---- recalculation --------------------------------------------------------------------------
-
 def test_recalc_works_on_a_copy_and_never_touches_the_source(installed, tmp_path):
     """The corpus identifies a document by the sha256 of the file on disk, so recalculating
     in place would change a document's identity as a side effect of reading it."""
@@ -197,8 +191,6 @@ def test_export_pdf_puts_the_file_where_it_was_asked(monkeypatch, tmp_path):
     assert out.read_bytes() == b"converted"
 
 
-# ---- what the rest of the system does with it -------------------------------------------------
-
 def test_a_workbook_with_uncomputed_formulas_is_recalculated_on_read(monkeypatch, tmp_path):
     """Without this the reader shows every formula as ``uncached`` even on a machine that
     could work it out."""
@@ -212,8 +204,6 @@ def test_a_workbook_with_uncomputed_formulas_is_recalculated_on_read(monkeypatch
     assert office_writer.cache_empty(str(path))
 
     def fake_recalc(source, *, into, timeout=None, meta=None):
-        # What LibreOffice does: reopen, compute, save. Done here with openpyxl so the
-        # test asserts on the wiring rather than on a program that may not be installed.
         import os
         book = openpyxl.load_workbook(str(source))
         book["S"]["A4"] = 42
@@ -226,8 +216,8 @@ def test_a_workbook_with_uncomputed_formulas_is_recalculated_on_read(monkeypatch
     before = path.read_bytes()
     out = reader.render(str(path))
     assert "42" in out
-    assert "uncached" not in out.replace("`uncached` means", "")   # not the legend
-    assert path.read_bytes() == before                             # source untouched
+    assert "uncached" not in out.replace("`uncached` means", "")
+    assert path.read_bytes() == before
 
 
 def test_without_libreoffice_the_readout_says_what_would_fix_it(absent, tmp_path):
@@ -263,8 +253,6 @@ def test_export_pdf_without_libreoffice_names_what_to_install(absent, tmp_path):
     assert "export_pdf needs LibreOffice" in receipt
     assert soffice.INSTALL_HINT in receipt
 
-
-# ---- legacy formats ----------------------------------------------------------------------------
 
 def test_a_legacy_file_without_libreoffice_is_refused_by_name(absent, tmp_path, monkeypatch):
     """OLE compound files: nothing in the Office stack reads them, and a model told only
@@ -315,5 +303,5 @@ def test_a_folder_walk_does_not_collect_legacy_files(tmp_path):
     from misaka.core.documents.index import _EXTRACTORS, SCAN_SUFFIXES
 
     for suffix in (".doc", ".xls", ".ppt"):
-        assert suffix in _EXTRACTORS            # named one by one, they are read
-        assert suffix not in SCAN_SUFFIXES      # swept up by a net, they are not
+        assert suffix in _EXTRACTORS
+        assert suffix not in SCAN_SUFFIXES

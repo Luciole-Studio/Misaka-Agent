@@ -245,7 +245,7 @@ def test_a_retried_turn_in_a_fork_does_not_lose_the_number_its_frame_shows(tmp_p
         "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
                   "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}})
     ce.sync(ctx)
-    live = ctx.sessionManager.buildSessionContext().messages[:-1]    # the native retry dropped the attempt
+    live = ctx.sessionManager.buildSessionContext().messages[:-1]
     prepared = ce.prepare({"reason": "threshold", "messages": live}, ctx)
     result = ce.compact(prepared)
     assert result is not None and result.summary == "LCM replay update"
@@ -273,7 +273,7 @@ def test_a_replay_update_still_names_the_summaries_it_carries(tmp_path, monkeypa
         "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
                   "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}})
     ce.sync(ctx)
-    live = ctx.sessionManager.buildSessionContext().messages[:-1]    # the native retry dropped the attempt
+    live = ctx.sessionManager.buildSessionContext().messages[:-1]
     result = ce.compact(ce.prepare({"reason": "threshold", "messages": live}, ctx))
     assert result is not None and result.summary == "LCM replay update"
     assert result.contextSummaries == named

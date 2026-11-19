@@ -44,9 +44,7 @@ def web_home(monkeypatch, tmp_path):
     """A throwaway web config and an empty vendor environment for every test."""
     for name in _VENDOR_ENV:
         monkeypatch.delenv(name, raising=False)
-    path = home.path("settings")           # the "web" section lives here now
-    # The blocklist is cached for 30s keyed on the config path; a test that writes one
-    # must not inherit the previous test's answer, nor leave its own behind.
+    path = home.path("settings")
     website_policy.invalidate_cache()
     monkeypatch.setattr(keyless.current_scope(), "cursor", [0])
     yield path
@@ -69,11 +67,6 @@ def no_dns(monkeypatch):
 
 def write_config(_path, **keys) -> None:
     write_web(keys)
-
-
-# ---------------------------------------------------------------------------
-# HTTP stubbing (the shape tests/test_web_providers.py established)
-# ---------------------------------------------------------------------------
 
 
 class _FakeClient:
@@ -145,11 +138,6 @@ def keyless_spy(monkeypatch, module):
     return seen
 
 
-# ---------------------------------------------------------------------------
-# Exa -- POST /contents, batched
-# ---------------------------------------------------------------------------
-
-
 async def test_exa_extract_posts_the_url_list_to_contents(monkeypatch):
     monkeypatch.setenv("EXA_API_KEY", "exa-key")
     body = {"results": [{"url": THREE[0], "title": "One", "text": "first page"}]}
@@ -166,7 +154,6 @@ async def test_exa_extract_posts_the_url_list_to_contents(monkeypatch):
         {
             "url": THREE[0],
             "title": "One",
-            # Hermes maps result.text to BOTH; Exa offers no second rendition.
             "content": "first page",
             "raw_content": "first page",
             "metadata": {"sourceURL": THREE[0], "title": "One"},
@@ -250,11 +237,6 @@ async def test_exa_extract_honours_a_free_tier_pin_over_a_key(monkeypatch, web_h
     assert seen["call"] == ("exa", [THREE[0]])
 
 
-# ---------------------------------------------------------------------------
-# Keenable -- GET /v1/fetch, per URL
-# ---------------------------------------------------------------------------
-
-
 def _keenable_pages(failures: dict[str, tuple[int, str]] | None = None):
     failures = failures or {}
     def handler(_method, _url, kwargs):
@@ -295,7 +277,7 @@ async def test_keenable_extract_keeps_a_failed_page_in_position(monkeypatch):
     out = await keenable.KeenableWebSearchProvider().extract(THREE)
 
     assert_positional(out, THREE)
-    assert len(calls) == 3  # one page failing does not stop the batch
+    assert len(calls) == 3
     assert "upstream exploded" in out[1]["error"]
     assert out[0]["content"] == f"body {THREE[0]}"
     assert out[2]["content"] == f"body {THREE[2]}"
@@ -324,11 +306,6 @@ async def test_keenable_extract_without_a_key_walks_the_ring(monkeypatch):
     assert seen["call"] == ("keenable", [THREE[0]])
 
 
-# ---------------------------------------------------------------------------
-# Tavily -- POST /extract, batched, three result lists
-# ---------------------------------------------------------------------------
-
-
 async def test_tavily_extract_posts_the_url_list(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-key")
     body = {"results": [{"url": THREE[0], "title": "A", "raw_content": "long", "content": "short"}]}
@@ -339,7 +316,6 @@ async def test_tavily_extract_posts_the_url_list(monkeypatch):
     assert calls[0]["url"] == "https://api.tavily.com/extract"
     assert calls[0]["json"] == {"urls": [THREE[0]], "include_images": False}
     assert calls[0]["headers"]["Authorization"] == "Bearer tvly-key"
-    # raw_content wins: it is the same page, untruncated.
     assert out[0]["content"] == "long"
     assert out[0]["raw_content"] == "long"
     assert out[0]["metadata"] == {"sourceURL": THREE[0], "title": "A"}
@@ -426,11 +402,6 @@ async def test_tavily_extract_raises_when_the_key_is_rejected(monkeypatch):
         await tavily.TavilyWebSearchProvider().extract([THREE[0]])
 
 
-# ---------------------------------------------------------------------------
-# Parallel -- the REST contract
-# ---------------------------------------------------------------------------
-
-
 async def test_parallel_extract_requests_full_content_without_sdk(monkeypatch):
     monkeypatch.setenv("PARALLEL_API_KEY", "par-key")
     monkeypatch.setitem(sys.modules, "parallel", None)
@@ -512,11 +483,6 @@ async def _resolved(value):
     return value
 
 
-# ---------------------------------------------------------------------------
-# Firecrawl -- POST /v2/scrape per URL, with both gates and the format selection
-# ---------------------------------------------------------------------------
-
-
 def _scraped(url="https://ok.test/page", *, markdown="MD", html="<p>HTML</p>", title="T"):
     """A cloud-shaped scrape reply: the page object nested under ``data``."""
     return {
@@ -572,11 +538,8 @@ async def test_firecrawl_extract_uses_a_self_hosted_instance(monkeypatch):
         ("markdown", ["markdown"], "MD", "<p>HTML</p>", "MD"),
         ("html", ["html"], "MD", "<p>HTML</p>", "<p>HTML</p>"),
         (None, ["markdown", "html"], "MD", "<p>HTML</p>", "MD"),
-        # None with nothing in markdown falls through to html.
         (None, ["markdown", "html"], "", "<p>HTML</p>", "<p>HTML</p>"),
-        # Prefer markdown; keep usable HTML if the vendor returned only that.
         ("markdown", ["markdown"], "", "<p>HTML</p>", "<p>HTML</p>"),
-        # An unrecognised format asks for both and prefers html, as in Hermes.
         ("pdf", ["markdown", "html"], "MD", "<p>HTML</p>", "<p>HTML</p>"),
     ],
 )
@@ -657,7 +620,6 @@ async def test_firecrawl_refuses_a_blocklisted_host_before_scraping(monkeypatch,
         "source": "config",
     }
     assert "Blocked by website policy" in out[1]["error"]
-    # A refusal must cost no vendor request.
     assert [call["json"]["url"] for call in calls] == [THREE[0], THREE[2]]
 
 
@@ -711,11 +673,6 @@ async def test_firecrawl_extract_with_the_ring_off_refuses_every_url(web_home):
 
     assert_positional(out, THREE)
     assert all("FIRECRAWL_API_KEY" in entry["error"] for entry in out)
-
-
-# ---------------------------------------------------------------------------
-# All five, one assertion
-# ---------------------------------------------------------------------------
 
 
 def test_every_extract_backend_advertises_the_capability():

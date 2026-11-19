@@ -70,7 +70,7 @@ def test_a_role_overlays_the_homes_file_but_never_the_shell(monkeypatch, tmp_pat
     overlay = env_file.role_overlay(role)
     assert overlay == {"SHARED_KEY": "role", "ROLE_ONLY": "yes"}
     assert env_file.values(role)["FROM_SHELL"] == "shell"
-    assert env_file.values()["SHARED_KEY"] == "home"          # the process itself is unchanged
+    assert env_file.values()["SHARED_KEY"] == "home"
     monkeypatch.delenv("SHARED_KEY")
 
 
@@ -80,7 +80,7 @@ def test_write_keeps_other_lines_creates_owner_only_and_refuses_misaka_names():
     target.write_text("# keys for the skills\nOLD=1\nGONE=2\n", encoding="utf-8")
     env_file.write({"OLD": "with space", "NEW": "n"}, remove=("GONE",))
     assert target.read_text(encoding="utf-8") == '# keys for the skills\nOLD="with space"\nNEW=n\n'
-    if os.name != "nt":                      # POSIX modes; Windows keeps the profile private by ACL
+    if os.name != "nt":
         assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert env_file.read() == {"OLD": "with space", "NEW": "n"}
     with pytest.raises(ValueError):
@@ -96,7 +96,7 @@ def test_a_symlinked_or_malformed_file_is_refused_not_half_read(tmp_path):
     home.path("env").symlink_to(real)
     with pytest.raises(env_file.EnvFileError):
         env_file.read()
-    assert env_file.load() == []                               # reported, nothing applied
+    assert env_file.load() == []
     home.path("env").unlink()
     home.path("env").write_text("A=1\nnot a line\n", encoding="utf-8")
     assert env_file.load() == [] and "A" not in os.environ

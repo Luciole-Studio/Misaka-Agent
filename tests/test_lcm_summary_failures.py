@@ -144,7 +144,7 @@ def test_a_503_retries_the_summarizer_and_never_reaches_the_main_model(relay):
     relay.fail(SUMMARIZER, 503, "No available accounts")
     summary, level = summarize()
     assert level == 3 and summary.startswith("source text")
-    assert relay.asked() == [SUMMARIZER] * 6       # three attempts at each of the two model levels
+    assert relay.asked() == [SUMMARIZER] * 6
 
 
 @pytest.mark.parametrize("status, message", [(401, "invalid key"), (402, "insufficient credits"),

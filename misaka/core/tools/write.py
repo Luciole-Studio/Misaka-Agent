@@ -74,7 +74,6 @@ def _coerce_options(options: WriteToolOptions | Mapping[str, Any] | None) -> Wri
     return WriteToolOptions(operations=options.get("operations"))
 
 
-# MISAKA fork: .csv and .tsv are text and both tools have always handled them; only the packages are refused.
 _TEXT_OFFICE_SUFFIXES = frozenset({".csv", ".tsv"})
 
 

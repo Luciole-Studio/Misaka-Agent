@@ -173,7 +173,6 @@ def test_merges_piped_stdin_with_the_first_cli_message_into_one_prompt():
     parsed = createArgs(["Summarize the text given"])
     result = buildInitialMessage(parsed=parsed, stdinContent="README contents\n")
 
-    # MISAKA fork: the parts are blank-line separated (pi joins them with "": "README contents\nSummarize ...").
     assert read_field(result, "initialMessage") == "README contents\n\nSummarize the text given"
     assert parsed.messages == []
 
@@ -190,6 +189,5 @@ def test_combines_stdin_file_text_and_first_cli_message_in_one_prompt():
     parsed = createArgs(["Explain it", "Second message"])
     result = buildInitialMessage(parsed=parsed, stdinContent="stdin\n", fileText="file\n")
 
-    # MISAKA fork: the parts are blank-line separated (pi: "stdin\nfile\nExplain it").
     assert read_field(result, "initialMessage") == "stdin\n\nfile\n\nExplain it"
     assert parsed.messages == ["Second message"]

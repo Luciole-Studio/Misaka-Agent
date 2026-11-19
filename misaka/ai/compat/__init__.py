@@ -119,7 +119,6 @@ _apiProviderRegistry: dict[str, _RegisteredApiProvider] = {}
 
 
 def _metered(stream: Any, model: Model, context: TranscriptContext, options: Any) -> AssistantMessageEventStream:
-    # MISAKA fork: the request is metered against the token cap here unless the stream meters its own (`lazyApi`'s).
     if isMetered(stream):
         return stream(model, context, options)
     return metered(model, context, options, lambda sent: stream(model, context, sent))
@@ -227,8 +226,6 @@ registerBuiltInApiProviders()
 
 @cache
 def _compatModels() -> Any:
-    # MISAKA fork: `const compatModels = builtinModels()` is built on first use; building it at import would run every
-    # provider factory whenever any compat name is imported.
     from misaka.ai.providers.all import builtinModels
 
     return builtinModels()
@@ -247,8 +244,6 @@ def _withEnvApiKey(model: Model, options: Any, defaultType: type) -> Any:
     apiKey = getEnvApiKey(model.provider, read_field(options, "env"))
     if not apiKey or apiKey == _AMBIENT_AUTH_MARKER:
         return options
-    # MISAKA fork: `{ ...options, apiKey }` for whichever shape the options arrive in (`defaultType` when there are
-    # none).
     if options is None:
         return defaultType(apiKey=apiKey)
     if isinstance(options, Mapping):

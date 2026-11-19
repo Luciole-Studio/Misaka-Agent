@@ -22,8 +22,6 @@ from tests.test_pdf_ocr_routing import _layer
 PAGE = "第{n}頁的正文足夠長，足以算作這一頁確實讀到了文字，而且每一頁都不相同。"
 REAL_TURNS = mineru._turns
 
-# Reads its orders from the file named by $MINERU_STAND_IN, writes the output the real program
-# writes, and logs what it was run with.
 STAND_IN = """#!{python}
 import json, os, sys
 
@@ -65,8 +63,6 @@ if orders.get("leave_behind"):
     subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
 """
 
-# Answers as ``tesseract <image> stdout --psm 0`` does: $TESSERACT_STAND_IN maps "<page>-<turn>" to
-# (turn still needed, confidence). A page it has no answer for has too little to go on.
 OSD = """#!{python}
 import json, os, sys
 
@@ -88,9 +84,6 @@ print("Script: Han")
 @pytest.fixture
 def stand_in(tmp_path, monkeypatch):
     if os.name == "nt":
-        # MinerU is looked for and started by its name, and by name Windows finds and starts only
-        # an .exe. A ``#!`` script is not one: where MinerU is installed the real program ran in
-        # the stand-in's place (2026-11-10: 39 of these failed and 6 passed for that reason alone).
         pytest.skip("a `#!` script cannot stand in for mineru-kit on Windows")
     folder = tmp_path / "bin"
     folder.mkdir()
@@ -146,8 +139,6 @@ def pages_asked(run):
     return [int(n) for n in args[args.index("-p") + 1].split(",")]
 
 
-# -- which program reads ---------------------------------------------------------------------------
-
 def test_mineru_reads_where_it_is_installed(stand_in):
     assert corpus._ocr_engine() == mineru.BINARY
 
@@ -188,8 +179,6 @@ def test_a_word_edited_in_later_reads_as_the_default(stand_in):
     settings(ocr_engine="tesseract")
     assert product.setting("documents", "ocr_engine", "auto", str) == "auto"
 
-
-# -- how it is run ---------------------------------------------------------------------------------
 
 def test_a_page_comes_back_under_its_own_number(stand_in):
     assert corpus._ocr_pages("scan.pdf", {}, [2, 5], 9) == {2: PAGE.format(n=2), 5: PAGE.format(n=5)}
@@ -278,8 +267,6 @@ def test_a_worker_left_behind_does_not_hold_a_finished_run_open(stand_in, tmp_pa
     assert time.monotonic() - started < 10
 
 
-# -- what a page holds -----------------------------------------------------------------------------
-
 def span(text):
     return {"type": "text", "content": text}
 
@@ -345,8 +332,6 @@ def test_a_page_with_nothing_on_it_is_an_empty_reading(stand_in):
     assert corpus._ocr_pages("scan.pdf", {}, [1], 1) == {1: ""}
 
 
-# -- a reading that ran away -----------------------------------------------------------------------
-
 RUNAWAY = "〇三一" * 300
 
 
@@ -380,8 +365,6 @@ def test_a_stuck_page_that_cannot_be_read_again_is_left_unread(stand_in, monkeyp
 def test_a_phrase_a_gazette_repeats_is_not_a_reading_that_ran_away():
     assert not mineru._stuck("部主管之全國收支 " * 8 + "其餘各項照舊辦理")
 
-
-# -- pages lying on their side ---------------------------------------------------------------------
 
 UPRIGHT = [0, 3.2]
 
@@ -485,7 +468,7 @@ def test_a_tesseract_off_the_path_is_run_from_where_it_was_found(judged, stand_i
     elsewhere = tmp_path / "Tesseract-OCR"
     elsewhere.mkdir()
     program = (tmp_path / "bin" / mineru.TESSERACT).rename(elsewhere / mineru.TESSERACT)
-    assert mineru.shutil.which(mineru.TESSERACT) != str(program)        # PATH no longer leads to it
+    assert mineru.shutil.which(mineru.TESSERACT) != str(program)
     monkeypatch.setattr(mineru, "find_tool", lambda name: str(program) if name == mineru.TESSERACT else None)
 
     mineru.read(book, [1, 2, 3], "advanced")
@@ -508,8 +491,6 @@ def test_a_file_that_cannot_be_rendered_is_read_as_it_is(tmp_path, monkeypatch):
     broken.write_bytes(b"not a pdf")
     assert mineru._turns(str(broken), [1, 2]) == {}
 
-
-# -- the headings a scan prints --------------------------------------------------------------------
 
 def titled(page, *titles):
     return {str(page): [{"type": "paragraph_title", "index": i, "level": 2,
@@ -571,8 +552,6 @@ def test_a_failed_run_costs_the_titles_of_its_batch_only(stand_in):
     assert mineru.headings("scan.pdf", 30) == {30: [(2, "兵事")]}
 
 
-# -- an outline from those headings ------------------------------------------------------------------
-
 def outlined(tmp_path, monkeypatch, found):
     """``corpus.ingest`` of a scan whose pages MinerU marks with ``found`` ({page: [titles]})."""
     monkeypatch.setattr(corpus, "build_tree", lambda p, reason=None: corpus._note(reason, "tree", "none_found"))
@@ -626,8 +605,6 @@ def test_a_document_ocrmypdf_read_is_not_asked_for_headings(tmp_path, monkeypatc
 
     assert asked == []
 
-
-# -- through ingest --------------------------------------------------------------------------------
 
 def test_a_scan_enters_the_corpus_with_the_pages_mineru_read(tmp_path, monkeypatch, stand_in):
     scan = tmp_path / "scan.pdf"

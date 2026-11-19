@@ -111,7 +111,6 @@ class _LlmImageContent(TypedDict):
 
 # Tool result content in the shape LLM APIs accept: text and base64 images. Matches the
 # `TextContent` and `ImageContent` types of `@earendil-works/pi-ai`.
-# MISAKA fork: those are `misaka.ai.types`, which are models; the MCP extension converts these dicts to them.
 type LlmContent = _LlmTextContent | _LlmImageContent
 
 

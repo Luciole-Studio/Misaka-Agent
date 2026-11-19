@@ -39,10 +39,10 @@ def test_an_image_costs_its_pixel_bound_not_its_base64():
 def test_the_pixel_bound_covers_every_provider_scheme():
     for width, height in [(1, 1), (32, 32), (2000, 1), (1568, 1568), (2000, 2000)]:
         bound = image_token_upper_bound(width, height)
-        assert bound >= width * height / 750                              # Anthropic
-        assert bound >= -(-width // 32) * -(-height // 32) * 2.46         # OpenAI patches
-        assert bound >= -(-width // 512) * -(-height // 512) * 170 + 85   # OpenAI tiles
-        assert bound >= -(-width // 768) * -(-height // 768) * 258        # Gemini tiles
+        assert bound >= width * height / 750
+        assert bound >= -(-width // 32) * -(-height // 32) * 2.46
+        assert bound >= -(-width // 512) * -(-height // 512) * 170 + 85
+        assert bound >= -(-width // 768) * -(-height // 768) * 258
 
 
 def test_an_unreadable_image_is_still_counted_as_text():

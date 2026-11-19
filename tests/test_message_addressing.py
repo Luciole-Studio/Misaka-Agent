@@ -28,8 +28,8 @@ from misaka.core.platform import cards, processes, tasks
 from misaka.core.session_manager import SessionManager
 
 BODY = "## deliverable\nnotes.md\n"
-SPACE_T1 = "w1111aaaa"      # the research run's space
-SPACE_T2 = "w2222bbbb"      # a test space on the same home
+SPACE_T1 = "w1111aaaa"
+SPACE_T2 = "w2222bbbb"
 ME = os.getpid()
 MY_IDENTITY = processes.identity(ME)
 
@@ -87,8 +87,6 @@ def _resolve(addr, **kw):
     return messages.resolve_address(addr, **kw)
 
 
-# ── resolution: ids ─────────────────────────────────────────────────────────────────────
-
 def test_a_card_is_addressed_by_its_id(world):
     sibling = _running(world, generation=3, title="T sibling")
     _live(world, _sid(), role="10032", task_id=sibling)
@@ -130,7 +128,7 @@ def test_a_card_that_has_not_started_gets_its_mail_pinned_for_its_first_attempt(
 
 
 def test_a_running_card_whose_session_is_still_starting_gets_its_mail_pinned(world):
-    running = _running(world, generation=4)        # claimed on the board, nobody live yet
+    running = _running(world, generation=4)
     target = _resolve(running)
     assert target["to_task"] == running and target["generation"] == 4 and target["starting"]
 
@@ -165,7 +163,6 @@ async def test_a_last_order_message_to_a_closed_card_continues_her_session(world
     out = await _part(lo, sender="last-order")._send(
         "fixture", {"to": done, "message": "dig into the 1803 budget", "summary": "more"},
         None, None, SimpleNamespace())
-    # R40: a finished card answers as a consultation; she is not asked to complete again.
     assert calls == [("pane.consult_card", {"task_id": done,
                                             "say": "[Message from last-order · session " + lo + ". If it asks you something, answer with SendMessage; a note that asks nothing needs no reply. Your card stays finished: files you change and findings you note are declared again when this turn ends.]\ndig into the 1803 budget",
                                             "expected_generation": 3, "place": {"grid": "p1"},
@@ -174,9 +171,8 @@ async def test_a_last_order_message_to_a_closed_card_continues_her_session(world
     assert out["details"]["woken"] and out["details"]["pane_id"] == "p7"
     assert out["details"]["consultation"] == "tr_0000000001"
     assert "stays as it was" in out["content"][0]["text"]
-    # B111: she can hear the answer inside the phase turn that has to end in its command.
     assert f"misaka_sister_output (task_id={done}, block=true)" in out["content"][0]["text"]
-    assert messages.pending(world.mail, "10032", task_id=done) == []   # nothing queued for nobody
+    assert messages.pending(world.mail, "10032", task_id=done) == []
 
 
 def test_a_session_that_is_gone_or_reads_no_mail_is_refused(world):
@@ -193,8 +189,6 @@ def test_an_unknown_name_lists_what_can_be_reached(world):
     text = str(refusal.value)
     assert "last-order" in text and "10038" in text and "card's id" in text and "session's id" in text
 
-
-# ── resolution: names, inside the sender's space ────────────────────────────────────────
 
 def test_a_name_reaches_the_one_window_of_that_role_in_the_space(world):
     window = _live(world, _sid(), role="10036", space=SPACE_T2)
@@ -214,7 +208,7 @@ def test_a_name_reaches_the_one_card_of_that_role_in_the_space(world):
 def test_the_same_role_in_another_space_is_not_a_candidate(world, monkeypatch):
     _live(world, _sid(), role="10036", space=SPACE_T1)
     target = _resolve("10036", sender="10037", space=SPACE_T2)
-    assert target["to_task"] is None and target["to_session"] is None     # the contact session
+    assert target["to_task"] is None and target["to_session"] is None
     assert session_catalog.live_readers("10036", SPACE_T2) == []
     assert len(session_catalog.live_readers("10036", SPACE_T1)) == 1
 
@@ -269,8 +263,6 @@ def test_your_own_role_with_nobody_else_of_it_here_is_refused(world):
     assert _resolve("10032", space=SPACE_T1, sender_session=me)["to_session"] == other
 
 
-# ── the reader side ─────────────────────────────────────────────────────────────────────
-
 def _send(world, to_addr, body, **kw):
     return messages.send(world.mail, to_addr, body, summary=body[:20], sender="10037", **kw)
 
@@ -283,7 +275,7 @@ def test_a_pinned_row_reaches_only_its_session_or_card_and_an_unpinned_one_only_
     bodies = lambda **kw: [r["body"] for r in messages.pending(world.mail, "10036", **kw)]
     assert bodies(session_id=session_a, task_id="t_aaaaaa") == ["for card A"]
     assert bodies(session_id=session_b) == ["for session B"]
-    assert bodies(session_id=session_a) == []                    # a window it was not for
+    assert bodies(session_id=session_a) == []
     assert bodies(session_id=_sid(), contact=True) == ["for nobody"]
     assert bodies() == []
     assert [r["body"] for r in messages.pending(world.mail, "10037", contact=True)] == []
@@ -314,7 +306,7 @@ def test_a_mailbox_shaped_by_another_build_is_refused_not_reshaped(tmp_path):
     old = sqlite3.connect(str(path))
     assert {row[1] for row in old.execute("PRAGMA table_info(messages)")} == {
         "id", "to_addr", "sender", "body", "summary", "task_id", "generation", "workspace",
-        "created_at", "delivered_at", "lease_expires", "lease_token"}                  # untouched
+        "created_at", "delivered_at", "lease_expires", "lease_token"}
     old.close()
 
 
@@ -338,8 +330,6 @@ def test_the_queue_has_no_workspace_column():
     assert "workspace" not in messages.COLUMNS
     assert {"to_task", "to_session", "sender_task", "sender_session"} <= messages.COLUMNS
 
-
-# ── the tool end to end ─────────────────────────────────────────────────────────────────
 
 class _Manager:
     flushed = True
@@ -374,12 +364,10 @@ async def _deliver(part, con):
 async def test_two_spaces_with_10036_and_10037_each_do_not_cross(world, monkeypatch):
     """The live run of 2026-09-29: a test space's windows and a research run's cards, one home."""
     monkeypatch.setattr(messages.subprocess, "Popen", lambda *a, **k: pytest.fail("nobody is woken"))
-    # T1: the research run -- 10036 and 10037 are cards.
     card36 = _running(world, assignee="10036", generation=1, title="T1 archives")
     card37 = _running(world, assignee="10037", generation=1, title="T1 methods")
     t1_36 = _live(world, _sid(), role="10036", task_id=card36, space=SPACE_T1)
     t1_37 = _live(world, _sid(), role="10037", task_id=card37, space=SPACE_T1)
-    # T2: a test space -- 10036 and 10037 are windows.
     t2_36 = _live(world, _sid(), role="10036", space=SPACE_T2)
     t2_37 = _live(world, _sid(), role="10037", space=SPACE_T2)
 
@@ -403,7 +391,6 @@ async def test_two_spaces_with_10036_and_10037_each_do_not_cross(world, monkeypa
     assert "T1 card note" in got["t1_36"] and "T2 window note" not in got["t1_36"]
     assert f"<from-card>{card37}</from-card>" in got["t1_36"]
     assert f"<from-session>{t2_37}</from-session>" in got["t2_36"]
-    # The contact session of 10036 has nothing to read, and both rows are delivered.
     assert messages.pending(world.mail, "10036", contact=True) == []
     assert world.mail.execute("SELECT COUNT(*) FROM messages WHERE delivered_at IS NULL").fetchone()[0] == 0
 
@@ -452,7 +439,7 @@ def test_catalog_records_its_space_from_the_environment_and_keeps_it(world, monk
     assert session_catalog.find_session("fixture")["space"] == SPACE_T1
     first._retire()
     assert session_catalog.find_session("fixture")["state"] == "saved"
-    monkeypatch.setenv("MISAKA_NET_SPACE", SPACE_T2)            # opened again in another space
+    monkeypatch.setenv("MISAKA_NET_SPACE", SPACE_T2)
     second = session_catalog.CatalogPart(spec)
     second._publish(SimpleNamespace(sessionManager=manager), "working")
     assert session_catalog.find_session("fixture")["space"] == SPACE_T1
@@ -480,7 +467,7 @@ def test_spaces_in_use_counts_saved_sessions_too(world):
     record.write_text(json.dumps({**value, "state": "saved"}), encoding="utf-8")
     _live(world, _sid(), role="10038", space=None)
     assert session_catalog.spaces_in_use() == {SPACE_T1, SPACE_T2}
-    assert session_catalog.live_readers("10037", SPACE_T2) == []       # saved is not a reader
+    assert session_catalog.live_readers("10037", SPACE_T2) == []
 
 
 def test_the_contact_wake_leaves_the_row_to_a_running_contact_turn(world, monkeypatch):
@@ -490,7 +477,7 @@ def test_the_contact_wake_leaves_the_row_to_a_running_contact_turn(world, monkey
     calls = []
     assert dm._left_to_contact("10036", lambda: calls.append(1)) is False and calls == []
     _live(world, _sid(), role="10037", kind="dm")
-    _live(world, _sid(), role="10036", space=SPACE_T1)                # a window is no contact
+    _live(world, _sid(), role="10036", space=SPACE_T1)
     assert dm._left_to_contact("10036", lambda: True) is False
     _live(world, _sid(), role="10036", kind="dm")
     answers = iter([False, True])
@@ -543,7 +530,7 @@ def test_the_catalog_finds_a_live_session_and_a_live_card(world):
     _live(world, gone, role="last-order", alive=False)
     assert session_catalog.live_session(card_session)["task_id"] == "t_aaaaaa"
     assert session_catalog.live_session(gone) is None
-    assert session_catalog.find_session(gone)["id"] == gone              # a record, if not live
+    assert session_catalog.find_session(gone)["id"] == gone
     assert session_catalog.live_card_session("t_aaaaaa")["id"] == card_session
     assert session_catalog.live_card_session("t_zzzzzz") is None
     Path(world.index / f"{card_session}.json").unlink()
@@ -571,7 +558,6 @@ def test_a_contact_session_answers_the_window_that_wrote_to_it(world):
     messages.send(world.mail, "10032", "hello", summary="hi", sender="last-order", sender_session=window)
     target = _resolve("last-order", sender="10032", contact=True)
     assert target["to_session"] == window
-    # Not a contact session: the name keeps its meaning (no neighbour, so the contact session).
     assert _resolve("last-order", sender="10032")["to_session"] is None
 
 
@@ -639,7 +625,7 @@ def _contact_turns(monkeypatch, *results):
         calls.append({"flags": flags, **kw})
         if "--session" in flags:
             path = flags[flags.index("--session") + 1]
-        else:    # a turn leaves its session behind, failed or not: a new Bot Chat, named
+        else:
             manager = SessionManager.create(cwd, flags[flags.index("--session-dir") + 1])
             manager.appendSessionInfo(flags[flags.index("--name") + 1])
             manager.appendMessage({"role": "user", "content": text, "timestamp": 0})
@@ -737,7 +723,7 @@ def test_a_contact_turn_stops_once_everyone_who_wrote_has_gone(world, monkeypatc
     stopped = []
 
     async def turn(flags, text, cwd, **kw):
-        _live(world, window, role="last-order", space=SPACE_T1, alive=False)   # the panel closes
+        _live(world, window, role="last-order", space=SPACE_T1, alive=False)
         try:
             await asyncio.sleep(30)
         except asyncio.CancelledError:
@@ -753,7 +739,7 @@ def test_a_contact_turn_stops_once_everyone_who_wrote_has_gone(world, monkeypatc
     assert stopped and time.monotonic() - started < 10
     assert not _delivered(world, mid)
     row = world.mail.execute("SELECT lease_token FROM messages WHERE id=?", (mid,)).fetchone()
-    assert row[0] is None                                   # back in the queue, for a later turn
+    assert row[0] is None
 
 
 def test_no_contact_turn_starts_for_windows_already_gone(world, monkeypatch):
@@ -903,7 +889,6 @@ def test_a_research_card_is_told_which_siblings_wait_for_it():
     body = planner.task_body(spec, siblings=[spec, after, beside])
     assert "→ Sister 10036 (starts after yours is done)" in body
     assert "→ Sister 10038 (in parallel with yours)" in body
-    # 2026-10-01: a Sister sent to "task1", the plan's own label for her sibling; it is no address.
     assert "C2" not in body and "C3" not in body and "`SendMessage` her number" in body
     body = planner.task_body({**after, "question": "q?", "rationale": "r", "deliverable": "d.md"},
                              siblings=[spec, after])
@@ -978,8 +963,6 @@ def test_last_order_inside_a_run_means_the_last_order_of_the_sender_s_own_node(w
     assert _resolve("last-order", sender="10037", sender_task=child_card, space=SPACE_T1)["to_session"] == node_lo
     assert _resolve("last-order", sender="10036", sender_task=root_card, space=SPACE_T1)["to_session"] == root_lo
     assert _resolve(node_lo, sender="10037", sender_task=child_card)["to_session"] == node_lo
-    # Her own Last Order, writing `last-order`, is not sent to herself; outside the run both windows
-    # are candidates and the sender is shown them.
     with pytest.raises(ValueError, match="2 live sessions"):
         _resolve("last-order", sender="10032", space=SPACE_T1, sender_session=_sid())
 
@@ -1003,7 +986,7 @@ def test_a_node_s_window_reads_its_own_mail_and_leaves_the_card_notifications_to
                     and isinstance(n.func, ast.Name) and n.func.id == "role_session_setup")
         flags = {k.arg: k.value.value for k in call.keywords if isinstance(k.value, ast.Constant)}
         assert flags["receive_messages"] is True and flags["receive_notifications"] is False
-        assert any(keyword.arg == "node" for keyword in call.keywords)      # her rows name her node
+        assert any(keyword.arg == "node" for keyword in call.keywords)
     spec = SessionSpec(profile_dir="/p", role="last_order", workspace="/w", kind="foreground",
                        sender="last-order", receive_messages=True, receive_notifications=False)
     assert network.part(spec).receive_notifications is False

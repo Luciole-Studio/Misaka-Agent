@@ -48,7 +48,7 @@ def test_persist_refresh_false_values_and_explicit_env(tmp_path, monkeypatch):
     assert built._config.proactive_recall_enabled
     settings.configure(False)
     assert not ce.bound_engine(ctx)._config.proactive_recall_enabled
-    assert ce.bound_engine(ctx)._config.embeddings_enabled  # manual semantic tools remain enabled
+    assert ce.bound_engine(ctx)._config.embeddings_enabled
     saved = settings.path().read_bytes()
     monkeypatch.setenv('LCM_PROACTIVE_RECALL_ENABLED', '0')
     assert not config_bridge.load_config(ctx=ctx).proactive_recall_enabled
@@ -58,7 +58,7 @@ def test_persist_refresh_false_values_and_explicit_env(tmp_path, monkeypatch):
     ce.close(ctx)
     ce.release_project(ctx)
     assert storage.clear(storage.project(ctx))
-    assert settings.path().read_bytes() == saved  # preferences are not task content
+    assert settings.path().read_bytes() == saved
 
 
 def test_failed_readiness_and_bad_json_do_not_overwrite_settings(monkeypatch):
@@ -88,7 +88,7 @@ async def test_menu_registered_and_toggles_through_extension_api(tmp_path, monke
     harn = SimpleNamespace(registerProvider=lambda *_: None, registerTool=lambda *_: None,
                            on=lambda *_: None, registerCommand=lambda name, spec: commands.__setitem__(name, spec))
     register(harn, kind='foreground', workspace=str(tmp_path))
-    assert 'lcm-settings' in commands  # independent of LCM_ENABLE_SLASH_COMMAND
+    assert 'lcm-settings' in commands
     notices, menus = [], []
     async def select(title, options):
         menus.append((title, options))
@@ -170,7 +170,6 @@ def test_native_request_reuses_original_recall_without_compaction_or_persistence
     assert len(calls) == 1
     assert json.dumps(ctx.sessionManager.getEntries(), sort_keys=True) == before
     assert built._store._conn.execute('SELECT COUNT(*) FROM messages').fetchone()[0] == 1
-    # The durable assembler does not retrieve/store a second copy of this block.
     assembled = built._assemble_context({'role': 'system', 'content': 'fixture'}, [{'role': 'user', 'content': 'find evidence'}])
     assert 'OTHER_SESSION_EVIDENCE' not in str(assembled) and len(calls) == 1
     settings.configure(False)
@@ -191,7 +190,7 @@ async def test_cancelled_setting_probe_does_not_save(tmp_path, monkeypatch):
     task = asyncio.create_task(execution.off_loop(settings.configure, True, ctx=context(tmp_path)))
     assert await asyncio.to_thread(entered.wait, 2)
     task.cancel()
-    await asyncio.sleep(0)  # Deliver cancellation before letting the probe reach its commit check.
+    await asyncio.sleep(0)
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task

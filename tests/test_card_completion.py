@@ -52,7 +52,7 @@ def _board(tmp_path, request, body=BODY):
     con.execute("UPDATE tasks SET status='running', claim_lock='lock1', claim_expires=?, output_dir=?, "
                 "worker_pid=? WHERE id=?", (int(time.time()) + 1800, str(out), os.getpid(), tid))
     from misaka.core.network import worker
-    worker.record_output_baseline(con, tasks.get(con, tid))    # as the runtime does before the first turn
+    worker.record_output_baseline(con, tasks.get(con, tid))
     return con, tid, out
 
 
@@ -88,7 +88,7 @@ def test_the_contract_deliverable_is_read_from_the_card_body(tmp_path):
     assert worker.contract_deliverable(task) == "choson-tusol-genealogy.md"
     assert worker.missing_deliverable(task) == "choson-tusol-genealogy.md"
     (out / "choson-tusol-genealogy.md").write_text("", encoding="utf-8")
-    assert worker.missing_deliverable(task) == "choson-tusol-genealogy.md"     # empty is not delivered
+    assert worker.missing_deliverable(task) == "choson-tusol-genealogy.md"
     (out / "choson-tusol-genealogy.md").write_text("# report\n", encoding="utf-8")
     assert worker.missing_deliverable(task) is None
     assert worker.missing_deliverable({"body": "## research question\nq\n", "output_dir": str(out)}) is None
@@ -105,7 +105,6 @@ async def test_a_reply_turn_leaves_the_card_running_and_says_so_once(tmp_path, m
     assert len(held) == 1
     assert "choson-tusol-genealogy.md" in held[0][0]["content"]
     assert "keep working" in held[0][0]["content"]
-    # It starts the turn itself: in a research run nobody else writes to the card again (2026-09-27).
     assert held[0][1]["triggerTurn"] is True
     assert tasks.latest_payload(con, tid, "submitted") is None
 
@@ -139,9 +138,9 @@ async def test_completion_does_not_carry_into_a_turn_that_did_not_end_cleanly(tm
     await _tool(part, "misaka_card_complete").execute(None, {"summary": "done"}, None, None, None)
     await part.agent_end(_turn("aborted", ""))
     await part.agent_settled()
-    assert tasks.get(con, tid)["status"] == "running"     # an aborted turn submits nothing
+    assert tasks.get(con, tid)["status"] == "running"
     await _end_turn(part, "and now it ends")
-    assert tasks.get(con, tid)["status"] == "done"        # the recorded completion still stands
+    assert tasks.get(con, tid)["status"] == "done"
 
 
 async def test_a_run_that_ends_in_an_error_fails_the_attempt_instead_of_holding_the_card(tmp_path, monkeypatch, request):
@@ -191,9 +190,9 @@ def test_a_deliverable_written_by_an_earlier_attempt_is_still_the_cards_product(
     """2026-09-27: a divergence card reopened after a resume declared again without rewriting its
     file; only files changed in the attempt were listed, and divergence.md lost its registration."""
     con, tid, out = _board(tmp_path, request)
-    (out / "choson-tusol-genealogy.md").write_text("# genealogy\n", encoding="utf-8")    # written by attempt 1
-    con.execute("UPDATE tasks SET generation=2 WHERE id=?", (tid,))    # reopened to declare again
-    worker.record_output_baseline(con, tasks.get(con, tid))            # attempt 2 starts with the file there
+    (out / "choson-tusol-genealogy.md").write_text("# genealogy\n", encoding="utf-8")
+    con.execute("UPDATE tasks SET generation=2 WHERE id=?", (tid,))
+    worker.record_output_baseline(con, tasks.get(con, tid))
     submission = worker.build_submission(con, tasks.get(con, tid), "declared again")
     assert (out / "choson-tusol-genealogy.md").relative_to(tmp_path).as_posix() in submission["artifacts"]
 
@@ -248,15 +247,15 @@ async def test_a_card_left_idle_after_the_notice_ends_its_attempt_unsettled(tmp_
     monkeypatch.setattr(todo, "UNSETTLED_GRACE_SECONDS", 0)
     part = _part(monkeypatch, con, tid)
     await _refused(part)
-    await _end_turn(part, "I could not complete it.")              # the notice
+    await _end_turn(part, "I could not complete it.")
     assert part._idle_watch is None
-    await _end_turn(part, "Waiting.")                              # nothing after it
+    await _end_turn(part, "Waiting.")
     await part._idle_watch
     row = tasks.get(con, tid)
     assert row["status"] == "ready" and row["claim_lock"] is None and row["consecutive_failures"] == 1
     assert "nothing was left to wake the session" in row["last_failure_error"]
     assert "choson-tusol-genealogy.md" in row["last_failure_error"]
-    assert "Cannot complete" in row["last_failure_error"]          # what the refusal said
+    assert "Cannot complete" in row["last_failure_error"]
     assert '"failure_kind": "protocol_violation"' in tasks.latest_payload(con, tid, "retry_scheduled")
     assert "## Previous attempt" in worker.card_prompt({**dict(row), "_handoffs": [], **worker.card_extras(con, row)})
 
@@ -268,7 +267,7 @@ async def test_a_turn_that_starts_keeps_the_card_running(tmp_path, monkeypatch, 
     await _end_turn(part)
     await _end_turn(part)
     watch = part._idle_watch
-    await part.agent_start()                                       # a message woke her
+    await part.agent_start()
     await asyncio.gather(watch, return_exceptions=True)
     assert watch.cancelled() and tasks.get(con, tid)["status"] == "running"
 

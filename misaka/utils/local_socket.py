@@ -29,7 +29,7 @@ if WINDOWS:
     from ctypes import wintypes
 
     _PIPE_PREFIX = "\\\\.\\pipe\\"
-    _OWNER_ONLY = "D:P(A;;GA;;;SY)(A;;GA;;;OW)"       # herdr bind_private_local_listener
+    _OWNER_ONLY = "D:P(A;;GA;;;SY)(A;;GA;;;OW)"
     _PIPE_REJECT_REMOTE_CLIENTS = 0x8
     _BUFFER = 65536
     _ERROR_FILE_NOT_FOUND = 2
@@ -84,9 +84,6 @@ def identity(path):
     return info.st_dev, info.st_ino
 
 
-# ── Windows: named pipes bridged to socketpairs ─────────────────────────────────────────
-
-
 def _pipe_connect(path, timeout):
     name = _PIPE_PREFIX + path
     deadline = None if timeout is None else time.monotonic() + timeout
@@ -97,14 +94,11 @@ def _pipe_connect(path, timeout):
             break
         except OSError as error:
             if error.winerror == _ERROR_FILE_NOT_FOUND:
-                # No pipe by that name: a leftover marker is a stale socket (refused), no
-                # marker means nothing was ever started there.
                 if os.path.exists(path):
                     raise ConnectionRefusedError(f"nothing is listening at {path}") from None
                 raise FileNotFoundError(_ERROR_FILE_NOT_FOUND, "no socket at this path", path) from None
             if error.winerror != _winapi.ERROR_PIPE_BUSY:
                 raise
-        # Every instance is taken for the moment; the server opens the next one straight away.
         remaining = None if deadline is None else deadline - time.monotonic()
         if remaining is not None and remaining <= 0:
             raise TimeoutError(f"the server at {path} did not accept in time")
@@ -158,7 +152,7 @@ class _Bridge:
                 overlapped, _ = _winapi.ReadFile(self.handle, _BUFFER, overlapped=True)
                 if not self._wait(overlapped):
                     return
-                overlapped.GetOverlappedResult(True)      # raises ERROR_BROKEN_PIPE at the peer's close
+                overlapped.GetOverlappedResult(True)
                 self.sock.sendall(overlapped.getbuffer())
         except OSError:
             return
@@ -189,7 +183,7 @@ class _Bridge:
         with self._lock:
             self._alive -= 1
             last = self._alive == 0
-        if last:                         # the other thread no longer touches either end
+        if last:
             self.sock.close()
             _winapi.CloseHandle(self.handle)
             _winapi.CloseHandle(self.stopped)
@@ -214,7 +208,6 @@ class _PipeServer:
             if error.winerror == _ERROR_ACCESS_DENIED:
                 raise OSError(f"another server is already listening at {path}") from None
             raise
-        # ipc.rs windows_socket_marker: the path names this server and no other.
         with open(path, "w", encoding="utf-8") as marker:
             marker.write(f"{os.getpid()}:{time.time_ns()}")
         threading.Thread(target=self._accept, args=(first,), name="pipe-accept", daemon=True).start()
@@ -237,7 +230,7 @@ class _PipeServer:
                     return
                 try:
                     overlapped.GetOverlappedResult(True)
-                except OSError:                    # the client left before it was accepted
+                except OSError:
                     _winapi.CloseHandle(handle)
                     handle = self._instance()
                     continue
@@ -245,12 +238,12 @@ class _PipeServer:
                 ours, theirs = socket.socketpair()
                 _Bridge(connected, theirs)
                 self._loop.call_soon_threadsafe(self._serve, ours)
-        except (OSError, RuntimeError):            # closed under us, or the loop is gone
+        except (OSError, RuntimeError):
             return
         finally:
             try:
                 self._loop.call_soon_threadsafe(self._done.set)
-            except RuntimeError:                   # the loop closed first: nobody waits
+            except RuntimeError:
                 pass
 
     def _serve(self, sock):

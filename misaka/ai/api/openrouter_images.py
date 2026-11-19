@@ -74,7 +74,6 @@ async def generateImages(
                 },
             )
         finally:
-            # MISAKA fork: close the client this request opened while its loop still runs.
             await _openai_sdk._close_client(client)
         onResponse = _option(options, "onResponse")
         if onResponse:
@@ -94,7 +93,6 @@ async def generateImages(
             if isinstance(content, str) and len(content) > 0:
                 output.output.append(TextContent(type="text", text=content))
 
-            # MISAKA fork: `images` is not a field the SDK declares; it keeps the response's own dicts.
             for image in read_field(choice.message, "images", None) or []:
                 imageUrl = (
                     read_field(image, "image_url", None)
@@ -165,7 +163,6 @@ def _buildParams(model: ImageModel, context: ImagesContext) -> dict[str, Any]:
 
 
 def _parseUsage(rawUsage: Any, model: ImageModel) -> Usage:
-    # MISAKA fork: the usage is the SDK's model, read by attribute.
     details = read_field(rawUsage, "prompt_tokens_details", None)
     promptTokens = read_field(rawUsage, "prompt_tokens", None) or 0
     reportedCachedTokens = read_field(details, "cached_tokens", None) or 0

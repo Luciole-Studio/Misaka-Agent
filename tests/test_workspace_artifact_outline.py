@@ -107,7 +107,6 @@ def test_scan_is_bounded_and_never_emits_a_cut_line(tmp_path, monkeypatch):
 
 
 def test_unicode_at_scan_boundary_does_not_break_decoding(tmp_path):
-    # Text-mode reading counts characters, not bytes; don't produce a clipped heading.
     text = '# first\n' + '中' * (256 * 1024 - 12) + '\n# 中文 heading beyond the limit\n'
     node = workspace._artifact_node(artifact(tmp_path, content=text.encode()))
     assert [h['title'] for h in node['nodes']] == ['first']

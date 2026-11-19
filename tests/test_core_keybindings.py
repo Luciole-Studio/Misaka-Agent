@@ -49,7 +49,6 @@ def test_applies_the_detected_defaults_consistently():
 
 
 def test_app_keybinding_names_the_app_table():
-    # MISAKA fork: `AppKeybinding` is spelled out where TypeScript derives it from `APP_KEYBINDINGS`.
     assert list(get_args(keybindings.AppKeybinding.__value__)) == list(keybindings.APP_KEYBINDINGS)
 
 

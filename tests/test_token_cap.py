@@ -48,8 +48,6 @@ def board(tmp_path, monkeypatch):
         yield SimpleNamespace(con=con, path=path, run=run["id"], card=card)
 
 
-# -- the ledger ----------------------------------------------------------------------------------------
-
 def test_a_request_is_granted_waits_or_stops_at_the_cap(board):
     con, run = board.con, board.run
     granted = budget.lease_request(con, 10_000, run, 1, need=2_000, want=8_000)
@@ -104,8 +102,6 @@ def test_spent_plus_in_flight_never_passes_the_cap(board):
     assert errors == []
     assert budget.spent(board.con, task_ids=budget.scope(board.con, board.run)) <= cap
 
-
-# -- the meter -------------------------------------------------------------------------------------------
 
 @pytest.fixture
 def provider(monkeypatch):
@@ -214,7 +210,6 @@ def test_a_wait_ends_when_the_request_is_aborted(board, provider):
     requested = time.time_ns() // 1_000_000
     message = asyncio.run(ask())
     assert message.stopReason == "aborted" and time.monotonic() - started < 3
-    # MISAKA fork: stamped with the request's start, as a provider stamps its replies, and timed from there.
     assert requested <= message.timestamp < requested + 200
     assert message.durationMs is not None and message.durationMs >= 250
 
@@ -227,7 +222,7 @@ def test_the_provider_gets_the_callers_signal(board, provider):
 
     async def ask():
         controller = AbortController()
-        waiter = asyncio.ensure_future(controller.signal.wait())     # a provider waited on it before
+        waiter = asyncio.ensure_future(controller.signal.wait())
         await asyncio.sleep(0)
         with budget.usage_context(board.path, board.card, 1, 1_000_000):
             message = await completeSimple(provider.model, {"messages": []},
@@ -254,7 +249,7 @@ def test_requests_in_flight_do_not_count_as_spent(board):
 def test_the_guards_read_the_cap_less_what_is_spent(board, provider):
     async def ask():
         with budget.usage_context(board.path, board.card, 1, 10_000):
-            budget.lease_request(board.con, 10_000, board.run, 1, need=1_000, want=3_000)   # another card's
+            budget.lease_request(board.con, 10_000, board.run, 1, need=1_000, want=3_000)
             await completeSimple(provider.model, {"messages": []})
             return metering.allowance()
     assert asyncio.run(ask()) == (10_000 - USED, 10_000), "neither its own lease nor another's is spent"
@@ -319,8 +314,6 @@ def test_a_request_refused_before_its_reply_began_spends_nothing(board, monkeypa
     assert budget.spent(board.con, task_ids=budget.scope(board.con, board.run)) == 0
     assert budget.reserved(board.con) == 0
 
-
-# -- no second count ----------------------------------------------------------------------------------------
 
 def test_an_agent_end_event_carries_no_usage_any_more():
     line = json.dumps({"type": "agent_end", "messages": [{"role": "assistant", "usage": {"totalTokens": 900}}]})

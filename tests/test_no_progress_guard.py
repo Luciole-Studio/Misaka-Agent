@@ -64,7 +64,7 @@ def test_reports_from_wind_down_assignments_do_not_count_and_hasten_the_stop():
     turns = [_spawn(turn) for turn in range(1, 4)]
     turns += [_spawn(turn, prompt="Done.", foreground=True) for turn in range(4, 9)]
     actions = _actions(guard, turns)
-    assert actions[5] == "hint" and actions[7] == "stop"     # degenerate: soft_streak + 2
+    assert actions[5] == "hint" and actions[7] == "stop"
 
 
 def test_any_other_tool_or_a_tool_free_turn_resets():

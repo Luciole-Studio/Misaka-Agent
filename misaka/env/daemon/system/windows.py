@@ -112,8 +112,6 @@ _ERROR_NAMES = {
     1921: "ELOOP",  # ERROR_CANT_RESOLVE_FILENAME
 }
 
-# MISAKA fork: Rust calls Win32 directly; Python's `os.read`, `os.write`, `os.ftruncate` and `os.fsync` on a descriptor go
-# through the C runtime, whose errors carry only an errno (already translated from the Windows error).
 _ERRNO_NAMES: dict[int, str] = {}
 for _name in (
     "EPERM",
@@ -199,10 +197,6 @@ def read_at(file: File, length: int, offset: int) -> bytes:
         raise ctypes.WinError(code)  # type: ignore[attr-defined]
     return buffer.raw[: read.value]
 
-
-# MISAKA fork: Rust's `File` calls Win32 directly; Python's `os.read`, `os.write`, `os.ftruncate` and `os.fsync` go
-# through the C runtime, which turns the Windows error into an errno (ERROR_INVALID_FUNCTION, a read of a directory, into
-# EINVAL instead of libuv's EISDIR). These call Win32 as Rust does.
 
 
 def _handle(file: File) -> Any:

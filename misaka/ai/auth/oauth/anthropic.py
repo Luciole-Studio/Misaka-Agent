@@ -46,7 +46,6 @@ def _decode(s: str) -> str:
 _CLIENT_ID = _decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl")
 _AUTHORIZE_URL = "https://claude.ai/oauth/authorize"
 _TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-# MISAKA fork: MISAKA_OAUTH_CALLBACK_HOST for upstream's PI_OAUTH_CALLBACK_HOST.
 _CALLBACK_HOST = getProviderEnvValue("MISAKA_OAUTH_CALLBACK_HOST") or "127.0.0.1"
 # Preferred so the port can be forwarded into containers or over SSH. Anthropic accepts any loopback port,
 # so login falls back to a free port when this one cannot be bound (#10571).
@@ -62,8 +61,6 @@ _SCOPES = (
 
 
 def _createState() -> str:
-    # MISAKA fork: upstream sends the PKCE verifier as `state`, which puts the secret half of PKCE into the
-    # authorize URL (browser history, logs). A separate random state keeps the verifier on this machine.
     return secrets.token_hex(16)
 
 
@@ -107,7 +104,6 @@ def _formatErrorDetails(error: Any) -> str:
             details.append(f"errno={jsString(errno)}")
         if error.__cause__ is not None:
             details.append(f"cause={_formatErrorDetails(error.__cause__)}")
-        # MISAKA fork: Python has no `error.stack`; the traceback stands in for it.
         stack = "".join(traceback.format_exception(error)).strip()
         if stack:
             details.append(f"stack={stack}")
@@ -178,7 +174,6 @@ async def _exchangeAuthorizationCode(
 
 
 async def _loginAnthropic(interaction: ProviderAuthInteraction, options: LoginOptions | None = None) -> OAuthCredential:
-    # MISAKA fork: `options` is accepted because every login is called with it.
     pkce = await generatePKCE()
     verifier, challenge = pkce.verifier, pkce.challenge
     state = _createState()

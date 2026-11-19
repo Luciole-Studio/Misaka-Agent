@@ -16,12 +16,10 @@ from collections.abc import Iterable, Iterator, Mapping
 from urllib.parse import quote, unquote_to_bytes, urljoin, urlsplit
 
 _SPECIAL_PORTS: dict[str, int | None] = {"http": 80, "https": 443, "ws": 80, "wss": 443, "ftp": 21, "file": None}
-# Host code points the URL Standard forbids (besides `%`, checked after decoding).
 _FORBIDDEN_HOST = re.compile(r"[\x00\t\n\r #/:<>?@\[\\\]^|]")
 _LEADING_TRAILING = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
 _TAB_NEWLINE = re.compile(r"[\t\n\r]")
 _SURROGATE = re.compile("[\ud800-\udfff]")
-# Percent-encode sets (the URL Standard's path, query and fragment sets, leaving `%` itself alone).
 _PATH_SAFE = "!$&'()*+,-./:;=@_~%[]|^"
 _QUERY_SAFE = "!$&'()*+,-./:;=?@_~%[]{}|^`\\"
 _SPECIAL_QUERY_SAFE = "!$&()*+,-./:;=?@_~%[]{}|^`\\"
@@ -115,8 +113,6 @@ def _serializeIPv6(pieces: list[int]) -> str:
 
 def _encodeHost(host: str) -> str:
     if host.startswith("["):
-        # The URL Standard's IPv6 parser and serialiser: the longest run of two or more zero pieces
-        # becomes `::`, pieces are lower-case hex, and an embedded IPv4 address is written as two pieces.
         inner = host[1:-1] if host.endswith("]") else None
         if inner is None or "%" in inner:
             raise _invalid()
@@ -232,15 +228,10 @@ class URL:
             baseUrl = base if isinstance(base, URL) else URL(base)
             if not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", text):
                 if re.match(r"^[/\\]{2}" if baseUrl._special else r"^//", text):
-                    # A scheme-relative reference keeps only the base's scheme (the relative slash state): for a
-                    # special scheme every leading slash or backslash is skipped and the authority follows, so
-                    # `//?q` against `http://h/` has an empty host and fails.
                     rest = text.lstrip("/\\") if baseUrl._special else text[2:]
                     text = f"{baseUrl.protocol}//{rest}"
                 else:
                     text = urljoin(baseUrl.href, text)
-        # A special scheme other than `file` takes its authority after any number of slashes or
-        # backslashes, none included (`https:example.com`), unless the base has the same scheme.
         special = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*):(?![/\\]{2}(?![/\\]))", text)
         if special and special.group(1).lower() in _SPECIAL_PORTS and special.group(1).lower() != "file" and (
             baseUrl is None or baseUrl.protocol != f"{special.group(1).lower()}:"
@@ -248,7 +239,7 @@ class URL:
             text = f"{special.group(1)}://{text[special.end():].lstrip(chr(47) + chr(92))}"
         try:
             parts = urlsplit(text)
-        except ValueError as error:  # an unbalanced `[` in the host, which `urlsplit` rejects on its own
+        except ValueError as error:
             raise _invalid() from error
         scheme = parts.scheme.lower()
         if not scheme or not re.fullmatch(r"[a-z][a-z0-9+.-]*", scheme):
@@ -278,7 +269,6 @@ class URL:
             else:
                 host, _colon, port = hostport.partition(":")
             if port:
-                # ASCII digits only: `str.isdigit` also accepts other scripts' digits and superscripts.
                 if not re.fullmatch(r"[0-9]+", port) or int(port) > 65535:
                     raise _invalid()
                 port = str(int(port))

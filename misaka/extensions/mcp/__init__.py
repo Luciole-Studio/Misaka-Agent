@@ -111,13 +111,9 @@ class McpExtensionOptions(TypedDict, total=False):
     createTransport: McpTransportFactory
     # Defaults to `mcp-auth.json` under the home's credentials.
     credentials: McpOAuthCredentialStore
-    # MISAKA fork: builds the credential store once the runtime loads, in place of `credentials`, so a role's
-    # store does not load the MCP client before a server is configured.
     createCredentials: Callable[[Any], McpOAuthCredentialStore]
     # File server log messages are appended to. Defaults to the home's `logs/mcp/mcp.log`.
     logPath: str
-    # MISAKA fork: the directory of the global `mcp.json`, named when no server is configured. Defaults to
-    # the agent directory; a misaka session's is its role's (`profiles.mcp_dir`).
     mcpDir: str
     # Opens the OAuth authorization URL. Defaults to the platform browser.
     openUrl: Callable[[str], None]
@@ -343,12 +339,10 @@ MCP_USAGE = "Usage: /mcp, /mcp login [server], /mcp logout [server], /mcp reconn
 
 
 def _defaultLogPath() -> str:
-    # MISAKA fork: the home keeps the server log with the other logs; pi writes `<agent-dir>/mcp.log`.
     return str(home.path("mcp_log"))
 
 
 def _emptyMessage(mcpDir: str) -> str:
-    # MISAKA fork: the global file, the role's (`mcpDir`) and the project's.
     files = dict.fromkeys([os.path.join(get_agent_dir(), "mcp.json"), os.path.join(mcpDir, "mcp.json")])
     return f"No MCP servers configured. Add them to {', '.join(files)} or {home.DIR_NAME}/mcp.json."
 
@@ -363,7 +357,6 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
         configErrors: list[str] = []
         # The trusted project's `mcp.json`, where `/mcp` saves project overrides of global servers.
         projectConfig: str | None = None
-        # MISAKA fork: the role's `mcp.json`, where `/mcp` saves her overrides of global servers.
         roleConfig: str | None = None
         # Registered servers that `mcp.json` overrides, shown in `/mcp`.
         overridden: list[str] = []
@@ -388,7 +381,6 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
             options.get("updateConfig") or _defaultUpdateConfig
         )
 
-        # MISAKA fork: asyncio holds tasks weakly; background work lives here until it finishes.
         tasks: set[asyncio.Task[Any]] = set()
 
         # Lifetime of the current session: aborted on session_shutdown, and before the first session_start
@@ -908,7 +900,6 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
             return "project" if entry.get("override") == projectConfig else "role"
 
         def describePlace(entry: McpServerEntry) -> str:
-            # MISAKA fork: the override is the project's or the role's, of a global or a role server.
             if entry.get("override"):
                 return f"{entry.get('scope')}, {overrideLayer(entry)} override"
             return nullishCoalesce(entry.get("scope"), entry["source"])
@@ -956,12 +947,10 @@ def createMcpExtension(options: McpExtensionOptions | None = None) -> ExtensionF
                 )
             )
             # Global servers without an override can be turned on or off for the trusted project alone.
-            # MISAKA fork: a role's own servers too, and a global server overridden for the role.
             inProject = (
                 scope in ("global", "role") and entry.get("override") != projectConfig and projectConfig is not None
             )
             inProjectSaved = "saved to the project mcp.json"
-            # MISAKA fork: a global server can be turned on or off for this role alone.
             inRole = scope == "global" and not entry.get("override") and roleConfig is not None
             inRoleSaved = "saved to the role mcp.json"
             items: list[SelectItem] = []
@@ -1566,14 +1555,11 @@ def _defaultUpdateConfig(entry: McpServerEntry, patch: McpServerConfigPatch) -> 
 
 
 # ---------------------------------------------------------------------------------------------
-# MISAKA glue: the bundled extension, the `misaka mcp` command, and the forks the user kept.
-# ---------------------------------------------------------------------------------------------
 
 EXTENSION_NAME = "mcp"
 # `builtin:mcp`, as upstream bundles it. Replaceable: an extension handling `mcp_servers_change` takes over.
 BUILTIN = True
 REPLACEABLE = True
-# MISAKA fork: the kinds that run tools for a person or a card; a budget-less or bare session has no servers.
 SESSION_KINDS = frozenset({"foreground", "dm", "card", "child"})
 COMMAND = "mcp"
 
@@ -1713,7 +1699,6 @@ def createMisakaMcpExtension(spec: Any) -> ExtensionFactory:
     })
 
     def factory(pi: Any) -> None:
-        # MISAKA fork: MCP output is fenced as untrusted data (descriptions, results, codemode results).
         register(_DataNoteApi(pi))
 
         def fence(event: Mapping[str, Any], _ctx: Any) -> dict[str, Any] | None:
@@ -1827,8 +1812,6 @@ def command(argv: list[str]) -> int:
     roleEnv = _roleEnvironment(profileDir, name)
     cwd = os.getcwd()
     agentDir = get_agent_dir()
-    # MISAKA fork: pi's entry applies the `httpProxy` setting before any command, from settings that never
-    # read a project's; misaka's hands the command over first, so it is applied here.
     startupSettingsManager = SettingsManager.create(cwd, agentDir, {"projectTrusted": False})
     applyHttpProxySettings(startupSettingsManager.getGlobalSettings().get("httpProxy"))
     configureHttpDispatcher()

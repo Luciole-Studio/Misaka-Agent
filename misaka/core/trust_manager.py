@@ -50,7 +50,6 @@ class ProjectTrustOption:
 
 type TrustFile = dict[str, bool | None]
 
-# MISAKA fork: the entries of a project's MISAKA home that MISAKA loads.
 TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES = ("settings.json", "mcp.json", "prompts", "themes")
 
 
@@ -215,8 +214,6 @@ def hasTrustRequiringProjectResources(cwd: str) -> bool:
 
 class ProjectTrustStore:
     def __init__(self, agentDir: str) -> None:
-        # MISAKA fork: the home keeps trust.json with its state; an embedder's own directory keeps it beside its
-        # settings.
         directory = Path(os.path.realpath(resolvePath(agentDir)))
         self.trustPath = str(home.path("trust") if directory == home.home() else directory / "trust.json")
 

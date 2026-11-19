@@ -60,7 +60,6 @@ SERVER_TOOLS = [
     {"name": "shot", "description": "Returns an image.", "inputSchema": {"type": "object", "properties": {}}},
 ]
 
-# MISAKA fork: asyncio holds tasks weakly; the fake servers' sends live here.
 _tasks: set[asyncio.Task[Any]] = set()
 
 

@@ -21,12 +21,6 @@ from misaka.utils.shell import (
     sanitizeBinaryOutput,
 )
 
-# image_resize re-exports are lazy (PEP 562): the module imports misaka.ai.types, whose
-# package __init__ boots every provider SDK. In pi (TypeScript) importing utils/paths
-# never runs a package index, so this chain does not exist there; eager Python __init__s
-# made the panel and daemon -- processes that never call a model -- pay ~0.8s of AI SDK
-# imports at startup. Provider registration is untouched: every engine process imports
-# misaka.ai.* directly (core/agent_session.py imports register_builtins itself).
 _IMAGE_RESIZE_EXPORTS = {
     "IMAGE_RESIZE_DEFAULT_MAX_BYTES": "DEFAULT_MAX_BYTES",
     "ImageResizeOptions": "ImageResizeOptions",

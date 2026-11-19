@@ -41,8 +41,6 @@ async def createNodePhotonImages(options: NodePhotonImagesOptions | None = None)
         return await inProcess()
     idleMs = options["idleMs"] if options.get("idleMs") is not None else 30_000
     thread: PhotonThread | None = None
-    # MISAKA fork: the in-process processor itself, not a future of the loop that fell back (upstream keeps the
-    # promise), so every loop can use it.
     fallback: ImageProcessor | None = None
 
     def forget() -> None:

@@ -101,7 +101,7 @@ def test_a_dissolution_belongs_to_the_conclusion_it_was_written_with(lab):
     assert [n["id"] for n in views.dissolving_nodes(lab.con, lab.run)] == [a["id"]]
     runs.write_text(lab.con, lab.run["id"], "synthesis", "Revised", runs.generated_path("synthesis-2.md", node_id=a["id"]),
                     "Revised conclusion", branch_id=a["id"])
-    assert views.dissolution(lab.con, lab.run, a) is None        # the revision answers the question after all
+    assert views.dissolution(lab.con, lab.run, a) is None
     assert views.dissolving_nodes(lab.con, lab.run) == []
 
 
@@ -141,7 +141,6 @@ async def test_the_final_report_waits_for_the_user_s_word_on_a_dissolved_questio
     record = report._record(lab.con, lab.run)
     assert record["dissolution_consent"] == {"agreed": False, "note": "answer it as asked"}
     assert record["dissolutions"][0]["node"] == a["id"]
-    # Decided once: a resumed run does not ask again.
     assert await workflow._await_consent(lab.con, {}, lab.run, window, poll_seconds=0, progress=None,
                                          check_active=lambda: None) is None
     assert len(presented) == 1
@@ -216,7 +215,6 @@ def test_a_headless_continuation_claims_a_new_generation_and_the_message_is_the_
     [task] = seen
     assert task["_say"] == "Review version 2." and int(task["generation"]) == 2
     assert tasks.latest_payload(con, tid, "continued", generation=2) is not None
-    # A card that is not settled is not continued.
     assert not dispatch.run_task(con, tasks.get(con, tid), {"provider": "p", "default_model": "m"}, say="again")
 
 
@@ -233,7 +231,6 @@ async def test_the_runners_continue_a_card_the_way_the_sister_tools_do(lab):
     lab.monkeypatch.setattr(headless._processes, "spawn", lambda argv, **k: spawned.append(argv) or SimpleNamespace(
         poll=lambda: 0 if exited else None, pid=1))
     await headless.continue_card("t_1", "go on", expected_generation=3)
-    # The message travels in a file, never on the command line (issue #13: WinError 206).
     [argv] = spawned
     assert argv[:-1] == [*node_module.CARD_ARGV, "t_1", "--say-file"] and "t_1" in headless.flying
     assert readPromptFile(argv[-1]) == "go on"
@@ -262,7 +259,7 @@ async def test_a_review_brief_too_long_for_a_command_line_reaches_the_card_whole
     from misaka.utils import loop_watchdog
     for owner, name in ((research_node, "setupCli"), (research_node.bootstrap, "install"),
                         (loop_watchdog, "configure"), (env_file, "load")):
-        lab.monkeypatch.setattr(owner, name, lambda *a, **k: None)   # process-wide entry wiring
+        lab.monkeypatch.setattr(owner, name, lambda *a, **k: None)
     lab.monkeypatch.setattr(research_node.node, "main_card", lambda task_id, *, say: seen.append((task_id, say)) or 0)
     assert research_node.main(argv[3:]) == 0
     assert seen == [("t_1", brief)]
@@ -292,7 +289,6 @@ async def test_a_card_child_that_will_not_start_ends_the_node_at_the_failure_lim
         await headless.continue_card("t_1", "go on", expected_generation=1)
     assert not isinstance(raised.value, (ValueError, RuntimeError, OSError)), "the drive loop must not retry it"
     assert not any(os.path.exists(path) for path in files), "no message file outlives a child that never started"
-    # A child that does start begins the count again.
     exited = []
     lab.monkeypatch.setattr(headless._processes, "spawn", lambda argv, **k: SimpleNamespace(
         poll=lambda: 0 if exited else None, pid=1))
@@ -331,14 +327,13 @@ def test_the_final_report_is_written_from_indexed_documents_one_command_per_part
         seen.append(prompt)
         names = [tool.name for tool in options["extra_tools"]]
         assert "misaka_research_report" in names
-        assert "declared_findings" not in prompt                  # no material catalog inlined
-        assert '"conclusion": ' in prompt or "ended without calling" in prompt   # the doc-id catalog, or the nudge
-        assert '"rationale"' not in prompt.split("# Catalog")[-1].split("# Corrections")[0]   # counts, not issue texts
-        # Only the node a survey section is about is listed in full; the draft lists none so.
+        assert "declared_findings" not in prompt
+        assert '"conclusion": ' in prompt or "ended without calling" in prompt
+        assert '"rationale"' not in prompt.split("# Catalog")[-1].split("# Corrections")[0]
         assert prompt.count('"cards": [') == (1 if "Finished-run survey" in prompt else 0)
-        assert "## Part" not in prompt                            # no survey section is sent back inline
+        assert "## Part" not in prompt
         if len(seen) == 1:
-            return None, "I will write it next.", None            # a prose reply: nothing is recorded
+            return None, "I will write it next.", None
         deliver = next(tool for tool in options["extra_tools"] if tool.name == "misaka_research_report")
         text = f"## Part {len(seen)}\n\nWritten from the documents."
         asyncio.run(deliver.execute(f"call-{len(seen)}", {"markdown": text}, None, None, ctx))
@@ -348,18 +343,15 @@ def test_the_final_report_is_written_from_indexed_documents_one_command_per_part
     worker = SimpleNamespace(run_llm_json=run_llm_json, session=None)
     cfg = {"roles_root": str(lab.tmp), "provider": "p", "default_model": "m"}
     draft = report.prepare(con, run, cfg, worker)
-    # Three survey sections (one per node; the first needed the nudge) and one draft.
     assert len(tool_calls) == 4 and len(seen) == 5
     assert "ended without calling `misaka_research_report`" in seen[1]
     survey = report._checkpoint(con, run, "survey")
     assert Path(survey["path"]).read_text(encoding="utf-8").count("## Part") == 3 and Path(draft["path"]).read_text(encoding="utf-8").startswith("## Part 5")
-    assert f"document `{report.doc_id(run, survey['path'])}`" in seen[-1]  # the draft reads the survey by its id
+    assert f"document `{report.doc_id(run, survey['path'])}`" in seen[-1]
     keys = {entry.key for entry in graph_core.entries(con, run["id"])}
     assert {f"survey:{n['id']}" for n in (root, a, b)} <= keys and "draft" in keys
-    # The run's products are in the corpus: the three conclusions, then the survey and draft themselves.
     docs = report.index_run(con, run)
     assert len(docs) == 5 and all(len(doc_id) == 12 for doc_id in docs.values())
-    # A resume redrafts nothing: the saved checkpoints are returned as they are.
     assert report.prepare(con, run, cfg, worker)["id"] == draft["id"] and len(seen) == 5
     review = report.review_body(con, run, draft)
     assert draft["sha256"] in review and "doc_read" in review and "declared_findings" not in review

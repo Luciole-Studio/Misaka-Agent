@@ -56,8 +56,6 @@ def crash(parentPort: _ParentPort, error: BaseException) -> None:
 
 def main(data: WorkerData, parentPort: _ParentPort) -> None:
     interrupt = data["interrupt"]
-    # MISAKA fork: the thread disposes the session when it ends (upstream: the VM lives until the host terminates
-    # the worker, so the session is never disposed).
     session = startVm(StartVmOptions(
         data=data,
         wasm=data["wasm"],

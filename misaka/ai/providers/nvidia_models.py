@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/nvidia.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "nvidia.json").read_text(encoding="utf-8"))
 
 NVIDIA_MODELS = flattenChatModelCatalog("nvidia", _values)

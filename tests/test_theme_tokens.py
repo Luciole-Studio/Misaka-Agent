@@ -114,7 +114,6 @@ def test_a_misaka_token_set_by_a_variable_resolves_before_its_fallback(tmp_path)
 
 
 def test_the_uninitialized_theme_has_every_token():
-    # MISAKA fork: `theme` exists from import on; its fallback palette is built from the table.
     split = splitThemeColors(dict.fromkeys(THEME_TOKENS, ""))
     uninitialized = theme_module.Theme(split["fgColors"], split["bgColors"], "256color", {"name": "uninitialized"})
     for name, token in THEME_TOKENS.items():

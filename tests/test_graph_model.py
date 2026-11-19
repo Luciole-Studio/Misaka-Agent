@@ -45,9 +45,6 @@ TREE = Schema.from_json({
 })
 
 
-# --- schema ---------------------------------------------------------------------------------------
-
-
 def test_a_schema_reads_and_writes_its_json_form_with_defaults_left_out():
     data = {
         "nodes": {"q": {"max": 4, "frozen": ["depth"]}, "note": {}},
@@ -94,9 +91,6 @@ def test_kinds_built_in_code_normalize_their_names_and_check_their_limits():
         EdgeKind(source=["a"], target=["b"], acyclic="no")
 
 
-# --- frozen JSON ------------------------------------------------------------------------------------
-
-
 def test_frozen_values_refuse_change_yet_read_as_plain_json():
     value = freeze({"a": [1, {"b": 2}], "c": "x"})
     assert isinstance(value, FrozenDict) and isinstance(value["a"], FrozenList)
@@ -123,9 +117,6 @@ def test_freeze_takes_only_json():
     for bad in ({1: "x"}, float("nan"), {"set": {1}}, object()):
         with pytest.raises(GraphError):
             freeze(bad)
-
-
-# --- the constraint check -----------------------------------------------------------------------------
 
 
 def test_a_graph_that_keeps_its_schema_has_no_violations():

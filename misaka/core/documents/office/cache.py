@@ -29,13 +29,8 @@ from misaka.config import expand_tilde_path
 from misaka.config.product import CFG
 from misaka.utils import atomic
 
-# A research run renders every document a card touches. The bound is generous -- an entry
-# is markdown, tens of KiB -- and exists so a long-lived corpus does not accumulate one
-# file per document ever read. Eviction is oldest-first by mtime, which for this store is
-# also least-recently-rendered.
 MAX_ENTRIES = 256
 
-# Bump when rendering semantics change: unchanged files must not retain old parse bugs.
 RENDER_VERSION = 3
 
 
@@ -100,8 +95,6 @@ def render_cached(path, render, *, workspace=None):
         return render()
     entry = directory / f"{key}.md"
     try:
-        # Pin the directory and reject links/special files before reading any bytes.
-        # Platforms without no-follow dir_fd opens simply re-render (a cache miss).
         if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
             raise OSError("No guarded cache reads on this platform")
         directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -116,8 +109,6 @@ def render_cached(path, render, *, workspace=None):
         finally:
             os.close(directory_fd)
     except (OSError, ValueError, UnicodeDecodeError):
-        # Absent, unreadable, or not the text it was written as: render, and let the write
-        # below replace whatever was there.
         pass
     text = render()
     try:

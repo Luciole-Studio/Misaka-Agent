@@ -223,8 +223,6 @@ _SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 _MID_CONVERSATION_OUTPUT_CONFIG_BETA = "mid-conversation-output-config-2026-07-01"
 _THINKING_BINDING_CONTROLS_BETA = "thinking-binding-controls-2026-08-01"
 _INLINE_TOOLS_BETA = "inline-tools-2026-09-15"
-# MISAKA fork: the messages of a 400 `invalid_request_error` that `stream` retries with preferred strict tools
-# downgraded, named (upstream lists them inline).
 _STRICT_TOOL_LIMIT_ERRORS = (
     "The compiled grammar is too large",
     "Too many strict tools (",
@@ -376,8 +374,6 @@ def _assertRequestAuth(provider: str, apiKey: str | None, headers: Mapping[str, 
         raise RuntimeError(f"No API key for provider: {provider}")
 
 
-# MISAKA fork: pi's `PiAnthropic` subclass is `_anthropic_sdk._sdk_client` (see that module).
-
 type _AnthropicFederationConfig = dict[str, Any]
 
 
@@ -413,7 +409,6 @@ def _getAnthropicFederation(
 # The SDK caches the federated access token per client, but pi creates a client
 # per request. Keep one client for the current federation config and fetch, and
 # clone it per request with `withOptions()`, which shares the token cache.
-# MISAKA fork: there is no per-request `fetch` here (the key alone decides).
 _federationClient: dict[str, Any] | None = None
 
 
@@ -511,7 +506,6 @@ async def _iterateSseMessages(body: Any, signal: Any = None) -> AsyncIterator[_S
     state: _SseDecoderState = {"event": None, "data": [], "raw": []}
     buffer = ""
 
-    # MISAKA fork: no reader lock to release; the response is closed by the request that opened it.
     async for value in _iterate_async_iterable(body.aiter_bytes(), signal, on_abort=lambda: _close_stream(body)):
         if signal_aborted(signal):
             raise RuntimeError("Request was aborted")
@@ -570,8 +564,6 @@ async def _iterateAnthropicEvents(response: Any, signal: Any = None) -> AsyncIte
                 f"Could not parse Anthropic SSE event {sse['event']}: {message}; data={sse['data']}; "
                 f"raw={'\\n'.join(sse['raw'])}"
             ) from error
-        # MISAKA fork: JavaScript's `for await` hands control to the consumer at every event, so it sees the
-        # partial as each event left it; a chunk's events would otherwise all be applied before it runs.
         await asyncio.sleep(0)
         yield event
 
@@ -606,7 +598,6 @@ def stream(
             stopReason="pending",
             timestamp=time.time_ns() // 1_000_000,
         )
-        # MISAKA fork: what this request opened, closed in `finally`.
         response: Any = None
         created: _CreatedClient | None = None
         federation: _AnthropicFederationConfig | None = None
@@ -705,9 +696,6 @@ def stream(
                 )
             stream.push(StartEvent(partial=output))
 
-            # MISAKA fork: pi keeps the provider block index and the tool's partial JSON on the block itself
-            # (`type Block`); the pydantic blocks forbid extra fields, so both live beside it. A block's index is
-            # dropped at its stop event, as upstream deletes `block.index`.
             blockIndexes: dict[int, int] = {}
             partialJsons: dict[int, StreamingArgs] = {}
 
@@ -796,7 +784,6 @@ def stream(
                                     if isOAuth
                                     else contentBlock.get("name")
                                 ),
-                                # MISAKA fork: arguments are a dict here, so a non-object input reads as `{}`.
                                 arguments=initialInput if isinstance(initialInput, dict) else {},
                             )
                         )
@@ -839,9 +826,6 @@ def stream(
                         elif block.type == "thinking":
                             stream.push(ThinkingEndEvent(contentIndex=index, content=block.thinking, partial=output))
                         elif block.type == "toolCall":
-                            # MISAKA fork: only streamed deltas replace what content_block_start inlined --
-                            # compatible endpoints put the whole input in the start block and send no
-                            # input_json_delta, where parsing the empty buffer would hand the tool `{}`.
                             partialJson = partialJsons.pop(event["index"], None)
                             if partialJson is not None and partialJson.raw:
                                 partialJson.finish_into(block)
@@ -884,8 +868,6 @@ def stream(
                     )
                     calculateCost(usageModel, output.usage)
 
-            # MISAKA fork: a compatible endpoint may omit a block-stop event; finalize every raw buffer before
-            # dispatch, since a streaming preview alone is never executable.
             for providerIndex, partialJson in partialJsons.items():
                 index = blockAt(providerIndex)
                 if index != -1 and partialJson.raw:
@@ -922,7 +904,6 @@ def stream(
             stream.push(DoneEvent(reason=output.stopReason, message=output))
             stream.end()
         except Exception as error:  # noqa: BLE001 - every failure becomes an error event on the stream
-            # MISAKA fork: see `_anthropic_sdk._invalidate_federation_token`.
             if federation is not None and created is not None and provider_error_status(error) == 401:
                 _anthropic_sdk._invalidate_federation_token(created.client)
             output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
@@ -932,7 +913,6 @@ def stream(
             stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
             stream.end()
         finally:
-            # MISAKA fork: close the response and the client this request opened while their loop still runs.
             await _close_stream(response)
             if created is not None:
                 await _anthropic_sdk._close_client(created.client, federation=federation is not None)
@@ -1011,7 +991,6 @@ def _isOAuthToken(apiKey: str) -> bool:
 class _CreatedClient(NamedTuple):
     client: Any
     isOAuthToken: bool
-    # MISAKA fork: the headers every request has to carry (see `_anthropic_sdk._sdk_client`).
     requestHeaders: dict[str, Any]
 
 
@@ -1488,13 +1467,11 @@ def _convertMessages(
             if isinstance(lastMessage["content"], list):
                 lastBlock = lastMessage["content"][-1] if lastMessage["content"] else None
                 if lastBlock and lastBlock["type"] in ("text", "image", "tool_result", "tool_addition", "tool_removal"):
-                    # MISAKA fork: a lone text block may carry a stable-prefix breakpoint (`_applyStablePrefixCacheMarker`).
                     if len(lastMessage["content"]) == 1 and lastBlock["type"] == "text":
                         _applyStablePrefixCacheMarker(lastMessage, lastBlock["text"], cacheControl)
                     else:
                         lastBlock["cache_control"] = cacheControl
             elif isinstance(lastMessage["content"], str):
-                # MISAKA fork: pi's `[{type: "text", text, cache_control}]`, unless a stable prefix is declared.
                 _applyStablePrefixCacheMarker(lastMessage, lastMessage["content"], cacheControl)
 
     return {"messages": params, "assistantLevels": assistantLevels}
@@ -1577,9 +1554,6 @@ def _isAnthropicStrictUnsupportedKeyword(key: str, value: Any) -> bool:
     return False
 
 
-# MISAKA fork: the non-strict schema keeps `$defs`/`definitions`, which MCP servers' tool schemas reference from
-# their properties; pi sends only type/properties/required and drops them. Kept until pi lands the local `$ref`
-# inlining discussed in pi #9557 / #10270, then follow pi.
 _SCHEMA_DEFINITION_KEYS = ("$defs", "definitions")
 
 

@@ -48,14 +48,10 @@ def auxiliary_config():
 
 
 def get_plugin_auxiliary_tasks():
-    # The pinned LCM plugin registers no auxiliary-task defaults. MISAKA has no
-    # Hermes plugin-discovery registry; do not discover another install's plugins.
     return ()
 
 
 def _scoped_key_env(name):
-    # Native workers already inherit their role's scrubbed environment. Hermes'
-    # profile-secret store is not part of this host.
     return (os.environ.get(name) or "").strip() if name else ""
 
 
@@ -64,10 +60,6 @@ def database_path(ctx=None) -> str:
     return str(storage.directory(storage.project(ctx)) / "lcm.db")
 
 
-# What Hermes' DEFAULT_CONFIG gives every config.yaml (hermes_cli/config_defaults.py, bda3a363e9):
-# upstream inherits compression.threshold before its own 0.35 (config._hermes_compression_threshold),
-# so in Hermes an unconfigured session compacts at half its window. settings.json carried no such
-# default, and MISAKA compacted at 0.35 (F16, 2026-10-24).
 HERMES_COMPRESSION_DEFAULTS = {"threshold": 0.50}
 
 
@@ -92,15 +84,8 @@ def _session_host_config(ctx) -> dict:
     return {**config, "lcm": {**lcm, "context_threshold": float(threshold)}}
 
 
-# Upstream's leaf chunk (20,000 tokens) fits the ~128k windows it was tuned on. A MISAKA session
-# runs on 272k to 1M windows and a research Last Order reads eleven 25 KB memos in one phase, so
-# the upstream size summarised a leaf at every phase and pulled a 1M-window session down at 30%
-# (2026-09-27). Unset, it scales with the session's own window. The fresh tail stays upstream's
-# 32 messages: scaled to 250, it was a research Last Order's entire conversation -- nothing was
-# ever old enough to summarise, she reached 1M on overflow recovery alone, and a node forked from
-# her failed on "prompt is too long" (2026-09-28).
 REFERENCE_WINDOW = 128_000
-SUMMARISER_SHARE = 0.6    # a leaf chunk is summarised in one call: it must fit the summariser
+SUMMARISER_SHARE = 0.6
 
 
 def scale_to_window(config, window, summariser_window=None):
@@ -134,27 +119,12 @@ def load_config(*, database=None, home=None, ctx=None) -> LCMConfig:
     from . import settings
     config = settings.apply(LCMConfig.from_env(host_config=_session_host_config(ctx)))
     if "LCM_EMBEDDING_QUERY_TIMEOUT_S" not in os.environ:
-        # Upstream's 3 s deadline also bounds lcm_grep's full-text arm (it interrupts the
-        # SQLite query through a progress handler), and a research project's lcm.db runs to
-        # tens of megabytes, where that arm regularly overran it and was dropped in silence
-        # (2026-09-18, B32). The knob is upstream's own; only misaka's default differs.
         config.embedding_query_timeout_s = 30.0
         config.config_sources["embedding_query_timeout_s"] = "misaka.default"
     if "LCM_RESERVE_TOKENS_FLOOR" not in os.environ:
-        # Upstream arms its overflow recovery (forced compaction that may cut into the fresh
-        # tail, deterministic truncation when the summariser cannot) only when an assembly
-        # cap exists, and the cap exists only with `max_assembly_tokens` or a non-zero
-        # reserve floor; upstream ships both at 0. Without it an overflowed Sister retried the
-        # identical prompt and died (2026-09-23, card t_9f10b6 on a 272k window). pi's own
-        # reserve is 16384 tokens; the knob is upstream's, only misaka's default differs.
         config.reserve_tokens_floor = 16_384
         config.config_sources["reserve_tokens_floor"] = "misaka.default"
     if "LCM_DYNAMIC_LEAF_CHUNK_ENABLED" not in os.environ:
-        # Without upstream's chunked leaf passes, a compaction summarises the whole raw backlog
-        # outside the fresh tail as one leaf: a research Last Order's 600k-token backlog became a
-        # single 4k-token summary, read by a summariser whose window is 272k (2026-09-29). Upstream
-        # recommends the chunked passes for workloads dominated by huge raw backlogs; the knob is
-        # upstream's, only misaka's default differs.
         config.dynamic_leaf_chunk_enabled = True
         config.config_sources["dynamic_leaf_chunk_enabled"] = "misaka.default"
     config.database_path = str(database) if database is not None else database_path(ctx)

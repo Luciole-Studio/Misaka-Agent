@@ -22,14 +22,11 @@ def _blocks(message: Any) -> list[Any]:
 
 
 def _response_id(message: Any) -> Any:
-    # Pi names the provider message.id responseId, not the JSONL entry ID.
     value = read_field(message, "responseId")
     return read_field(message, "id") if value is None else value
 
 
 def _merge_user_messages(a: Any, b: Any) -> Any:
-    # Source normalizeUserTextContent -> joinTextAtSeam -> hoistToolResults.
-    # Shallow copies preserve image/signature blocks; never mutate the archive.
     left, right = read_field(a, 'content'), read_field(b, 'content')
     left = [TextContent(text=left) if hasattr(a, 'model_copy') else {'type': 'text', 'text': left}] if isinstance(left, str) else list(left)
     right = [TextContent(text=right) if hasattr(b, 'model_copy') else {'type': 'text', 'text': right}] if isinstance(right, str) else list(right)
@@ -66,8 +63,6 @@ def filter_resume_messages(messages: list[Any]) -> list[Any]:
         if read_field(message, 'role') == 'assistant':
             ids = [read_field(block, 'id') for block in _blocks(message)
                    if read_field(block, 'type') in {'toolCall', 'tool_use'}]
-            # Source resume removes the MESSAGE only when every call is
-            # unresolved; this is not its separate block-level fork cleaner.
             if ids and all(call in unresolved for call in ids):
                 continue
         selected.append(message)

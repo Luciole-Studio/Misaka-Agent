@@ -61,7 +61,6 @@ from misaka.ai.providers.zai import zaiProvider
 from misaka.ai.providers.zai_coding_cn import zaiCodingCnProvider
 from misaka.ai.types import AnyModel, ClassifierModel, ImageModel, Model
 
-# MISAKA fork: `import modelDataManifest from "./data/.manifest.json"` reads the JSON.
 _modelDataManifest = json.loads((Path(__file__).parent / "data" / ".manifest.json").read_text(encoding="utf-8"))
 
 # Providers present in the generated catalog. `KnownProvider` additionally

@@ -37,7 +37,6 @@ async def editInExternalEditor(options: ExternalEditorOptions) -> ExternalEditor
         with open(filePath, "w", encoding="utf-8", newline="") as file:  # noqa: ASYNC230 - upstream writeFileSync
             file.write(options["content"])
         editor, *editorArgs = options["command"].split(" ")
-        # MISAKA fork: the product name in the hand-over line.
         sys.stdout.write(f"Launching external editor: {options['command']}\nMISAKA will resume when the editor exits.\n")
         sys.stdout.flush()
 
@@ -46,9 +45,6 @@ async def editInExternalEditor(options: ExternalEditorOptions) -> ExternalEditor
         exitCode: int | None
         try:
             if sys.platform == "win32":
-                # MISAKA fork: Node's `shell: true` joins the words with plain spaces, so cmd.exe reads the
-                # command's own quotes (`"C:\\Program Files\\..." -w`) as written; the temp file is quoted, so
-                # a user name with a space still reaches the editor as one argument.
                 child = await asyncio.create_subprocess_shell(
                     " ".join([editor, *editorArgs, subprocess.list2cmdline([filePath])])
                 )

@@ -201,7 +201,6 @@ async def classify(
     )
 
     try:
-        # MISAKA fork: a plain mapping context is read into ClassifierContext.
         context = context if isinstance(context, ClassifierContext) else ClassifierContext.model_validate(context)
         if model.api != "openai-decisions":
             raise RuntimeError(f"Unsupported classifier API: {model.api}")

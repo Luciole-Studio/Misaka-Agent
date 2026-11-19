@@ -546,8 +546,6 @@ async def test_ddgs_deadline_kills_and_reaps_owned_worker(tmp_path, monkeypatch)
     with pytest.raises(TimeoutError, match="timed out after 0.2s"):
         await ddgs._run_ddgs_search_bounded("query", 1)
     worker = int(pidfile.read_text(encoding="utf-8"))
-    # Windows: a venv's python.exe is a launcher that runs the interpreter as its child in a kill-on-close job; ending
-    # the launcher ends the interpreter a moment later (seen on a runner: alive at once, gone within 2 s).
     deadline = time.monotonic() + (5 if sys.platform == "win32" else 0)
     while psutil.pid_exists(worker) and time.monotonic() < deadline:
         await asyncio.sleep(0.05)
@@ -583,7 +581,7 @@ async def test_timeout_rotation_preserves_busy_pool_and_retires_it_after_drain(t
         release.set()
         await first
         assert clients[0].is_closed and not clients[1].is_closed and seen == [10, 20]
-        await search(owner, "first")  # A completed result does not depend on its timeout policy.
+        await search(owner, "first")
         assert seen == [10, 20]
     finally:
         release.set()

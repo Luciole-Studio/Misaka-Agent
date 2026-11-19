@@ -37,8 +37,6 @@ from .snapshot import Snapshot
 
 PROPOSED, APPROVED, APPLIED, VOID = "proposed", "approved", "applied", "void"
 
-# status, action -> status. An approved entry may be approved again (a fresh go-ahead for the same
-# proposal); an applied or void one moves no further.
 _MOVES = {
     (PROPOSED, "approve"): APPROVED,
     (APPROVED, "approve"): APPROVED,

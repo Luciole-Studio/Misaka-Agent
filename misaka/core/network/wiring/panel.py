@@ -24,8 +24,6 @@ import os
 import sys
 import time
 
-# Sessions with a UI inside a pane. Children inherit MISAKA_NET_PANE from their parent but run
-# headless, and must not speak for her pane.
 SESSION_KINDS = {"foreground", "dm", "card"}
 BLOCKED_MESSAGE = "waiting for your answer"
 
@@ -35,11 +33,11 @@ class Reporter:
     blocked (a question is open) beats working (a turn is running) beats idle."""
 
     def __init__(self, send):
-        self.send = send            # send(state, message, seq, session): blocking, may raise
+        self.send = send
         self.active = False
         self.blocked = 0
         self.message = ""
-        self.session = ""           # the file this session writes; the panel matches its list against it
+        self.session = ""
         self.last = None
         self.seq = 0
 
@@ -73,9 +71,6 @@ class PanelPart:
         self.session = None
         self.role = role
         self.kind = kind
-        # ``--as`` (cli/app.py) names a Sister the way chat.assembly resolves her -- relative
-        # to profiles/sisters/ -- while the role is the path relative to profiles/
-        # (``sisters/10032``). Same trim as messages.py and todo.py.
         self.who = role.rsplit("/", 1)[-1]
         self.pane_id = os.environ.get("MISAKA_NET_PANE", "")
         self._request = request
@@ -90,8 +85,6 @@ class PanelPart:
                      "session": session},
                     timeout=3)
 
-    # -- state reports --
-
     async def session_start(self, _event, ctx):
         self.reporter.note_session(ctx)
         await self.reporter.publish(force=True)
@@ -102,8 +95,6 @@ class PanelPart:
         await self.reporter.publish()
 
     async def agent_settled(self, _event, ctx):
-        # TodoPart precedes this part: acceptance, Git and PageIndex finish
-        # before a workflow's driver may advance to the next phase.
         self.reporter.active = not ctx.isIdle()
         self.reporter.note_session(ctx)
         await self.reporter.publish()
@@ -123,8 +114,6 @@ class PanelPart:
         self.reporter.active, self.reporter.blocked, self.reporter.message = False, 0, ""
         await self.reporter.publish()
 
-    # -- fork as a split --
-
     async def session_before_fork(self, event, ctx):
         if self.kind != "foreground":
             return None
@@ -141,11 +130,11 @@ class PanelPart:
         entry = manager.getEntry(str(event.get("entryId"))) if source else None
         if not entry:
             return None
-        if event.get("position") == "at":            # /tree "clone here"
+        if event.get("position") == "at":
             leaf = str(entry["id"])
-        else:                                        # /fork a user message: branch at its parent
+        else:
             if (entry.get("message") or {}).get("role") != "user":
-                return None                          # the runtime validates and refuses as pi does
+                return None
             leaf = entry.get("parentId")
         if not leaf:
             return None
@@ -157,18 +146,14 @@ class PanelPart:
             if not branched:
                 return False
             if not os.path.isfile(branched):
-                # createBranchedSession defers the write until the branch holds an
-                # assistant message; the new pane resumes from disk, so write it now.
                 branch_manager.rewrite_file()
             chat = [sys.executable, "-m", "misaka", "chat"]
-            if role != "last_order":           # chat.py -- Last Order's role name
+            if role != "last_order":
                 chat += ["--as", who]
             created = request("pane.create",
                               {"argv": [*chat, "--session", branched], "cwd": manager.getCwd(),
                                "title": "Last Order" if role == "last_order" else who,
                                "place": {"tab": pane_id}})
-            # Only a seated pane (daemon.py answers with its id) earns the cancel:
-            # cancelling first and failing second loses the fork at both ends.
             return bool(created and created.get("pane_id"))
 
         try:
@@ -180,7 +165,7 @@ class PanelPart:
 
 def part(spec):
     if os.environ.get("MISAKA_SUBAGENT_ID"):
-        return None            # a child process inherits its parent's pane id but must not speak for that pane
+        return None
     if not os.environ.get("MISAKA_NET_PANE"):
         return None
     return PanelPart(spec.role, spec.kind)

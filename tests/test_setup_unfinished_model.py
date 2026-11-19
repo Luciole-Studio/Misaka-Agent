@@ -63,7 +63,7 @@ def test_a_uv_tool_install_prints_the_command_without_asking(monkeypatch, capsys
     wizard = setup.Wizard()
     wizard._add_extras(["openai"])
     wizard.state.update(provider="openai", model="m", credential=True)
-    wizard._verify(NS(), "openai", "m")      # skipped: the request would fail without the SDK
+    wizard._verify(NS(), "openai", "m")
     wizard._model_check()
 
     out = capsys.readouterr().out
@@ -105,5 +105,5 @@ def test_a_key_stored_during_setup_counts_at_once(monkeypatch):
         return ApiKeyCredential(key="sk-test")
 
     asyncio.run(auth.credentials.modify("openai", store))
-    assert not auth.runtime.getProviderAuthStatus("openai").configured   # the stale view
+    assert not auth.runtime.getProviderAuthStatus("openai").configured
     assert setup.has_credential("openai")

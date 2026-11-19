@@ -519,7 +519,6 @@ def spawn(command: str, args: Sequence[str], options: Mapping[str, Any]) -> Chil
 
         # libuv puts every child into one job that ends them when this process exits, however it exits.
         libuv_windows.assignToJob(process)
-    # MISAKA fork: misaka's signal-time cleanup kills the servers a session started.
     trackDetachedChildPid(process.pid)
     child.stdin = Writable(child)
     child.stdout = _Readable()

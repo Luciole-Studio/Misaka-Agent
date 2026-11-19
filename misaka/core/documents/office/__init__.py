@@ -32,14 +32,6 @@ from misaka.core.documents.office import xlsx as _xlsx
 from misaka.core.documents.office.cache import render_cached
 from misaka.core.documents.office.paging import blocks, resume_context
 
-# Suffix to renderer key. ``.xlsm`` is a workbook that carries macros: the macros are not
-# text and the sheets read identically, so it is an ``xlsx`` (borrowed from FrontierAgent
-# plugins/tools/_reader_core.py:572 ``_FMT_NORM``). ``.csv``/``.tsv`` are rendered by the
-# workbook module because they share its relational-table representation, but they are
-# their own format for paging: a csv has no sheets to cut at. ``.docm``/``.pptm`` are the
-# macro-bearing variants and read identically for the same reason ``.xlsm`` does.
-# Only what this package can actually render is listed; ``read`` routes on membership here
-# and ``index._EXTRACTORS`` mirrors it.
 _FORMATS = {
     ".xlsx": "xlsx", ".xlsm": "xlsx",
     ".csv": "csv", ".tsv": "csv",
@@ -47,12 +39,8 @@ _FORMATS = {
     ".pptx": "pptx", ".pptm": "pptx",
 }
 
-# The formats that are OOXML packages, and so go through the zip precheck. A csv is a text
-# file: prechecking it as a zip would refuse every csv there is.
 _PACKAGED = frozenset({"xlsx", "docx", "pptx"})
 
-# The renderer per format. ``cell_range`` reaches only the workbook: it names a sheet and a
-# range, which the other three do not have.
 _RENDER = {
     "xlsx": lambda path, cell_range, meta: _xlsx.render(path, cell_range=cell_range,
                                                         meta=meta),
@@ -76,9 +64,6 @@ __all__ = [
 
 precheck = _zip.precheck
 
-# The title a document carries inside itself, for the formats that carry one.
-# ``index.source_title`` prefers it over the file name, which for a downloaded deck is
-# whatever the URL ended in.
 TITLE_OF = {"docx": _docx.title, "pptx": _pptx.title}
 
 

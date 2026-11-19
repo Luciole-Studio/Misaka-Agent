@@ -29,9 +29,9 @@ def test_only_anomalous_verdicts_are_logged_and_only_once(caplog):
     processes._REPORTED.clear()
     me = os.getpid()
     with caplog.at_level(logging.WARNING, logger="misaka.core.platform.processes"):
-        assert not processes.identity_is_alive(2**22 - 7, "host:4194297:1.0")   # gone: silent
-        assert not processes.identity_is_alive(me, "host:0:0.0")                 # mismatch: one line
-        assert not processes.identity_is_alive(me, "host:0:0.0")                 # same anomaly: no repeat
+        assert not processes.identity_is_alive(2**22 - 7, "host:4194297:1.0")
+        assert not processes.identity_is_alive(me, "host:0:0.0")
+        assert not processes.identity_is_alive(me, "host:0:0.0")
     lines = [r.getMessage() for r in caplog.records if r.name == "misaka.core.platform.processes"]
     assert len(lines) == 1
     assert "identity mismatch" in lines[0] and str(me) in lines[0]
@@ -40,8 +40,6 @@ def test_only_anomalous_verdicts_are_logged_and_only_once(caplog):
 def test_self_drift_is_reported_once(caplog, monkeypatch):
     processes._REPORTED.clear()
     processes._SELF_IDENTITY = "host:1:1.000000"
-    # A second's drift is psutil's boot-time correction (B56), explained and tolerated; a
-    # reading an hour off is a real drift and is said once.
     monkeypatch.setattr(processes, "identity", lambda pid: "host:1:2.000000")
     with caplog.at_level(logging.WARNING, logger="misaka.core.platform.processes"):
         processes._self_check()
@@ -84,7 +82,6 @@ def test_a_refused_claim_explains_the_key_mismatch_and_leaves_it_on_the_row(tmp_
     assert text.startswith("claim refused: runner key mismatch")
     assert key[:8] in text and "00000000" in text
     assert runs.node(con, node_id)["last_error"] == text
-    # A later, different explanation does not overwrite the first cause.
     runs.note_claim_failure(con, "research_execution", node_id, key)
     assert runs.node(con, node_id)["last_error"] == text
 
@@ -129,7 +126,7 @@ def test_configure_logging_sends_warnings_to_a_file(tmp_path, monkeypatch):
     try:
         path = engine.configure_logging()
         assert path == str(home.path("log"))
-        assert engine.configure_logging() == path                      # idempotent
+        assert engine.configure_logging() == path
         assert len(root.handlers) == len(before) + 1
         logging.getLogger("misaka.test.b6").warning("painted nowhere")
         for handler in root.handlers:

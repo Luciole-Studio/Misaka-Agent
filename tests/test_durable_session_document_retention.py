@@ -517,10 +517,6 @@ class TestDocumentCacheRetention:
         monkeypatch.setattr(sessionModule, "setTimeout", countingSetTimeout)
         opened = open_(1_000)
         session, clock, sizes = opened.session, opened.clock, opened.sizes
-        # MISAKA fork: upstream replaces `setTimeout` with one returning a plain number, as in Cloudflare Workers, and the
-        # Session notices the missing `unref` on its first timer. An asyncio timer never keeps the loop alive, so misaka
-        # has no such runtime and never makes that check (see `SessionImpl._documentTimersUnavailable`); the test puts
-        # the Session in the state that check leaves it in.
         session._documentTimersUnavailable = True
         conversationId = await createConversation(session)
         await bump(session, conversationId)

@@ -17,7 +17,6 @@ def extract_json(text):
     depth, in_string, escaped = 0, False, False
     for i, ch in enumerate(text):
         if depth:
-            # Never turn a malformed outer response into a valid nested fragment.
             if in_string:
                 if escaped:
                     escaped = False
@@ -108,8 +107,6 @@ def validate_cards(obj, sisters):
         if not (isinstance(body, str) and '## acceptance criteria' in body.lower()):
             errors.append(f"card {i}: body must contain a testable `## acceptance criteria` section")
         else:
-            # A `## deliverable` the completion check cannot satisfy is refused now, not when the
-            # card tries to complete (R52).
             from misaka.core.network import card_contract, worker
             try:
                 name = worker.contract_deliverable({"body": body})

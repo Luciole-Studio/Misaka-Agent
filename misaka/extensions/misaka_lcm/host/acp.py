@@ -59,8 +59,6 @@ async def complete(*, messages, model, timeout, cwd, signal=None, **kwargs):
                 await asyncio.gather(aborting, return_exceptions=True)
             if not worker.done():
                 await run_in_thread(client.close)
-                # A terminated child can report a transport error. The cancelling
-                # owner wins, after the original pumps/pipes have drained.
                 try:
                     await settle(worker)
                 except Exception:

@@ -41,9 +41,6 @@ PRESETS = {
         description="Claude Code, Anthropic's coding agent: reads a codebase, edits files, runs commands."),
     "codex": Ally(
         "codex", CODEX_ACP,
-        # The adapter's default mode asks before every command and turns the network off;
-        # "agent-full-access" is approval "never" with the network on (raven, measured on
-        # codex-acp 1.1.14 and 1.13.1). The user chose full access for Codex (2026-09-29).
         env=(("INITIAL_AGENT_MODE", "agent-full-access"),),
         description="Codex, OpenAI's coding agent: reads a codebase, edits files, runs commands."),
 }
@@ -97,7 +94,7 @@ def environment(ally: Ally) -> dict[str, str]:
             **dict(ally.env)}
 
 
-START_SECONDS = 600         # ``npx -y`` fetches an adapter the first time it runs
+START_SECONDS = 600
 
 
 async def handshake(ally: Ally) -> str:

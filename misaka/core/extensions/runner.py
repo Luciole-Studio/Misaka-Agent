@@ -619,7 +619,6 @@ class ExtensionRunner:
     commandDiagnostics: list[ResourceDiagnostic] = field(default_factory=list)
     staleMessage: str | None = None
     uiPromptDepth: int = field(default=0, init=False, repr=False)
-    # MISAKA fork: the session's parts (core.moments), so the runner's own ui_prompt events reach them.
     moments: Any = field(default=None, init=False, repr=False)
     activeUIPrompt: tuple[UIPromptKind, str | None] | None = field(
         default=None, init=False, repr=False
@@ -847,7 +846,7 @@ class ExtensionRunner:
         }
         if title:
             event["title"] = title
-        moments = self.moments  # MISAKA fork: the session's parts hear it first
+        moments = self.moments
 
         async def dispatch() -> None:
             if moments is not None:

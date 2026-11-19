@@ -38,10 +38,6 @@ CREATE INDEX IF NOT EXISTS idx_notification_events_resource
   ON notification_events(resource_type,resource_id,kind,id);
 """
 
-# ``unixepoch()`` is SQLite 3.38 (2022-02). A CREATE TRIGGER does not compile its body, so an
-# older library installs this happily and then fails *every* terminal UPDATE with "no such
-# function" -- submit/fail/stop/block/reclaim all raise. requires-python does not constrain
-# libsqlite3: Ubuntu 22.04's system Python 3.12 links 3.37.2. strftime has been there since 3.x.
 TASK_TRIGGER = """
 CREATE TRIGGER IF NOT EXISTS task_terminal_notification_v4
 AFTER UPDATE OF status,generation ON tasks
@@ -75,10 +71,10 @@ def _txn(con):
 
 
 NOTIFICATION_SCHEMA_VERSION = 1
-EVENT_RETENTION_SECONDS = 30 * 86400      # an event every subscriber has passed is history
-SUBSCRIPTION_IDLE_SECONDS = 30 * 86400    # a subscriber silent this long has left for good
-HEARTBEAT_SECONDS = 86400                 # how often a poll that finds nothing says the subscriber is still there
-SUBSCRIBE_LOOKBACK_SECONDS = 7 * 86400    # what a new subscriber is told about from before it arrived
+EVENT_RETENTION_SECONDS = 30 * 86400
+SUBSCRIPTION_IDLE_SECONDS = 30 * 86400
+HEARTBEAT_SECONDS = 86400
+SUBSCRIBE_LOOKBACK_SECONDS = 7 * 86400
 
 
 def prune(con, *, now=None):
@@ -181,9 +177,6 @@ def claim_next(con, subscription_id, *, token=None, ttl_seconds=60):
              sub["resource_id"], sub["resource_id"], sub["kind"], sub["kind"]),
         ).fetchone()
         if event is None:
-            # Nothing to hand out: write only an expired lease to clear, or the daily heartbeat that
-            # keeps ``prune`` off a subscriber still polling. Writing on every poll rewrote the board
-            # every few seconds while nothing happened (0.19.17 on a Mac: ~57 KB of WAL a minute).
             if (sub["lease_token"] is not None or sub["leased_event_id"] is not None
                     or sub["lease_expires"] is not None or int(sub["updated_at"]) <= now - HEARTBEAT_SECONDS):
                 con.execute(

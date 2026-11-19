@@ -49,12 +49,10 @@ _AUTHORIZE_URL = "https://openrouter.ai/auth"
 _TOKEN_URL = "https://openrouter.ai/api/v1/auth/keys"
 _LOGIN_TIMEOUT_MS = 5 * 60 * 1000
 _TOKEN_EXCHANGE_TIMEOUT_MS = 30_000
-# MISAKA fork: `Number.MAX_SAFE_INTEGER`.
 _MAX_SAFE_INTEGER = 2**53 - 1
 
 
 def _getCallbackHost() -> str:
-    # MISAKA fork: MISAKA_OAUTH_CALLBACK_HOST for upstream's PI_OAUTH_CALLBACK_HOST.
     return getProviderEnvValue("MISAKA_OAUTH_CALLBACK_HOST") or "127.0.0.1"
 
 
@@ -149,7 +147,6 @@ async def _exchangeAuthorizationCode(code: str, verifier: str, signal: Any) -> O
 
 
 async def _loginOpenRouter(interaction: ProviderAuthInteraction, options: LoginOptions | None = None) -> OAuthCredential:
-    # MISAKA fork: `options` is accepted because every login is called with it.
     pkce = await generatePKCE()
     verifier, challenge = pkce.verifier, pkce.challenge
     # OpenRouter sends no `state`; the random path keeps stray requests from completing the sign-in.

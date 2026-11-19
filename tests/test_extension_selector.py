@@ -47,7 +47,6 @@ def test_the_shimmer_colours_every_character_and_resets_the_foreground():
     assert stripAnsi(shimmer) == "Sign in with Radius"
     assert shimmer.endswith("\x1b[39m")
     assert shimmer.count("\x1b[38;") == len("Sign in with Radius")
-    # The bands flow: a later frame colours the first character differently.
     assert radiusShimmer("Sign in with Radius", 250) != shimmer
 
 
@@ -72,7 +71,6 @@ async def test_the_login_menu_animates_only_while_the_radius_option_is_selected(
     assert stripAnsi("\n".join(animated)) == stripAnsi("\n".join(first)).replace(
         f"→ {options[0]}", f"  {options[0]}"
     ).replace(f"  {label}", f"→ {label}")
-    # The selected Radius row is coloured character by character, unlike a plain selector's row.
     plain = ExtensionSelectorComponent("Select authentication method:", options, lambda _option: None, lambda: None)
     plain.handleInput("j")
     plain.handleInput("j")

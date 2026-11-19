@@ -51,7 +51,6 @@ class CustomEntryComponent(Container):
         except Exception as error:  # noqa: BLE001 - renderer failures stay visible in the transcript
             message = errorMessage(error)
             box = Box(self.outputPad, 1, lambda text: theme.bg("customMessageBg", text))
-            # MISAKA fork: a custom entry is a dict.
             box.addChild(Text(theme.fg("error", f"[{self.entry.get('customType')}] renderer failed: {message}"), 0, 0))
             component = box
 

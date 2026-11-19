@@ -32,8 +32,6 @@ def _save(wb, path):
     return path
 
 
-# ── grid ────────────────────────────────────────────────────────────────────
-
 def test_the_grid_carries_column_letters_and_row_numbers(tmp_path):
     wb, path = _book(tmp_path)
     ws = wb.active
@@ -73,13 +71,11 @@ def test_two_data_islands_are_separated_and_labelled(tmp_path):
     wb, path = _book(tmp_path)
     ws = wb.active
     ws["A1"] = "first"
-    ws["A9"] = "second"          # a gap of more than _GAP blank rows splits the block
+    ws["A9"] = "second"
     out = xlsx.render(_save(wb, path))
     assert "`data region 1: A1`" in out
     assert "`data region 2: A9`" in out
 
-
-# ── rendered values ─────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize(("value", "fmt", "shown"), [
     (datetime.datetime(2024, 3, 1), None, "2024-03-01"),  # noqa: DTZ001 - a cell has no zone
@@ -89,7 +85,7 @@ def test_two_data_islands_are_separated_and_labelled(tmp_path):
     (1234.5, '"$"#,##0.00', "$1,234.50"),
     (-1234.0, "#,##0;(#,##0)", "(1,234)"),
     (12345.0, "0.00E+00", "1.23E+04"),
-    (1234567.0, '#,##0,,"M"', "1234567"),   # trailing-comma scaling is not rendered
+    (1234567.0, '#,##0,,"M"', "1234567"),
 ])
 def test_number_formats_render_the_way_the_sheet_shows_them(tmp_path, value, fmt, shown):
     wb, path = _book(tmp_path)
@@ -109,8 +105,6 @@ def test_a_number_format_is_recorded_once_at_sheet_level(tmp_path):
     assert "▸ number-format" in out
     assert "0.0% A1:A5" in out
 
-
-# ── formulas ────────────────────────────────────────────────────────────────
 
 def test_a_homogeneous_fill_is_one_grouped_r1c1_entry(tmp_path):
     wb, path = _book(tmp_path)
@@ -140,10 +134,8 @@ def test_a_formula_this_product_wrote_reads_back_as_uncached(tmp_path):
     ws["A1"], ws["A2"] = 2, "=A1*3"
     out = xlsx.render(_save(wb, path))
     assert "`uncached`" in out
-    assert "uncached" in out.split("## Sheet")[0]  # the head says why, once
+    assert "uncached" in out.split("## Sheet")[0]
 
-
-# ── sheet-level meta ────────────────────────────────────────────────────────
 
 def test_a_merged_region_names_the_cell_holding_the_value(tmp_path):
     wb, path = _book(tmp_path)
@@ -207,8 +199,6 @@ def test_conditional_formatting_is_kept(tmp_path):
     assert "cellIs greaterThan 3" in out
 
 
-# ── tables, pivots, charts ──────────────────────────────────────────────────
-
 def test_a_small_excel_table_is_emitted_whole_with_no_column_schema(tmp_path):
     from openpyxl.worksheet.table import Table
     wb, path = _book(tmp_path)
@@ -261,8 +251,6 @@ def test_a_chart_is_read_out_of_the_package(tmp_path):
     assert 'title="Quarterly"' in out
 
 
-# ── sheets ──────────────────────────────────────────────────────────────────
-
 def test_an_empty_sheet_produces_no_page_of_its_own(tmp_path):
     wb, path = _book(tmp_path)
     wb.active["A1"] = "only sheet with content"
@@ -291,8 +279,6 @@ def test_a_workbook_with_no_content_anywhere_is_refused(tmp_path):
         xlsx.render(_save(wb, path))
     assert "blank.xlsx" in str(caught.value)
 
-
-# ── cell_range ──────────────────────────────────────────────────────────────
 
 def test_cell_range_renders_only_that_region(tmp_path):
     wb, path = _book(tmp_path)
@@ -323,8 +309,6 @@ def test_a_malformed_cell_range_says_so(tmp_path):
     assert "not a range" in str(caught.value)
 
 
-# ── csv / tsv ───────────────────────────────────────────────────────────────
-
 def test_a_csv_is_a_relational_table_with_column_meta(tmp_path):
     path = tmp_path / "rows.csv"
     body = "name,amount\n" + "".join(f"r{n},{n}\n" for n in range(1, 31))
@@ -332,7 +316,7 @@ def test_a_csv_is_a_relational_table_with_column_meta(tmp_path):
     out = xlsx.render_csv(str(path))
     assert "▸ table" in out
     assert "amount: num, min=1, max=30" in out
-    assert "r30,30" in out           # csv is never truncated: paging is the layer above
+    assert "r30,30" in out
 
 
 def test_a_csv_line_verifies_exactly_as_the_file_writes_it(tmp_path):
@@ -375,8 +359,6 @@ def test_an_empty_csv_is_refused(tmp_path):
     assert "nothing.csv" in str(caught.value)
 
 
-# ── size guard ──────────────────────────────────────────────────────────────
-
 def test_a_region_too_large_to_grid_degrades_to_its_reference(tmp_path, monkeypatch):
     """A dense island of a million cells is not rendered into the model's context; it is
     named, with the argument that fetches part of it."""
@@ -408,12 +390,6 @@ def test_a_whole_column_or_row_range_is_filled_from_the_sheet(tmp_path, rng):
     assert "\t" in out
 
 
-# ── defects an adversarial read of FrontierAgent's source turned up ──────────
-#
-# Each of these is a real defect in the reference implementation, found by reading it and
-# reproduced here before the fix was written. They are the reason this port is not a
-# transcription.
-
 def test_an_uncached_formula_inside_an_excel_table_is_marked_too(tmp_path):
     """The head promises "empty formula caches marked uncached". FrontierAgent's
     ``_x_table_regions`` takes no ``mark_uncached``, so inside an Excel Table the same cell
@@ -438,9 +414,9 @@ def test_a_region_whose_cells_all_render_empty_is_not_announced(tmp_path):
     ws["A1"], ws["B1"] = "", ""
     ws["A5"] = "real content"
     out = xlsx.render(_save(wb, path))
-    assert "`data region" in out          # the real one survives
+    assert "`data region" in out
     assert "real content" in out
-    assert "\tA\tB\n" not in out          # the all-empty one is not announced
+    assert "\tA\tB\n" not in out
 
 
 def test_a_chart_whose_data_sheet_is_gone_is_still_reported(tmp_path):
@@ -476,7 +452,7 @@ def test_a_cell_range_point_query_does_not_scan_the_whole_workbook(tmp_path):
         xlsx.render(path, cell_range="S!A1:A2")
     finally:
         xlsx._has_formula = real
-    assert len(seen) <= 8          # the four cells of the range, twice over at worst
+    assert len(seen) <= 8
 
 
 def test_a_chart_sheet_in_a_cell_range_is_refused_rather_than_crashing(tmp_path):
@@ -510,4 +486,4 @@ def test_a_chart_title_split_across_runs_keeps_its_spaces_and_its_quotes(tmp_pat
     out = xlsx.render(_save(wb, path))
     assert "Revenue" in out and "by quarter" in out
     assert 'title="Revenue' in out
-    assert out.count('title="') == 1        # the attribute was not closed early
+    assert out.count('title="') == 1

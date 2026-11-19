@@ -32,8 +32,6 @@ def _parent_and_child(panel, home):  # noqa: F811
     return con, a, x
 
 
-# ── the board ───────────────────────────────────────────────────────────────────────────────
-
 def test_a_consultation_leaves_the_card_as_it_is_and_a_card_has_one(panel, home):  # noqa: F811
     a, _ = _card(panel, home, title="A")
     con = panel._board()
@@ -98,8 +96,6 @@ def test_a_consultation_whose_process_is_gone_is_abandoned(panel, home):  # noqa
         == unbound["id"], "one nobody took up is abandoned once it is stale"
 
 
-# ── the daemon ──────────────────────────────────────────────────────────────────────────────
-
 async def test_closing_her_window_ends_the_consultation_not_the_card(panel, home):  # noqa: F811
     """R40 itself: the window closed on a consultation of a delivered card. The card stays done,
     and the card built on her keeps waiting for its other parent instead of being stopped."""
@@ -120,7 +116,7 @@ async def test_a_reopened_window_reads_the_question_from_its_file(panel, home): 
     goes in a file, as every message a pane's program starts with does (issue #13)."""
     from misaka.utils.prompt_file import readPromptFile
     _con, a, _x = _parent_and_child(panel, home)
-    question = "which statute? " * 4000                  # past a Windows command line (32,767)
+    question = "which statute? " * 4000
     pane, _run_id = await panel.consult_card(a, question, asker={"sender": "last-order"})
     assert pane.argv[-4:-1] == ["--resume", "--consult", "--say-file"]
     assert readPromptFile(pane.argv[-1]) == question
@@ -176,7 +172,7 @@ async def test_her_open_window_takes_the_message_through_her_inbox(panel, home):
     con, a, _x = _parent_and_child(panel, home)
     first, run_id = await panel.consult_card(a, "first question")
     proc = first.proc
-    tasks.end_consultation(con, run_id, first.consult[1], "done")       # she answered
+    tasks.end_consultation(con, run_id, first.consult[1], "done")
     panel._watch_consultations(tasks)
     assert first.consult is None and first.alive()
 
@@ -206,8 +202,6 @@ async def test_a_card_stop_reaches_one_consultation(panel, home):  # noqa: F811
     assert reply == {"stopped": True}
     assert tasks.get_run(con, run_id)["summary"] == "the research run was stopped"
 
-
-# ── Last Order waiting (B121) ───────────────────────────────────────────────────────────────
 
 async def test_last_order_waits_for_the_consultation_not_the_card(panel, home):  # noqa: F811
     """B121: a message put into a finished card's open window left Last Order nothing to wait on,

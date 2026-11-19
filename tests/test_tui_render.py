@@ -277,7 +277,6 @@ async def test_writes_the_crash_dump_to_the_log_directory(tmp_path):
     assert "Terminal width: 40" in Path(crashLogPath).read_text(encoding="utf-8")
 
 
-# MISAKA fork: without a log directory the dump goes to MISAKA's home, not the OS temp directory.
 async def test_writes_the_crash_dump_to_misakas_home_without_a_log_directory(tmp_path, monkeypatch):
     monkeypatch.setenv(home.ENV_HOME, str(tmp_path))
     terminal = VirtualTerminal(40, 10)

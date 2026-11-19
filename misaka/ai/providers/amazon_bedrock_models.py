@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/amazon-bedrock.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "amazon-bedrock.json").read_text(encoding="utf-8"))
 
 AMAZON_BEDROCK_MODELS = flattenChatModelCatalog("amazon-bedrock", _values)

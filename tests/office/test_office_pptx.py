@@ -86,8 +86,6 @@ def _flow(tmp_path):
     return _save(presentation, tmp_path, "flow.pptx")
 
 
-# ---- structure -------------------------------------------------------------------------
-
 def test_every_slide_opens_with_the_heading_paging_cuts_at(tmp_path):
     """``office.paging`` cuts a deck at this line, so it is both the page boundary and the
     name a citation's page number resolves to. FA writes ``<!-- slide N -->``, which is a
@@ -163,7 +161,7 @@ def test_a_label_drawn_on_top_of_an_empty_box_is_one_line_not_two(tmp_path):
     label.text_frame.paragraphs[0].add_run().text = "Inside"
     out = reader.render(_save(presentation, tmp_path, "pair.pptx"))
     assert out.count("Inside") == 1
-    assert "fill:#AABBCC" in out                 # the box folded into the label's own line
+    assert "fill:#AABBCC" in out
     assert out.count("fill:#AABBCC") == 1
 
 
@@ -183,8 +181,6 @@ def test_a_slide_that_needs_no_vision_model_says_nothing_about_one(tmp_path):
     out = reader.render(_deck(tmp_path))
     assert "needs_vlm" not in out.split("## Slide 2")[0]
 
-
-# ---- what stays quotable ----------------------------------------------------------------
 
 def test_two_cells_of_one_row_verify_as_one_quotation(tmp_path):
     """Under a pipe table the row folds to "|North|800|" and "North 800" is not in it."""
@@ -238,8 +234,6 @@ def test_a_chart_title_with_a_quote_in_it_does_not_break_its_own_tag(tmp_path):
     assert "title=\"The 'big' question\"" in out
 
 
-# ---- edges -------------------------------------------------------------------------------
-
 def test_the_deck_title_is_its_first_slide_title(tmp_path):
     assert reader.title(_deck(tmp_path)) == "Findings"
 
@@ -274,7 +268,7 @@ def test_a_deck_pages_one_slide_at_a_time_in_the_corpus(tmp_path, monkeypatch):
     assert pages == 3
     located = corpus.verify_quote(doc_id, "North 800")
     assert located is not None
-    assert located["page"] == 2                  # the slide the table is actually on
+    assert located["page"] == 2
 
 
 def test_the_deck_title_reaches_the_corpus_metadata(tmp_path, monkeypatch):

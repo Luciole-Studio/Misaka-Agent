@@ -243,7 +243,6 @@ class TreeList:
 
         # Determine which subtrees contain the active leaf (to sort current branch first)
         # Use iterative post-order traversal to avoid stack overflow
-        # MISAKA fork: keyed by `id(node)`, as the nodes are unhashable dataclasses.
         containsActive: dict[int, bool] = {}
         leafId = self.currentLeafId
         # Build list in pre-order, then process in reverse for post-order effect
@@ -1017,8 +1016,6 @@ class TreeList:
             self.applyFilter()
         elif kb.matches(keyData, "tui.editor.deleteCharBackward"):
             if len(self.searchQuery) > 0:
-                # MISAKA fork: drops the last code point; pi drops the last UTF-16 unit, which can leave half of a
-                # surrogate pair that Python could not write to the terminal.
                 self.searchQuery = self.searchQuery[:-1]
                 self.foldedNodes.clear()
                 self.applyFilter()

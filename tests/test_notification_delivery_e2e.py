@@ -487,8 +487,6 @@ async def _redeliver_and_keep_working(board, session, rounds: int = 3):
 
 
 async def test_a_cancelled_error_inside_a_deferred_route_does_not_hold_the_routes_after_it(tmp_path):
-    # MISAKA fork (`_emitAgentSettled`): C's route raises CancelledError itself (no cancellation of this task); D (a
-    # Sister card) and a background shell's completion, deferred after it, still run, and nothing stays held.
     manager, box = await _open(tmp_path)
     async with session_with(tmp_path, [gate_extension(box)], sessionManager=manager) as s:
         s.agent.streamFunction = _replies(20)

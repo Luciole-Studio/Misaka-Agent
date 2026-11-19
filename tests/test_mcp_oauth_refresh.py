@@ -173,8 +173,6 @@ async def test_uses_the_configured_authorization_server_metadata_url():
 
 
 # -- MCP OAuth client ID metadata documents (#10302) ----------------------------------------------
-# The configuration rejects `clientRegistration: "cimd"` (a MISAKA fork); the mechanism is reached here
-# through the settings, as upstream's tests reach it.
 
 CIMD = {"clientRegistration": "cimd"}
 

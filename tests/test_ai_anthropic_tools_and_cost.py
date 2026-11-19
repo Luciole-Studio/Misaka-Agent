@@ -106,7 +106,6 @@ async def test_only_sends_the_full_input_schema_for_strict_json_schema_tools():
 
 
 async def test_keeps_schema_definitions_on_non_strict_tools():
-    # MISAKA fork: MISAKA's tools reference `$defs` from their properties, so the non-strict schema keeps them.
     parameters = {
         "type": "object",
         "properties": {"value": {"$ref": "#/$defs/v"}},

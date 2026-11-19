@@ -100,8 +100,6 @@ def _resolveOptions(options: HighlightOptions | dict[str, Any] | None) -> Highli
     return HighlightOptions()
 
 
-# MISAKA fork: Pygments strips leading blank lines and appends a newline by default; highlight.js keeps
-# the text line for line, so lexers are made without either.
 _LEXER_OPTIONS: dict[str, Any] = {"stripnl": False, "ensurenl": False}
 
 

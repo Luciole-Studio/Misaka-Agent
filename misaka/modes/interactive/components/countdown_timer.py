@@ -20,8 +20,6 @@ class CountdownTimer:
         onTick: Callable[[int], None],
         onExpire: Callable[[], None],
     ) -> None:
-        # MISAKA fork: `setInterval` is a timer that re-arms itself (see `_scheduleTick`), so this holds the pending
-        # one; `_intervalToken` drops a tick already under way when `dispose` runs.
         self.intervalId: asyncio.TimerHandle | threading.Timer | None = None
         self._intervalToken = 0
         self.tui = tui

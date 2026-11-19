@@ -53,8 +53,6 @@ def test_formats_raw_read_arguments(offset, limit, expected):
 
 
 def test_formats_raw_read_arguments_python_values():
-    # MISAKA: values a Python caller can pass. A bool is not a number (JavaScript's `typeof true` is "boolean"),
-    # and an integer beyond the double range is JavaScript's Infinity.
     assert formatReadLineRange(True, 3) == ""
     assert formatReadLineRange(10**400, 1) == ""
     assert formatReadLineRange(2.0, 3) == ":2-4"
@@ -80,8 +78,6 @@ def test_shows_string_ranges_in_the_tui(tmp_path):
 
 
 def test_a_numeric_string_limit_no_longer_breaks_the_read_row(tmp_path):
-    # MISAKA: before 1.3 the row computed `offset + limit - 1` with whatever the model sent, which raised
-    # TypeError in Python for a string limit (JavaScript concatenated instead).
     tool = ToolExecutionComponent(
         "read", "call", {"path": "notes.txt", "offset": 3, "limit": "abc"}, {},
         createReadToolDefinition(str(tmp_path)), SimpleNamespace(requestRender=lambda: None), os.getcwd(),

@@ -184,13 +184,6 @@ def _getAllProviderModels(provider: Any) -> list[Model]:
     return list(getAllModels() if getAllModels is not None else provider.getModels())
 
 
-# MISAKA fork: compat is typed per API in Python. A configured block becomes the compat model
-# upstream's `Model<TApi>["compat"]` type names for the model's API, with extra keys allowed.
-# Upstream never validates the merged object -- each API reads what it knows of it -- so a
-# value this API's type cannot take (another API's spelling of a shared field, a nested key
-# the routing types do not declare) is kept as written instead of failing the provider.
-# An API with no compat shape of its own gets the OpenAI-compatible one. The subclass lives in the
-# schema's module, where the forward references of its fields resolve.
 def _configuredCompat(schema: type[BaseModel]) -> type[BaseModel]:
     return type(
         f"Configured{schema.__name__}",
@@ -526,9 +519,6 @@ def _applyExtension(
 
 
 def _adaptOAuth(config: Any) -> OAuthAuth:
-    # MISAKA fork: the config may be a mapping or an object, a one-parameter `refreshToken` is called with the
-    # credential alone (JavaScript ignores the extra argument), and `getBaseUrl`/`getAuthHeaders` (misaka's flow
-    # extensions) shape `toAuth`.
     async def login(callbacks: Any, _options: Any = None) -> OAuthCredential:
         credential = await read_field(config, "login")(
             SimpleNamespace(
@@ -801,7 +791,6 @@ def validateExtensionProvider(
 
 
 def _flowCredentials(credential: OAuthCredential) -> OAuthCredentials:
-    # MISAKA fork: misaka's flows take their credentials without the `type` tag.
     data = credential.model_dump()
     data.pop("type", None)
     return OAuthCredentials.model_validate(data)
@@ -882,8 +871,6 @@ def composeModelProvider(
             await baseRefreshModels(context)
         refreshed: list[ProviderModelConfig] | None = None
         if extensionRefreshModels is not None:
-            # MISAKA fork: a refreshed definition may be a model object, as at registration (ModelRuntime
-            # .registerProvider); the composer reads mappings.
             refreshed = [
                 definition.model_dump(exclude_unset=True) if hasattr(definition, "model_dump") else definition
                 for definition in await extensionRefreshModels(context)

@@ -150,8 +150,6 @@ def render(packet):
                        else "not pursued" + (f", answered by {option['covered_by']}" if option.get("covered_by") else "")
                        + f": {option['reason']}" if option["reason"] else "pending")
                 lines.append(f"  - {option['label']} -- {option['premise']} → {outcome}")
-    # Findings are Sisters' words and their sources' quotations: data, fenced as planner's
-    # evidence block fences the same ledger (issue #10 audit, M3).
     declared = []
     for finding in packet["declared_findings"]:
         declared.append(f"- `{finding['id']}` {finding['text']}")

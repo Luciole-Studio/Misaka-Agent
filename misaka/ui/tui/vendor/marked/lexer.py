@@ -362,7 +362,6 @@ class _Lexer:
         # Every mask must keep the length it replaces: emStrong and del line
         # maskedSrc up with src by slicing from the end. `anyPunctuation` matches
         # unicode punctuation, so an escaped astral character is 3 code units.
-        # MISAKA fork: mask lengths are UTF-16 code units (`jsLength`), as upstream's `.length`.
         maskedSrc = js_regexp.replace(
             maskedSrc, self.tokenizer.rules.inline.anyPunctuation, lambda match0: "+" * jsLength(match0)
         )
@@ -501,7 +500,6 @@ class _Lexer:
             token = self.tokenizer.inlineText(cutSrc)
             if token:
                 src = _rest(src, token.raw)
-                # MISAKA fork: the last UTF-16 code unit, as upstream's `slice(-1)`.
                 if jsSlice(token.raw, -1) != "_":  # Track prevChar before string of ____ started
                     prevChar = jsSlice(token.raw, -1)
                 keepPrevChar = True

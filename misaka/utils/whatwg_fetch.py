@@ -20,7 +20,6 @@ from misaka.core.http_dispatcher import dispatcherIdleTimeout
 from misaka.utils.js import jsonParse, raceAbort
 from misaka.utils.whatwg_url import URL, URLSearchParams
 
-# Statuses whose response has no body: the Fetch Standard's "null body status".
 _NULL_BODY_STATUSES = frozenset({101, 103, 204, 205, 304})
 
 
@@ -68,7 +67,6 @@ class Body:
             reading = _next(self._chunks)
             chunk = await (reading if self._signal is None else raceAbort(reading, self._signal))
         except httpx.HTTPError as error:
-            # A connection dropped mid-body, or a body idle timeout, is a `TypeError` for fetch too.
             await self.cancel()
             raise TypeError("terminated") from error
         except BaseException:
@@ -86,7 +84,6 @@ class Body:
         if self._close is not None:
             await self._close()
 
-    # An async generator's name for the same thing, so a stream of either kind closes alike.
     aclose = cancel
 
 
@@ -132,7 +129,6 @@ class Response:
         return self._content
 
 
-# undici's default connect timeout, which pi's dispatcher keeps.
 _CONNECT_TIMEOUT_S = 10.0
 
 
@@ -174,7 +170,7 @@ async def fetchWith(
 ) -> Response:
     """``fetch`` over ``client``; with ``owned`` the client closes along with the response body."""
     options: RequestInit = init if init is not None else {}
-    url = URL(input)  # `TypeError("Invalid URL")`, as the Request constructor throws
+    url = URL(input)
     if url.username or url.password:
         raise TypeError("Request cannot be constructed from a URL that includes credentials.")
     if url.protocol not in ("http:", "https:"):
@@ -189,7 +185,6 @@ async def fetchWith(
     try:
         response = await (sending if signal is None else raceAbort(sending, signal))
     except httpx.HTTPError as error:
-        # Network failures, connection and idle timeouts and redirect loops all reject with `TypeError`.
         raise TypeError("fetch failed") from error
     if redirect == "error" and response.has_redirect_location:
         await response.aclose()

@@ -89,7 +89,6 @@ def _sendPage(response: asyncio.StreamWriter, status: int, html: str) -> None:
         f"content-length: {len(body)}\r\n"
         "connection: close\r\n\r\n"
     )
-    # MISAKA fork: the peer may be gone already; node's `response.end` does not throw for it.
     with contextlib.suppress(OSError, RuntimeError):
         response.write(head.encode("latin-1") + body)
         response.close()
@@ -145,8 +144,6 @@ async def startOAuthCallbackServer[T](options: OAuthCallbackServerOptions[T]) ->
             idle.discard(response)
         parts = requestLine.decode("latin-1").split()
         if len(parts) < 2:
-            # MISAKA fork: a peer that sent no request line (a preconnect, a port scan, or one
-            # of `close()`'s own aborts) gets no answer.
             response.transport.abort()
             return
         method, target = parts[0], parts[1]
@@ -181,7 +178,6 @@ async def startOAuthCallbackServer[T](options: OAuthCallbackServerOptions[T]) ->
             _sendPage(response, 502, oauthErrorHtml(f"{providerName} sign-in failed.", str(failure)))
             finish({"error": failure})
 
-    # MISAKA fork: bind only the first address the host resolves to, as `listen` does.
     addresses = await loop.getaddrinfo(options.host, options.port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)
     family, _, _, _, sockaddr = addresses[0]
     server = await asyncio.start_server(handle, str(sockaddr[0]), options.port, family=family)
@@ -258,8 +254,6 @@ async def waitForCallbackOrManualInput[T](
         return {"type": "manual", "input": input if input is not None else ""}
     finally:
         manualAbort.abort()
-        # MISAKA fork: also stop awaiting a prompt that ignores its signal. `asyncio.wait`, so
-        # a cancellation of this login itself still propagates.
         if not manual.done():
             manual.cancel()
             await asyncio.wait({manual})

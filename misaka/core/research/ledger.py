@@ -78,7 +78,6 @@ def claims(con, finding_id):
 
 def ingest_report(con, run, task, report):
     """Record structurally valid declarations; never inspect or grade source content."""
-    # Validate the envelope before writing anything. No silent truncation or partial rejection.
     declared = [Finding.model_validate(item) for item in report.get("findings", [])]
     artifacts = {}
     for row in runs.artifacts(con, run["id"], task_id=task["id"]):

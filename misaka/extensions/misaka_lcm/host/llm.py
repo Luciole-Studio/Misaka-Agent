@@ -83,14 +83,10 @@ def get_provider(name):
 
 
 def _expand_direct_api_alias(provider, base_url):
-    # Hermes models OpenAI's direct API as custom. MISAKA already registers it
-    # as a first-class provider, with its own auth/transport. Keep that identity.
     return provider, base_url
 
 
 def _unwrap_moa_provider(provider, model):
-    # No Hermes MoA preset owner exists here. Never send its virtual endpoint or
-    # preset name to the real main model as an accidental fallback.
     raise ValueError("Hermes MoA presets are not native auxiliary routes; select a registered provider/model")
 
 
@@ -104,7 +100,6 @@ def _model_route(model, registry):
 
 
 def _route(model: str, provider: str, registry, main_runtime, *, defer_nous=False) -> tuple[str, str]:
-    # Hermes' "auto" means inherit; it is never a model ID on the wire.
     model = "" if model.lower() == "auto" else model
     provider = "" if provider.lower() == "auto" else provider
     route = _model_route(model, registry)
@@ -115,7 +110,7 @@ def _route(model: str, provider: str, registry, main_runtime, *, defer_nous=Fals
     model = route.model
     if not model and explicit_provider:
         if provider == 'nous' and defer_nous:
-            return provider, ''  # tier-dependent: choose only after resolving the issuing account
+            return provider, ''
         from ..native.auxiliary_policy import _API_KEY_PROVIDER_AUX_MODELS_FALLBACK
         from .profiles import get_provider_profile
         profile = get_provider_profile(provider)
@@ -144,14 +139,10 @@ def resolve_model(provider, model, registry):
     from .profiles import get_provider_profile
     profile = get_provider_profile(provider)
     if profile is not None and profile.auth_type == 'external_process':
-        # ACP selects the model in session/set_config_option, not in an HTTP
-        # catalog. These local request defaults never replace the main model.
         return Model(id=model, name=model, provider=provider, api='openai-completions',
             baseUrl=profile.base_url, reasoning=False, input=['text'], contextWindow=128000,
             maxTokens=4096, cost={'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0})
     if not model:
-        # Auth needs a native provider route, but a deferred Nous recommendation
-        # must never send this temporary catalog identity to the model transport.
         candidate = next((item for item in registry.getAll() if item.provider == provider), None)
         if candidate is None:
             raise RuntimeError(f'No native model registered for {provider}')
@@ -217,8 +208,6 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
     async def unavailable(error):
         from ..native.auxiliary_fallback import _try_configured_fallback_chain
         execution.check_cancelled()
-        # Original unavailable-client rule: only the explicit per-task chain.
-        # Runtime 401s still follow the separate explicit-provider recovery gate.
         if recovery and task and route_provider not in {'auto', '', None}:
             with routing.scope(registry, main_runtime, provider,
                                base_url or read_field(selected, 'baseUrl', ''), {'apiKey': api_key}) as route_state:
@@ -230,22 +219,16 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                     try:
                         return await call_candidate(candidate, candidate_model, label)
                     except _UnavailableClient:
-                        # MISAKA resolves async auth at dispatch, not in the sync
-                        # selector. A failed constructor is skipped for this walk.
                         route_state.unavailable.add(candidate.selection_key)
         if recovery:
             raise error
         raise _UnavailableClient(str(error)) from error
 
-    # A plugin model prefix is part of the explicit call, not a lower-priority
-    # default. Resolve it before the task config can select a different account.
     override = _model_route(model, registry)
     if recovery:
         provider, model, base_url, api_key, configured_mode = auxiliary_policy._resolve_task_provider_model(
             task, provider or override.provider, override.model or None, base_url, api_key)
     else:
-        # A fallback is already a resolved destination. Its absent key/endpoint
-        # means its OWN registry defaults, not the failed task's credentials.
         provider, model, configured_mode = provider or override.provider, override.model or None, api_mode
     if provider == "custom":
         config = auxiliary_policy._get_auxiliary_task_config(task)
@@ -270,9 +253,6 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
     from .profiles import get_provider_profile
     profile = get_provider_profile(provider)
     external = profile is not None and profile.auth_type == 'external_process'
-    # A main-model snapshot is route-scoped, not a credential pool for a pinned
-    # fallback model. Registered per-model endpoint/transport metadata still wins
-    # when the auxiliary model differs from the main model.
     if model and (selected.provider, selected.id) == (main_runtime.get("provider"), main_runtime.get("model")):
         base_url = base_url or main_runtime.get("base_url")
         api_mode = api_mode or main_runtime.get("api_mode")
@@ -289,8 +269,6 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
 
     aborting = asyncio.create_task(abort_request()) if execution.current_signal() is not None else None
     try:
-        # Prepare once, outside recovery, as Hermes does. A transport retry must
-        # not repeat auth lookup or borrow credentials from a concurrent /model.
         auth_started = time.monotonic()
         from .pool import Pool
         pool = None if external else Pool.configured(registry, selected.provider)
@@ -299,7 +277,6 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
         def issuing_credential():
             stored = (_stored(registry, pooled_entry.id if pooled_entry else selected.provider)
                       if not api_key and hasattr(registry, 'authStorage') else None)
-            # The wire key is authoritative, even when a default login exists.
             return {**(stored or {}), 'access': auth.get('apiKey') or (stored or {}).get('access', '')}
 
         try:
@@ -340,7 +317,6 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
         if endpoint:
             selected = selected.model_copy(update={"baseUrl": endpoint})
         remaining = timeout - (time.monotonic() - auth_started)
-        # Ownerless auxiliary calls still keep one cache scope across retries.
         cache_id = str(uuid.uuid4())
         if route_info is not None:
             route_info.update(provider=selected.provider, model=selected.id)
@@ -348,8 +324,6 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
         async def primary(*, temperature, max_tokens, extra_body=None):
             nonlocal remaining
             execution.check_cancelled()
-            # Auth is part of the initial deadline. Each later physical attempt
-            # gets its own budget, not the already-exhausted first timer.
             budget, remaining = remaining, timeout
             if external:
                 from .acp import complete
@@ -383,7 +357,7 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                 wire_model = selected.model_copy(update={'baseUrl': re.sub(r'/v1/?$', '', selected.baseUrl.rstrip('/'))})
                 if wire_key and (selected.provider == 'nous' or _requires_bearer_auth(selected.baseUrl)):
                     headers['Authorization'] = f'Bearer {wire_key}'
-                    wire_key = None  # native header-only auth omits X-Api-Key
+                    wire_key = None
             try:
                 streamed = (latency_info is not None or selected.api in {'anthropic-messages', 'openai-codex-responses'}
                             or _kimi_code_endpoint(selected.baseUrl))
@@ -423,8 +397,6 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                         latency_info.setdefault("provider_dispatch_ms", _elapsed_ms(started))
                     stream = _provider_stream(registry, wire_model, context, options)
                     if streamed:
-                        # Only substantive native deltas re-arm the idle window.
-                        # Metadata/keepalives count for timing, never for liveness.
                         iterator = stream.__aiter__()
                         loop = asyncio.get_running_loop()
                         idle = min(60.0, budget)
@@ -489,7 +461,6 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                     return False
                 owner, entry = pool, pooled_entry
             else:
-                # An explicit key must not refresh an unrelated saved OAuth login.
                 if external or api_key or not hasattr(registry, 'authStorage') or not registry.isUsingOAuth(selected):
                     return False
                 if not _stored(registry, selected.provider):
@@ -534,8 +505,6 @@ async def _complete(messages, model, provider, temperature, max_tokens, timeout,
                     vision=task == 'vision', stale_model=selected.id)
             if not healed or healed == selected.id:
                 return False
-            # An explicit Portal recommendation is a routable ID, not a guessed
-            # native catalog row. It does not change the owner's main model/window.
             selected = selected.model_copy(update={'id': healed, 'name': healed})
             if route_info is not None:
                 route_info.update(provider=selected.provider, model=selected.id)
@@ -617,11 +586,7 @@ def _responses_cache(payload, model, main_runtime, request_id, *, system_prompt=
     )
     from ..native.support import base_url_host_matches
 
-    # Replace Pi's random request key; it owns transport resources, not cache affinity.
     payload.pop("prompt_cache_key", None)
-    # Generic native Responses encodes the system prompt in input[], while
-    # Codex uses instructions. Hash the same actual prefix on both transports;
-    # do not duplicate an existing input[] system message into instructions.
     instructions = system_prompt or payload.get("instructions") or "You are a helpful assistant."
     if not system_prompt and not payload.get("instructions"):
         payload["instructions"] = instructions
@@ -635,8 +600,6 @@ def _responses_cache(payload, model, main_runtime, request_id, *, system_prompt=
             payload["prompt_cache_key"] = key
     retention = _default_prompt_cache_retention_for_request(model.id, model.baseUrl)
     if payload.get("prompt_cache_retention") is None:
-        # Pi inserts a None for its disabled cache policy. It is not an explicit
-        # Hermes retention override and must not mask Meta/Mantle's opt-in.
         payload.pop("prompt_cache_retention", None)
         if retention:
             payload["prompt_cache_retention"] = retention

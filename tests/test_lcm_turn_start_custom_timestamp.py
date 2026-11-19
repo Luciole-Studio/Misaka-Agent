@@ -15,7 +15,7 @@ async def _turns(tmp_path, monkeypatch, threshold):
     from misaka.extensions import misaka_lcm
     from tests.suite_harness import createHarness
 
-    monkeypatch.setenv("LCM_LEAF_CHUNK_TOKENS", "400")       # a backlog over the leaf chunk within a few turns
+    monkeypatch.setenv("LCM_LEAF_CHUNK_TOKENS", "400")
     monkeypatch.setenv("LCM_FRESH_TAIL_COUNT", "4")
     monkeypatch.setenv("LCM_CONTEXT_THRESHOLD", threshold)
     project = tmp_path / "project"
@@ -34,7 +34,7 @@ async def _turns(tmp_path, monkeypatch, threshold):
         harness.setResponses([fauxAssistantMessage(f"answer {i} " + " ".join(f"w{j}" for j in range(120)))
                               for i in range(8)])
         await harness.session.prompt("start")
-        for i in range(5):                                        # research-phase work orders
+        for i in range(5):
             await harness.session.sendCustomMessage(
                 {"customType": "research-phase", "content": f"phase {i}", "display": True, "details": {"turn": True}},
                 {"triggerTurn": True})

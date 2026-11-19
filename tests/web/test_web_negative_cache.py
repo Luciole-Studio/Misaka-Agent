@@ -22,7 +22,6 @@ def test_403_bans_on_the_first_failure_and_lifts_after_an_hour():
 
     assert nc.skip_reason(url, now=3599.0) is not None
     assert nc.skip_reason(url, now=3600.0) is None
-    # The expired entry is forgotten, so the next 403 gets a full window again.
     nc.record_failure(url, 403, now=3600.0)
     assert nc.skip_reason(url, now=7199.0) is not None
 
@@ -65,7 +64,7 @@ def test_a_racing_failure_cannot_shorten_an_active_ban():
     """Two parallel fetches clear the gate together; the second verdict must not re-time."""
     url = "https://mixed.example/f"
     nc.record_failure(url, 403, now=0.0)
-    nc.record_failure(url, 429, now=1.0)  # would otherwise cut 1h down to 5 min
+    nc.record_failure(url, 429, now=1.0)
     reason = nc.skip_reason(url, now=400.0)
     assert reason is not None and "403" in reason
     assert nc.skip_reason(url, now=3599.0) is not None
@@ -87,7 +86,6 @@ def test_a_different_status_replaces_a_pending_count():
     nc.record_failure(url, 429, now=1.0)
     reason = nc.skip_reason(url, now=2.0)
     assert reason is not None and "429" in reason and "422" not in reason
-    # The 429 window is served and forgotten; the old 422 count did not survive it.
     assert nc.skip_reason(url, now=301.0) is None
     nc.record_failure(url, 422, now=302.0)
     assert nc.skip_reason(url, now=303.0) is None
@@ -117,10 +115,10 @@ def test_the_default_clock_is_the_one_production_uses():
 
 def test_eviction_sacrifices_dead_entries_before_live_bans(monkeypatch):
     monkeypatch.setattr(nc, "_MAX_ENTRIES", 4)
-    nc.record_failure("https://live1.example/", 403, now=0.0)  # banned until 3600
+    nc.record_failure("https://live1.example/", 403, now=0.0)
     nc.record_failure("https://live2.example/", 403, now=0.0)
-    nc.record_failure("https://pending.example/", 422, now=0.0)  # count only, no ban
-    nc.record_failure("https://served.example/", 429, now=0.0)  # ban over by t=1000
+    nc.record_failure("https://pending.example/", 422, now=0.0)
+    nc.record_failure("https://served.example/", 429, now=0.0)
 
     nc.record_failure("https://new.example/", 403, now=1000.0)
 
@@ -136,5 +134,4 @@ def test_the_table_stays_bounded(monkeypatch):
     for i in range(50):
         nc.record_failure(f"https://host{i}.example/", 403, now=float(i))
     assert len(nc.current_scope().negative_bans) <= 4
-    # Eviction drops the ban closest to expiry, so the newest failure survives.
     assert nc.skip_reason("https://host49.example/", now=50.0) is not None

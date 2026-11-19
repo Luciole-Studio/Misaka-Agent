@@ -53,7 +53,6 @@ def agent_commands(part):
             if len(argv) != 2:
                 raise ValueError('Usage: /agents background <task-id|all>')
             if argv[1] == 'all':
-                # Source backgroundAll: shells and ordinary local agents.
                 accepted = 0
                 for task in (*manager._shell_tasks.values(), *manager._tasks.values()):
                     if not task.background:

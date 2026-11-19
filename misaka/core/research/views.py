@@ -73,15 +73,6 @@ def lineage(con, node):
     return chain
 
 
-# --- where each possibility went ---------------------------------------------------------
-# Every possibility raised in a run -- an option of a decision, a divergence proposal, a red-team
-# issue taken to a decision -- has at most one pointer to what answers it, set by the Last Order who
-# judged it: an issue ``becomes`` an option or is ``covered_by`` a node; an option ``opens`` a node
-# or, left unopened, is ``covered_by`` the node or the option that answers it. Following them ends at
-# a node, or at a record left unopened (declined, not pursued, or still waiting). Nothing here judges
-# whether two possibilities are the same; it reads what was recorded. The chain is never shortened:
-# each step is someone's judgement, and the record keeps them all.
-
 def possibility_issues(con, run, issues=None):
     """The issues that are possibilities, the ones the paths list carries: every divergence proposal,
     and every red-team issue taken to a node's decision -- disposed ``branch``, or named in a decision
@@ -110,7 +101,7 @@ def proposal_premise(issue):
 
 def _pointer(element):
     """Where one possibility points, or None: an issue's option or node, an option's node or cover."""
-    if "decision_id" in element:                          # an option
+    if "decision_id" in element:
         return element["node_id"] or element["covered_by"]
     return element["option_id"] or element["covered_by"]
 
@@ -213,8 +204,6 @@ def node_view_path(node_id):
     return os.path.join(runs.node_dir(node_id), NODE_VIEW)
 
 
-# --- reconciliation ---------------------------------------------------------------------
-
 def reconcilable_options(con, run):
     """Pending options whose deciding node has finished its own work: what a reconciliation must
     give an outcome to."""
@@ -263,8 +252,6 @@ def resolve_reconcile(con, run, payload):
     unreviewed = sorted(set(claims) - set(reviewed))
     if unreviewed:
         problems.append(f"every coverage claim needs a verdict (holds or reopen); missing: {', '.join(unreviewed)}")
-    # A reopened proposal is a possibility of its own: it is given an outcome like a pending option, and a
-    # node opened for it is a child of the node that raised it.
     reopened = {item["proposal"]: claims[item["proposal"]] for item in verdicts
                 if item["verdict"] == "reopen" and item["proposal"] in claims}
     origin = {**{oid: row["decided_at"] for oid, row in pending.items()},
@@ -363,8 +350,6 @@ def resolve_relations(con, run, payload):
         raise ValueError("Relations not accepted: " + "; ".join(problems) + ".")
     return {"relations": relations}
 
-
-# --- views --------------------------------------------------------------------------------
 
 def _clip(text, limit):
     text = " ".join(str(text or "").split())
@@ -678,7 +663,6 @@ def _render_destinations(found, flat):
         if found[key]:
             lines += [f"### {title}", ""]
             for group in found[key]:
-                # The record first; what went to it under it.
                 ordered = sorted(group["members"], key=lambda entry: entry["id"] != group["record"])
                 for entry in ordered:
                     lines += member(entry, group["record"], "" if entry["id"] == group["record"] else "  ")

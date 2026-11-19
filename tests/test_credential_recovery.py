@@ -41,7 +41,6 @@ def test_a_refused_credential_is_recognised(text):
     "500 Internal Server Error",
     "context length exceeded",
     "Monthly usage limit reached",
-    # A number or an index, not a status.
     "max_tokens: 401 > 400",
     "Invalid 'input[401].content': string too long",
     "messages.401: `tool_use` ids were found without `tool_result` blocks immediately after",
@@ -318,9 +317,9 @@ async def test_a_message_with_no_provider_recovers_nothing():
 
 
 @pytest.mark.parametrize("attempt,settings,expected", [
-    (1, None, False),                                   # already retrying: one rotation per turn
-    (0, _Settings(enabled=False), False),               # retries off: nothing would follow it
-    (0, _Settings(retries=0), False),                   # no budget: nothing would follow it
+    (1, None, False),
+    (0, _Settings(enabled=False), False),
+    (0, _Settings(retries=0), False),
     (0, None, True),
 ])
 async def test_a_token_is_only_rotated_when_a_retry_can_follow(attempt, settings, expected):

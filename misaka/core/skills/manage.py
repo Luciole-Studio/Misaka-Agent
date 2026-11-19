@@ -108,7 +108,7 @@ def validate_frontmatter(content, *, new_skill=False):
     errors = [f.message for f in lint_content(text) if f.severity == "error"]
     if errors:
         return "; ".join(errors)
-    parsed = parseFrontmatter(text)                     # the linter parsed it: valid, typed name and description
+    parsed = parseFrontmatter(text)
     desc = parsed.frontmatter["description"].strip().strip("'\"")
     if len(desc) > MAX_DESCRIPTION_LENGTH:
         return f"Description exceeds {MAX_DESCRIPTION_LENGTH} characters."
@@ -120,13 +120,6 @@ def validate_frontmatter(content, *, new_skill=False):
         )
     if not (parsed.body or "").strip():
         return "SKILL.md must contain a body after frontmatter."
-    # Last gate: the index reads SKILL.md with its own lenient parser, and what
-    # this function accepts is worth nothing if that parser comes back empty --
-    # the skill installs, then advertises no description and enforces no
-    # `platforms:`, silently. The two share a frontmatter boundary now
-    # (index.parse_skill_markdown), so this only catches a disagreement between
-    # the two YAML loaders; it is cheap, and it fails at write time where the
-    # author can still see why.
     from misaka.core.skills.index import parse_skill_markdown
     indexed = parse_skill_markdown(text)[0]
     if not str(indexed.get("name") or "").strip() or not str(indexed.get("description") or "").strip():
@@ -159,7 +152,7 @@ def _security_scan(skill_dir):
             scan_skill,
             should_allow_install,
         )
-        result = scan_skill(Path(skill_dir), source="agent-created", honor_ignore=False)   # never the skill's own ignore file
+        result = scan_skill(Path(skill_dir), source="agent-created", honor_ignore=False)
         allowed, reason = should_allow_install(result)
     except Exception as error:  # noqa: BLE001 - whatever failed inside the scanner, the answer is "not scanned"
         return f"The security scan could not run ({type(error).__name__}: {error}); the change was not applied."
@@ -294,15 +287,6 @@ def _resolve_target(skill_dir, file_path):
     relative = Path(file_path)
     if relative.name in SKILL_IGNORE_FILENAMES:
         return None, f"{file_path} controls what the security scanner sees; it is not written through skill_manage."
-    # A SKILL.md anywhere but the skill root is a second skill, not a support
-    # file: the index walks every directory under the layer root and any folder
-    # holding a SKILL.md becomes an entry of its own, named by its own
-    # frontmatter. Writing one through this path would skip everything create
-    # enforces (frontmatter validation, name == directory name, the visible-layer
-    # conflict check, the 60-character description budget) and would be recorded
-    # in the ledger as "add a file to skill X" while actually adding skill Y.
-    # The root SKILL.md is still reachable here — `patch(file_path='SKILL.md')`
-    # is a normal thing to ask for, and the callers re-validate it as SKILL.md.
     if relative.name.casefold() == "skill.md" and len(relative.parts) > 1:
         return None, (
             f"{file_path} would define a second skill inside '{Path(skill_dir).name}'. "
@@ -317,9 +301,6 @@ def _resolve_target(skill_dir, file_path):
             return None, f"Skill mutation paths cannot contain symlinks: {current}"
     target = Path(skill_dir) / file_path
     if target.is_dir():
-        # Every caller from here reads, writes or unlinks the path as a file;
-        # a directory turns that into an uncaught IsADirectoryError/PermissionError
-        # and the tool answers with a traceback instead of its error contract.
         return None, f"{file_path} is a directory, not a file."
     return target, None
 
@@ -380,10 +361,6 @@ def _write_file(profile_dir, name, file_path, file_content):
         return {"success": False, "error": "Use create or edit for SKILL.md so frontmatter is validated."}
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    # Bytes, not text: the copy exists only to put the file back if the scan
-    # rejects the write, and an existing support file the tool did not create
-    # (a vendored asset, a latin-1 note) is allowed to be anything at all.
-    # Decoding it here would fail the whole call on a file we never had to read.
     try:
         original = target.read_bytes() if target.exists() else None
     except OSError as error:
@@ -409,10 +386,6 @@ def _edit_skill(profile_dir, name, content):
     if err:
         return {"success": False, "error": err}
     md = skill_dir / "SKILL.md"
-    # The replacement is validated; the old bytes are only the undo. Reading them
-    # as text would make a skill whose SKILL.md is not UTF-8 (installed by hand,
-    # written by another tool) impossible to repair with the very action meant
-    # to replace it wholesale.
     try:
         original = md.read_bytes()
     except OSError as error:
@@ -530,13 +503,13 @@ def _remove_file(profile_dir, name, file_path):
                 "available_files": available or None}
     try:
         target.unlink()
-    except OSError as error:                # unreadable parent, read-only mount, a race with _resolve_target's is_dir check
+    except OSError as error:
         return {"success": False, "error": f"Cannot delete {file_path}: {error}"}
     parent = target.parent
     try:
         if parent != skill_dir and parent.exists() and not any(parent.iterdir()):
             parent.rmdir()
-    except OSError:                         # tidying an emptied directory is best-effort; the file is gone either way
+    except OSError:
         pass
     return {"success": True, "message": f"Deleted {file_path} from '{name}'."}
 
@@ -583,8 +556,6 @@ def _precheck(action, skill_dir, name, content, file_path, file_content, old_str
     return None
 
 
-# Hermes exposes ONE shape; legacy calls are normalized before schema validation.
-# Keep unknown keys so validation reports them rather than silently dropping work.
 _OPERATION_KEYS = {"action", "name", "content", "category", "file_path", "file_content",
                    "old_string", "new_string", "replace_all", "absorbed_into"}
 MANAGE_PARAMETERS = copy.deepcopy(SKILL_MANAGE_SCHEMA["parameters"])
@@ -720,15 +691,11 @@ def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
     supplied, err = _normalize_visible_roots(profile_dir, visible_roots)
     if err:
         return {"success": False, "error": err}
-    # Fixed workspace identity, but fresh discovery: absent project roots can appear
-    # between staging and approval. Explicit extension roots remain part of review.
     extensions = [root for layer, root in supplied if layer == "extension"]
     def roots_now():
         return list(dict.fromkeys([*skill_roots(profile_dir, workspace, extension_paths=extensions), *supplied]))
     try:
         with using_scope(scope_for(profile_dir, workspace)), skill_write.mutation_lock():
-            # Recover before discovery: a crash mid-delete can make the target
-            # temporarily absent, so resolving first would strand its journal.
             skill_write.recover_transactions()
             if approved_payload_hash is not None and (_reviewed is None or skill_write.payload_sha256(_reviewed) != approved_payload_hash):
                 return {"success": False, "error": "Approved skill payload changed after review; nothing applied."}
@@ -738,8 +705,6 @@ def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
             from .operations import guards as maintenance_guards
             if denied := maintenance_guards(bound, profile_dir, workspace):
                 return denied
-            # Cheap validation precedes staging; do not ask the user to approve a
-            # malformed main document or an invalid support-file target.
             for op in bound:
                 a = "edit" if op["action"] == "patch" and op.get("content") else op["action"]
                 err = _precheck(a, _skills_root(profile_dir) / op["name"], op["name"], op.get("content", ""), op.get("file_path", ""), op.get("file_content"), op.get("old_string", ""), op.get("new_string"))
@@ -788,8 +753,6 @@ def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
                         "operations": canonical, "bound_operations": bound, "write_origin": payload["write_origin"],
                         "payload_sha256": approved_payload_hash, "curator_archive": curator_archive}
             journal = skill_write.prepare_transaction(paths, action=action if operations is None else "batch", skill=", ".join(dict.fromkeys(op["name"] for op in canonical)), evidence=evidence)
-            # Work outside every live Skill tree. The transaction commits only after
-            # ALL operations, validations and scans succeeded. No partial rmtree.
             with tempfile.TemporaryDirectory(prefix="misaka-skill-stage-") as temp:
                 stage_profile = Path(temp)
                 for change in journal["changes"]:
@@ -842,7 +805,7 @@ def manage(action=None, name=None, *, profile_dir, content=None, file_path=None,
                 from .operations import org_edit_notes
                 try:
                     notes = org_edit_notes(bound, profile_dir, workspace)
-                except Exception as error:  # Post-commit sharing must not falsify the committed local receipt.
+                except Exception as error:
                     logger.warning("Skill committed; organisation sharing failed", exc_info=True)
                     notes = [f"Local Skill committed; organisation sharing failed: {error}"]
                 sharing = {"org_sharing": " ".join(notes)} if notes else {}
@@ -876,8 +839,6 @@ def apply_pending(record):
     token = _bypass.set(True)
     try:
         with using_scope(scope):
-            # The immutable staged payload records actual read marks. Original base
-            # digests are rechecked by manage before any operation is committed.
             for path in payload.get('read_paths', []):
                 mark_background_review_skill_read(Path(path))
             return manage(profile_dir=payload["profile_dir"], operations=payload["operations"],
@@ -892,8 +853,6 @@ def pending_diff(payload):
     import difflib
 
     if payload.get("version") == 2:
-        # Simulate the SAME ordered operations on detached copies. Previewing
-        # each against live files lies for create->write_file and patch chains.
         from .layers import skill_roots
         profile = payload["profile_dir"]
         supplied = payload.get("visible_roots", [])
@@ -911,13 +870,13 @@ def pending_diff(payload):
                 if path.exists():
                     skill_write._safe_parents(path)
                     dest = Path(temp) / "skills" / path.relative_to(_skills_root(profile))
-                    if not dest.exists():  # A whole-role base already contains its dependencies.
+                    if not dest.exists():
                         shutil.copytree(path, dest, symlinks=True)
             from .scope import SkillScope, using_scope
             scope = SkillScope(Path(profile), Path(payload['workspace']), storage=Path(temp),
                                origin=payload.get('write_origin', 'foreground'))
             diffs = []
-            token = _bypass.set(True)  # Only detached preview storage, never the live gate.
+            token = _bypass.set(True)
             try:
                 with using_scope(scope):
                     for i, op in enumerate(bound):
@@ -944,7 +903,7 @@ def pending_diff(payload):
         try:
             return path.read_text(encoding="utf-8-sig") if path.is_file() else ""
         except UnicodeDecodeError:
-            return None          # binary: previewed by name only
+            return None
         except OSError:
             return ""
 

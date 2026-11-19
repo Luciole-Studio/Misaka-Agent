@@ -25,8 +25,6 @@ from misaka.utils.management_http import FetchRetryOptions, fetchWithRetry
 from misaka.utils.values import signal_aborted
 from misaka.utils.whatwg_url import URL
 
-# MISAKA fork: no default catalog endpoint (pi: "https://pi.dev"). misaka does not send users' traffic to pi's service;
-# an embedder that runs a catalog server passes its URL as `catalogBaseUrl`.
 DEFAULT_CATALOG_BASE_URL: str | None = None
 REMOTE_CATALOG_ATTEMPT_TIMEOUT_MS = 4_000
 REMOTE_CATALOG_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000
@@ -55,8 +53,6 @@ def _mergeModels(baseline: Sequence[AnyModel], dynamic: Sequence[AnyModel]) -> l
 
 
 def _toModel(entry: dict[str, Any]) -> AnyModel | None:
-    # MISAKA fork: catalog entries become typed models here. A malformed entry is left out
-    # instead of failing the whole catalog.
     try:
         return ANY_MODEL_ADAPTER.validate_python(entry)
     except ValidationError:
@@ -129,7 +125,6 @@ async def _requestCatalog(providerId: str, catalogBaseUrl: str, signal: Any, val
         {
             "headers": {
                 "accept": "application/json",
-                # MISAKA fork: misaka's anonymous user agent (ai/utils/pi_user_agent.py), not pi's `pi/<version>` one.
                 "User-Agent": getPiUserAgent(),
                 **({"if-none-match": validator} if validator else {}),
             },
@@ -296,7 +291,6 @@ def withPersonalizedCatalog(
                 return
 
             remote: list[AnyModel] = []
-            # MISAKA fork: no catalog endpoint, no catalog request (see the docstring).
             if catalogBaseUrl is not None:
                 response = await _requestCatalog(provider.id, catalogBaseUrl, context.signal)
                 if signal_aborted(context.signal):

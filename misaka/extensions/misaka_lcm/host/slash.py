@@ -13,8 +13,6 @@ USAGE = "/lcm help"
 def run(argv: str | list[str], ctx=None) -> str:
     args = shlex.split(argv) if isinstance(argv, str) else argv
     if args and args[0] in operators.COMMANDS:
-        # stdout belongs to the terminal owner, so never redirect process-global
-        # sys.stdout in a worker thread shared with other sessions.
         with subprocess.Popen([sys.executable, "-m", operators.__name__, *args],
                               cwd=str(storage.project(ctx)),
                               text=True, encoding="utf-8", errors="replace", stdout=subprocess.PIPE,

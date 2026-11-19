@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/google-vertex.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "google-vertex.json").read_text(encoding="utf-8"))
 
 GOOGLE_VERTEX_MODELS = flattenChatModelCatalog("google-vertex", _values)

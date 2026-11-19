@@ -70,7 +70,6 @@ async def test_filters_built_in_and_extension_tools_from_available_and_active_to
         assert "ask_question" not in allToolNames
         assert "bash" in allToolNames
         assert "dynamic_tool" in allToolNames
-        # MISAKA fork: MISAKA's default tools add office/grep/find/ls to pi's read/bash/edit/write.
         assert sorted(harness.session.getActiveToolNames()) == [
             "bash",
             "dynamic_tool",
@@ -230,9 +229,6 @@ async def test_reports_overflow_reason_and_will_retry_for_overflow_recovery():
 
 # --- issue #5303 bash output truncation past exit -----------------------------------------------
 #
-# MISAKA fork: the child process is MISAKA's asyncio subprocess protocol, so the stand-in child drives that protocol
-# (data arrives through ``pipe_data_received``, exit through ``process_exited``) where pi's test emits events on an
-# EventEmitter with PassThrough streams.
 
 
 class _FakeTransport:

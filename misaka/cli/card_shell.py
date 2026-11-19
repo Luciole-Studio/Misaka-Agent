@@ -32,7 +32,6 @@ def launch(task_id, resume_only=False, say=None, consult=False):
     a finished card's answer to a message instead (``pane.consult_card``): no claim, the card
     stays as it is, and the consultation the daemon opened is what this process settles. Without
     a claim or a consultation a reopened session is only for looking."""
-    # Read the card and let go: the session below runs for as long as a person keeps it open.
     with contextlib.closing(db.connect(CFG["db"])) as con:
         row = db.get(con, task_id)
         handoffs = worker.card_handoffs(con, row) if row is not None else []
@@ -57,14 +56,11 @@ def launch(task_id, resume_only=False, say=None, consult=False):
         if task["claim_lock"] != lock or int(task["generation"]) != int(generation):
             sys.exit(f"Card {task_id} is not claimed by this pane; the daemon owns the claim.")
     elif say:
-        # A model turn changes the card, so it only happens under a claim (pane.continue_card).
         sys.exit(f"Card {task_id}: a message needs the daemon's claim; reopening without one is read-only.")
     elif resume_only and task["status"] in ACTIVE_STATUSES:
-        # The live session is being written by another process; do not open it twice.
         sys.exit(f"Card {task_id} is still running in another pane ({task['status']}); open that pane instead.")
     workspace = db.workspace_for(task)
     if not os.path.isdir(workspace):
-        # The card's folder is the project; a deleted or moved one is never recreated in silence.
         sys.exit(f"Card {task_id}: its folder {workspace} no longer exists.")
     run_dir = workspace
     from misaka.core.platform import cards as card_files
@@ -82,7 +78,6 @@ def launch(task_id, resume_only=False, say=None, consult=False):
     session_dir = session_roots.card_session_dir(task)
     cont = worker.continue_flags(task["session_file"], session_dir)
     if resume_only:
-        # Open the existing session only; never resend the contract, which would rerun the card.
         if not cont:
             sys.exit(f"Card {task_id} has no session to resume.")
         flags += cont
@@ -106,8 +101,6 @@ def launch(task_id, resume_only=False, say=None, consult=False):
 
     from misaka.cli.engine import main as engine_main
     from misaka.utils import loop_watchdog
-    # A claimed card is the daemon's to reclaim when its process ends; a session reopened
-    # without a claim is only for a person to read, and stays open.
     loop_watchdog.configure(f"card-{task_id}", exit_on_stall=bool(lock and generation) or consult)
     code = asyncio.run(loop_watchdog.watched(engine_main(flags, assembly.engine_options())))
     sys.exit(code)

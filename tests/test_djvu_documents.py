@@ -53,7 +53,7 @@ def test_a_djvu_text_layer_comes_out_one_page_per_form_feed(tmp_path):
 
 def test_a_thin_text_layer_is_kept_rather_than_replaced_by_an_empty_rendering(tmp_path):
     """A rendering that reads nothing must not overwrite the words the file already had."""
-    book = build_djvu(tmp_path, words_per_page=1)         # under the text-layer threshold
+    book = build_djvu(tmp_path, words_per_page=1)
     meta = {}
     pages = corpus._djvu_pages(str(book), meta)
     assert [p.strip() for p in pages] == ["page 1 w0", "page 2 w0"]
@@ -85,7 +85,7 @@ def test_a_djvu_stored_out_of_step_is_renumbered_when_ingested_again(tmp_path):
     meta.update(pages=2)
     meta.pop("extract_version")
     meta.pop("unread_pages", None)
-    (Path(ddir) / "meta.json").write_text(json.dumps(meta), encoding="utf-8")       # as version 1 stored it
+    (Path(ddir) / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
     _, count = corpus.ingest(str(book), workspace=str(workspace), with_tree=False)
     assert count == 3
     assert corpus.read_page(doc_id, 2, workspace=str(workspace)).startswith("page 2 w0")
@@ -113,7 +113,7 @@ def test_a_downloaded_djvu_is_indexed_on_arrival(tmp_path, monkeypatch):
     """download_file indexes whatever SCAN_SUFFIXES names; a DjVu now goes in like a PDF."""
     monkeypatch.setenv("MISAKA_PAGEINDEX", str(tmp_path / "corpus"))
     workspace = tmp_path / "ws"
-    (workspace / "downloads").mkdir(parents=True)       # the corpus reads inside the workspace only
+    (workspace / "downloads").mkdir(parents=True)
     book = build_djvu(workspace / "downloads")
     doc_id, count = corpus.ingest(str(book), workspace=str(workspace))
     assert doc_id and count == 2

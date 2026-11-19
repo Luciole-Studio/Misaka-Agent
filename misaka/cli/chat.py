@@ -23,9 +23,6 @@ def assembly(who, cfg=None):
         prof = os.path.join(cfg["profiles_root"], who)
         if not os.path.isdir(prof):
             sys.exit(f"Unknown Sister {who!r}. Roster: {', '.join(sorted(sisters()))}")
-        # Her own pin first: one Sister, one model, set from her own session's
-        # /model selector (config.profiles.persist_role_default_model). The
-        # product-wide default is only the fallback for a Sister who has none.
         return prof, profiles.pinned_model(prof) or cfg["default_model"]
     prof = os.path.join(cfg["roles_root"], "last_order")
     return prof, cfg["lo_model"]
@@ -49,13 +46,6 @@ def resolve_session(session, who):
 def launch(who, model=None, cont=False, pick=False, session=None, read_only=False, catalog=None, attach=False, skills=None):
     """Open chat; only the writable form assembles an agent. ``who=None`` means Last Order."""
     from misaka.core.session_manager import readSessionHeader
-    # `chat` is a full-screen TUI in every form, not just under --pick. Without a terminal the
-    # picker died on a bare OSError(EINVAL) from registering stdin with the event loop, while
-    # every other form exited 0 having printed nothing at all -- so a piped `misaka chat` looked
-    # like it had worked. Both are the same missing precondition, so both are refused here.
-    #
-    # Naming --session or -c as the way out would be wrong: they are equally interactive, and
-    # recommending them is what the earlier --pick-only guard did.
     if not sys.stdin.isatty():
         sys.exit("misaka chat needs a terminal; stdin is not a TTY.\n"
                  "For a scripted, non-interactive turn use `misaka dm <who> \"<message>\"`.")
@@ -65,7 +55,6 @@ def launch(who, model=None, cont=False, pick=False, session=None, read_only=Fals
             sys.exit(f"chat {access} needs exactly one of --session or --catalog.")
         if who is not None or model is not None or cont or pick or skills:
             sys.exit(f"chat {access} opens the original session; omit --as, --model, --continue and --pick.")
-        # An explicit file needs no engine, roster, auth, session writer or task hooks.
         path = session or catalog
         if session and not ("/" in session or "\\" in session or session.endswith(".jsonl")):
             path = resolve_session(session, None)
@@ -89,9 +78,6 @@ def launch(who, model=None, cont=False, pick=False, session=None, read_only=Fals
         sys.exit("--catalog requires --attach or --read-only.")
     if session:
         session = resolve_session(session, who)
-        # A resumed conversation goes back to the folder it worked in, whatever folder the
-        # shell or the panel sits in: the bucket, the workspace, the skills, and every tool
-        # follow the session. A folder that is gone is an error, not a silent move.
         header = readSessionHeader(session)
         folder = header.get("cwd")
         if not folder or not os.path.isdir(folder):
@@ -99,8 +85,6 @@ def launch(who, model=None, cont=False, pick=False, session=None, read_only=Fals
         os.chdir(folder)
     cfg = current_config()
     prof, _model_default = assembly(who, cfg)
-    # Sessions are bucketed per role and per folder, like pi's per-cwd sessions:
-    # `-c` resumes this role's conversation about *this* project.
     sess = sessions.chat_dir(who, os.getcwd())
     if who:
         title = f"MISAKA · {who}"
@@ -134,7 +118,7 @@ def launch(who, model=None, cont=False, pick=False, session=None, read_only=Fals
 
     from misaka.cli.engine import main as engine_main
     from misaka.utils import loop_watchdog
-    loop_watchdog.configure("chat", exit_on_stall=False)      # a person is there: the stack, not an exit
+    loop_watchdog.configure("chat", exit_on_stall=False)
     sys.exit(asyncio.run(loop_watchdog.watched(engine_main(flags, session_assembly.engine_options()))))
 
 
@@ -154,8 +138,6 @@ def _display_value(value):
 def read_session_snapshot(path):
     from misaka.core.session_manager import _parse_jsonl_entries, buildContextEntries
 
-    # The writer may be mid-UTF-8 or mid-entry. Read only committed lines; never
-    # open a writable SessionManager to repair, migrate or flush someone else's file.
     data = path.read_bytes()
     entries = _parse_jsonl_entries(data[:data.rfind(b"\n") + 1].decode("utf-8"), strict=True)
     if not entries or entries[0].get("type") != "session" or not isinstance(entries[0].get("id"), str):
@@ -230,7 +212,7 @@ async def follow_session(screen, path, *, catalog=False, attach=False):
         elif keybindings.matches(data, "app.thinking.toggle"):
             screen.toggleThinkingBlockVisibility()
         else:
-            return None  # The focused editor (if attached) receives ordinary input.
+            return None
         return {"consume": True}
 
     unsubscribe = screen.ui.addInputListener(on_input)
@@ -298,16 +280,12 @@ async def follow_session(screen, path, *, catalog=False, attach=False):
                 screen.updateStreaming(None)
                 stream_cursor = None
                 if owner is not None and not os.path.exists(str(owner.get("control") or "")):
-                    # The owning process exited (a research node that finished its routine, a
-                    # closed window): its input socket is gone, the conversation itself is not.
                     notice.setText("The original session has ended; this is its saved conversation, read-only. "
                                    "Nothing typed here can reach it any more.")
                 else:
                     notice.setText(_display_value(f"Session unavailable: {error}"))
                 if owner is not None:
                     screen.footer.setText(theme.fg("dim", "Original owner disconnected · reopen from Sessions · Ctrl+C/D detaches"))
-                    # Read any final committed messages, but never start a replacement
-                    # owner or silently route queued text to a new runtime instance.
                     saved = owner.get("path")
                     if saved and os.path.isfile(saved):
                         try:

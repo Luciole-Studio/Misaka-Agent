@@ -115,8 +115,8 @@ async def test_context_hook_prepends_an_ephemeral_notice(board, tmp_path, monkey
     assert head["role"] == "custom" and head["customType"] == "research-mode"
     assert head["display"] is False and rid in head["content"]
     assert isinstance(head["timestamp"], int)
-    assert rest == messages                     # the transcript itself is untouched
-    assert messages == [_user("hello")]         # and nothing was written into it
+    assert rest == messages
+    assert messages == [_user("hello")]
 
 
 async def test_context_hook_is_silent_without_a_run(board, monkeypatch):

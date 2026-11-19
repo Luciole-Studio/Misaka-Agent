@@ -29,7 +29,6 @@ def test_parses_like_node(text, expected):
 
 
 def test_mcp_validation_reads_hosts_the_way_node_does():
-    # The IPv6 loopback in full is still loopback; a URL Node rejects is not an http URL.
     assert isLoopbackRedirectUri("http://[0:0:0:0:0:0:0:1]:5/callback")
     assert validateMcpServerConfig("s", {"url": "https://exa mple.com"}) == 'server "s": url must be an http or https URL'
     assert validateMcpServerConfig("s", {"url": "https:example.com/mcp"}) == {"url": "https:example.com/mcp"}

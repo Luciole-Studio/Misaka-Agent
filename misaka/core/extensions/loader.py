@@ -172,7 +172,6 @@ class _ExtensionAPI:
     def registerTool(self, definition: ToolDefinition[Any, Any]) -> None:
         self.load.assertActive()
         parameters = read_field(definition, "parameters")
-        # MISAKA fork: an object schema is a JSON-schema mapping or a pydantic model class (pi: any non-array object).
         if not (
             isinstance(parameters, Mapping)
             or (isinstance(parameters, type) and hasattr(parameters, "model_json_schema"))
@@ -181,7 +180,6 @@ class _ExtensionAPI:
                 f'Tool "{read_field(definition, "name")}" registered by extension "{self.extension.path}" '
                 "must define an object parameter schema."
             )
-        # MISAKA fork: a definition may also be a mapping, as pi's are plain objects.
         if isinstance(definition, Mapping):
             definition = ToolDefinition(**definition)
         self.extension.tools[definition.name] = RegisteredTool(

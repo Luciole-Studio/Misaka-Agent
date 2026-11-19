@@ -22,7 +22,7 @@ async def test_a_resume_does_not_ask_for_a_conversation_that_was_never_written(t
         missing = str(tmp_path / "sessions" / "root.jsonl")
         os.makedirs(os.path.dirname(missing))
         runs.set_state(con, run["id"], status="failed", root_session=missing)
-        with pytest.raises(RuntimeError) as raised:     # this test home has no model: it stops there
+        with pytest.raises(RuntimeError) as raised:
             await workflow.run(con, cfg, research_node.ProcessSpawner(), run_id=run["id"], resume=True,
                                poll_seconds=0.01)
         assert not isinstance(raised.value.__context__, FileNotFoundError)

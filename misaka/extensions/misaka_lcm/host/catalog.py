@@ -80,7 +80,6 @@ def _get_json(url, *, timeout, headers=None, ssl_context=None):
 def origin():
     registry = llm._REGISTRY.get()
     if registry is None:
-        # Calls outside a native owner must be explicit, not borrow another registry.
         raise RuntimeError('Model catalog access requires a native registry')
     key = (catalog_url('nous'), catalog_url('openrouter'))
     with _LOCK:
@@ -95,7 +94,6 @@ def origin():
 
 
 def warm(refresh):
-    # Preserve provider/config identity in the original bounded background fetch.
     context = contextvars.copy_context()
     threading.Thread(target=context.run, args=(refresh,), name='lcm-catalog-warm', daemon=True).start()
 
@@ -127,7 +125,7 @@ def fetch_nous_recommended_models(portal_base_url='', timeout=5.0, *, force_refr
             try:
                 _write_json_cache(path, disk, indent=2)
             except OSError:
-                pass  # An unwritable cache does not invalidate the live result.
+                pass
         else:
             entry = disk.get(base, {})
             data = entry.get('data', {}) if isinstance(entry, dict) else {}

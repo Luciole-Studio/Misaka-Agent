@@ -40,8 +40,6 @@ SCANNED = "SCANNED PAGE {n} report of the district magistrate on the harvest"
 STAMP = "Downloaded from archive.example.org on 2026-10-07, page {n}"
 
 
-# -- what the file says about its pages ------------------------------------------------------------
-
 def test_a_stamp_on_every_page_is_not_a_text_layer():
     pages = [STAMP.format(n=n) + "\n" for n in range(1, 6)]
     assert corpus._route(pages) == {n: corpus.ROUTE_EMPTY for n in range(1, 6)}
@@ -86,8 +84,6 @@ def test_an_image_with_a_line_of_text_is_sent_to_ocr_and_a_page_of_prose_is_not(
     assert corpus._route([heading], lambda numbers: {1: (0.05, True)}) == {}
 
 
-# -- reading ocrmypdf's sidecar --------------------------------------------------------------------
-
 def test_a_placeholder_stands_for_the_run_of_pages_it_names():
     text = "[OCR skipped on page(s) 1-2]\fscan three\fscan four"
     assert corpus._sidecar_pages(text, 4) == {3: "scan three", 4: "scan four"}
@@ -109,8 +105,6 @@ def test_page_spec():
     assert corpus._page_spec([7, 1, 2, 3, 9, 10]) == "1-3,7,9-10"
 
 
-# -- putting what OCR read where it belongs ---------------------------------------------------------
-
 def test_a_text_layer_keeps_its_words_and_ocr_is_added_after_them():
     pages = ["Plate 3. The caption the publisher typeset.", "", "" * 30]
     routed = {1: corpus.ROUTE_IMAGE, 2: corpus.ROUTE_EMPTY, 3: corpus.ROUTE_GARBLED}
@@ -130,8 +124,6 @@ def test_a_page_ocr_could_not_read_is_named_with_the_reason():
     assert unread[1].endswith("OCR found no text on it")
     assert unread[2].endswith(corpus.OCR_MISSING)
 
-
-# -- the whole path, with a stand-in ocrmypdf -------------------------------------------------------
 
 @pytest.fixture
 def fake_ocrmypdf(monkeypatch):
@@ -239,8 +231,6 @@ def test_without_ocrmypdf_the_scanned_pages_are_named_unread(tmp_path, monkeypat
                                      "5": f"{corpus.ROUTE_EMPTY}; {corpus.OCR_MISSING}"}}
 
 
-# -- the corpus: new documents, and documents an older extractor indexed ----------------------------
-
 def _ingest(tmp_path, monkeypatch, name="book.pdf"):
     workspace = tmp_path / "ws"
     workspace.mkdir(exist_ok=True)
@@ -317,7 +307,7 @@ def test_a_reread_rewrites_only_the_pages_it_newly_read(tmp_path, monkeypatch, f
     stored = [typeset(1) + "  \n", "", typeset(3) + "  \n"]
     doc_id = _as_version_1(tmp_path, monkeypatch, stored)
     state["count"] = 3
-    _layer(monkeypatch, [typeset(1), "", typeset(3)])    # pdftotext spaces it differently now
+    _layer(monkeypatch, [typeset(1), "", typeset(3)])
     _, count, _, meta = _ingest(tmp_path, monkeypatch)
     ws = str(tmp_path / "ws")
     assert count == 3
@@ -336,8 +326,6 @@ def test_without_ocrmypdf_a_reread_waits_for_it(tmp_path, monkeypatch):
     assert meta["unread_pages"] == {"2": f"{corpus.ROUTE_EMPTY}; {corpus.OCR_MISSING}"}
 
 
-# -- what the doc_* tools say about it --------------------------------------------------------------
-
 def test_the_listing_and_the_reader_name_unread_and_reread_pages():
     row = {"pages": 10, "ocr": True, "ocr_pages": [4, 5], "orig_path": "/w/book.pdf",
            "unread_pages": {"6": f"{corpus.ROUTE_EMPTY}; {corpus.OCR_MISSING}",
@@ -350,7 +338,6 @@ def test_the_listing_and_the_reader_name_unread_and_reread_pages():
     assert "Page 6 has no text here (no text layer; ocrmypdf is not installed" in notes
     assert "Page 7 has no text here (no text layer; OCR found no text on it)" in notes
     assert "doc_page_image" in notes and "Pages 4-5 were re-read" in notes
-    # A plate or a chart OCR read is left out of the figures, so the reader names it here.
     assert "Pages 4-5 were read by OCR from the page image" in notes
     assert tools._page_notes(row, 1, 3) == ""
 
@@ -360,8 +347,6 @@ def test_an_unread_djvu_page_is_seen_with_doc_page_image():
            "unread_pages": {"3": f"{corpus.ROUTE_EMPTY}; {corpus.OCR_MISSING}"}}
     assert "doc_page_image" in tools._page_notes(row, 3, 3)
 
-
-# -- the real thing, when this machine has it -------------------------------------------------------
 
 def _typeset(pdf, page, line, y):
     obj = raw.FPDFPageObj_NewTextObj(pdf.raw, b"Helvetica", 12.0)
@@ -436,7 +421,6 @@ def test_a_reread_without_pdfiums_answer_keeps_a_plates_ocr(tmp_path, monkeypatc
     assert corpus._reread(str(ddir), str(source), 6) == 6
     assert (ddir / "pages" / "p0006.txt").read_text(encoding="utf-8") == stored[5]
     assert json.loads((ddir / "meta.json").read_text(encoding="utf-8"))["extract_version"] == 2
-    # A file pdfium never reads is not re-extracted, OCR and all, on every ingest for ever.
     for _ in range(corpus.REREAD_TRIES - 1):
         corpus._reread(str(ddir), str(source), 6)
     meta = json.loads((ddir / "meta.json").read_text(encoding="utf-8"))
@@ -459,7 +443,6 @@ def _put_off_doc(tmp_path, monkeypatch, **meta):
 
 def test_a_reread_put_off_and_then_answered_forgets_the_misses(tmp_path, monkeypatch):
     ddir, source = _put_off_doc(tmp_path, monkeypatch)
-    # With ocrmypdf installed: on a machine without it the scanned pages wait for it, which keeps the put-off.
     real_which = shutil.which
     monkeypatch.setattr(corpus.shutil, "which", lambda name: f"/fake/{name}" if name == corpus.OCR_BINARY else real_which(name))
     monkeypatch.setattr(corpus, "_pdf_visuals", lambda p, numbers: None)

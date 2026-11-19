@@ -14,15 +14,12 @@ def _write(tmp_path, kind, path):
     return asyncio.run(guard.tool_call({"toolName": "write", "input": {"path": path, "content": "x"}}, None))
 
 
-# -- H4: a card rewriting the instructions every later session loads --------------------------------------
-
 @pytest.mark.parametrize("path", ["PROJECT.md", "AGENTS.md", "../CLAUDE.md",
-                                  # as write resolves them: a leading @, and a case-folding file system
                                   "@PROJECT.md", "project.md", "Agents.md", "../claude.MD"])
 @pytest.mark.parametrize("kind", ["card", "beast", "child"])
 def test_a_sister_or_sub_agent_does_not_write_the_projects_instructions(tmp_path, monkeypatch, kind, path):
     from misaka.config import home
-    monkeypatch.setattr(home, "FOLDS_CASE", True)                  # macOS and Windows
+    monkeypatch.setattr(home, "FOLDS_CASE", True)
     decision = _write(tmp_path, kind, path)
     assert decision and decision["block"] and "Tell Last Order" in decision["reason"]
 
@@ -64,8 +61,6 @@ def test_last_order_and_ordinary_files_are_untouched(tmp_path, kind, path):
     assert _write(tmp_path, kind, path) is None
 
 
-# -- M1: MISAKA's own credentials through the file tools ----------------------------------------------------
-
 def _home_with_credentials(tmp_path, monkeypatch):
     from misaka.config import home
     monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
@@ -105,16 +100,12 @@ def test_credentials_are_refused_in_any_case_and_only_where_the_home_loads_them(
     root = tmp_path / "home"
     for refused in (root / "Credentials" / "auth.json", tmp_path / "HOME" / "credentials" / "auth.json",
                     root / ".ENV", root / "profiles" / "sisters" / "10032" / ".env",
-                    # what `misaka update` snapshots of them
                     root / "state" / "backups" / "update-20261008" / ".env",
                     root / "state" / "backups" / "update-20261008" / "credentials" / "auth.json"):
         assert is_credential_store(str(refused)), refused
-    # A project's .env copied into a sub-agent's worktree is the project's own.
     assert not is_credential_store(str(root / "state" / "worktrees" / "w1" / ".env"))
     assert not is_credential_store(str(tmp_path / "project" / ".env"))
 
-
-# -- H5: a node in a restricted container ----------------------------------------------------------------------
 
 def test_a_runner_claims_its_row_where_no_identity_can_be_read(tmp_path, monkeypatch):
     from contextlib import closing
@@ -133,8 +124,6 @@ def test_a_runner_claims_its_row_where_no_identity_can_be_read(tmp_path, monkeyp
         assert runs.claim_runner(con, "research_execution", root["id"], key), "the same process claims again"
         assert processes.identity(12345) is None, "everyone else still sees an unreadable process as unknown"
 
-
-# -- H6: restoring an official optional skill is scanned as the hub scans it --------------------------------------------
 
 def test_an_optional_skill_is_scanned_before_it_is_restored(tmp_path, monkeypatch):
     from misaka.core.skills.vendor import skills_sync
@@ -158,22 +147,18 @@ def test_an_optional_skill_is_scanned_before_it_is_restored(tmp_path, monkeypatc
     real_scan = guard.scan_skill
     monkeypatch.setattr(guard, "scan_skill", lambda path, source: scanned.append(source) or real_scan(path, source=source))
     result = optional.restore_official_optional_skill("all", restore=True)
-    # Shipped official content, scanned as the hub scans it: the verdict is recorded, not a refusal
-    # (0.18.9 scanned it as community and refused 66 of the 140 shipped skills).
     assert set(scanned) == {"official"}
     assert result["ok"] is True and sorted(result["restored"]) == ["leaky", "plain"]
     assert recorded["plain"] == "safe" and recorded["leaky"] != "safe"
 
 
-# -- M6 and node_dir ------------------------------------------------------------------------------------------
-
 @pytest.mark.parametrize("cited, expected", [
     ("downloads/my paper 2024.pdf", "downloads/my paper 2024.pdf"),
-    ("downloads/a.pdf p. 3", "downloads/a.pdf"),              # words after the path in the same span
+    ("downloads/a.pdf p. 3", "downloads/a.pdf"),
     ("nodes/b_1/synthesis.md (v2)", "nodes/b_1/synthesis.md"),
-    ("downloads/my%20paper.pdf", "downloads/my%20paper.pdf"),  # a file saved under its escaped name
-    ("downloads/my%20other.pdf", "downloads/my other.pdf"),    # a Markdown link's escape
-    ("downloads/a%00b.pdf", None),                             # a NUL is no path, and no crash
+    ("downloads/my%20paper.pdf", "downloads/my%20paper.pdf"),
+    ("downloads/my%20other.pdf", "downloads/my other.pdf"),
+    ("downloads/a%00b.pdf", None),
 ])
 def test_a_cited_path_resolves_through_its_possible_spellings(tmp_path, cited, expected):
     from misaka.core.research.bundle import _Collector, _Index

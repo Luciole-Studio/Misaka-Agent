@@ -19,7 +19,6 @@ from misaka.ai.utils.typebox_helpers import typeboxSchema
 from misaka.utils.values import read_field
 
 CONTEXT_FRAMING_TOKENS = 4096
-# Providers that bill a flat amount per image, whatever its size, stay under this.
 IMAGE_TOKEN_FLOOR = 2560
 
 
@@ -62,9 +61,6 @@ def image_token_upper_bound(width: int, height: int) -> int:
     )
 
 
-# Keyed by (length, hash), never by the base64 itself: every request re-measures the same images,
-# and a cache holding the strings would keep megabytes of image data alive after the context
-# that carried them has been compacted away.
 _IMAGE_SIZES: OrderedDict[tuple[int, int], tuple[int, int] | None] = OrderedDict()
 _IMAGE_SIZES_KEPT = 256
 

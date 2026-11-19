@@ -625,7 +625,6 @@ class HostImpl:
         )
         try:
             result = fn(ctx)
-            # MISAKA fork: a promise resolved with a promise adopts it; an awaited coroutine may return a future.
             while inspect.isawaitable(result):
                 result = await result
             return result

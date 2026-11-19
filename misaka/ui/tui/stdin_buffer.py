@@ -294,13 +294,8 @@ class StdinBuffer:
         self.pasteMode: bool = False
         self.pasteBuffer: str = ""
         self.pendingKittyPrintableCodepoint: int | None = None
-        # MISAKA fork: EventEmitter's listener table.
         self.listeners: dict[str, list[Callable[[str], Any]]] = {}
-        # MISAKA fork: the loop `setTimeout` schedules on (`None`: the running loop when a timer is armed).
         self.loop = loop
-        # MISAKA fork: upstream's terminal sets the stdin encoding to UTF-8, so Node's stream decodes each chunk
-        # and holds a partial character back for the next one. MISAKA's POSIX reader hands over raw `os.read`
-        # bytes; this decoder does what that stream decoder does.
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         timeout = options.get("timeout")
         self.timeoutMs: float = timeout if timeout is not None else DEFAULT_SEQUENCE_TIMEOUT_MS
@@ -322,11 +317,6 @@ class StdinBuffer:
         return True
 
     def process(self, data: str | bytes | bytearray) -> None:
-        # MISAKA fork: bytes go through the stream decoder first (see `decoder`). A chunk that decodes to nothing
-        # (a character split across reads) is no data event in Node, so it neither emits nor touches the timer.
-        # Upstream's Buffer branch (a single byte above 127 becomes ESC + byte - 128, for 8-bit meta keys) is not
-        # ported: production input never takes it there, and here a lone byte of a split UTF-8 character would
-        # turn into an Alt+key.
         if isinstance(data, (bytes, bytearray)):
             data = self.decoder.decode(bytes(data))
             if len(data) == 0:
@@ -420,13 +410,10 @@ class StdinBuffer:
                     else:
                         self.emitDataSequence(sequence)
 
-            # MISAKA fork: `setTimeout` on the event loop (see `loop`); input arrives on the loop's thread.
             loop = self.loop if self.loop is not None else asyncio.get_running_loop()
             self.timeout = loop.call_later(timeoutMs / 1000, onTimeout)
 
     def emitDataSequence(self, sequence: str) -> None:
-        # MISAKA fork: a character outside the BMP is one sequence here, so its raw duplicate after a Kitty CSI-u
-        # sequence is dropped too (JavaScript sees two surrogate halves, neither matching the codepoint).
         rawCodepoint = ord(sequence) if len(sequence) == 1 else None
         if rawCodepoint is not None and rawCodepoint == self.pendingKittyPrintableCodepoint:
             self.pendingKittyPrintableCodepoint = None

@@ -42,8 +42,6 @@ def test_keeps_the_default_and_custom_prompt_prefixes_exact():
         "skills": [],
     })
 
-    # MISAKA fork: MISAKA's default prompt introduces MISAKA, where pi's opens "You are an expert coding assistant
-    # operating inside pi".
     assert defaultPrompt.startswith("You are an agent of MISAKA")
     assert customPrompt.startswith("You are Exact.\n\n<cwd>")
 

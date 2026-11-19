@@ -29,9 +29,9 @@ from typing import Any
 from . import materials, prompts, store, views
 from .store import ReadingError
 
-EXCERPT_CHARS = 8_000          # the opening window of each material a study reader is handed
+EXCERPT_CHARS = 8_000
 EXCERPT_SOURCES = 3
-PRIOR_CHARS = 12_000           # a continued node's own note; compare and reread carry notes whole
+PRIOR_CHARS = 12_000
 DOC_TOOLS = ("doc_outline", "doc_read", "doc_find", "doc_verify", "doc_page_image")
 HOW = {"independent": "fork", "compare": "compare", "reread": "reread"}
 
@@ -58,9 +58,6 @@ def lo_profile():
     return str(home.path("roles_root") / "last_order")
 
 
-# -- opening -------------------------------------------------------------------------------------
-
-
 async def open_reading(sources, question, *, workspace, intent="", runs_dir=None, progress=QUIET):
     """Add the materials and make the reading with its entry node ``N0``. No model is called."""
     if not sources:
@@ -72,7 +69,6 @@ async def open_reading(sources, question, *, workspace, intent="", runs_dir=None
     directory = os.path.join(parent, run_id)
     os.makedirs(directory)
     try:
-        # The folder's layout from the start, as PR #12 lays it out; sources/ when copies go there.
         inbox = materials.inbox(workspace, directory)
         for part in (os.path.join(directory, "nodes"), os.path.join(directory, "sessions"),
                      *([inbox] if os.path.dirname(inbox) == directory else [])):
@@ -82,7 +78,6 @@ async def open_reading(sources, question, *, workspace, intent="", runs_dir=None
             progress.note(f"adding {source}")
             record, copy = await materials.add(source, workspace, directory)
             if any(known["doc_id"] == record["doc_id"] for known in records):
-                # The same material twice (one text, two names): one material, and no second copy.
                 progress.note(f"  {record['title']} is already in this reading")
                 if copy:
                     os.remove(copy)
@@ -130,9 +125,6 @@ def render(run, progress=QUIET):
         progress.note(f"could not update the reading's files: {type(error).__name__}: {error}")
 
 
-# -- models --------------------------------------------------------------------------------------
-
-
 async def model_runtime():
     """The models and credentials of the home, as a session made without one would load them."""
     from misaka.config import home
@@ -167,9 +159,6 @@ def choose_model(runtime, reference=None, current=None):
     return model
 
 
-# -- one study reader ----------------------------------------------------------------------------
-
-
 @dataclass
 class Result:
     summary: str
@@ -179,7 +168,7 @@ class Result:
     relations: list[dict[str, str]]
     questions: list[str]
     session: str | None = None
-    forked_from: str | None = None     # the session this one continues; None for a fresh one
+    forked_from: str | None = None
     prose: bool = False
 
 
@@ -269,7 +258,6 @@ class Reader:
         await loader.reload()
         manager, forked_from = None, None
         if session_file and os.path.exists(session_file):
-            # A fork, not the file itself: the node keeps its session until this action is recorded.
             try:
                 manager, forked_from = SessionManager.forkFrom(session_file, workspace, sessions), session_file
             except Exception as error:  # noqa: BLE001 - a damaged session must not take the reading with it
@@ -285,15 +273,12 @@ class Reader:
                 written.append(read_field(inner, "delta"))
                 self.progress.text(role, node_id, read_field(inner, "delta"))
 
-        # From here the session's file is this action's: kept only if it returns a reading.
         try:
             built = await createAgentSession({"cwd": workspace, "agentDir": lo_profile(), "noTools": "builtin",
                                               "tools": [tool.name for tool in tools], "customTools": tools,
                                               "resourceLoader": loader, "sessionManager": manager,
                                               "model": self.model, "modelRuntime": self.runtime})
             session = built["session"]
-            # Nobody watches a study reader turn by turn: MISAKA's guards against a session repeating
-            # itself or spinning on its tools stand in, as for every headless session (platform.session).
             from misaka.agent.guards import install_guards
             from misaka.core.platform import metering
             from misaka.core.platform.vocabulary import NO_PROGRESS_VOCABULARY
@@ -313,7 +298,6 @@ class Reader:
             if sink.get("value") is not None:
                 result = _normalize(sink["value"], run, fallback_refs)
             elif text:
-                # The reader answered in prose: still its reading of the material, so it is kept.
                 self.progress.note(f"{node_id}: the reader answered in prose instead of calling reading_submit")
                 first = next((line.lstrip("#").strip() for line in text.splitlines() if line.strip()), "")
                 result = Result(first[:160], text, [], list(fallback_refs), [], [], prose=True)
@@ -333,8 +317,6 @@ class Reader:
                 session.dispose()
             if not kept:
                 forget(manager.getSessionFile())
-
-    # -- context -----------------------------------------------------------------------------
 
     async def _excerpts(self, run, refs):
         """One opening window per material, preferring the places the action starts from."""
@@ -370,7 +352,6 @@ class Reader:
         out = []
         for node_id in node_ids:
             node = run.reading(node_id)
-            # A continuation goes on from the latest sections; the earlier ones are in the note.
             body = (views.note(run, node_id, limit=None if whole else PRIOR_CHARS) if run.sections(node_id)
                     else node.attrs["summary"])
             out.append((node_id, node.attrs.get("lens"), node.attrs["question"], body))
@@ -386,8 +367,6 @@ class Reader:
             method_text=prompts.method(action), materials=prompts.catalogue(run),
             excerpts=await self._excerpts(run, refs),
             prior=self._prior(run, prior_ids, whole=mode in ("compare", "reread"))), refs
-
-    # -- writing a result ----------------------------------------------------------------------
 
     def _record(self, change, run, node_id, action, mode, result, at):
         """One action's result onto ``node_id``: its section, its attributes, its relations."""
@@ -428,8 +407,6 @@ class Reader:
             raise
         render(run, self.progress)
 
-    # -- operations ----------------------------------------------------------------------------
-
     async def act(self, run, node_id, action, *, question=None, lens=None, focus=None, mode=None, using=(),
                   refs=None):
         """One action on ``node_id``: ``continue`` writes onto that node, every other mode onto a
@@ -463,7 +440,7 @@ class Reader:
                                              **({"lens": lens} if lens else {}), **({"using": using} if using else {})},
                          apply, [result])
             if result.forked_from:
-                forget(result.forked_from)          # its fork, now the node's session, holds all of it
+                forget(result.forked_from)
         self.progress.changed(run.id, [target])
         return target, result
 
@@ -490,7 +467,6 @@ class Reader:
                 if any(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes):
                     raise asyncio.CancelledError
             except asyncio.CancelledError:
-                # Stopped: the lines that had finished are not recorded, so neither are their sessions.
                 for study in studies:
                     if study.done() and not study.cancelled() and study.exception() is None:
                         forget(study.result().session)

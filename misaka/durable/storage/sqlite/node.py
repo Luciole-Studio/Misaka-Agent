@@ -42,7 +42,6 @@ DEFAULT_WAL_AUTO_CHECKPOINT_PAGES = 1_000
 DEFAULT_BUSY_TIMEOUT_MS = 5_000
 # Prepared statements kept per connection. The storage issues well under a hundred distinct statement texts.
 _STATEMENT_CACHE_SIZE = 512
-# MISAKA fork: STRICT tables need SQLite 3.37, and Python links the SQLite of the system rather than a bundled one.
 _MINIMUM_SQLITE_VERSION = (3, 37, 0)
 
 

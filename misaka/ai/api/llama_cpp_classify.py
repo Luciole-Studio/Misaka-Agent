@@ -98,7 +98,6 @@ class LabeledQuestion:
 
 
 class _HttpError(Exception):
-    # MISAKA fork: upstream's interface over `Error`; `_httpError` and `_timeoutError` set the fields.
     name: str = "Error"
     status: int | None
     headers: Any
@@ -287,16 +286,12 @@ async def _post(request: _RequestContext, path: str, body: Any, observe: bool) -
             else nullishCoalesce(_option(options, "signal"), timeoutSignal)
         )
         try:
-            # MISAKA fork: `options.fetch` is not ported; httpx sends the request, following redirects and with no
-            # timeout of its own, as fetch does -- the signals above are the bound.
             async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(None)) as client:
                 try:
                     next = await cancel_on_abort(
                         client.post(f"{root}{path}", headers=headers, content=jsonStringify(payload)), signal
                     )
                 except httpx.TransportError as error:
-                    # MISAKA fork: fetch rejects a failed connection with a status-less "fetch failed", which
-                    # retryProviderRequest does not retry.
                     raise RuntimeError("fetch failed") from error
                 if not next.is_success:
                     raise _httpError(next, next.text)
@@ -306,7 +301,6 @@ async def _post(request: _RequestContext, path: str, body: Any, observe: bool) -
                 raise _timeoutError(_option(options, "timeoutMs")) from None
             raise
 
-    # MISAKA fork: the attempt returns `(response, json)` for upstream's `{ response, json }`.
     response, json = await retryProviderRequest(
         attempt,
         {
@@ -350,8 +344,6 @@ async def _tokenize(request: _RequestContext, content: str) -> list[int]:
 # Label token IDs per server, model and label. A label is `undefined` when the
 # model's vocabulary splits it into several tokens. Failed lookups are evicted
 # so a later call retries them.
-# MISAKA fork: pi keeps the pending promise itself. An asyncio future belongs to one event
-# loop, so resolved IDs are kept for every loop and lookups in flight per loop.
 _labelTokenCache: dict[str, int | None] = {}
 _pendingLabelTokens: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Future[int | None]]] = (
     weakref.WeakKeyDictionary()
@@ -493,7 +485,6 @@ async def classify(model: ClassifierModel, context: ClassifierContext, options: 
     )
 
     try:
-        # MISAKA fork: a plain mapping context is read into ClassifierContext.
         context = context if isinstance(context, ClassifierContext) else ClassifierContext.model_validate(context)
         if model.api != "llama-cpp-classify":
             raise RuntimeError(f"Unsupported classifier API: {model.api}")

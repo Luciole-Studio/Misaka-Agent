@@ -205,7 +205,6 @@ def _getRetryAfterDelayMs(headers: httpx.Headers | Mapping[str, str]) -> float |
     if math.isfinite(seconds):
         return max(0, seconds * 1000)
 
-    # MISAKA fork: `Date.parse` reads an HTTP date; `parsedate_to_datetime` is Python's reader for one.
     try:
         date = parsedate_to_datetime(retryAfter).timestamp() * 1000
     except (TypeError, ValueError, OverflowError):
@@ -247,8 +246,6 @@ def _normalizeTimeoutMs(value: Any) -> int | None:
 # unavailable (browser/Vite builds). Callers fall back to sending the
 # uncompressed JSON when this returns null.
 def _compressRequestBodyZstd(bodyJson: str) -> bytes | None:
-    # MISAKA fork: pi reaches zstd through `node:zlib` (`loadNodeZlib`). Python's zlib has no zstd; the codec is
-    # `compression.zstd` from 3.14 and the third-party `zstandard` before that.
     try:
         from compression import zstd  # type: ignore[import-not-found]
 
@@ -295,7 +292,6 @@ def stream(
             stopReason="pending",
             timestamp=time.time_ns() // 1_000_000,
         )
-        # MISAKA fork: the response this request opened, closed in `finally`.
         response: httpx.Response | None = None
 
         try:
@@ -423,9 +419,6 @@ def stream(
             lastError: BaseException | None = None
             maxRetries = nullishCoalesce(_option(options, "maxRetries"), _DEFAULT_MAX_RETRIES)
 
-            # MISAKA fork: pi's `fetch` runs on undici, whose idle timeout is the HTTP idle
-            # setting that also arrives here as `timeoutMs` (coding-agent's http-dispatcher.ts);
-            # httpx gets it as its read timeout, and nothing else.
             readTimeout = httpTimeoutMs / 1000 if httpTimeoutMs is not None and httpTimeoutMs > 0 else None
             async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(None, read=readTimeout)) as client:
                 attempt = 0
@@ -434,7 +427,6 @@ def stream(
                         raise RuntimeError("Request was aborted")
 
                     try:
-                        # MISAKA fork: the header timeout races the request instead of an `AbortSignal.timeout`.
                         request = client.build_request(
                             "POST", _resolveCodexUrl(model.baseUrl), headers=sseHeaders, content=sseBody
                         )
@@ -498,7 +490,6 @@ def stream(
                 if response is None or not response.is_success:
                     raise lastError or RuntimeError("Failed after retries")
 
-                # MISAKA fork: httpx always hands over a body stream; fetch has none for these statuses.
                 if response.status_code in (204, 205):
                     raise RuntimeError("No response body")
 
@@ -514,8 +505,6 @@ def stream(
                 stream.push(DoneEvent(reason=output.stopReason, message=output))
                 stream.end()
         except Exception as error:  # noqa: BLE001 - every failure becomes the stream's error event
-            # MISAKA fork: streaming scratch buffers live beside the blocks
-            # (`openai_responses_shared._StreamingToolCallScratch`), so there is nothing to strip here.
             output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
             output.errorMessage = formatProviderError(normalizeProviderError(error))
             stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
@@ -638,8 +627,6 @@ def _buildRequestBody(
     elif model.reasoning and (thinkingLevelMap is None or thinkingLevelMap.get("off", UNDEFINED) is not None):
         body["reasoning"] = {"effort": nullishCoalesce(None if thinkingLevelMap is None else thinkingLevelMap.get("off"), "none")}
 
-    # MISAKA fork: pi's `undefined` fields are left out of the JSON; a Python `None` would be
-    # sent as `null`.
     return {key: value for key, value in body.items() if value is not None}
 
 
@@ -682,7 +669,6 @@ def _resolveCodexUrl(baseUrl: str | None = None) -> str:
 
 
 def _resolveCodexWebSocketUrl(baseUrl: str | None = None) -> str:
-    # MISAKA fork: `urllib.parse` stands in for the WHATWG `URL`.
     url = urlparse(_resolveCodexUrl(baseUrl))
     if url.scheme == "https":
         url = url._replace(scheme="wss")
@@ -782,8 +768,6 @@ async def _mapCodexEvents(
     model: Model,
     onProviderStreamEvent: Any,
 ) -> AsyncIterator[dict[str, Any]]:
-    # MISAKA fork: a JavaScript `for await` that stops early closes its source (`return()`); Python's
-    # `async for` leaves it open, so it is closed here.
     try:
         async for event in events:
             try:
@@ -841,8 +825,6 @@ def _normalizeCodexStatus(status: Any) -> str | None:
 
 
 async def _parseSSE(response: httpx.Response, signal: Any = None) -> AsyncIterator[dict[str, Any]]:
-    # MISAKA fork: httpx's text iterator stands in for the body reader and its streaming `TextDecoder`; one abort task
-    # for the whole body closes the response, as the abort listener cancels the reader.
     reader = _iterate_async_iterable(response.aiter_text(), signal, on_abort=lambda: response.aclose())
     buffer = ""
 
@@ -857,7 +839,6 @@ async def _parseSSE(response: httpx.Response, signal: Any = None) -> AsyncIterat
                 value = ""
                 done = True
             except httpx.ReadTimeout as error:
-                # MISAKA fork: undici's body timeout ends a fetch body with "terminated".
                 raise RuntimeError("terminated") from error
             if signal_aborted(signal):
                 raise RuntimeError("Request was aborted")
@@ -917,7 +898,6 @@ class _CachedWebSocketConnection:
     socket: Any
     busy: bool
     createdAt: int
-    # MISAKA fork: the loop's timer handle stands in for `setTimeout`'s.
     idleTimer: asyncio.TimerHandle | None = None
     continuation: _CachedWebSocketContinuationState | None = None
 
@@ -1052,8 +1032,6 @@ class _WebSocketCloseError(RuntimeError):
 
 
 def _getWebSocketReadyState(socket: Any) -> int | None:
-    # MISAKA fork: a websockets connection reports `state`, whose values (CONNECTING 0 .. CLOSED 3) are numbered as the
-    # DOM `readyState` is.
     readyState = getattr(socket, "state", None)
     return int(readyState) if isinstance(readyState, int) and not isinstance(readyState, bool) else None
 
@@ -1073,7 +1051,6 @@ def _closeWebSocketSilently(socket: Any, code: int = 1000, reason: str = "done")
         result = socket.close(code, reason)
     except Exception:  # noqa: BLE001 - closing a dead websocket must not raise
         return
-    # MISAKA fork: a websockets `close()` is a coroutine; it is scheduled, as the DOM close returns at once.
     if not hasattr(result, "__await__"):
         return
     try:
@@ -1120,8 +1097,6 @@ async def _connectWebSocket(
     wsHeaders.pop("OpenAI-Beta", None)
     connectTimeoutMs = _DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS if connectTimeoutMs is None else connectTimeoutMs
 
-    # MISAKA fork: `websockets.connect` with `open_timeout` replaces the open/error/close listeners and the timer; the
-    # proxy is resolved from `env` (and the process environment) for every runtime, as pi's Bun shim does.
     proxyUrl = resolveHttpProxyUrlForTarget(re.sub(r"^ws:", "http:", re.sub(r"^wss:", "https:", url)), env)
     if signal_aborted(signal):
         raise RuntimeError("Request was aborted")
@@ -1246,7 +1221,6 @@ async def _acquireWebSocket(
 
 
 def _extractWebSocketError(event: Any) -> BaseException:
-    # MISAKA fork: the failure arrives as the exception websockets raised, not as a DOM error event.
     if isinstance(event, BaseException) and len(str(event)) > 0:
         return event
     message = getattr(event, "message", None)
@@ -1256,8 +1230,6 @@ def _extractWebSocketError(event: Any) -> BaseException:
 
 
 def _extractWebSocketCloseError(event: Any) -> BaseException:
-    # MISAKA fork: websockets keeps the peer's close frame on `rcvd` (None when the connection dropped without one:
-    # code 1006); `code`/`reason` on the exception are deprecated aliases. `wasClean` is not reported.
     if event is not None:
         if hasattr(event, "rcvd"):
             rcvd = event.rcvd
@@ -1283,7 +1255,6 @@ def _extractWebSocketCloseError(event: Any) -> BaseException:
 
 
 def _decodeWebSocketData(data: Any) -> str | None:
-    # MISAKA fork: websockets hands over `str` or `bytes`; there is no Blob or ArrayBuffer.
     if isinstance(data, str):
         return data
     if isinstance(data, bytes | bytearray | memoryview):
@@ -1292,8 +1263,6 @@ def _decodeWebSocketData(data: Any) -> str | None:
 
 
 async def _parseWebSocket(socket: Any, signal: Any = None, idleTimeoutMs: int | None = None) -> AsyncIterator[dict[str, Any]]:
-    # MISAKA fork: a `recv()` loop replaces the message/error/close listeners and their queue. One abort task serves the
-    # whole stream; the idle timeout races each receive.
     sawCompletion = False
     abortTask = _create_abort_wait_task(signal)
     try:
@@ -1400,8 +1369,6 @@ async def _startWebSocketOutputOnFirstEvent(
     onStart: Callable[[], None],
 ) -> AsyncIterator[dict[str, Any]]:
     started = False
-    # MISAKA fork: a JavaScript `for await` that stops early closes its source (`return()`); Python's
-    # `async for` leaves it open, so it is closed here.
     try:
         async for event in events:
             if not started:
@@ -1555,8 +1522,6 @@ def _extractAccountId(token: str) -> str:
         parts = token.split(".")
         if len(parts) != 3:
             raise RuntimeError("Invalid token")
-        # MISAKA fork: decoded as base64url (with its padding restored), the alphabet a JWT segment is written in;
-        # `atob` takes standard base64 only.
         payload = jsonParse(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)).decode("utf-8"))
         claims = payload.get(_JWT_CLAIM_PATH) if isinstance(payload, Mapping) else None
         accountId = claims.get("chatgpt_account_id") if isinstance(claims, Mapping) else None
@@ -1574,8 +1539,6 @@ def _buildBaseCodexHeaders(
     token: str,
 ) -> httpx.Headers:
     # Defaults first so model and caller headers can override them, matching the other providers.
-    # MISAKA fork: the default originator is MISAKA's client name; sending pi's would credit this traffic to it, which
-    # is what CLIENT_NAME exists to prevent.
     headers = httpx.Headers({"originator": CLIENT_NAME, "User-Agent": getPiUserAgent()})
     for key, value in (initHeaders or {}).items():
         headers[key] = value

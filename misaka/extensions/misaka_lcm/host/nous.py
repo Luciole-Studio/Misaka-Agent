@@ -77,8 +77,6 @@ async def refresh_token(credential, signal=None):
         error = policy.AuthError(f'Nous OAuth refresh: {message}', provider='nous', code=code,
             relogin_required=code in policy._OAUTH_GRANT_DEAD_CODES or 'reuse' in message.lower())
         if error.relogin_required and code in policy._OAUTH_GRANT_DEAD_CODES:
-            # Commit the terminal marker through the SAME native refresh transaction;
-            # throwing before returning would replay the dead single-use grant forever.
             state.update(access_token='', refresh_token='', expires_at=None)
             state['last_auth_error'] = policy._last_auth_error_marker('nous', error, reason='runtime_refresh_failure')
             return _credentials(state)
@@ -101,7 +99,6 @@ def api_key(credential):
 
 
 def base_url(credential):
-    # Explicit native operator configuration wins; server-returned URLs are validated.
     return os.getenv('NOUS_INFERENCE_BASE_URL') or policy._healed_nous_inference_url(credential_state(credential))
 
 

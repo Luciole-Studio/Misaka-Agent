@@ -76,7 +76,7 @@ def _status():
 
     debug_enabled = debug.enabled()
     network_status = network.status()
-    http_timeout("default", 60)  # Validate before reporting a ready configuration.
+    http_timeout("default", 60)
     limits = {name: operation_seconds(name) for name in OPERATION_DEFAULTS}
     for capability, resolve in (("Search", dispatch.resolve_provider), ("Extract", dispatch.resolve_extractor)):
         provider, backend, error = resolve()
@@ -130,7 +130,6 @@ def _post_setup(row, args):
     if hook not in {None, "ddgs", "xai_grok"}:
         raise ValueError(f"Unknown Web post_setup hook: {hook}")
     if args.install:
-        # An explicit CLI action, never an availability probe or a first-tool-call install.
         uv = shutil.which("uv")
         command = [uv, "pip", "install", "--python", sys.executable, "ddgs"] if uv else [
             sys.executable, "-m", "pip", "install", "ddgs"]
@@ -254,7 +253,7 @@ def _accounts(args):
             if info.providerId == "xai" or info.providerId.startswith("xai:"):
                 print(f"{info.providerId.partition(':')[2] or '(default)'}: {info.type}")
         return
-    account = args.key  # absent means the same default grant as /login xai
+    account = args.key
     key = oauth_account_key("xai", account)
     if args.op == "logout":
         asyncio.run(storage.delete(key))

@@ -63,7 +63,6 @@ def createFakeTui() -> Any:
 @pytest.fixture(autouse=True)
 def setup(monkeypatch):
     initTheme("dark")
-    # MISAKA: the PNG transcoder registration is process state; each test starts without it.
     monkeypatch.setattr(image_convert, "_png_transcoder_load", None)
     monkeypatch.setattr(image_convert, "_png_transcoder_registered", False)
     monkeypatch.setattr(image_module, "imageTranscoder", None)

@@ -19,18 +19,14 @@ from misaka.config import home
 
 logger = logging.getLogger(__name__)
 
-# The product paths ``CFG`` answers for. Each is a row of ``home.LAYOUT`` under the same name.
 _PATHS = ("db", "messages_db", "web_cache", "office_cache", "office_intent",
           "net_sock", "net_snapshot", "tasks_root", "profiles_root", "roles_root")
 
-# The product knobs ``CFG`` answers for, by their settings.json section and key, with the default.
 _KNOBS = {
     "token_cap": ("research", "token_cap", 0, int),
     "research_plan_approval": ("research", "plan_approval", True, bool),
 }
 
-# Every knob ``setting()`` is asked for, by settings.json section and key, with the type its value
-# must fit (None: any JSON value). Defaults stay with the callers -- two of them are computed.
 KNOBS = {
     ("documents", "mineru_tier"): str,
     ("documents", "ocr_engine"): str,
@@ -62,7 +58,7 @@ KNOBS = {
     ("vision", "model"): str,
 }
 
-_settings_cache: tuple[str, int, dict] | None = None     # (path, mtime_ns, document)
+_settings_cache: tuple[str, int, dict] | None = None
 _warned: set[tuple[str, str, str]] = set()
 
 
@@ -155,11 +151,8 @@ def validate_settings() -> list[str]:
     return errors
 
 
-# A negative cap stopped every research run at its start. The settings schema says so too (`minimum: 0`).
 NOT_NEGATIVE = {("research", "token_cap")}
 
-# A knob that takes one of a few words: a slip of the pen would otherwise read as some other choice
-# in silence. The settings schema says so too (`enum`).
 ONE_OF = {("documents", "mineru_tier"): ("advanced", "standard", "basic"),
           ("documents", "ocr_engine"): ("auto", "mineru", "ocrmypdf")}
 

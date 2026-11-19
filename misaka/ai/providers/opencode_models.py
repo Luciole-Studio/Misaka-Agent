@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/opencode.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "opencode.json").read_text(encoding="utf-8"))
 
 OPENCODE_MODELS = flattenChatModelCatalog("opencode", _values)

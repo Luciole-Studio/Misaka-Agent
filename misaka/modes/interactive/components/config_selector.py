@@ -47,7 +47,6 @@ type SettingsScope = Literal["user", "project"]
 type ProjectOverrideState = Literal["inherit", "load", "unload"]
 type ScopedResolvedPaths = dict[ConfigWriteScope, ResolvedPaths]
 
-# MISAKA fork: no "skills" (see the module docstring).
 RESOURCE_TYPES: tuple[ResourceType, ...] = ("extensions", "prompts", "themes")
 
 RESOURCE_TYPE_LABELS: dict[ResourceType, str] = {
@@ -201,7 +200,6 @@ type FlatEntry = _GroupEntry | _SubgroupEntry | _ItemEntry
 
 
 def _projectBaseDir(cwd: str) -> str:
-    # MISAKA fork: `home.project_dir`, as `DefaultPackageManager.resolve` reads project entries against it.
     projectDir = home.project_dir(cwd)
     return str(projectDir) if projectDir is not None else cwd
 
@@ -227,7 +225,6 @@ class ConfigSelectorHeader:
         )
         hint = switchHint + actionHint + sep + rawKeyHint("esc", "close")
         spacing = max(1, width - visibleWidth(title) - visibleWidth(hint))
-        # MISAKA fork: the home's settings.json, where upstream names `~/.pi/agent/settings.json`.
         scopeHint = (
             theme.fg("muted", f"{home.DIR_NAME}/settings.json · inherited global resources are dimmed")
             if self.writeScope == "project"
@@ -489,7 +486,6 @@ class ResourceList:
             return self.getInheritedEnabled(item) if state == "inherit" else state == "load"
 
         enabled = not item.enabled
-        # MISAKA fork: every resource is top-level; there are no package resources to toggle.
         self.toggleTopLevelResource(item, enabled)
         return enabled
 
@@ -558,7 +554,6 @@ class ResourceList:
         )
 
     def setProjectResourceOverride(self, item: ResourceItem, state: ProjectOverrideState) -> bool:
-        # MISAKA fork: every resource is top-level (no `setProjectPackageOverride`).
         return self.setProjectTopLevelOverride(item, state)
 
     def setProjectTopLevelOverride(self, item: ResourceItem, state: ProjectOverrideState) -> bool:
@@ -601,7 +596,6 @@ class ResourceList:
     def getProjectOverrideState(self, item: ResourceItem) -> ProjectOverrideState:
         if self.writeScope != "project":
             return "inherit"
-        # MISAKA fork: every resource is top-level (no package source to read the override from).
         return self.getOverrideStateFromEntries(
             list(self.settingsManager.getProjectSettings().get(item.resourceType) or []),
             self.getTopLevelOverridePatterns(item, "project"),

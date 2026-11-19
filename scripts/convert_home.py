@@ -41,10 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from misaka.config import home
 
-# old path (relative to the home) -> name in the layout table, or (name, path under it) for what
-# a plugin keeps in its own directory (the table names the plugins dir, never a plugin's files)
 MOVES = {
-    # First: the old skill ledger sat at <home>/skills, where the shared skills now live.
     "skills": "skills_state",
     "agent/settings.json": "settings", "agent/models.json": "models", "agent/keybindings.json": "keybindings",
     "agent/themes": "themes", "agent/prompts": "prompts", "agent/extensions": "extensions",
@@ -63,10 +60,7 @@ MOVES = {
     "cache/skill_blobs": "skill_blobs",
     "moa-traces": "moa_traces", "panel-crash.log": "panel_crash_log", "locks": "locks",
 }
-# Configuration files the merge phase folds into settings.json / .env: left where they are
-# by the relayout, consumed afterwards.
 FOLDED = ("allies.json", "skills.json", "moa.json", "web.json")
-# Rebuilt or meaningless once nothing is running: removed rather than moved.
 DISPOSABLE = ("net.sock", "net.sock.lock", "net.sock.log", "net.json", "dm-protocol.md", ".skills-write.lock",
               "agent/auth.json.lock", "agent/settings.json.lock", "agent/models-store.json.lock", "web.json.lock",
               "board.db-wal", "board.db-shm", "messages.db-wal", "messages.db-shm", ".DS_Store", "agent/.DS_Store")
@@ -103,7 +97,6 @@ def plan(root: Path):
     shared = root / home.LAYOUT["shared"].rel
     for entry in sorted(root.iterdir()):
         if entry.name == "state":
-            # The old layout had no state/ of its own: whatever is in one, an agent put there.
             strays += [(child, shared / child.name) for child in sorted(entry.iterdir())]
         elif entry.name not in known and entry.name not in claimed and entry.name not in DISPOSABLE and entry.name not in FOLDED:
             strays.append((entry, shared / entry.name))
@@ -150,18 +143,17 @@ def _moved(root: Path, target: str) -> Path | None:
     if not target.startswith(str(root) + os.sep):
         return None
     rel = Path(target[len(str(root)) + 1:])
-    # The longest old prefix in the move table wins (``profiles/skills`` before ``profiles``).
     for old in sorted(MOVES, key=len, reverse=True):
         old_parts = Path(old).parts
         if rel.parts[:len(old_parts)] == old_parts:
             return root / _new_rel(MOVES[old]) / Path(*rel.parts[len(old_parts):])
     known = {entry.rel.split("/", 1)[0] for entry in home.LAYOUT.values()}
-    if rel.parts[0] not in known:                          # an agent-made directory: filed under shared/
+    if rel.parts[0] not in known:
         return root / home.LAYOUT["shared"].rel / rel
     return None
 
 
-USER_BIN = Path.home() / ".local" / "bin"     # where skills link the CLIs they install into the library
+USER_BIN = Path.home() / ".local" / "bin"
 
 
 def relink(root: Path, *, apply: bool) -> tuple[int, int]:
@@ -183,7 +175,7 @@ def relink(root: Path, *, apply: bool) -> tuple[int, int]:
             if apply:
                 parent = link.parent
                 mode = parent.stat().st_mode & 0o777
-                if not os.access(parent, os.W_OK):      # a read-only library snapshot: open it for the swap
+                if not os.access(parent, os.W_OK):
                     parent.chmod(mode | 0o200)
                 try:
                     link.unlink()
@@ -246,7 +238,6 @@ def rewrite_paths(root: Path, *, apply: bool) -> tuple[int, int]:
             def swap(match):
                 nonlocal count
                 spelling, tail = match.group(1), match.group(2)
-                # Prose writes `<dir>/...` for "and so on"; the dots are not a path component.
                 tail, ellipsis = (tail[:-4], tail[-4:]) if tail.endswith("/...") else (tail, "")
                 new = _moved(root, str(root) + tail)
                 if new is None or not new.exists():
@@ -392,7 +383,7 @@ def apply_env_folds(root: Path) -> None:
         if source.name == ".skill-secrets.json":
             (source.parent / ".skill-secrets.lock").unlink(missing_ok=True)
         if source.parent.name == "credentials" and role is not None and not any(source.parent.iterdir()):
-            source.parent.rmdir()          # a role's now-empty credentials/ dir
+            source.parent.rmdir()
 
 
 def _role_dirs(root: Path) -> list[Path]:
@@ -511,7 +502,7 @@ def main() -> int:
     for name in ("board.db", "messages.db"):
         checkpoint(root / name)
     print(f"\nbacking up to {backup} ...")
-    if sys.platform == "darwin":        # an APFS clone: instant, and costs no space until something changes
+    if sys.platform == "darwin":
         subprocess.run(["cp", "-cR", str(root), str(backup)], check=True)
     else:
         shutil.copytree(root, backup, symlinks=True)
@@ -524,7 +515,7 @@ def main() -> int:
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         source.rename(target)
-    ledger = root / home.LAYOUT["skills_state"].rel / ".ledger-v2.jsonl"   # same entries, current name
+    ledger = root / home.LAYOUT["skills_state"].rel / ".ledger-v2.jsonl"
     if ledger.exists() and not ledger.with_name(".ledger.jsonl").exists():
         ledger.rename(ledger.with_name(".ledger.jsonl"))
     for leftover in ("agent", "pending"):

@@ -451,7 +451,6 @@ async def runFlow(provider: OAuthClientProvider, options: OAuthFlowOptions) -> O
         or provider.clientMetadata.get("scope")
     )
     stored = await maybe_await(provider.clientInformation())
-    # MISAKA fork: an optional member is looked up with `getattr`, and a provider may hold it as None.
     clientMetadataDocument = getattr(provider, "clientMetadataDocument", None)
     clientDocument = (
         None if stored is not None else (clientMetadataDocument(metadata) if clientMetadataDocument else None)
@@ -605,8 +604,6 @@ class _OAuthAuthProvider:
                 finally:
                     self._inFlight = None
 
-            # MISAKA fork: one task stands in for the shared promise; waiters shield it, so a cancelled
-            # waiter does not cancel the refresh the others share, and its failure is always observed.
             self._inFlight = asyncio.ensure_future(run())
             self._inFlight.add_done_callback(lambda done: done.cancelled() or done.exception())
         await asyncio.shield(self._inFlight)

@@ -18,7 +18,6 @@ def role_of(profile_dir):
     """Return the role name (path relative to profiles/), or the basename when not under profiles/."""
     p = os.path.abspath(profile_dir or "")
     marker = os.sep + "profiles" + os.sep
-    # Role names are "/"-joined (sisters/10032) on every OS; Windows paths carry "\\".
     return p.split(marker, 1)[1].replace(os.sep, "/") if marker in p else os.path.basename(p)
 
 
@@ -96,7 +95,6 @@ def resolve_model_reference(reference, runtime, *, fallback_provider=None):
             raise ValueError(f"Ambiguous model {reference!r}; choose provider/model: {', '.join(matches)}")
         from misaka.core.model_runtime import personalizedCatalogHint
 
-        # A pinned OpenRouter model leaves the catalog when the user's key may not use it (pi 1.2 per-key lists).
         hint = personalizedCatalogHint(reference.partition("/")[0] if "/" in reference else fallback_provider)
         raise ValueError(f"Unknown model {reference!r}; choose a registered provider/model" + (f".{hint}" if hint else ""))
     return f"{model.provider}/{model.id}"
@@ -128,7 +126,7 @@ def persist_role_default_model(profile_dir, model_id, *, strict=False):
 
         os.makedirs(profile_dir, exist_ok=True)
         path = settings_path(profile_dir)
-        with FileLock(path + ".lock"):     # the lock SettingsManager takes for the same file
+        with FileLock(path + ".lock"):
             data = role_settings(profile_dir, strict=True)
             if data.get("defaultProvider") == provider and data.get("defaultModel") == model:
                 return False

@@ -72,7 +72,7 @@ async def test_offset_pages_the_rendering_the_way_it_pages_a_text_file(tmp_path)
     whole = await _read(tmp_path, path="book.xlsx")
     tail = await _read(tmp_path, path="book.xlsx", offset=4)
     assert len(tail) < len(whole)
-    assert "## Sheet: Revenue" not in tail          # the head lines were skipped
+    assert "## Sheet: Revenue" not in tail
     assert "2023\t4000" in tail
 
 

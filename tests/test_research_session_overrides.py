@@ -33,8 +33,6 @@ def _session(session_id="s-1", stream=None):
     return session
 
 
-# --- the picker's answers -------------------------------------------------------------------
-
 @pytest.mark.parametrize("answer,expected", [
     ("Global setting", None), ("", None),
     ("0.5", 0.5), ("0.85", 0.85), ("60%", 0.6), ("60", 0.6), (" 0.6 ", 0.6)])
@@ -76,8 +74,6 @@ def test_a_run_without_its_own_settings_follows_the_global_ones():
     assert runs.session_overrides(chosen) == {"context_threshold": 0.5, "max_output_tokens": 64_000}
 
 
-# --- the output limit -----------------------------------------------------------------------
-
 def test_the_output_limit_caps_every_request_but_never_raises_the_model_maximum():
     session = _session()
     release = session_overrides.apply(session, {"max_output_tokens": 64_000})
@@ -106,8 +102,6 @@ def test_nothing_is_applied_without_overrides_or_a_session_id():
     assert session.agent.streamFunction is stream
 
 
-# --- the compaction threshold ---------------------------------------------------------------
-
 def _settings(document):
     home.path("settings").parent.mkdir(parents=True, exist_ok=True)
     home.path("settings").write_text(json.dumps(document), encoding="utf-8")
@@ -118,15 +112,15 @@ def _ctx(session_id):
 
 
 @pytest.mark.parametrize("document,threshold,source", [
-    ({}, 0.5, "config_yaml:compression.threshold"),                      # Hermes' default, as in Hermes
+    ({}, 0.5, "config_yaml:compression.threshold"),
     ({"compression": {"threshold": 0.75}}, 0.75, "config_yaml:compression.threshold"),
-    ({"compression": {"enabled": False}}, 0.35, "default"),            # upstream: a disabled one is not inherited
+    ({"compression": {"enabled": False}}, 0.35, "default"),
     ({"lcm": {"context_threshold": 0.6}}, 0.6, "config_yaml:lcm.context_threshold"),
 ])
 def test_lcm_inherits_hermes_compression_threshold(monkeypatch, document, threshold, source):
     """F16 (2026-10-24): upstream inherits Hermes' compression.threshold, 0.50 by default, before
     its own 0.35; settings.json carried none, so a 1M-window Last Order compacted at 350k, not 500k."""
-    config_bridge = pytest.importorskip("misaka.extensions.misaka_lcm.host.config_bridge")   # a plugin
+    config_bridge = pytest.importorskip("misaka.extensions.misaka_lcm.host.config_bridge")
     monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
     _settings(document)
     config = config_bridge.load_config(ctx=_ctx("plain"))
@@ -134,7 +128,7 @@ def test_lcm_inherits_hermes_compression_threshold(monkeypatch, document, thresh
 
 
 def test_lcm_reads_the_session_threshold_through_its_own_config_channel(monkeypatch):
-    config_bridge = pytest.importorskip("misaka.extensions.misaka_lcm.host.config_bridge")   # a plugin
+    config_bridge = pytest.importorskip("misaka.extensions.misaka_lcm.host.config_bridge")
     monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
     _settings({"lcm": {"context_threshold": 0.7}})
     assert config_bridge.load_config(ctx=_ctx("plain")).context_threshold == 0.7
@@ -150,7 +144,7 @@ def test_lcm_reads_the_session_threshold_through_its_own_config_channel(monkeypa
 
 
 def test_a_running_engine_recomputes_its_trigger_when_the_threshold_changes(monkeypatch):
-    config_bridge = pytest.importorskip("misaka.extensions.misaka_lcm.host.config_bridge")   # a plugin
+    config_bridge = pytest.importorskip("misaka.extensions.misaka_lcm.host.config_bridge")
     lcm_settings = pytest.importorskip("misaka.extensions.misaka_lcm.host.settings")
     monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
     _settings({"lcm": {"context_threshold": 0.7}})
@@ -160,7 +154,7 @@ def test_a_running_engine_recomputes_its_trigger_when_the_threshold_changes(monk
                             _set_context_length=lambda length, source: recomputed.append(
                                 (length, source, built._config.context_threshold)))
     lcm_settings.refresh(built, _ctx("window"))
-    assert recomputed == []                                   # nothing changed, nothing recomputed
+    assert recomputed == []
     release = session_overrides.apply(_session("window"), {"context_threshold": 0.5})
     lcm_settings.refresh(built, _ctx("window"))
     assert recomputed == [(1_000_000, "update_model", 0.5)]
@@ -168,8 +162,6 @@ def test_a_running_engine_recomputes_its_trigger_when_the_threshold_changes(monk
     lcm_settings.refresh(built, _ctx("window"))
     assert recomputed[-1] == (1_000_000, "update_model", 0.7)
 
-
-# --- sessions built for the run -------------------------------------------------------------
 
 async def test_a_spec_with_overrides_applies_them_to_its_session_and_again_after_a_switch():
     part = session_overrides.part(SessionSpec(profile_dir="p", role="r", workspace="w", kind="card",
@@ -222,8 +214,6 @@ def test_a_research_card_carries_its_runs_settings(board, tmp_path):
     assert runs.session_overrides(plain) == {}
 
 
-# --- the picker, end to end -----------------------------------------------------------------
-
 @pytest.fixture
 async def chat(board, tmp_path, monkeypatch):
     state = SimpleNamespace(notices=[], seen=[], started=asyncio.Event(), result={"answers": {}})
@@ -233,7 +223,6 @@ async def chat(board, tmp_path, monkeypatch):
     monkeypatch.setattr(cards, "init_project", lambda *a, **k: None)
 
     async def drive(con, cfg, spawner, **kwargs):
-        # What the window's own session runs with while the run works in it.
         state.seen.append((session_overrides.value("window", "context_threshold"),
                            session_overrides.value("window", "max_output_tokens")))
         state.run = runs.get(con, kwargs["run_id"])
@@ -271,7 +260,7 @@ async def test_the_pickers_choice_is_the_runs_and_its_window_uses_it_while_the_r
     await _start(chat, {research._THRESHOLD_QUESTION: "0.5", research._OUTPUT_QUESTION: "64k"})
     assert runs.session_overrides(chat.run) == {"context_threshold": 0.5, "max_output_tokens": 64_000}
     assert chat.seen == [(0.5, 64_000)]
-    assert session_overrides.value("window", "context_threshold") is None     # given back when the run paused
+    assert session_overrides.value("window", "context_threshold") is None
     assert any("compaction at 0.5 of the window | output limit 64,000 tokens" in text for text in chat.notices)
     assert "compaction at 0.5" in research._status(board, chat.run["id"], str(tmp_path))
     assert json.loads(home.path("settings").read_text(encoding="utf-8")) == {"lcm": {"context_threshold": 0.7}}

@@ -154,7 +154,6 @@ async def test_uses_the_configured_default_when_a_legacy_caller_omits_streamFn()
     finally:
         from misaka.ai.compat import streamSimple
 
-        # MISAKA fork: restores the fallback `misaka.core.sdk` installs, which other tests in the process rely on.
         setDefaultStreamFn(streamSimple)
 
 

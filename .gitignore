@@ -3,25 +3,18 @@ __pycache__/
 *.pyc
 .DS_Store
 .coverage
-# Benchmark runs are local artefacts; the frozen baseline is not.
 
-# libghostty-vt build tree (scripts/build_libghostty_vt.sh)
 /build/
 
-# Claude Code session checkpoints
 /.claude/
 
-# build artefacts
 /dist/
 
-# Disposable project LCM cache and content-free lifetime locks
 /.misaka/lcm/
 /.misaka/lcm.gate
 /.misaka/lcm.activity.sqlite*
 
-# Readings opened in a checkout (/read open, misaka read open): the reader's, not the repository's
 /reading/
 
-# Development records (plans, audits, ledgers): kept on the developer's machine, not published
 /docs/plans/
 /docs/audits/

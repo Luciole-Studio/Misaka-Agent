@@ -235,8 +235,6 @@ class _Child:
                 transport.terminate()
             except ProcessLookupError:
                 pass
-        # MISAKA fork: asyncio needs its transport closed; a process still running then gets killed outright, which
-        # ends the daemon as SIGTERM would (it has no handler for either).
         transport.close()
 
 

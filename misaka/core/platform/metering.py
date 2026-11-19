@@ -33,9 +33,7 @@ from misaka.utils.values import read_field
 
 logger = logging.getLogger(__name__)
 
-# A request granted less output than this is not worth sending: it waits, or stops at the cap.
 MIN_OUTPUT_TOKENS = 1024
-# Codex and other models with no output cap of their own are leased this much output.
 FALLBACK_OUTPUT_TOKENS = 32_000
 RENEW_SECONDS = 300
 WAIT_FIRST, WAIT_MOST = 0.5, 5.0
@@ -149,7 +147,6 @@ def meter(model: Any, context: Any, options: Any, send) -> AssistantMessageEvent
     if current is None and local is None:
         return send(options)
     out = AssistantMessageEventStream()
-    # When the request started: the timestamp of a reply the meter ends it with (pi: providers stamp theirs).
     startedAt = time.time_ns() // 1_000_000
 
     async def run() -> None:
@@ -174,11 +171,9 @@ def meter(model: Any, context: Any, options: Any, send) -> AssistantMessageEvent
             return
         if reading["status"] == "exhausted":
             if reading.get("local"):
-                # The session's own allowance, not the run's: the run goes on.
                 _ended(out, model, "error", f"this session's allowance of {reading['cap']:,} tokens is used up", startedAt)
                 return
             if current and current[3]:
-                # Every driver and card of the run stops on it, not only this session.
                 await asyncio.to_thread(budget.cap_reached_path, current[0], current[1], current[3])
             _ended(out, model, "error", _exhausted_text(reading, need), startedAt)
             return
@@ -197,9 +192,6 @@ def meter(model: Any, context: Any, options: Any, send) -> AssistantMessageEvent
                     renewed = time.monotonic()
                     await asyncio.to_thread(budget.renew_request_path, current[0], lease)
                 if read_field(event, "type") in ("done", "error"):
-                    # Passed on once the request is settled: it completes the caller's request, and
-                    # a card that exits on its last reply lost the receipt -- its lease was held 15
-                    # minutes, then charged in full (0.18.10 sweep).
                     terminal = event
                     continue
                 out.push(event)
@@ -211,10 +203,6 @@ def meter(model: Any, context: Any, options: Any, send) -> AssistantMessageEvent
         finally:
             used = usage_tokens(read_field(message, "usage", {}) or {}) if message is not None else 0
             if used <= 0 and started:
-                # A reply cut off reports no usage: count the context sent and what came back,
-                # not the whole lease -- a retried cut would otherwise fill the cap with nothing.
-                # A request refused before its reply began (a 429, a dropped connection) spent
-                # nothing; 0.18.9 charged it the context's whole bound, every retry.
                 used = bound + streamed
             if local is not None:
                 local.in_flight -= granted
@@ -226,7 +214,7 @@ def meter(model: Any, context: Any, options: Any, send) -> AssistantMessageEvent
                 try:
                     await asyncio.shield(asyncio.to_thread(
                         budget.settle_request_path, current[0], lease, current[1], current[2], used))
-                except Exception:  # a lost receipt must not lose the reply; the lease expires and is charged
+                except Exception:
                     logger.warning("token ledger: a request's usage (%s tokens) was not recorded", used, exc_info=True)
         if terminal is not None:
             out.push(terminal)

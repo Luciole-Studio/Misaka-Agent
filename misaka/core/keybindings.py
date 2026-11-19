@@ -95,7 +95,6 @@ APP_KEYBINDINGS: KeybindingDefinitions = {
     ),
     "app.clipboard.pasteImage": KeybindingDefinition(
         defaultKeys="alt+v" if windowsKeybindings else "ctrl+v",
-        # MISAKA fork: Windows copies of files in Explorer paste as paths too (pi: macOS only).
         description="Paste files on macOS and Windows, images, or text from clipboard",
     ),
     "app.session.new": KeybindingDefinition(defaultKeys=[], description="Start a new session"),
@@ -192,8 +191,6 @@ APP_KEYBINDINGS: KeybindingDefinitions = {
     ),
 }
 
-# MISAKA fork: `keyof typeof APP_KEYBINDINGS` spelled out as the literal union of the table's names
-# (tests/test_core_keybindings.py keeps the two equal).
 type AppKeybinding = Literal[
     "app.interrupt",
     "app.clear",
@@ -247,7 +244,6 @@ KEYBINDINGS: KeybindingDefinitions = {
         TUI_KEYBINDINGS["tui.editor.undo"],
         defaultKeys="ctrl+z" if sys.platform == "win32" else "alt+z" if windowsKeybindings else "ctrl+-",
     ),
-    # MISAKA fork (D1): upstream overrides `tui.altScreen.previousPrompt`, `nextPrompt` and `search` here.
     **APP_KEYBINDINGS,
 }
 
@@ -279,8 +275,6 @@ def loadRawConfig(path: str) -> dict[str, Any] | None:
         # `readFileSync(path, "utf-8")` decodes invalid bytes as U+FFFD; `utf-8-sig` is `stripBom`.
         with open(path, encoding="utf-8-sig", errors="replace") as handle:
             parsed = jsonParse(handle.read())
-        # MISAKA fork: a JSON array is no object here (upstream reads its indices as keybinding names, which name
-        # no keybinding).
         if not isinstance(parsed, dict):
             return None
         return parsed

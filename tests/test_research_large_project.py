@@ -29,7 +29,7 @@ def test_rendering_a_large_tree_joins_once():
         for i in range(400)]}
     started = time.perf_counter()
     text = workspace.render(tree)
-    assert time.perf_counter() - started < 5          # a join per node took minutes here
+    assert time.perf_counter() - started < 5
     lines = text.split("\n")
     assert len(lines) == 1 + 400 + 400 * 500 * 2
     assert lines[:4] == ["Workspace  [ws]", "  Node 0  [n0]  — s", "    Leaf 0  [n0.0]", "      Path: /p/0/0"]
@@ -143,7 +143,7 @@ async def test_doc_list_finds_a_document_by_any_of_its_source_folders(tmp_path, 
         return result["content"][0]["text"]
 
     assert "d1" in await listed(os.path.join(str(card.parent), "")) and "d2" not in await listed("cards")
-    assert "d1" in await listed("GAZ.PDF")                       # titles match as before
+    assert "d1" in await listed("GAZ.PDF")
     assert "No indexed document's title or source path" in await listed("nowhere")
 
 
@@ -187,7 +187,7 @@ def test_a_shared_index_checks_each_card_against_the_registry_as_it_stands(board
     monkeypatch.setattr(bundle.corpus, "docs", lambda **k: [])
     path = Path(run["workspace"], "nodes", "b_1", "notes.md")
     path.parent.mkdir(parents=True)
-    path.write_bytes(b"first\n")                     # bytes: text mode writes "\r\n" on Windows
+    path.write_bytes(b"first\n")
     runs.register_file(con, run["id"], "task_output", "notes", str(path),
                        sha256=hashlib.sha256(b"first\n").hexdigest())
     index = bundle.project_index(run["workspace"])
@@ -199,7 +199,7 @@ def test_a_shared_index_checks_each_card_against_the_registry_as_it_stands(board
                        sha256=hashlib.sha256(b"second\n").hexdigest())
     later = bundle._Collector(con, run, index)
     assert later.checked_digest(real) == hashlib.sha256(b"second\n").hexdigest()
-    assert index.digests == {}                        # the registry stays with each collector
+    assert index.digests == {}
 
 
 async def test_a_halt_settles_and_reports_off_the_event_loop(root_run, monkeypatch):  # noqa: F811

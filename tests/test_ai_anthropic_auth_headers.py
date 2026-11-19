@@ -149,7 +149,6 @@ async def test_lets_explicit_request_headers_override_anthropic_auth_token():
 
 
 async def test_uses_pis_user_agent_by_default_for_anthropic_messages_requests():
-    # MISAKA fork: the client name is misaka's (`getPiUserAgent`).
     request = await _request({"apiKey": "anthropic-key"})
 
     assert request.headers["user-agent"] == getPiUserAgent()

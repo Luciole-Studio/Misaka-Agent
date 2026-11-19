@@ -172,7 +172,6 @@ async def createAgentSessionServices(
     extensions_result.runtime.pendingVirtualModelRegistrations = []
 
     refresh_result = await model_runtime.refresh(ModelsRefreshOptions(allowNetwork=False))
-    # MISAKA fork: a catalog that could not be restored is reported rather than dropped silently.
     for provider_id, error in refresh_result.errors.items():
         diagnostics.append(
             AgentSessionRuntimeDiagnostic(

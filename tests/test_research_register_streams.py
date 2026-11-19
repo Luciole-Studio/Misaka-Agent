@@ -63,7 +63,7 @@ def test_random_text_and_bytes_agree_at_any_piece_size(tmp_path, monkeypatch):
         if rng.random() < 0.5:
             data = "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 40))).encode()
             if data and rng.random() < 0.3:
-                data = data[:rng.randrange(0, len(data))]      # may now end inside a character
+                data = data[:rng.randrange(0, len(data))]
         else:
             data = bytes(rng.randrange(256) for _ in range(rng.randrange(0, 40)))
         path.write_bytes(data)
@@ -123,8 +123,8 @@ def test_settling_a_card_registers_its_files_without_reading_one_whole(state, mo
     con, run, root = state
     files = {
         "report.md": "# 报告\n\nthe write-up\n".encode(),
-        "exp/work/A_WAL_OFF_1.db": b"SQLite format 3\x00" + bytes(range(256)) * 9000,     # 2.3 MB, not text
-        "exp/runA.log": "DELETE FULL ok 第一轮\n".encode() * 90000,                          # 2.4 MB of text
+        "exp/work/A_WAL_OFF_1.db": b"SQLite format 3\x00" + bytes(range(256)) * 9000,
+        "exp/runA.log": "DELETE FULL ok 第一轮\n".encode() * 90000,
     }
     tid = _accept(con, run, root, files)
     monkeypatch.setattr(Path, "read_bytes", lambda self: pytest.fail(f"read whole: {self}"))

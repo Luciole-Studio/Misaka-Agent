@@ -335,7 +335,6 @@ def startVm(options: StartVmOptions) -> VmSession:
 
     try:
         # Called from the prelude with primitives only. A missing argument is `None` (`undefined` upstream).
-        # MISAKA fork: each argument is read out of the VM once; a read costs a few calls into wasm.
         def bridgeCallback(kind: JSValueHandle, a: Any = None, b: Any = None, c: Any = None) -> JSValueHandle:
             match kindText := kind.toString():
                 case "call" | "global":

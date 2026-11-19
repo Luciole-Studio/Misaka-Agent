@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any
 
 ENV_VAR_ASSIGN_RE = re.compile(r"^[A-Za-z_]\w*=")
-# CCB SAFE_ENV_VARS: variables that cannot execute code or load libraries, skipped before a prefix.
 SAFE_ENV_VARS = frozenset({
     "GOEXPERIMENT", "GOOS", "GOARCH", "CGO_ENABLED", "GO111MODULE",
     "RUST_BACKTRACE", "RUST_LOG",

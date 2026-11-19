@@ -222,7 +222,6 @@ class ProcessTerminal:
         self.programStatusQueryPending = False
         self.writeLogPath = _writeLogPath()
 
-        # MISAKA fork: the Node runtime pieces (see the module docstring).
         self.stdin: Any = sys.stdin
         self.stdout: Any = sys.stdout
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -244,12 +243,10 @@ class ProcessTerminal:
     def start(self, onInput: Callable[[str], None], onResize: Callable[[], None]) -> None:
         self.inputHandler = onInput
         self.resizeHandler = onResize
-        # MISAKA fork: capture the loop that timer, signal and reader callbacks run on.
         self._event_loop()
         self._lastStdinActivityMs = self._now_ms()
 
         # Save previous state and enable raw mode
-        # MISAKA fork: `stdin.isRaw`/`setRawMode(true)`/`setEncoding("utf8")`/`resume()`.
         self.wasRaw = False
         self._enter_raw_mode()
 
@@ -333,7 +330,6 @@ class ProcessTerminal:
         before DA. `PI_PROGRAM_STATUS=1` or `0` skips the query.
         """
         self.setupStdinBuffer()
-        # MISAKA fork: `process.stdin.on("data", this.stdinDataHandler)`.
         self._install_reader()
         self.keyboardProtocolPushed = True
         self.pendingKeyboardProtocolDeviceAttributes += 1
@@ -479,7 +475,6 @@ class ProcessTerminal:
         previousHandler = self.inputHandler
         self.inputHandler = None
 
-        # MISAKA fork: every read stamps `_lastStdinActivityMs` (upstream adds a temporary "data" listener).
         self._lastStdinActivityMs = self._now_ms()
         endTime = self._now_ms() + maxMs
 
@@ -525,7 +520,6 @@ class ProcessTerminal:
 
         # Remove event handlers
         if self.stdinDataHandler:
-            # MISAKA fork: `process.stdin.removeListener("data", this.stdinDataHandler)`.
             self._remove_reader()
             self.stdinDataHandler = None
         self.inputHandler = None
@@ -537,12 +531,10 @@ class ProcessTerminal:
         # re-interpreted after raw mode is disabled. This fixes a race condition
         # where Ctrl+D could close the parent shell over SSH.
         # Restore raw mode state
-        # MISAKA fork: `stdin.pause()` + `setRawMode(this.wasRaw)`; restoring the terminal discards unread input.
         self._restore_raw_mode()
 
     def write(self, data: str) -> None:
         self.stdout.write(data)
-        # MISAKA fork: Node writes a TTY synchronously; Python's stdout buffers.
         flush = getattr(self.stdout, "flush", None)
         if callable(flush):
             flush()
@@ -624,8 +616,6 @@ class ProcessTerminal:
         self.progressInterval.cancel()
         self.progressInterval = None
         return True
-
-    # --- MISAKA fork: the Node runtime pieces ---------------------------------------------------------------------
 
     def _scheduleProgressKeepalive(self) -> None:
         """``setInterval``: one loop timer after another."""

@@ -35,7 +35,6 @@ def isolated(tmp_path, monkeypatch):
     profile.mkdir(parents=True)
     (profile / "SOUL.md").write_text("Fixture Sister.\n", encoding="utf-8")
     (home.path("roles_root") / "MISAKA.md").write_text("Fixture shared identity.\n", encoding="utf-8")
-    # Prevent editable installs from sending children to a different checkout.
     guard = tmp_path / "python"
     guard.mkdir()
     (guard / "sitecustomize.py").write_text(
@@ -117,8 +116,6 @@ def host(root):
                  sessionManager=SessionManager.create(workspace, str(root / "sessions")),
                  settingsManager=NS(getGlobalSettings=dict, getProjectSettings=dict),
                  getActiveToolNames=list, isProjectTrusted=lambda: True,
-                 # The fork snapshot records the session's effective prompt (pi 0.87: the
-                 # agent state's prompt is replayed from the transcript and read-only).
                  systemPrompt="Fixture parent.",
                  agent=NS(state=NS(messages=[], tools=[])))
     manager = SubagentManager(session, RoleContext(
@@ -149,7 +146,7 @@ async def test_native_first_turn_and_resume(isolated, endpoint, kind, background
         task = await create(manager, session, kind, background)
         assert task.transcript.is_file(), "New child needs a durable session before --session opens it"
         original_id = SessionManager.open(str(task.transcript)).getSessionId()
-        if os.name != "nt":                  # POSIX modes; Windows keeps the profile private by ACL
+        if os.name != "nt":
             assert task.transcript.stat().st_mode & 0o777 == 0o600
         assert not task.initial_prompt_sent
         async with asyncio.timeout(20):
@@ -158,7 +155,6 @@ async def test_native_first_turn_and_resume(isolated, endpoint, kind, background
         assert task.turn_count == 1 and task.initial_prompt_sent
         assert "Fixture answer." in str(task.result)
         if background:
-            # Also exercise registry rehydration, not just an in-memory task.
             await manager.close()
             manager = type(manager)(session, manager.role_context)
         result = await manager.send_message(task.id, "SECOND_MARKER", context=session)
@@ -334,7 +330,7 @@ async def test_lcm_child_inherits_resumed_project_not_launcher(isolated, endpoin
     )
     from misaka.core.extensions.runner import ExtensionRunner
     from misaka.core.session_manager import SessionManager
-    misaka_lcm = pytest.importorskip("misaka.extensions.misaka_lcm")    # a plugin: gone with its folder
+    misaka_lcm = pytest.importorskip("misaka.extensions.misaka_lcm")
     manager, parent = host(isolated)
     project = isolated / 'original-project'
     project.mkdir()
@@ -356,8 +352,6 @@ async def test_lcm_child_inherits_resumed_project_not_launcher(isolated, endpoin
 
 
 async def test_message_to_unstarted_child_returns_at_once(isolated, endpoint):
-    # A child still queued for a slot has nothing to consume steering with; the
-    # sender used to wait on it until the child started and reached a tool round.
     manager, session = host(isolated)
     try:
         task = await create(manager, session)

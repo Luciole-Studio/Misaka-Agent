@@ -173,8 +173,6 @@ def overlap(a: str, b: str, scan: int, probe: int = 64, maxCandidates: int = 8) 
 # Ops arrive from a facet, a plugin compartment, or a tool whose details may echo model output, so none of
 # it is trusted input.
 #
-# MISAKA fork: a Python container has no prototype to pollute, but the segments stay reserved so a batch
-# means the same thing here as on a TypeScript peer.
 RESERVED_SEGMENTS: frozenset[str] = frozenset({"__proto__", "constructor", "prototype"})
 
 
@@ -498,10 +496,7 @@ def applyImmutableBatches(target: Any, batches: Iterable[Sequence[Op]]) -> Any:
     deliberately exposes no intermediate revisions.
     """
     root = target
-    # MISAKA fork: `WeakSet<object>` becomes the ids of the copies, which the map keeps alive so that no
-    # id is reused while the call runs (a plain `dict` or `list` cannot be weakly referenced).
     owned: dict[int, Any] = {}
-    # MISAKA fork: `for (const ops of batches)` closes an iterator it leaves early; a Python `for` does not.
     iterator = iter(batches)
     try:
         for ops in iterator:

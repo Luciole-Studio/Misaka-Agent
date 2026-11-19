@@ -45,37 +45,13 @@ from misaka.core.platform.prompt_guard import MARKER, untrusted
 
 logger = logging.getLogger(__name__)
 
-# Keys upstream's tool payloads cite their material by. Every handler returns
-# `json.dumps` of a structure, so reading the ids out of the parsed payload is exact
-# where scraping the rendered text would be guesswork.
 _STORE_KEYS = frozenset({"store_id", "store_ids", "source_store_id"})
 _NODE_KEYS = frozenset({"node_id", "node_ids"})
-# `lcm_recent` in rollup mode returns a period summary and cites it by rollup id alone --
-# no store row, no node. `lcm_rollup_sources` maps it back to the nodes it was built from.
 _ROLLUP_KEYS = frozenset({"rollup_id", "rollup_ids"})
-# The side file an externalized payload moved to, cited by its own file name. Three tool
-# answers reach that file without naming any row or node -- `lcm_expand` and
-# `lcm_describe` in `externalized_ref` mode, and `lcm_grep(content_scope='externalized')`
-# in each match -- so these keys are the only trace of the material they return.
 _REF_KEYS = frozenset({"externalized_ref", "externalized_refs", "ref"})
 
-# The V4 evidence family's own citation, and the one form of provenance that does not
-# come with a `store_id` beside it: `lcm:<store_id>:<start>-<end>` names a character span
-# inside one stored row. `evidence_compiler` delivers its `direct_fact`, its `evidence`
-# entries and its rendered brief citing rows by this string *only* -- the hydrated dict
-# that did carry `store_id` is filtered down to five keys on the way out
-# (`requirements_compiler._deliver`) -- so `_collect`'s key list reaches none of it.
-#
-# Read out of the rendered text rather than out of named fields, because the text is
-# where the spelling stops varying: `direct_fact.exact_ref`, `novel_exact_refs[]`,
-# `computation.citations[]` and the `- exact evidence: [lcm:2:63-111] ...` line of the
-# brief are four shapes of one citation, and a fifth arrives with the next upstream
-# release. Over-reading is the safe direction here: a ref that a hostile row merely
-# *quotes* resolves to that row, which the check then has to vouch for anyway.
 _EXACT_REF = re.compile(r"\blcm:([1-9][0-9]{0,17}):[0-9]+-[0-9]+\b")
 
-# SQLite's default parameter ceiling is 999; a tool result never cites near that many
-# rows, but a chunked IN list costs one loop and removes the ceiling as a failure mode.
 _MAX_PARAMS = 500
 
 
@@ -83,22 +59,6 @@ def cited_rows(text: str) -> set[int]:
     """The store rows one piece of LCM output cites by exact ref alone."""
     return {int(store_id) for store_id in _EXACT_REF.findall(text or "")}
 
-# Content this check cannot see through, and therefore will not vouch for. The sentinel
-# is the fence itself. The other half is upstream's externalization placeholder: with
-# `large_output_externalization_enabled` a big tool result is replaced in `content` by
-# `[Externalized tool output: ...; ref=FILE]` (or the `[GC'd externalized ...]` and
-# `[Externalized LCM ingest payload: ...]` variants) and the real text moves to a side
-# file. The dye leaves the row with it, so the row stops answering the question -- and a
-# row that cannot answer is not a row to call clean.
-#
-# The side file the dye left *for* is opaque in the same way and for a stronger reason:
-# it is not in the database at all, so no lineage query reaches it, and the tools that
-# read it hand back a caller-chosen slice -- `lcm_expand(content_offset=...)` and
-# `lcm_grep`'s match snippet both return the middle of a payload, where a fence's two
-# sentinels are not. Reading the file to look would only move the guess: a bounded read
-# can miss a marker past its bound, and missing one is the direction that costs the
-# prompt its voice. So a cited ref is untrusted on sight, which is also the only answer
-# consistent with the stub row that points at it already being one.
 _STUB_HEAD = "xternalized "
 _STUB_REF = "; ref="
 _OPAQUE_ARGS = (MARKER, _STUB_HEAD, _STUB_REF)
@@ -114,11 +74,6 @@ _TAINTED_ROW = """
      WHERE store_id IN ({placeholders})
 """
 
-# Upstream's own lineage walk (`SummaryDAG.source_message_ids`), asked a yes/no question
-# instead of for the ids: does anything under these nodes -- at any depth, through nested
-# nodes -- carry the fence. The walk carries the node it started from, because "no source
-# row left" is an answer per node: one pruned lineage beside a live one still has to
-# fence, and a `MAX()` over the union would hide it behind its neighbour.
 _TAINTED_NODE = """
     WITH RECURSIVE walk(root, source_type, source_id) AS (
         SELECT n.node_id, n.source_type, CAST(j.value AS INTEGER)
@@ -181,9 +136,6 @@ def _collect(payload, stores: set[int], nodes: set[int], rollups: set[int], refs
             elif key in _ROLLUP_KEYS:
                 rollups.update(_integers(item))
             else:
-                # A ref key is not a stopping point: `lcm_inspect` spells its inventory
-                # as `externalized_refs: [{externalized_ref, store_id, ...}]`, and those
-                # rows are worth reaching even though the ref alone already decides.
                 if key in _REF_KEYS:
                     refs.update(_strings(item))
                 _collect(item, stores, nodes, rollups, refs)
@@ -285,8 +237,6 @@ def refence(output: str, *, engine, tool_name: str) -> str:
     """
     if not output:
         return output
-    # Raw rows still carry their own fence, and so does a summary the deterministic
-    # fallback assembled out of them. Cheaper than the database and true on its face.
     if MARKER in output:
         return untrusted(f"lcm:{tool_name}", output)
     try:

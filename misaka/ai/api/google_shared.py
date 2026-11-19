@@ -123,7 +123,6 @@ def isThinkingPart(part: Any) -> bool:
 
     See: https://ai.google.dev/gemini-api/docs/thought-signatures
     """
-    # MISAKA fork: a part is an SDK `Part` model or a plain dict.
     thought = part.get("thought") if isinstance(part, Mapping) else getattr(part, "thought", None)
     return thought is True
 
@@ -449,7 +448,6 @@ def resolveGoogleFunctionCallingMode(
 
 def mapStopReason(reason: FinishReason) -> StopReason:
     """Map Gemini FinishReason to our StopReason."""
-    # MISAKA fork: the SDK's FinishReason is a str enum, so its wire string matches a member too.
     match reason:
         case FinishReason.STOP:
             return "stop"
@@ -475,7 +473,6 @@ def mapStopReason(reason: FinishReason) -> StopReason:
         ):
             return "error"
         case _:
-            # MISAKA fork: an enum member prints as `FinishReason.X`; the message names the wire value.
             raise RuntimeError(f"Unhandled stop reason: {getattr(reason, 'value', reason)}")
 
 

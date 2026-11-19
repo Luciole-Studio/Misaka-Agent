@@ -263,7 +263,6 @@ async def test_real_tcp_connection_is_reused_and_closed(monkeypatch):
     server = await asyncio.start_server(serve, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     monkeypatch.setenv("PARALLEL_BASE_URL", f"http://127.0.0.1:{port}")
-    # This fixture never uses an operator's proxy.
     real = httpx.AsyncClient
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(**(kw | {"trust_env": False, "proxy": None})))
     owner = WebRuntime()

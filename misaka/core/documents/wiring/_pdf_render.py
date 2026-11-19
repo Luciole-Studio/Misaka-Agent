@@ -4,7 +4,6 @@ import json
 import sys
 from io import BytesIO
 
-# Bound allocation before rendering; the inline image limit is also 2000x2000.
 _MAX_RENDER_PX = 2000
 _MAX_SCALE = 10.0
 
@@ -24,7 +23,7 @@ def _render_page(pdf_path, page, scale, box=None):
             return None, count
         pg = pdf[page - 1]
         try:
-            width, height = pg.get_size()                 # points; pixels = points * scale
+            width, height = pg.get_size()
             crop = (0, 0, 0, 0)
             if box:
                 x0, y0, x1, y1 = (max(0.0, box[0]), max(0.0, box[1]), min(width, box[2]), min(height, box[3]))
@@ -33,7 +32,6 @@ def _render_page(pdf_path, page, scale, box=None):
             scale = min(scale, _MAX_SCALE, _MAX_RENDER_PX / max(width, height, 1))
             bitmap = pg.render(scale=max(scale, 1 / _MAX_RENDER_PX), crop=crop)
             try:
-                # to_pil() shares the bitmap's buffer, so the PNG has to be written before it goes.
                 image = bitmap.to_pil()
                 try:
                     buffer = BytesIO()

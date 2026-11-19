@@ -16,10 +16,6 @@ def errorMessage(error: Any) -> str:
             return jsErrorMessage(error)
         return jsString(error)
     except Exception:  # noqa: BLE001 - formatting must not fail for the value it formats
-        # `Object.prototype.toString.call(error)`. MISAKA fork: upstream reads an `Error`'s `message` property, which
-        # cannot throw, so it takes this path only for a non-error; a Python exception's message is its `str()`, which
-        # its class can make raise, so an exception may reach it too. The type name stands in for the `[object Tag]`
-        # tag, which a Python value does not have.
         return f"[object {type(error).__name__}]"
 
 

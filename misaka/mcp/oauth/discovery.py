@@ -71,7 +71,6 @@ class AuthorizationServerDiscoveryUrl(TypedDict):
 
 
 async def discard(response: _fetch.Response | None) -> None:
-    # MISAKA fork: awaited, since an unread httpx body holds its pooled connection until it closes.
     if response is not None and response.body is not None:
         with contextlib.suppress(Exception):
             await response.body.cancel()

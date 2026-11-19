@@ -69,7 +69,6 @@ class NestedCallRecorder:
 
     def __init__(self) -> None:
         self._calls: list[NestedToolCallRecord] = []
-        # MISAKA fork: keyed by identity; pydantic records are not hashable.
         self._startedAt: dict[int, float] = {}
         self._complete = True
         self._argumentBytes = 0
@@ -236,8 +235,6 @@ class NestedToolCallRunner:
                 try:
                     await asyncio.shield(previous)
                 except asyncio.CancelledError:
-                    # MISAKA fork: a JavaScript await cannot be cancelled. Hand the queue on once
-                    # the previous holder releases it, so later calls keep their order.
                     previous.add_done_callback(lambda _done: release())
                     raise
         self._scopes[toolCall.id] = _CallScope(

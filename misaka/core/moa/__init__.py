@@ -12,7 +12,7 @@ is configured: a preset nobody can run must not make an empty catalog look popul
 
 from misaka.core.wiring import KINDS
 
-SESSION_KINDS = KINDS  # a configured ``provider=moa`` must resolve in every session, bare ones included
+SESSION_KINDS = KINDS
 
 
 def provider_config(runtime):

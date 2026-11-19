@@ -34,9 +34,6 @@ from typing import NamedTuple
 
 from misaka.utils.js import UNDEFINED, jsLength, jsSlice
 
-# MISAKA fork: `\d` is spelled `[0-9]` (a Python `\d` also matches non-ASCII digits) and the end anchor is `\Z` (a
-# JavaScript `$` without the `m` flag does not match before a final newline).
-
 # Valid string terminator sequences are BEL, ESC\, and 0x9c
 _ST = r"(?:\u0007|\u001B\\|\u009C)"
 

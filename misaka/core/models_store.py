@@ -31,8 +31,6 @@ StoredModels = dict[str, Any]
 class _ModelsFileReload:
     controller: AbortController
     promise: asyncio.Task[StoredModels]
-    # MISAKA fork: an asyncio task belongs to the event loop that created it, so a
-    # reader on another loop starts its own reload instead of joining this one.
     loop: asyncio.AbstractEventLoop
     readers: int = 0
 
@@ -85,10 +83,6 @@ class InMemoryCodingAgentModelsStore:
 
 
 def _readableEntry(entry: Any) -> ModelsStoreEntry | None:
-    # MISAKA fork: pi returns the stored object as it is, and `Models` drops the models whose
-    # type it does not know (`withKnownModelTypes`). Python has to read the models here, so a
-    # stored model this version cannot read (a newer build's type or field) is dropped here the
-    # same way, and an entry it cannot read is no entry; the next network refresh rewrites it.
     if not isinstance(entry, dict):
         return None
     models = []
@@ -115,7 +109,6 @@ class FileModelsStore:
 
     def __init__(self, path: str | os.PathLike[str] | None = None) -> None:
         global _sharedModelsFileReadState
-        # MISAKA fork: the default store lives in the home's state directory.
         self._path = normalizePath(os.fspath(path if path is not None else home.path("models_store")))
         self._storage = FileAuthStorageBackend(self._path)
         self._readState = (
@@ -131,7 +124,6 @@ class FileModelsStore:
         if not content:
             return {}
         parsed = json.loads(content.removeprefix("﻿"))
-        # MISAKA fork: a non-object file is refused here rather than failing on first lookup.
         if not isinstance(parsed, dict):
             raise RuntimeError("models-store.json must contain an object")  # noqa: TRY004
         return parsed

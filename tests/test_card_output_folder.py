@@ -88,7 +88,6 @@ def test_a_running_card_is_left_as_it_is(board):
     assert tasks.get(board.con, tid)["output_dir"] is None
 
 def test_a_near_name_does_not_meet_the_contract(board):
-    # 结论.md is not 草稿.md, and 2024.csv is not 2025.csv.
     _tid, row = card(board)
     write(os.path.join(row["output_dir"], "repert.md"))
     assert worker.missing_deliverable(row) == "report.md"

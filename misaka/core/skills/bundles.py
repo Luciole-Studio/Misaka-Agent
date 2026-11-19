@@ -33,7 +33,7 @@ def scan(roots):
         base = Path(root)
         if base.is_symlink():
             continue
-        for ext in ("*.yaml", "*.yml"):  # preserve native yaml-then-yml ordering
+        for ext in ("*.yaml", "*.yml"):
             for path in sorted(base.glob(ext)):
                 if not path.is_file() or path.is_symlink():
                     continue

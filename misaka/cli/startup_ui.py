@@ -73,7 +73,6 @@ async def loadStartupThemes(settingsManager: SettingsManager) -> list[Theme]:
     packageManager = DefaultPackageManager(
         {"cwd": ".", "agentDir": get_agent_dir(), "settingsManager": globalSettingsManager}
     )
-    # MISAKA fork: MISAKA has no package sources, so nothing is missing to install or skip.
     resolvedPaths = await packageManager.resolve()
     return loadThemes(resolvedPaths.themes)
 
@@ -81,7 +80,6 @@ async def loadStartupThemes(settingsManager: SettingsManager) -> list[Theme]:
 async def createStartupTui(settingsManager: SettingsManager) -> TUI:
     setCapabilityOverrides(settingsManager.getTerminalCapabilityOverrides())
     setRegisteredThemes(await loadStartupThemes(settingsManager))
-    # MISAKA fork (D11): the built-in theme matching the terminal, not the system theme.
     initTheme(resolveThemeSetting(settingsManager.getThemeSetting(), getTerminalTheme()) or getTerminalTheme())
     setKeybindings(KeybindingsManager.create())
     ui: TUI = TuiMainScreen(ProcessTerminal(), settingsManager.getShowHardwareCursor(), get_agent_dir())
@@ -91,7 +89,6 @@ async def createStartupTui(settingsManager: SettingsManager) -> TUI:
 
 def startStartupTui(ui: TUI, settingsManager: SettingsManager) -> None:
     ui.start()
-    # MISAKA fork (D11): no terminal colour query.
 
 
 async def clearStartupTui(ui: TUI) -> None:

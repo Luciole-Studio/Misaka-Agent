@@ -109,8 +109,6 @@ def createHttpxIdleTimeout(
     return httpx.Timeout(None, read=normalized_timeout_ms / 1000)
 
 
-# MISAKA fork: undici's global dispatcher is this module's idle timeout, which every `fetch` reads when it
-# opens its connection (`whatwg_fetch.createClient`, the OAuth flows' `fetch`).
 _dispatcherIdleTimeoutMs: int = DEFAULT_HTTP_IDLE_TIMEOUT_MS
 
 

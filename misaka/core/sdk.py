@@ -190,7 +190,6 @@ async def createAgentSession(options: CreateAgentSessionOptions | None = None) -
     agentDir = resolvePath(options["agentDir"]) if options.get("agentDir") else getDefaultAgentDir()
     resourceLoader = options.get("resourceLoader")
 
-    # MISAKA fork: a directory keeps credentials and models the way the home lays them out (config.home.path).
     from misaka.config import home
 
     authPath = str(home.path("auth", agentDir)) if options.get("agentDir") else None
@@ -198,11 +197,8 @@ async def createAgentSession(options: CreateAgentSessionOptions | None = None) -
     modelRuntime = options.get("modelRuntime") or await ModelRuntime.create({"authPath": authPath, "modelsPath": modelsPath})
 
     settingsManager = options.get("settingsManager") or SettingsManager.create(cwd, agentDir)
-    # MISAKA fork: a session that runs as a role reads that role's settings.
     if options.get("modelProfile"):
         settingsManager.bindModelProfile(options["modelProfile"], modelRuntime)
-    # MISAKA fork: the agent directory decides the session store only when the caller named one; otherwise
-    # sessions go to the product tree (config.sessions), where /resume and the panel look.
     sessionManager = explicitSessionManager or SessionManager.create(
         cwd, getDefaultSessionDir(cwd, options.get("agentDir") and agentDir)
     )
@@ -232,7 +228,6 @@ async def createAgentSession(options: CreateAgentSessionOptions | None = None) -
         if model is None:
             modelFallbackMessage = f"Could not restore model {sessionModel['provider']}/{sessionModel['modelId']}"
 
-    # MISAKA fork: a role that pins its model starts on it, and says so when that provider has no credentials.
     if model is None and getattr(settingsManager, "getModelProfile", lambda: None)():
         from misaka.config import profiles
 
@@ -280,7 +275,6 @@ async def createAgentSession(options: CreateAgentSessionOptions | None = None) -
             else settingsManager.getDefaultThinkingLevel() or DEFAULT_THINKING_LEVEL
         )
 
-    # MISAKA fork: the agent's own default (her role's defaultThinkingLevel) comes before the shared per-model table.
     if thinkingLevel is None:
         thinkingLevel = settingsManager.getRoleThinkingLevel()
 
@@ -438,7 +432,6 @@ async def createAgentSession(options: CreateAgentSessionOptions | None = None) -
         return modelRuntime.streamSimple(model, context, requestOptions)
 
     async def transformContext(messages: list[AgentMessage], signal: Any | None = None) -> list[AgentMessage]:
-        # MISAKA fork: the context engine prepares the messages, and the session's parts see its durable view.
         session = extensionRunnerRef.get("session")
         if session is not None:
             messages = await session.prepareContextMessages(messages, signal)
@@ -452,8 +445,6 @@ async def createAgentSession(options: CreateAgentSessionOptions | None = None) -
         {
             "initialState": {
                 "systemPrompt": "",
-                # MISAKA fork: Agent's state needs a model; a session without one starts on a placeholder that is
-                # cleared right after.
                 "model": model or _unknownModel(),
                 "thinkingLevel": thinkingLevel,
                 "tools": [],
@@ -486,7 +477,6 @@ async def createAgentSession(options: CreateAgentSessionOptions | None = None) -
             sessionManager.appendModelChange(model.provider, model.id)
         sessionManager.appendThinkingLevelChange(thinkingLevel)
 
-    # MISAKA fork: core parts; a raw SDK or helper session has no product assembly, so it gets the session catalog.
     from misaka.core.session_catalog import CatalogPart
 
     parts = list(options.get("parts") or [])

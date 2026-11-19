@@ -50,7 +50,6 @@ _UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
 _AUTHORIZE_URL = "https://auth.openai.com/api/accounts/authorize"
 _TOKEN_URL = "https://auth.openai.com/api/accounts/oauth/token"
 _RESOURCE = "https://api.openai.com/v1"
-# MISAKA fork: MISAKA_OAUTH_CALLBACK_HOST for upstream's PI_OAUTH_CALLBACK_HOST.
 _CALLBACK_HOST = getProviderEnvValue("MISAKA_OAUTH_CALLBACK_HOST") or "127.0.0.1"
 _CALLBACK_PORT = 1455
 _CALLBACK_PATH = "/auth/callback"
@@ -71,9 +70,7 @@ class _AuthorizationResult:
 class _CallbackServer:
     server: asyncio.Server
     result: asyncio.Future[_AuthorizationResult]
-    # MISAKA fork: what `closeAllConnections` closes; asyncio's server does not track it.
     connections: set[asyncio.StreamWriter] = field(default_factory=set)
-    # MISAKA fork: the browser's callback, held open until the code is exchanged.
     pending: list[asyncio.StreamWriter] = field(default_factory=list)
 
 
@@ -127,7 +124,6 @@ def _sendHtml(response: asyncio.StreamWriter, status: int, body: str) -> None:
         f"Content-Length: {len(encoded)}\r\n"
         "Connection: close\r\n\r\n"
     )
-    # MISAKA fork: the peer may be gone already; node's `response.end` does not throw for it.
     with contextlib.suppress(OSError, RuntimeError):
         response.write(head.encode("latin-1") + encoded)
         response.close()
@@ -162,7 +158,6 @@ async def _startCallbackServer(expectedState: str) -> _CallbackServer:
             connections.discard(response)
         parts = requestLine.decode("latin-1").split()
         if len(parts) < 2:
-            # MISAKA fork: a peer that sent no request line gets no answer.
             response.transport.abort()
             return
         try:
@@ -184,8 +179,6 @@ async def _startCallbackServer(expectedState: str) -> _CallbackServer:
                 _sendHtml(response, 400, oauthErrorHtml(message))
                 return
 
-            # MISAKA fork: the page waits for the token exchange, as callback-server.ts's does. Sent
-            # here, "completed" stood over a login whose code OpenAI then refused (invalid_grant).
             if result.done():
                 _sendHtml(response, 409, oauthErrorHtml("This sign-in has already been handled."))
                 return
@@ -326,7 +319,6 @@ async def _loginOpenAIChatGPT(
     except OSError as error:
         if error.errno != errno.EADDRINUSE:
             raise
-        # MISAKA fork: the session is a misaka one.
         raise RuntimeError(
             f"Port {_CALLBACK_PORT} is in use, probably by an unfinished login in another misaka session or by the Codex CLI. Cancel that login and try again."
         ) from error
@@ -380,17 +372,13 @@ async def _loginOpenAIChatGPT(
         _answerCallback(callback, 200, oauthSuccessHtml("ChatGPT authentication completed. You can close this window."))
         return credential
     except Exception as error:
-        # MISAKA fork: callback-server.ts's 502 page for a code the token endpoint refused.
         _answerCallback(callback, 502, oauthErrorHtml("ChatGPT sign-in failed.", str(error)))
         if signal_aborted(interaction.signal):
             raise RuntimeError("Login cancelled") from error
         raise
     finally:
-        # MISAKA fork: a cancelled login still answers the browser instead of leaving it loading.
         _answerCallback(callback, 400, oauthErrorHtml("ChatGPT was not connected."))
         manualAbort.abort()
-        # MISAKA fork: also stop awaiting a prompt that ignores its signal. `asyncio.wait`, so
-        # a cancellation of this login itself still propagates.
         if not manualCode.done():
             manualCode.cancel()
             await asyncio.wait({manualCode})

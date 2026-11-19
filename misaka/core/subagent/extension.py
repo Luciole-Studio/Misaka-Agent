@@ -78,9 +78,6 @@ def allows_subagents(
 
 
 class _StrictModel(BaseModel):
-    # CCB's strict schemas. A model's tool call is converted first, as every tool's is upstream (pi's `Value.Convert`,
-    # misaka.ai.utils.typebox_convert): "0"/"1" and 0/1 read as booleans and a number as a string where one is
-    # declared; `strict` then refuses whatever is still of the wrong type.
     model_config = ConfigDict(extra="forbid", strict=True)
     _semantic_boolean = field_validator("run_in_background", "block", mode="before", check_fields=False)(semantic_boolean)
 
@@ -117,8 +114,6 @@ class AgentParams(_StrictModel):
     )
 
 
-# Two stable native validators, not a JSON-schema-only view that Pi can coerce
-# before a hook rewrite is checked. Provider schemas remain ordinary objects.
 AgentForegroundParams = create_model(
     "AgentForegroundParams", __base__=_StrictModel,
     **{name: (field.annotation, field) for name, field in AgentParams.model_fields.items()
@@ -159,9 +154,6 @@ def _render_result(result: Any, context: Any = None, *_args: Any) -> Any:
         task_id = details.get("agentId") or details.get("task_id")
         if not status or not task_id:
             return None
-        # Source AgentTool/UI.tsx branch structure; native Text/expanded mode
-        # replaces Ink/transcript widgets. Reuse native number/time formatting
-        # instead of recreating Intl or another UI framework.
         from misaka.core.tools.render_utils import formatToolDuration, get_text_output
         from misaka.modes.interactive.components.footer import format_tokens
 
@@ -182,8 +174,6 @@ def _render_result(result: Any, context: Any = None, *_args: Any) -> Any:
             else:
                 lines.append(f"In progress… · {count} tool {'use' if count == 1 else 'uses'}" +
                              (f" · {format_tokens(tokens)} tokens" if tokens else ""))
-                # Source collapsed progress shows the last three rows. The
-                # native tracker owns the bounded five-activity history.
                 activities = progress.get("recentActivities") or []
                 displayed = activities if expanded else activities[-3:]
                 for activity in displayed:
@@ -203,8 +193,6 @@ def _render_result(result: Any, context: Any = None, *_args: Any) -> Any:
                 lines.extend(("Response:", get_text_output(details, False)))
             if completion is not None:
                 lines.append(completion)
-        # Child names, prompts and output are data; retain the native terminal
-        # escape/control-byte sanitizer, including on expanded renders.
         text = get_text_output({"content": [{"type": "text", "text": "\n".join(lines)}]}, False)
         return Text(text, paddingX=0, paddingY=0)
     except Exception:  # noqa: BLE001
@@ -374,8 +362,6 @@ class SubagentPart:
             execute=launch_agent,
             renderResult=_render_result,
             promptSnippet="Delegate one task to an autonomous agent",
-            # Definitions and detailed usage stay here; the native collaboration
-            # section explains the currently active delegation surface once.
         )
         self.tools = [
             self.agent_tool,
@@ -412,10 +398,6 @@ class SubagentPart:
         if self.manager is None or (not background_disabled() and
                 {TASK_OUTPUT_TOOL_NAME, TASK_STOP_TOOL_NAME}.issubset(tool.name for tool in tools)):
             return tools
-        # Do not mutate the registry: leaving a scope restores the exact builtin.
-        # Only our builtin input type is projected; extension/SDK overrides retain
-        # their schema and execution. Reject stale background fields, not a silent
-        # downgrade into a blocking foreground command.
         schema = BashToolInput.model_json_schema()
         schema["additionalProperties"] = False
         return [tool.model_copy(update={
@@ -429,7 +411,7 @@ class SubagentPart:
             return
 
         def current_manager(*, required):
-            manager = self.manager  # Reload replaces owners; resolve on each call.
+            manager = self.manager
             available = manager is not None and not background_disabled()
             if self.session is not None:
                 available = available and {TASK_OUTPUT_TOOL_NAME, TASK_STOP_TOOL_NAME}.issubset(self.session.getActiveToolNames())
@@ -439,14 +421,13 @@ class SubagentPart:
 
         def start_background(**kwargs):
             from misaka.core.subagent.shell import background_result
-            # Source ShellCommand.background removes its foreground timeout.
             kwargs['timeout'] = None
             return background_result(current_manager(required=True).start_shell(**kwargs))
 
         def register_foreground(**kwargs):
             manager = current_manager(required=False)
             if manager is None:
-                return None  # Ordinary Pi foreground semantics in a restricted scope.
+                return None
             from misaka.core.tools.bash import _resolve_timeout_seconds
             _resolve_timeout_seconds(kwargs.pop("timeout"))
             return manager.start_shell(**kwargs, timeout=None, background=False)
@@ -481,9 +462,6 @@ class SubagentPart:
         if self.manager is not None:
             self.manager.session = session
         if self._top_level() and not (self.policy is not None and self.policy.top_level):
-            # CCB: the main session runs in its permission mode too, and its sub-agents inherit
-            # from it (runAgent.agentGetAppState); the mode comes from the settings, once: a session
-            # switched to keeps the mode the person chose, as CCB's app state does.
             from misaka.core.subagent.configuration import initial_permission_mode
 
             self.set_permission_mode(initial_permission_mode(session))
@@ -510,12 +488,9 @@ class SubagentPart:
         from misaka.core.moments import opens_turn
 
         eligible = await self._refresh_roster(_ctx) if self.manager is not None else {}
-        # SubagentStart hooks answer a prompt. A run a notification wakes (a task or shell result) has
-        # none; running them there would repeat their context on every wake.
         result = await self.policy.before_agent(event) if self.policy is not None and opens_turn(event) else None
         from misaka.core.subagent.catalog import list_in_messages, listing_delta
 
-        # A hidden Agent tool must not leak an unactionable catalog into the prompt.
         if list_in_messages() and self.session is not None:
             names = self.session.getActiveToolNames()
             if AGENT_TOOL_NAME in names:
@@ -538,9 +513,6 @@ class SubagentPart:
                 attachments.append({"role": "custom", "timestamp": 0, **delta})
         reminder = self.role_context.critical_system_reminder
         if reminder:
-            # CCB getCriticalSystemReminderAttachment + wrapInSystemReminder,
-            # after native engine preflight on EVERY request. This is not
-            # durable chat history and does not mutate the LCM source prefix.
             attachments.append({
                 "role": "custom", "customType": "critical_system_reminder",
                 "content": f"<system-reminder>\n{reminder}\n</system-reminder>",
@@ -567,8 +539,6 @@ class SubagentPart:
         manager = self.manager
         if manager is None:
             return
-        # Parts survive reload/session replacement; a closed manager does not.
-        # Tool callbacks resolve self.manager at invocation, never an old closure.
         if manager._closed:
             manager = self.manager = SubagentManager(self.session, self.role_context)
             manager.flag_agents = self._flag_agents
@@ -577,13 +547,10 @@ class SubagentPart:
             from misaka.core.subagent.runtime import _safe_component
 
             manager._parent_session_id = _safe_component(str(owner.getSessionId()))
-        # The loop the session runs on is known here, not when the part was built:
-        # ``route_to_children`` and the drains below find this manager through it.
         self._loop = asyncio.get_running_loop()
         _ACTIVE_MANAGERS.setdefault(self._loop, set()).add(manager)
         await self._refresh_roster(ctx)
         if owner is not None:
-            # The ends a previous process of this session never got to report (R34).
             try:
                 await manager.recover_notices(ctx)
             except Exception as error:  # noqa: BLE001 - an unreadable record must not keep the session from opening
@@ -754,8 +721,6 @@ async def route_to_children(to: str, message: str, _summary: str, ctx: Any):
         if manager._parent_session_id != sid:
             continue
         try:
-            # Ownership was bound by session_start and checked above. Only this
-            # session's manager may lazily open its persisted child registry.
             if await manager._find_task_async(to, context=ctx) is None:
                 continue
         except RuntimeError:

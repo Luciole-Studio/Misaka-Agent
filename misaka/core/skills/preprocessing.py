@@ -39,7 +39,7 @@ def _is_community_hub_skill(skill_dir: Path | None) -> bool:
         locks = {}
         try:
             locks[HubLockFile().path.resolve()] = _skills_dir().resolve()
-        except RuntimeError:  # MISAKA: no role scope here (a module-level load); the trees' own locks below
+        except RuntimeError:
             pass
         for root in target.parents:
             if root.name == "skills" and (root / ".hub" / "lock.json").is_file():

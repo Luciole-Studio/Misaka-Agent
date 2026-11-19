@@ -158,8 +158,6 @@ def _match_pattern(pattern: str, *candidates: str) -> bool:
 
 
 def _relative_to(file_path: str, base_dir: str) -> str:
-    # MISAKA fork: `path.relative` never throws; `os.path.relpath` does on Windows when a
-    # drive-less name such as `builtin:mcp` and the base sit on different drives.
     try:
         return toPosixPath(os.path.relpath(file_path, base_dir))
     except ValueError:
@@ -452,8 +450,6 @@ class DefaultPackageManager:
 
         # Built-in extensions are enabled unless the user `extensions` setting excludes them, for
         # example with `-builtin:mcp`. A matching `+`, `-`, or `!` entry in the project setting
-        # overrides that. (MISAKA fork: only a trusted project's setting counts; toggling a bundled
-        # extension runs no project code.)
         project_extensions = list(project_settings.get("extensions") or []) if project_trusted else []
         for name in self.builtinExtensions:
             path = f"{BUILTIN_PATH_PREFIX}{name}"

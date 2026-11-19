@@ -101,11 +101,9 @@ def deletable(path):
         yield None
     finally:
         if fd is not None:
-            os.close(fd)   # Closing releases the lock.
+            os.close(fd)
 
 
-# Where SessionControl puts its socket directory (a short path: macOS sockaddr_un is 104 bytes).
-# Windows has neither /tmp nor that limit; its temp directory is the user's own.
 _CONTROL_PARENT = tempfile.gettempdir() if sys.platform == "win32" else "/tmp"
 _CONTROL_PARENTS = {_CONTROL_PARENT, os.path.realpath(_CONTROL_PARENT)}
 
@@ -116,7 +114,7 @@ def _release_control(value):
     if not control:
         return
     if os.path.islink(os.path.dirname(control)):
-        return              # the recorded name, not whatever it currently points at
+        return
     directory = os.path.dirname(os.path.realpath(control))
     if (os.path.basename(directory).startswith("misaka-session-")
             and os.path.dirname(directory) in _CONTROL_PARENTS):
@@ -131,7 +129,7 @@ def _live_socket(path):
         local_socket.connect(path, 0.2).close()
         return True
     except OSError:
-        return False        # refused or unreachable: the process that bound it is gone
+        return False
 
 
 def _sweep_orphan_controls(spoken_for):
@@ -157,8 +155,6 @@ def _sweep_orphan_controls(spoken_for):
                     continue
             except OSError:
                 continue
-            # Asked under every spelling of the parent: a Windows pipe answers only to the name it was created under,
-            # and the temp directory a session made it in may be an 8.3 short path that realpath spells out.
             if any(_live_socket(os.path.join(spelling, name, "control.sock")) for spelling in _CONTROL_PARENTS):
                 continue
             shutil.rmtree(directory, ignore_errors=True)
@@ -187,14 +183,14 @@ def sweep_dead():
         if not pid:
             continue
         if value.get("state") == "saved" and not control and path and os.path.isfile(path):
-            continue                          # already retired by its own runtime: no probe needed
+            continue
         alive, reason = processes.explain_liveness(pid, value.get("identity"))
         if alive or reason != "pid gone":
             if control:
                 spoken_for.add(os.path.dirname(os.path.realpath(control)))
             continue
         if _object(file) != value:
-            continue                          # republished while we looked: its new owner wins
+            continue
         if path and os.path.isfile(path):
             _release_control(value)
             value["state"] = "saved"
@@ -203,7 +199,7 @@ def sweep_dead():
             _write(file, value)
         else:
             _release_control(value)
-            file.unlink(missing_ok=True)      # a pointer to a transcript that was never written
+            file.unlink(missing_ok=True)
         swept += 1
     _sweep_orphan_controls(spoken_for)
     return swept
@@ -307,8 +303,6 @@ class CatalogPart:
         self.session_id = None
         self._unregister = None
         self.session = self.control = None
-        # False for a reader that takes mail only between turns (an ally over ACP); SendMessage
-        # tells the sender so.
         self.steer = True
 
     def attach(self, session):
@@ -339,13 +333,8 @@ class CatalogPart:
         if record != self.record:
             self._retire()
         kind = self.spec.kind if self.spec else "session"
-        # A session belongs to the panel space it first ran in: a record that already names
-        # one keeps it, wherever the session is opened again. A contact session is nobody's
-        # neighbour.
         space = None if kind == "dm" else (_object(record).get("space")
                                            or os.environ.get("MISAKA_NET_SPACE") or None)
-        # A reserved filename is not history. Keep Pi's first-message flush;
-        # only this live-owner pointer makes an unsaved session visible.
         value = {"id": manager.getSessionId(), "path": os.path.realpath(path) if path else None,
                  "pending": bool(path and not manager.flushed and not os.path.exists(path)),
                  "cwd": manager.getCwd(), "role": _role(self.spec.role) if self.spec else "unknown",
@@ -402,7 +391,7 @@ class CatalogPart:
             return
         value = _object(record)
         if value.get("instance") != self.instance:
-            return  # another runtime now owns this file; do not overwrite its state
+            return
         if value.get("path") and os.path.isfile(value["path"]):
             value["state"] = "saved"
             value.pop("control", None)
@@ -440,8 +429,6 @@ def list_entries(con, *, extra_paths=()):
     product = os.path.realpath(sessions.sessions_root())
     roots = {product, get_sessions_dir()}
     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")} if con else set()
-    # The runs, nodes and card links of the workflows that own cards, as their owners list them
-    # (``platform.owners``).
     run_rows, nodes, links = {}, {}, {}
     own_dirs = {"cards", "subagents"}.union(*(owner.session_dirs() for owner in owners.registered()))
     if con is not None:
@@ -476,11 +463,9 @@ def list_entries(con, *, extra_paths=()):
             ephemeral.append(value)
     paths = {os.path.realpath(p) for p in extra_paths if p}
     paths.update(records)
-    # Persisted pointers locate historical/custom conversations without an alternate run store.
     node_files = {os.path.realpath(n["session_file"]): n for n in nodes.values() if n.get("session_file")}
     paths.update(node_files)
     paths.update(os.path.realpath(r["root_session"]) for r in run_rows.values() if r.get("root_session"))
-    # Nested/custom roots can overlap. One canonical file is always one row.
     for root in roots:
         paths.update(os.path.realpath(p) for p in iter_session_files(root, recursive=True))
     entries = []
@@ -505,9 +490,6 @@ def list_entries(con, *, extra_paths=()):
         if len(parts) > 1 and parts[0] not in own_dirs:
             row["role"] = record.get("role", _role(parts[0]))
             row["kind"] = "dm" if parts[1] == "dm" else record.get("kind", "foreground")
-        # The first card (in table order) whose session directory holds the file. Looked up through the file's own
-        # parents: trying every card's directory on every file was 515 x 298 `relative_to` calls, 2.3 s at each
-        # panel poll (2026-10-29).
         holders = [card_order[str(parent)] for parent in Path(path).parents if str(parent) in card_order]
         card = cards[card_keys[min(holders)]] if holders else None
         run, node = None, None
@@ -518,8 +500,6 @@ def list_entries(con, *, extra_paths=()):
                        kind="card", workspace=card["workspace"], cwd=card["workspace"], task_status=card["status"])
             link = links.get(card["id"], {})
             run, node = run_rows.get(link.get("run_id")), nodes.get(link.get("branch_id"))
-        # A workflow's own conversation, placed by its owner: the run, and the node whose Last
-        # Order it is.
         place = next((found for owner in owners.registered()
                       if (found := owner.session_place(parts, nodes)) is not None), None)
         if place is not None:

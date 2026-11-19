@@ -60,7 +60,6 @@ from misaka.utils.js_regexp import RegExp
 from misaka.utils.node_errors import withSyscall
 from misaka.utils.text import stripBom
 
-# MISAKA fork: `role` is the role's own `mcp.json`.
 type McpServerScope = Literal["global", "role", "project", "extension"]
 
 
@@ -83,7 +82,6 @@ class LoadedMcpConfig(TypedDict):
     errors: list[str]
     # The project `mcp.json` when the project is trusted, where `/mcp` saves project overrides.
     projectConfig: NotRequired[str]
-    # MISAKA fork: the role's `mcp.json`, where `/mcp` saves her overrides of global servers.
     roleConfig: NotRequired[str]
 
 
@@ -143,7 +141,6 @@ def readConfigFile(path: str, scope: Literal["global", "role", "project"], state
         errors.append(f"{path}: autoEnableCodemode must be a boolean")
     mcpServers = parsed.get("mcpServers")
     for name, value in (mcpServers if mcpServers is not None else {}).items():
-        # MISAKA fork: a role file overrides as a project file does.
         if scope != "global" and isRecord(value) and isOverride(value):
             base = servers.get(name)
             extra = [key for key in value if key not in OVERRIDE_KEYS]
@@ -175,7 +172,6 @@ def readConfigFile(path: str, scope: Literal["global", "role", "project"], state
 
 class LoadMcpConfigOptions(TypedDict):
     agentDir: str
-    # MISAKA fork: the directory of the role's own `mcp.json`, read after the global one.
     roleDir: NotRequired[str]
     cwd: str
     projectTrusted: bool
@@ -190,7 +186,6 @@ def loadMcpConfig(options: LoadMcpConfigOptions) -> LoadedMcpConfig:
     roleConfig = os.path.join(roleDir, "mcp.json") if roleDir is not None else None
     if roleConfig is not None:
         readConfigFile(roleConfig, "role", state)
-    # MISAKA fork: `home.project_dir` names the project's config directory, and none at `$HOME`.
     projectDir = home.project_dir(options["cwd"]) if options["projectTrusted"] else None
     projectConfig = str(projectDir / "mcp.json") if projectDir is not None else None
     if projectConfig:

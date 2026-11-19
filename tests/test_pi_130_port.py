@@ -97,7 +97,6 @@ async def test_resume_uses_the_default_tools_when_the_transcript_records_no_load
     manager = SessionManager.inMemory(str(tmp_path / "workspace"))
     manager.appendMessage({"role": "user", "content": "hi", "timestamp": int(time.time() * 1000)})
     async with session_with(tmp_path, [_inactive_and_active_tools], sessionManager=manager) as session:
-        # MISAKA fork: the default selection is misaka's eight tools (`DEFAULT_TOOL_NAMES`), where pi has four.
         assert sorted(session.getActiveToolNames()) == sorted([*DEFAULT_TOOL_NAMES, "active_tool"])
 
 

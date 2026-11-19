@@ -59,9 +59,6 @@ class AcpClient:
     def __init__(self, argv, *, cwd, env, on_update, on_request, detach=False):
         self.argv, self.cwd, self.env = list(argv), cwd, env
         self.on_update, self.on_request = on_update, on_request
-        # A pane's Ctrl-C goes to its whole foreground process group; ``detach`` keeps the agent
-        # out of it, so the key cancels a turn instead of killing the agent. In process the agent
-        # stays in its host's group, which a stop terminates whole.
         self.detach = detach
         self.proc = None
         self._ids = itertools.count(1)
@@ -118,7 +115,6 @@ class AcpClient:
                 try:
                     line = await self.proc.stdout.readline()
                 except ValueError:
-                    # A line past the limit cannot be resynchronised: the conversation is over.
                     self._stderr.append(f"\n(misaka: the agent sent a line over {STREAM_LIMIT} bytes)")
                     break
                 if not line:
@@ -126,7 +122,7 @@ class AcpClient:
                 try:
                     message = json.loads(line)
                 except ValueError:
-                    continue                  # a stray non-protocol line on stdout
+                    continue
                 if not isinstance(message, dict):
                     continue
                 method = message.get("method")

@@ -23,8 +23,7 @@ def test_the_coverage_extension_offers_the_maps(tmp_path):
     last_order = Path(CFG["roles_root"]).expanduser() / "last_order"
     roots = layers.skill_roots(str(last_order), str(tmp_path), extension_paths=_discovered())
     [entry] = index.candidates(roots, "builtin:coverage:coverage_maps")
-    assert entry["name"] == "builtin:coverage:coverage_maps"  # named by the extension's own path
+    assert entry["name"] == "builtin:coverage:coverage_maps"
     assert sorted(p.name for p in (Path(entry["dir"]) / "references").iterdir()) == [
         "disciplines.md", "facets.md", "internal.md", "questions.md", "societies.md", "traditions.md"]
-    # The prompts and the skill's own text say "coverage maps", unprefixed.
     assert [e["dir"] for e in index.candidates(roots, "coverage-maps")] == [entry["dir"]]

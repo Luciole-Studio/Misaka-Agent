@@ -121,7 +121,6 @@ def isTruthyEnvFlag(value: str | None) -> bool:
 
 
 def resolveAppMode(parsed: Args, stdinIsTTY: bool, stdoutIsTTY: bool) -> AppMode:
-    # MISAKA fork: there is no RPC mode.
     if parsed.mode == "json":
         return "json"
     if parsed.print or not stdinIsTTY or not stdoutIsTTY:
@@ -190,7 +189,6 @@ async def runAuthCommand(args: list[str]) -> int | None:
             sys.stdout.write(f"{credential}\n")
             return 0
 
-        # MISAKA fork: a bare `auth check` prints MISAKA's provider overview, where pi rejects it.
         if not command.json and not command.credentials and not jsTrim(parsed.provider or "") and not jsTrim(parsed.model or ""):
             from misaka.cli.auth_overview import print_provider_overview
 
@@ -285,7 +283,6 @@ async def resolveSessionPath(sessionArg: str, cwd: str, sessionDir: str | None =
         return ResolvedSession(type="local", path=localMatch.path)
 
     # Try global search across all projects
-    # MISAKA fork: "all projects" is the root of this run's store (a window's own store), not a flat directory.
     allSessions = await SessionManager.listAll(sessions_root_of(sessionDir))
     globalMatch = next((s for s in allSessions if s.id == sessionArg), None)
     if globalMatch is None:
@@ -417,7 +414,6 @@ async def createSessionManager(
         try:
             selectedPath = await selectSession(
                 lambda onProgress=None, signal=None: SessionManager.list(cwd, sessionDir, onProgress, signal),
-                # MISAKA fork: the all-sessions tab lists the root of this run's store (a window's own store).
                 lambda onProgress=None, signal=None: SessionManager.listAll(sessions_root_of(sessionDir), onProgress, signal),
                 settingsManager,
             )
@@ -495,8 +491,6 @@ def buildSessionOptions(
                 options["thinkingLevel"] = resolved.thinkingLevel
                 cliThinkingFromModel = True
 
-    # MISAKA fork: a role that pins its default model starts on it; scoped models do not override the pin unless
-    # --models names them.
     roleDefault = bool(
         "model" not in options and scopedModels and not hasExistingSession and not parsed.models
         and settingsManager.hasPinnedModelDefault()
@@ -576,7 +570,6 @@ def createRuntimeFactory(
 ) -> Callable[[dict[str, Any]], Awaitable[CreateAgentSessionRuntimeResult]]:
     """pi's ``createRuntime`` closure in ``main``, hoisted so headless sessions share it (see the module docstring).
     The keyword options are the values that closure captures from ``main``."""
-    # MISAKA fork: `--agents` configures the core parts that host subagents.
     if parsed.agents is not None:
         for part in parts or ():
             configure = getattr(part, "configure_agents", None)
@@ -591,7 +584,6 @@ def createRuntimeFactory(
         sessionStartEvent = runtimeOptions.get("sessionStartEvent")
         projectTrustContext = runtimeOptions.get("projectTrustContext")
         trustStore = ProjectTrustStore(agentDir)
-        # MISAKA fork: a headless session has no startup settings manager; it reads global settings the same way.
         trustSettingsManager = startupSettingsManager or SettingsManager.create(cwd, agentDir, {"projectTrusted": False})
         isInitialRuntime = sessionStartEvent is None
         projectTrustDiagnostics: list[AgentSessionRuntimeDiagnostic] = []
@@ -672,7 +664,6 @@ def createRuntimeFactory(
         settingsManager = services.settingsManager
         modelRuntime = services.modelRuntime
         resourceLoader = services.resourceLoader
-        # MISAKA fork: role-bound model defaults.
         if modelProfile:
             settingsManager.bindModelProfile(modelProfile, modelRuntime)
         if modelDefaultsReadOnly:
@@ -734,7 +725,6 @@ def createRuntimeFactory(
                 "tools": sessionOptions.get("tools"),
                 "excludeTools": sessionOptions.get("excludeTools"),
                 "noTools": sessionOptions.get("noTools"),
-                # MISAKA fork: the product's own tools and core parts.
                 "customTools": customTools,
                 "parts": parts,
             }
@@ -761,7 +751,6 @@ def _field(item: Any, name: str) -> Any:
 
 class MainOptions(TypedDict, total=False):
     extensionFactories: list[Any]
-    # MISAKA fork: the product's own options.
     customTools: list[Any]
     parts: list[Any]
     modelProfile: str
@@ -773,7 +762,6 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
     # Commands and startup selectors can load user-authored themes before runtime creation.
     setThemeJsonValidator(validateThemeJson)
     extensionFactories = (options or {}).get("extensionFactories")
-    # MISAKA fork: `MISAKA_OFFLINE`, where upstream reads `PI_OFFLINE`; misaka has no version check to skip.
     offlineMode = "--offline" in args or isTruthyEnvFlag(os.environ.get("MISAKA_OFFLINE"))
     if offlineMode:
         os.environ["MISAKA_OFFLINE"] = "1"
@@ -817,7 +805,7 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
         takeOverStdout()
 
     runtime = None
-    runtimeHandedOff = False   # MISAKA fork: set once a mode is running; the mode disposes the runtime itself
+    runtimeHandedOff = False
     try:
         try:
             validateForkFlags(parsed)
@@ -970,11 +958,6 @@ async def main(args: list[str], options: MainOptions | None = None) -> int:
             },
         )
     finally:
-        # MISAKA fork: pi leaves via process.exit() right after --help / --list-models, which releases everything by
-        # definition. Returning instead means every early return above has to release explicitly, or the extensions
-        # registered on session_shutdown -- MCP server subprocesses, the LCM context flush, subagent and research
-        # teardown -- never get their event. Both modes dispose the runtime themselves, so a handed-off runtime is
-        # left alone rather than being sent session_shutdown twice.
         if runtime is not None and not runtimeHandedOff:
             try:
                 await runtime.dispose()

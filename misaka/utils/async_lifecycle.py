@@ -18,8 +18,6 @@ async def settle(future):
 
 async def settle_thread_call(function, /, *args, **kwargs):
     """Finish a stateful thread call, letting its owner handle deferred cancellation."""
-    # Unlike a wrapper Task, this executor Future is not cancelled by loop
-    # shutdown. Preserve async-local context just as asyncio.to_thread does.
     call = partial(contextvars.copy_context().run, function, *args, **kwargs)
     return await settle(asyncio.get_running_loop().run_in_executor(None, call))
 

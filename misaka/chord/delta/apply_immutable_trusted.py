@@ -13,8 +13,6 @@ from . import Op, Path, Seg
 def applyImmutableTrusted(target: Any, operations: Sequence[Op]) -> Any:
     """Apply self-produced trusted operations while copying each touched container once."""
     root = target
-    # MISAKA fork: `WeakSet<object>` becomes a map from id to the copy, which keeps every copy alive while
-    # the call runs, so no id is reused (a plain `dict` or `list` cannot be weakly referenced).
     owned: dict[int, Any] = {}
     for operation in operations:
         verb = operation[0]

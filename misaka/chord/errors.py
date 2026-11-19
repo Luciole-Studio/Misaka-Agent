@@ -69,7 +69,6 @@ class ChordError(Exception):
         self.retryable = code in RETRYABLE
         self.details: Any = options.get("details")
         cause = options.get("cause", UNDEFINED)
-        # MISAKA fork: `{ cause }` is the exception's `__cause__` when it is one; any cause is kept as `cause`.
         self.cause: Any = None if cause is UNDEFINED else cause
         if isinstance(cause, BaseException):
             self.__cause__ = cause

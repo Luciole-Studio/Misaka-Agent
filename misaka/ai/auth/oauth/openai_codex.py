@@ -67,7 +67,6 @@ _TokenOperation = Literal["exchange", "refresh"]
 
 
 def _getCallbackHost() -> str:
-    # MISAKA fork: MISAKA_OAUTH_CALLBACK_HOST for upstream's PI_OAUTH_CALLBACK_HOST.
     return getProviderEnvValue("MISAKA_OAUTH_CALLBACK_HOST") or "127.0.0.1"
 
 
@@ -123,7 +122,6 @@ def _decodeJwt(token: str) -> dict[str, Any] | None:
         if len(parts) != 3:
             return None
         payload = parts[1] or ""
-        # MISAKA fork: base64url with its padding restored (RFC 7519); `atob` throws on `-` and `_`.
         decoded = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)).decode("latin-1")
         return jsonParse(decoded)
     except Exception:  # noqa: BLE001 - `catch { return null; }`

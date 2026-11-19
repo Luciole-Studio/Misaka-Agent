@@ -36,7 +36,6 @@ from misaka.utils.values import maybe_await, signal_aborted
 class ClassifierHttpError(Exception):
     """An HTTP failure in the shape `retryProviderRequest` and `normalizeProviderError` understand."""
 
-    # MISAKA fork: upstream's interface over `Error`; `_httpError` and `_timeoutError` set the fields.
     name: str = "Error"
     status: int | None
     headers: Any
@@ -116,8 +115,6 @@ async def postClassifierRequest(
             else nullishCoalesce(_option(options, "signal"), timeoutSignal)
         )
         try:
-            # MISAKA fork: `options.fetch` is not ported; httpx sends the request, following redirects and with no
-            # timeout of its own, as fetch does -- the signals above are the bound.
             async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(None)) as client:
                 try:
                     next = await cancel_on_abort(
@@ -129,8 +126,6 @@ async def postClassifierRequest(
                         signal,
                     )
                 except httpx.TransportError as error:
-                    # MISAKA fork: fetch rejects a failed connection with a status-less "fetch failed", which
-                    # retryProviderRequest does not retry.
                     raise RuntimeError("fetch failed") from error
                 if not next.is_success:
                     raise _httpError(label, next, next.text)
@@ -140,7 +135,6 @@ async def postClassifierRequest(
                 raise _timeoutError(_option(options, "timeoutMs")) from None
             raise
 
-    # MISAKA fork: the attempt returns `(response, json)` for upstream's `{ response, json }`.
     response, json = await retryProviderRequest(
         attempt,
         {

@@ -15,15 +15,10 @@ every session, sub-agents or not. It appears here because the sub-agent path
 
 from __future__ import annotations
 
-# The child-management vocabulary, in the casing the tools register under.
 MANAGEMENT_TOOLS = ("Agent", "TaskOutput", "SendMessage", "TaskStop")
 
-# The same set for the permission and hook paths, which compare lowered names.
 MANAGEMENT_TOOL_NAMES = frozenset(name.casefold() for name in MANAGEMENT_TOOLS)
 
-# ``NoProgressGuard``'s vocabulary (FrontierAgent's four tools, by role): ``Agent`` creates a
-# child and hands it its prompt; ``SendMessage`` assigns a running one more work; a report
-# comes back through ``TaskOutput``, or from a foreground ``Agent`` itself.
 NO_PROGRESS_VOCABULARY = {
     "management": MANAGEMENT_TOOLS,
     "create": ("Agent",),
@@ -31,8 +26,6 @@ NO_PROGRESS_VOCABULARY = {
     "collect": ("Agent", "TaskOutput"),
 }
 
-# The ordinary board tools a workflow's driver owns while it drives the session's cards (it
-# creates, starts, links, reviews and deletes them itself): withheld from that session.
 DRIVER_OWNED_TOOLS = frozenset({
     "misaka_card", "misaka_dispatch", "misaka_sister", "misaka_card_link",
     "misaka_card_request_review", "misaka_card_review", "misaka_card_unblock",

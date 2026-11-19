@@ -387,7 +387,6 @@ def test_supports_native_reads_keys_iteration_map_and_json():
     assert list(change.state["object"]) == ["a", "b"]
     assert change.state["object"].keys() == ["a", "b"]
     assert plain(change.state) == {"values": [1, 4, 5, 3], "object": {"a": 1, "b": 2}}
-    # MISAKA fork: a draft is not a ``dict`` or a ``list``, so the JSON round trip goes through ``copyJson``.
     assert json.loads(json.dumps(copyJson(change.state))) == {"values": [1, 4, 5, 3], "object": {"a": 1, "b": 2}}
     change.abort()
 

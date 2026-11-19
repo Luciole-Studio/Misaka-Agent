@@ -98,7 +98,6 @@ def escTimeoutSetting(monkeypatch: pytest.MonkeyPatch) -> Callable[[float], None
     return configure
 
 
-# MISAKA fork: the configured value is the `tui.esc_timeout_ms` setting.
 def test_uses_the_configured_escape_timeout(escTimeoutSetting):
     escTimeoutSetting(80)
     assert resolveEscapeTimeoutMs({}) == 80
@@ -120,7 +119,6 @@ def test_defaults_to_10ms_otherwise(escTimeoutSetting):
     assert resolveEscapeTimeoutMs({}) == 10
 
 
-# MISAKA fork: a pane of the panel is a relayed transport too.
 def test_defaults_to_100ms_in_a_panel_pane(escTimeoutSetting):
     assert resolveEscapeTimeoutMs({"MISAKA_NET_PANE": "1"}) == 100
 

@@ -72,7 +72,6 @@ async def test_advisor_usage_stays_on_the_aggregators_message(monkeypatch):
     monkeypatch.setattr(moa, "_AUTH_RESOLVER", None)
 
     async def complete_simple(model, _context, _options=None):
-        # One advisor reports its cost, the other leaves it to the catalog price.
         return _answer(model, _usage(10, cost=0.5) if model.id == "gpt-advisor" else _usage(100))
 
     def stream_simple(model, _context, _options=None):
@@ -82,7 +81,6 @@ async def test_advisor_usage_stays_on_the_aggregators_message(monkeypatch):
         stream.end(message)
         return stream
 
-    # The compat module is patched by name, as the MoA provider imports its functions at call time.
     stream_module = importlib.import_module("misaka.ai.compat")
     monkeypatch.setattr(stream_module, "completeSimple", complete_simple)
     monkeypatch.setattr(stream_module, "streamSimple", stream_simple)
@@ -91,8 +89,6 @@ async def test_advisor_usage_stays_on_the_aggregators_message(monkeypatch):
     context = TranscriptContext(messages=[UserMessage(content="question", timestamp=1)])
     message = await moa.stream_simple_moa(PRESET, context, SimpleStreamOptions(sessionId="session-1")).result()
 
-    # Aggregator 7 tokens + advisors 10 and 100; the reported cost is kept, the missing one is priced
-    # at the advisor's catalog rate (1 per million input tokens).
     assert (message.provider, message.model, message.usage.input) == ("anthropic", "claude-aggregator", 117)
     assert message.usage.cost.total == pytest.approx(0.01 + 0.5 + 100 / 1_000_000)
 

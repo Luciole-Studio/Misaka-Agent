@@ -58,8 +58,6 @@ class _ModelCatalogRefreshCoordinator:
         finally:
             active.waiters -= 1
             if active.waiters == 0 and self._activeByRuntime.get(modelRuntime) is active:
-                # MISAKA fork: the abandoned refresh is forgotten now rather than when it settles: in pi the
-                # rejection and its cleanup run before any later caller can look.
                 del self._activeByRuntime[modelRuntime]
                 active.controller.abort()
 

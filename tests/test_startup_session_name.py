@@ -28,8 +28,6 @@ def createSessionFile(projectDir: str, sessionFile: Path) -> None:
             "id": "assistant-1",
             "parentId": None,
             "timestamp": timestamp,
-            # MISAKA fork: messages are validated when the agent state is built, so the assistant message carries
-            # the fields pi's fixture leaves out (api, usage, stopReason).
             "message": {
                 "role": "assistant",
                 "content": [{"type": "text", "text": "hello"}],

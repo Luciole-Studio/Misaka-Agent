@@ -50,7 +50,6 @@ def _encode(suffix, args):
         if suffix == ".jsonl":
             return "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
         if suffix == ".json":
-            # A .json file has to parse as JSON: rows concatenated line by line would not.
             return json.dumps(rows, ensure_ascii=False, indent=2)
         return "\n".join(row if isinstance(row, str)
                          else json.dumps(row, ensure_ascii=False) for row in rows)
@@ -84,8 +83,6 @@ def write(path, op, args, *, overwrite=False):
             with open(path, encoding="utf-8") as handle:
                 existing = handle.read()
             if existing and not existing.endswith("\n"):
-                # Appending to a file with no final newline would otherwise join the last
-                # existing line to the first new one.
                 separator = "\n"
         else:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -103,8 +100,6 @@ def write(path, op, args, *, overwrite=False):
             existing = handle.read()
         available = existing.count(find)
         limit = args.get("count")
-        # ``count: 0`` means replace nothing and has to be honoured literally; a truthiness
-        # test here would fall through and replace every occurrence.
         updated = (existing.replace(find, args.get("replace", ""), int(limit))
                    if limit is not None else existing.replace(find, args.get("replace", "")))
         done = min(available, int(limit)) if limit is not None and int(limit) >= 0 else available

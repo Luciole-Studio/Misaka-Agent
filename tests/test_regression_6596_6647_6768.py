@@ -35,8 +35,6 @@ from tests.suite_harness import createHarness
 
 
 def test_uses_system32_taskkill_and_consumes_its_spawn_error(monkeypatch: pytest.MonkeyPatch):
-    # MISAKA fork: Python's Popen reports a failed spawn by raising at once, where Node emits "error" later; the
-    # second call checks that killProcessTree swallows it.
     calls: list[tuple[Any, dict[str, Any]]] = []
     failures: list[OSError] = []
 

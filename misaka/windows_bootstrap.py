@@ -114,7 +114,6 @@ def suppress_platform_ver_console() -> None:
         pass
 
 
-# MISAKA fork: not in Hermes, whose console shim it cannot help (its #88838/#89599).
 def release_launcher() -> None:
     """Take the console-script launcher off ``sys.path``.
 

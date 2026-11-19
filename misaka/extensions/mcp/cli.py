@@ -55,14 +55,11 @@ from .runtime import (
 
 
 def _logPath(agentDir: str) -> str:
-    # MISAKA fork: the home keeps the server log with the other logs; another agent directory keeps it inside.
     if os.path.realpath(agentDir) == os.path.realpath(home.home()):
         return str(home.path("mcp_log"))
     return os.path.join(agentDir, "mcp.log")
 
 
-# MISAKA fork: the paths name the MISAKA home (`home.display`, `home.DIR_NAME`) where pi names ~/.pi, and a role's
-# own file sits between the global file and the project's (`--as`, `--global`).
 HELP = f"""{chalk.bold("Usage:")}
   {APP_NAME} mcp add <server> [options] -- <command> [args...]
   {APP_NAME} mcp add <server> [options] --url <url>
@@ -117,18 +114,11 @@ DEFAULT_LOGIN_TIMEOUT_SECONDS = 300
 class McpCommandOptions(TypedDict):
     cwd: str
     agentDir: str
-    # MISAKA fork: the directory of the role's own `mcp.json`, her profile, read after the global one in
-    # `agentDir`. Without it, the global file is the only one besides the project's, as in pi.
     mcpDir: NotRequired[str]
-    # MISAKA fork: the Sister `--as` named, repeated in the commands the output suggests.
     asRole: NotRequired[str]
     # Defaults to `mcp-auth.json` under the home's credentials.
     credentials: NotRequired[McpOAuthCredentialStore]
-    # MISAKA fork: builds `credentials` from the loaded configuration, which says where each server's
-    # sign-ins are.
     createCredentials: NotRequired[Callable[[LoadedMcpConfig], McpOAuthCredentialStore]]
-    # MISAKA fork: how stdio servers start, with the role's names as her sessions start them. Defaults to
-    # `createDefaultTransport`.
     createTransport: NotRequired[Callable[[McpServerEntry, str, Any], Any]]
     # Defaults to the platform browser.
     openUrl: NotRequired[Callable[[str], None]]
@@ -212,8 +202,6 @@ def createConnection(
     })
 
 
-# Short spellings of options. `-l`/`--local` match `pi install`; MISAKA fork: misaka has no `install`, and
-# `-g`/`--global` picks the global file over the role's.
 OPTION_ALIASES = {"-l": "--local", "-g": "--global"}
 
 type _OptionKind = Literal["flag", "value", "list"]
@@ -270,7 +258,6 @@ def parseOptions(
 
 
 def _print(line: str) -> None:
-    # MISAKA fork: flushed as console.log is, so the sign-in URL reaches a pipe before the process exits.
     print(line, flush=True)
 
 
@@ -288,7 +275,6 @@ async def runMcpCommand(args: list[str], options: McpCommandOptions) -> int:
         log(HELP)
         return 0
 
-    # MISAKA fork: the project's config directory comes from the home layout, and there is none at `$HOME`.
     projectDir = home.project_dir(options["cwd"])
     projectConfig = str(projectDir / "mcp.json") if projectDir is not None else None
     if command == "add" or command == "remove":
@@ -470,7 +456,6 @@ def add(
 
     project = "local" in values
     if project and projectConfig is None:
-        # MISAKA fork: a project file needs a project directory, which the home root is not.
         error(f"There is no project at {options['cwd']} to hold a {home.DIR_NAME}/mcp.json.")
         return 1
     target = _target(values, projectConfig, options, error)
@@ -513,7 +498,6 @@ def remove(
         return 1
     project = "local" in parsed.values
     if project and projectConfig is None:
-        # MISAKA fork: see `add`.
         error(f"There is no project at {options['cwd']} to hold a {home.DIR_NAME}/mcp.json.")
         return 1
     target = _target(parsed.values, projectConfig, options, error)
@@ -542,7 +526,6 @@ def remove(
     )
     hint = ""
     if other is not None:
-        # MISAKA fork: the option that picks the file defining it, among three.
         option = {"project": "use --local", "global": "use --global"}.get(other.get("scope"), "omit --local and --global")
         hint = f" It is defined in {other['source']}; {option}."
     error(f'No {scope} MCP server named "{name}" in {path}.{hint}')
@@ -623,7 +606,6 @@ async def _list(
         log(f"{entry['name']}: {state} ({entry['exposure']}, {entry['scope']})")
         log(f"  {entry['transport']}")
         if entry.get("override"):
-            # MISAKA fork: the override is the project's or the role's.
             layer = "project" if entry["override"] == loaded.get("projectConfig") else "role"
             log(f"  {layer} override: {entry['override']}")
         if entry["state"] == "needs-auth":
@@ -709,8 +691,6 @@ async def waitForRedirectUrl(signal: Any, interactive: bool) -> str | None:
         if not signal_aborted(signal):
             await wait_for_abort(signal)
         return None
-    # MISAKA fork: stdin has no abortable `question`; a daemon thread reads the line and the race
-    # against the abort gives up on it.
     loop = asyncio.get_running_loop()
     answer: asyncio.Future[str] = loop.create_future()
 

@@ -249,8 +249,6 @@ async def test_updates_the_cached_branch_when_the_reftable_directory_changes(
         tablesList = fixture.reftableDir / "tables.list"
         before = os.stat(tablesList)
         tablesList.write_text("1\n", encoding="utf-8")
-        # MISAKA fork: the watchers poll stat (pi's use inotify). A same-size rewrite within the file system's timestamp
-        # tick right after creation changes nothing a poll can see, so the modification time is moved on explicitly.
         os.utime(tablesList, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
         # Real fs watcher events can arrive late under full-suite load.
         await waitFor(lambda: len(git.execFileCalls) == 1, 10_000)

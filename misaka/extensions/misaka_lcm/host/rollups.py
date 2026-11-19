@@ -17,6 +17,4 @@ def nudge(engine) -> None:
     session_id = str(getattr(engine, "current_session_id", "") or "")
     if config is None or not config.temporal_rollups_enabled or not session_id:
         return
-    # Upstream's own scheduler call. It swallows its own failures (maintenance is
-    # opportunistic and must never fail a foreground turn), so there is nothing to catch.
     engine._schedule_rollup_maintenance(session_id)

@@ -82,8 +82,6 @@ class LockResult:
 class _AuthFileReload:
     controller: AbortController
     promise: asyncio.Task[AuthStorageData]
-    # MISAKA fork: an asyncio task belongs to the event loop that created it, so a
-    # reader on another loop starts its own reload instead of joining this one.
     loop: asyncio.AbstractEventLoop
     readers: int = 0
 
@@ -230,11 +228,6 @@ class FileAuthStorageBackend(AuthStorageBackend):
             raise RuntimeError("Auth storage lock was compromised")
 
     def acquireLockSyncWithRetry(self) -> FileLock:
-        # MISAKA fork: pi 1.2 also retries EPERM on Windows (`getRetryableLockErrorCode`, capped by
-        # `MAX_EPERM_RETRIES` in the async loop): a lock directory pending deletion fails mkdir until its
-        # last handle closes. filelock's Windows lock already reports a name pending deletion or a sharing
-        # conflict as "not acquired", which is the `Timeout` retried here, and fails fast on a real access
-        # denial, so there is no EPERM case to retry.
         maxAttempts = 10
         delay_ms = 20
         attempt = 1
@@ -581,9 +574,6 @@ class AuthStorage:
                 self.readState.reload = None
                 reload.controller.abort()
 
-        # MISAKA fork: pi's reader leaves in the `finally` of its await, which on an abort runs as a microtask, before
-        # any timer -- so the last reader stops the reload before its lock retry can fire again. asyncio has no
-        # microtasks; the reader leaves the moment its signal aborts instead.
         removeAbortListener = addAbortListener(signal, leave) if signal is not None else None
         try:
             result = raceWithAbortSignal(asyncio.shield(reload.promise), signal)
@@ -647,7 +637,6 @@ class AuthStorage:
     async def list(self, options: AuthOperationOptions | None = None) -> list[CredentialInfo]:
         """List credential metadata without resolving configured key values."""
         # pi lists every record by its type, readable or not, so it can still be logged out.
-        # MISAKA fork: CredentialInfo carries the two credential types only.
         entries = [
             CredentialInfo(providerId=providerId, type=value["type"])
             for providerId, value in _coerce_storage_object(await self.readLatestData(options)).items()
@@ -674,10 +663,6 @@ def _to_runtime_credential(
 ) -> Credential | None:
     if not isinstance(value, dict):
         return None
-    # MISAKA fork: pi hands the stored object on as it is and its readers take the fields
-    # they know. The credential models here check them, so an api_key record keeps only the
-    # fields they declare, and a record they still cannot read is no credential -- not an
-    # error that stops every provider's availability, or the login that would replace it.
     try:
         if value.get("type") == "api_key":
             credential = RuntimeApiKeyCredential.model_validate(

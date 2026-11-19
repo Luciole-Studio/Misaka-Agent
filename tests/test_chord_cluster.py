@@ -304,12 +304,6 @@ async def test_removes_facets_from_server_and_workers_reconciles_removal_tombsto
     assert cold.codeVersion == server.codeVersion
     # Close this loader-less child before the addition; it tested only the removal reconciliation.
     await cold.close()
-    # MISAKA fork: in JavaScript the server has seen the child's `bye` here: the loop above resumes from `setImmediate`
-    # only after every microtask (so the child's link has no frame left in its chain), and `await cold.close()` resumes
-    # one microtask after the `bye` step close queued. asyncio has no microtask checkpoint (a frame sent in the turn the
-    # tick's timer fired is still queued) and a Python `await` of a close that finished without suspending does not
-    # yield, so the `bye` is two link steps away: the test gives the link those turns (one yield in `Host.close` would
-    # not be enough).
     await tick()
     modules["greeter"] = greeterFacet("v2")
     await server.reload([greeterFacet("v2")], {"remote": {"session:": ["greeter"]}})

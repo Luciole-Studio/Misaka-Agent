@@ -31,7 +31,6 @@ class InMemoryTransport(TransportEvents):
         self._started = True
 
     async def send(self, message: JsonRpcMessage, options: McpTransportSendOptions | None = None) -> None:
-        # MISAKA fork: `options` is accepted and ignored, as upstream's `send(message)` ignores it (see `McpTransport`).
         if not self._started or self._closed:
             raise McpConnectionClosedError()
         peer = self._peer

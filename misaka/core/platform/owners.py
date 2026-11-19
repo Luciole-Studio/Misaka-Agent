@@ -30,8 +30,6 @@ class CardOwner:
     token_cap_setting = ""
     resume_command = ""
 
-    # --- its cards ------------------------------------------------------------------------------
-
     def card(self, con: sqlite3.Connection, task_id: str) -> dict[str, Any] | None:
         """The owner's context for a card it owns, with ``scope`` (the unit of work the card belongs
         to, such as one run of the workflow); None for a card it does not own."""
@@ -72,8 +70,6 @@ class CardOwner:
         """The ledger rows ``task_id`` shares a token cap with, or None when the owner sets none for it."""
         return None
 
-    # --- who works where --------------------------------------------------------------------------
-
     def sender_scope(self, con: sqlite3.Connection, task_id: str | None,
                      session_id: str | None) -> tuple[str | None, str | None]:
         """``(scope, unit)`` a message's sender works in -- the run, and the node inside it -- by her card
@@ -98,8 +94,6 @@ class CardOwner:
     def progress(self, scope: str, payload: dict[str, Any]) -> tuple[str, str] | None:
         """``(customType, text)`` of a progress event of ``scope`` for the conversation that owns its chat."""
         return None
-
-    # --- sessions -----------------------------------------------------------------------------------
 
     def system_context(self, session: Any, tool_names: Iterable[str], system_prompt: str,
                        sister_id: str | None) -> str:
@@ -138,8 +132,6 @@ class CardOwner:
         """``(scope, unit, coordinator)`` of a conversation in one of those folders, from its path's parts
         under the store: whether it is a coordinator's (a node's Last Order), and of which unit."""
         return None
-
-    # --- the board's settings and files -------------------------------------------------------------
 
     def token_cap(self) -> int:
         """The tokens one of the owner's scopes may spend (0: none)."""

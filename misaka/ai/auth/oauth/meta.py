@@ -65,7 +65,6 @@ def _requestSignal(signal: Any) -> Any:
 async def _readJson(response: Response) -> dict[str, Any] | None:
     try:
         json = await response.json()
-        # MISAKA fork: `typeof json === "object"` holds for an array too; only a dict has the fields read below.
         return json if isinstance(json, dict) else None
     except Exception:  # noqa: BLE001 - `catch { return null; }`
         return None
@@ -93,7 +92,6 @@ def _trustedHttpUrl(value: Any) -> str | None:
 
 
 def _positiveNumber(value: Any) -> float | None:
-    # MISAKA fork: a JSON `true` is not a number.
     if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
         return value
     return None
@@ -215,7 +213,6 @@ async def _mintApiKey(identityToken: str, signal: Any) -> OAuthCredential:
 
 
 async def _loginMeta(interaction: ProviderAuthInteraction, options: LoginOptions | None = None) -> OAuthCredential:
-    # MISAKA fork: `options` is accepted because every login is called with it.
     try:
         device = await _startDeviceAuthorization(interaction.signal)
         interaction.notify(

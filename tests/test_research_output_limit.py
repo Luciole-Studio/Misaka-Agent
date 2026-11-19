@@ -117,7 +117,7 @@ def test_reconcile_nudges_a_reply_that_ends_in_prose(monkeypatch):
            "question": "why is the sky blue"}
     outcome = planner.reconcile(None, run, {}, None, round=1, material={}, validate=lambda value: value)
     assert outcome == {"round": 1}
-    assert planner.user_instructions(run) in calls[0][0]      # B122: what the user allowed opens
+    assert planner.user_instructions(run) in calls[0][0]
     assert len(calls) == 2
     assert "ended without calling `misaka_research_reconcile`" in calls[1][0]
     assert calls[1][1] is True

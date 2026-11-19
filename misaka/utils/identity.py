@@ -21,7 +21,6 @@ def _baseline() -> int:
     return next(sys.getrefcount(value) for _key, value in items.items())
 
 
-# Measured once, with the same loop shape the sweep uses, so a different interpreter's counting still agrees.
 _BASELINE = _baseline()
 
 
@@ -49,7 +48,6 @@ class IdentityWeakSet:
             del self._items[id(value)]
 
     def _sweep(self) -> None:
-        # A container held only by a swept parent becomes unreferenced with it, so repeat while anything goes.
         while True:
             dead = [key for key, value in self._items.items() if sys.getrefcount(value) <= _BASELINE]
             if not dead:

@@ -154,8 +154,6 @@ def stream(
             try:
                 await _consumeChatStream(model, output, stream, mistralStream, _option(options, "onProviderStreamEvent"))
             finally:
-                # MISAKA fork: an async generator left mid-iteration is not released until the
-                # loop finalizes it; closing it here releases the response straight away.
                 await mistralStream.aclose()
 
             if signal_aborted(_option(options, "signal")):
@@ -169,7 +167,6 @@ def stream(
             stream.push(DoneEvent(reason=output.stopReason, message=output))
             stream.end()
         except Exception as error:  # noqa: BLE001 - every failure becomes the stream's error event
-            # MISAKA fork: partialArgs lives beside the blocks (`StreamingArgs`), so there is nothing to strip here.
             output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
             output.errorMessage = _formatMistralError(error)
             stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
@@ -305,8 +302,6 @@ async def _requestMistralStream(
     timeoutMs = nullishCoalesce(_option(options, "timeoutMs"), 60_000)
     headerTimeoutSignal = TimeoutAbortSignal(timeoutMs)
     combinedSignal = combineAbortSignals([_option(options, "signal"), headerTimeoutSignal])
-    # MISAKA fork: undici's idle timeout, which bounds a stalled body upstream, is httpx's read timeout here; httpx's
-    # defaults would add a five-second one.
     client = httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(None, read=dispatcherIdleTimeout()))
     try:
         request = client.build_request(
@@ -329,12 +324,9 @@ async def _requestMistralStream(
             await maybe_await(onResponse({"status": response.status_code, "headers": headersToRecord(response.headers)}, model))
 
         if not response.is_success:
-            # MISAKA fork: `response.text()` reads under no signal once the header wait is over; the caller's still
-            # aborts it, as it would cancel the fetch body.
             body = (await _awaitOrThrowReason(response.aread(), _option(options, "signal"))).decode("utf-8", errors="replace")
             await response.aclose()
             raise _MistralHttpError(response.status_code, body, response.reason_phrase)
-        # MISAKA fork: a fetch Response has a null body exactly for these statuses; httpx always has a stream.
         if response.status_code in (204, 205):
             await response.aclose()
             raise RuntimeError("Mistral response has no body")
@@ -459,8 +451,6 @@ _MISTRAL_STREAM_DONE = object()
 async def _readMistralEvents(
     response: httpx.Response, signal: Any | None = None, client: httpx.AsyncClient | None = None
 ) -> AsyncIterator[dict[str, Any]]:
-    # MISAKA fork: httpx's text iterator stands in for the body reader and its streaming `TextDecoder`; the response
-    # and the client are closed here, as the reader is cancelled. One abort task serves the whole body.
     buffer = ""
     reader = response.aiter_text().__aiter__()
     abortTask = _create_abort_wait_task(signal)
@@ -605,8 +595,6 @@ async def _consumeChatStream(
     currentBlock: TextContent | ThinkingContent | None = None
     blocks = output.content
     toolBlocksByKey: dict[str | int, int] = {}
-    # MISAKA fork: the arguments accumulate in StreamingArgs beside the block, not in a
-    # `partialArgs` field on it, and the final parse flags malformed JSON.
     partialArgsByIndex: dict[int, StreamingArgs] = {}
 
     def blockIndex() -> int:

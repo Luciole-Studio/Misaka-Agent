@@ -301,9 +301,6 @@ class ExpandableText(ThemedText):
         self.invalidate()
 
 
-# MISAKA fork (D1): pi's `BuiltInHeader` only adds the logo click that plays an easter egg in fullscreen mode; the
-# header is an `ExpandableText`.
-
 
 class CompactionQueuedMessage(TypedDict):
     text: str
@@ -334,7 +331,6 @@ DEAD_TERMINAL_ERROR_CODES = {"EIO", "EPIPE", "ENOTCONN", "ENOTTY"}
 
 
 def isDeadTerminalError(error: Any) -> bool:
-    # MISAKA fork: Node names the errno in `error.code`; Python carries the number in `OSError.errno`.
     if not isinstance(error, OSError) or error.errno is None:
         return False
     code = errno.errorcode.get(error.errno)
@@ -358,7 +354,6 @@ def formatCrashExtensionHint(extensionMatches: Sequence[str] | None) -> str | No
         else f"{', '.join(quoted[:-1])}, and {quoted[-1]}"
     )
     noun = "extension" if len(matches) == 1 else "extensions"
-    # MISAKA fork: MISAKA has no `config` command to disable an extension with, so only the `-ne` check is offered.
     return f"A stack frame came from loaded {noun} {labels}, which may be involved. Run `{APP_NAME} -ne` to confirm."
 
 
@@ -401,8 +396,6 @@ def formatResumeCommand(sessionManager: Any) -> str | None:
     if not sessionFile or not os.path.exists(sessionFile):
         return None
 
-    # MISAKA fork: MISAKA resumes a conversation through `misaka chat`, which finds the session in the window's
-    # own store (`--as <Sister>` outside Last Order); there is no `--session-dir` to name.
     args = [APP_NAME, "chat"]
     who = os.environ.get("MISAKA_WHO")
     if who and who != "last-order":
@@ -509,8 +502,6 @@ class InteractiveModeOptions:
     # Terminal implementation. Defaults to the current process terminal.
     terminal: Any = None
 
-
-# --- MISAKA forks: Python helpers for JavaScript idioms the interactive mode uses ---
 
 
 def _spread_tool_result(raw: Any, isError: bool, durationMs: float | None = None) -> dict[str, Any]:
@@ -786,7 +777,6 @@ class InteractiveMode:
         if options is None:
             options = InteractiveModeOptions()
         elif isinstance(options, dict):
-            # MISAKA fork: the engine passes the options as a dict.
             options = InteractiveModeOptions(**options)
 
         self.autocompleteProviderWrappers: list[Callable[[AutocompleteProvider], AutocompleteProvider]] = []
@@ -889,9 +879,6 @@ class InteractiveMode:
         # Custom header from extension (undefined = use built-in header)
         self.customHeader: Any = None
 
-        # MISAKA fork: extension dialogs run one at a time; a second waits for the first, a dialog opened from inside
-        # another is refused, and resetting the extension UI cancels the waiting one. Sisters, research and extension
-        # parts can all ask at once, and upstream's displacement would strand the displaced dialog's caller.
         self._extensionPromptLock = asyncio.Lock()
         self._extensionPromptOwner: object | None = None
         self._extensionPromptTask: asyncio.Task[Any] | None = None
@@ -901,8 +888,6 @@ class InteractiveMode:
             f"misaka_extension_prompt_{id(self)}", default=None
         )
         self._extensionPromptContextToken: contextvars.Token[object | None] | None = None
-        # MISAKA fork: `run` returns the exit code through this future (the engine awaits it), and `void` promises are
-        # tasks held here until they finish (asyncio holds tasks weakly).
         self._shutdownFuture: asyncio.Future[int] | None = None
         self._pendingUserInputFuture: asyncio.Future[str] | None = None
         self._backgroundTasks: set[asyncio.Task[Any]] = set()
@@ -917,10 +902,8 @@ class InteractiveMode:
             await self.rebindCurrentSession({"renderBeforeBind": True})
             self.themeController.applyFromSettings()
 
-        # MISAKA fork: the runtime passes the new session; the bound accessors read it from the runtime anyway.
         self.runtimeHost.setRebindSession(rebindSession)
         self.version = VERSION
-        # MISAKA fork (D1): the main-screen renderer only, so no renderer reference is needed.
         self.ui = createInteractiveTui(
             InteractiveTuiOptions(
                 showHardwareCursor=self.settingsManager.getShowHardwareCursor(),
@@ -983,7 +966,6 @@ class InteractiveMode:
         if source == "auto" or source == "local" or source == "cli":
             return scopePrefix
 
-        # MISAKA fork: MISAKA has no package sources (npm:/git:), so every other source is tagged by its scope.
         return scopePrefix
 
     def prefixAutocompleteDescription(self, description: str | None, sourceInfo: Any = None) -> str | None:
@@ -1016,7 +998,6 @@ class InteractiveMode:
             SlashCommand(name=command.name, description=command.description, argumentHint=command.argumentHint)
             for command in BUILTIN_SLASH_COMMANDS
         ]
-        # MISAKA fork: MISAKA's own commands (`/clear`, `/board`).
         slashCommands.extend(
             SlashCommand(name=command.name, description=command.description, argumentHint=command.argumentHint)
             for command in _LOCAL_ALIAS_SLASH_COMMANDS
@@ -1104,8 +1085,6 @@ class InteractiveMode:
             if cmd.name not in builtinCommandNames
         ]
 
-        # MISAKA fork: skills are MISAKA core commands (the parts' moments), not pi's `skill:` commands; they and the
-        # other core commands follow the extension commands.
         knownNames = {command.name for command in [*slashCommands, *templateCommands, *extensionCommands]}
         coreCommandList = [
             SlashCommand(
@@ -1138,26 +1117,18 @@ class InteractiveMode:
             if setAutocompleteProvider is not None:
                 setAutocompleteProvider(provider)
 
-    # MISAKA fork: no `showStartupNoticesIfNeeded`: it shows only the changelog ("What's New"), which MISAKA does not
-    # ship.
-
     def mountInteractiveTui(self, tui: Any, components: list[Any]) -> None:
         for component in components:
             tui.addChild(component)
 
     def stopInteractiveTui(self) -> None:
-        # MISAKA fork (D1): the fullscreen exit output and `preserveScreen` belong to the fullscreen renderer.
         self.ui.stop()
-
-    # MISAKA fork (D1): no `switchTuiMode`.
 
     async def init(self) -> None:
         if self.isInitialized:
             return
 
         self.registerSignalHandlers()
-
-        # MISAKA fork: no changelog is loaded (MISAKA ships none).
 
         if len(self.session.scopedModels) > 0 and self.shouldShowStartupDetails():
             modelList = ", ".join(
@@ -1173,7 +1144,6 @@ class InteractiveMode:
 
         # Keep one component tree and remount it when changing renderers.
         self.renderWidgets()  # Initialize with default spacer
-        # MISAKA fork (D1): no fullscreen chat viewport.
         self.mountInteractiveTui(
             self.ui,
             [
@@ -1192,8 +1162,6 @@ class InteractiveMode:
         self.defaultEditor.onSubmit = lambda text: self.handleStartupSubmit(text)
         self.ui.setFocus(self.editor)
 
-        # MISAKA fork: the header title's agent part follows the terminal background (light or dark), from the
-        # terminal's OSC 11 answer and its mode-2031 light/dark notifications, and is redrawn when that changes.
         self._terminalBgIsLight = False
         self.ui.setTerminalColorSchemeNotifications(True)
 
@@ -1231,9 +1199,6 @@ class InteractiveMode:
         # Add header with keybindings from config (unless silenced)
         if self.shouldShowStartupHeader():
             showDetails = self.shouldShowStartupDetails()
-            # MISAKA fork: MISAKA's title in place of the Pi logo. `MISAKA_APP_TITLE` ("MISAKA · <agent>") overrides
-            # only the displayed title; the brand keeps the accent colour and the agent part takes `appTitleOnLight`
-            # on light terminals and `appTitle` otherwise.
             titleText = os.environ.get("MISAKA_APP_TITLE") or APP_NAME
 
             def withLogo(hints: str) -> str:
@@ -1296,7 +1261,6 @@ class InteractiveMode:
                 )
 
             def onboarding() -> str:
-                # MISAKA fork: the window's tagline (`MISAKA_TAGLINE`) in place of pi's self-help note.
                 return theme.fg("dim", os.environ.get("MISAKA_TAGLINE") or "MISAKA research system ready.")
 
             header = ExpandableText(
@@ -1320,7 +1284,6 @@ class InteractiveMode:
 
         # Ensure fd and rg are available after mounting the TUI.
         # Both are needed: fd for autocomplete, rg for grep tool and bash commands.
-        # MISAKA fork: never downloaded (see tools_manager); a missing one is reported.
         fdPath, _rgPath = await asyncio.gather(
             ensureTool("fd", lambda status: self.showManagedToolStatus(status)),
             ensureTool("rg", lambda status: self.showManagedToolStatus(status)),
@@ -1377,7 +1340,6 @@ class InteractiveMode:
             await self.checkShutdownRequested()
             return await self._shutdownFuture
 
-        # MISAKA fork: offline mode is `MISAKA_OFFLINE`, where upstream reads `PI_OFFLINE`.
         if not os.environ.get("MISAKA_OFFLINE"):
             controller = AbortController()
             timeout = setTimeout(lambda: controller.abort(), 15_000)
@@ -1392,9 +1354,6 @@ class InteractiveMode:
                     timeout.cancel()
 
             self._schedule_task(refreshCatalogs())
-
-        # MISAKA fork: no pi version check and no package update check (MISAKA updates through `misaka update` and has
-        # no package sources).
 
         # Check tmux keyboard setup asynchronously
         async def tmuxCheck() -> None:
@@ -1424,8 +1383,6 @@ class InteractiveMode:
 
         if modelFallbackMessage:
             self.showWarning(modelFallbackMessage)
-
-        # MISAKA fork: no crash notice (MISAKA keeps no crash log for `/bug`).
 
         self._schedule_task(self.maybeWarnAboutAnthropicSubscriptionAuth())
 
@@ -1468,15 +1425,9 @@ class InteractiveMode:
             if self._shutdownFuture is not None and self._shutdownFuture.done():
                 return
             try:
-                # MISAKA fork: the input was taken while the agent was idle, but a research driver or a notification
-                # can start a turn in between (pi has no such turn starters). Without a behaviour, prompt() raised
-                # "Agent is already processing" and the typed message was lost; steer is what Enter would have queued
-                # had the turn started a moment earlier. Idle is unchanged.
                 await self.session.prompt(userInput, {"streamingBehavior": "steer"})
             except Exception as error:  # noqa: BLE001 - upstream `catch (error)` shows any failure
                 self.showError(errorMessage(error))
-
-    # MISAKA fork: no `checkForPackageUpdates` (MISAKA has no package sources).
 
     async def checkTmuxKeyboardSetup(self) -> str | None:
         if not os.environ.get("TMUX"):
@@ -1521,16 +1472,12 @@ class InteractiveMode:
             )
 
         if extendedKeysFormat == "xterm":
-            # MISAKA fork: the product name.
             return (
                 "tmux extended-keys-format is xterm. MISAKA works best with csi-u. Add `set -g extended-keys-format "
                 "csi-u` to ~/.tmux.conf and restart tmux."
             )
 
         return None
-
-    # MISAKA fork: no `getChangelogForDisplay` or `reportInstallTelemetry` (no changelog ships, and MISAKA pings
-    # nothing).
 
     def getMarkdownThemeWithSettings(self) -> Any:
         return dataclasses_replace(getMarkdownTheme(), codeBlockIndent=self.settingsManager.getCodeBlockIndent())
@@ -1551,7 +1498,6 @@ class InteractiveMode:
 
     def formatExtensionDisplayPath(self, path: str) -> str:
         result = self.formatDisplayPath(path)
-        # MISAKA fork: MISAKA extensions are Python packages, so `/index.py` is stripped as well.
         for suffix in ("/index.ts", "/index.js", "/index.py"):
             result = result.removesuffix(suffix)
         return result
@@ -1624,7 +1570,6 @@ class InteractiveMode:
         if source.startswith("npm:"):
             return source[len("npm:") :] or source
 
-        # MISAKA fork: no git URL parsing (MISAKA has no git package sources).
         return source
 
     def getCompactExtensionLabel(self, resourcePath: str, sourceInfo: Any = None) -> str:
@@ -1675,7 +1620,6 @@ class InteractiveMode:
         for extension in extensions:
             segments = self.getCompactDisplayPathSegments(extension["path"])
             lastSegment = segments[-1] if segments else None
-            # MISAKA fork: `index.py` too.
             if len(segments) > 1 and lastSegment in ("index.ts", "index.js", "index.py"):
                 segments.pop()
             if not self.isPackageSource(extension.get("sourceInfo")):
@@ -1869,7 +1813,6 @@ class InteractiveMode:
             return
 
         def sectionHeader(name: str, color: str = "mdHeading") -> str:
-            # MISAKA fork: section titles use MISAKA's `sectionTitle` theme token (falls back to accent).
             return theme.fg("sectionTitle", f"[{name}]")
 
         def formatCompactList(items: list[str], sort: bool = True) -> str:
@@ -1896,8 +1839,6 @@ class InteractiveMode:
             self.loadedResourcesContainer.addChild(section)
             self.loadedResourcesContainer.addChild(Spacer(1))
 
-        # MISAKA fork: no skills from the resource loader; MISAKA's skills are core commands and list themselves through
-        # `startup_sections`.
         promptsResult = self.session.resourceLoader.getPrompts()
         themesResult = self.session.resourceLoader.getThemes()
         extensions = read_field(options, "extensions")
@@ -1981,8 +1922,6 @@ class InteractiveMode:
                 extensionLabels = self.getCompactExtensionLabels(extensions)
                 addLoadedSection("Extensions", lambda: formatCompactList(extensionLabels), extList, "mdHeading")
 
-            # MISAKA fork: sections registered by extensions and core parts (MISAKA's [Skills] among them). Their text
-            # may be a callable, evaluated on every render, so an asynchronously loaded resource updates by itself.
             for registered in list(startup_sections.SECTIONS):
                 registeredName = str(registered.get("name") or "")
                 if not registeredName:
@@ -1997,7 +1936,6 @@ class InteractiveMode:
                 addLoadedSection(registeredName, collapsedSection, expandedSection)
 
         if showDiagnostics:
-            # MISAKA fork: no [Skill conflicts] (no skill resources in the loader).
             promptDiagnostics = read_field(promptsResult, "diagnostics", [])
             if len(promptDiagnostics) > 0:
                 self.loadedResourcesContainer.addChild(
@@ -2060,8 +1998,6 @@ class InteractiveMode:
             try:
                 return await self.runtimeHost.newSession(options)
             except ContextCarryUnsupportedError as error:
-                # MISAKA fork: an extension asked to carry the context over (`carryOverContext`) and the context
-                # engine refused; the current session is intact, so this is reported rather than fatal.
                 self.showError(str(error))
                 return {"cancelled": True}
             except Exception as error:  # noqa: BLE001 - upstream catches everything
@@ -2107,7 +2043,6 @@ class InteractiveMode:
 
         def shutdownHandler() -> None:
             self.shutdownRequested = True
-            # MISAKA fork: until `run` has created the exit-code future, `run` performs the requested shutdown itself.
             if self.session.isIdle and self._shutdownFuture is not None:
                 self._schedule_task(self.shutdown())
 
@@ -2137,9 +2072,6 @@ class InteractiveMode:
         extensionRunner = self.session.extensionRunner
         self.setupExtensionShortcuts(extensionRunner)
         self.showLoadedResources({"force": False, "showDiagnosticsWhenQuiet": True})
-        # MISAKA fork: no `showStartupNoticesIfNeeded` (no changelog ships).
-
-    # MISAKA fork (D1): no `applyFullscreenScrollbarSetting`.
 
     def ensurePngTranscoder(self) -> None:
         """Lets extension images use the PNG transcoder; tool results register it themselves."""
@@ -2209,15 +2141,12 @@ class InteractiveMode:
         extensionHint = self.getCrashExtensionHint(error)
         if extensionHint:
             self.chatContainer.addChild(ThemedText(lambda: theme.fg("warning", extensionHint), self.outputPad, 0))
-        # MISAKA fork: no crash record or `/bug` instructions (MISAKA has no `/bug`).
         stopThemeWatcher()
         self.stop()
-        # MISAKA fork: `SystemExit` in place of `process.exit(1)`.
         raise SystemExit(1)
 
     def getCrashExtensionHint(self, error: Any) -> str | None:
         try:
-            # MISAKA fork: the stack is the Python traceback.
             stack = (
                 "".join(traceback.format_exception(error)) if isinstance(error, BaseException) else None
             )
@@ -2226,8 +2155,6 @@ class InteractiveMode:
             )
         except Exception:  # noqa: BLE001 - upstream `catch { return undefined }`
             return None
-
-    # MISAKA fork: no `recordCrash`, `crashReportInstructions` or `suggestBugReport` (MISAKA has no `/bug`).
 
     def maybeSuggestBugReport(self, message: Any) -> None:
         """MISAKA fork: with no `/bug` to suggest, an unexpected error only checks whether the install changed."""
@@ -2263,10 +2190,6 @@ class InteractiveMode:
         self.chatContainer.clear()
         self.pendingMessagesContainer.clear()
         self.compactionQueuedMessages = []
-        # MISAKA fork: a `!` command run while the agent streams keeps its block in the pending area, and its message
-        # waits in the session (not in the transcript redrawn below) until the run settles. `/reload` and the turn-end
-        # custom-message flush redraw mid-run, so the blocks go back into the pending area; once the session has
-        # nothing pending, the session itself changed (`/new`, `/resume`, fork) and they are dropped.
         if self.session.hasPendingBashMessages:
             for component in self.pendingBashComponents:
                 self.pendingMessagesContainer.addChild(component)
@@ -2313,7 +2236,6 @@ class InteractiveMode:
 
                 self._schedule_task(run())
 
-            # MISAKA fork: a namespace stands in for the object literal.
             return SimpleNamespace(
                 ui=self.createExtensionUIContext(),
                 mode="tui",
@@ -2388,7 +2310,6 @@ class InteractiveMode:
         self.activeWorkingIndicatorEmbedded = False
         self.statusContainer.clear()
         self.setEditorWorkingStatusIndicator(None)
-        # MISAKA fork (D1): the main screen is the only renderer, so pi's `tuiMode === "regular"` test always holds.
         if clearedIndicator and not clearedIndicatorWasEmbedded and self.ui.getClearOnShrink():
             self.statusContainer.addChild(self.idleStatus)
 
@@ -2486,7 +2407,6 @@ class InteractiveMode:
         self.renderWidgets()
 
     def resetExtensionUI(self) -> None:
-        # MISAKA fork: cancels the dialog that waits for its turn as well as the open one.
         self._resetExtensionPrompts()
         if self.extensionSelector:
             self.hideExtensionSelector()
@@ -2611,8 +2531,6 @@ class InteractiveMode:
 
         return unsubscribe
 
-    # MISAKA fork (D1): no `rebindExtensionTerminalInputListeners`; the renderer is never replaced.
-
     def clearExtensionTerminalInputListeners(self) -> None:
         for subscription in self.extensionTerminalInputSubscriptions:
             subscription["unsubscribe"]()
@@ -2635,11 +2553,6 @@ class InteractiveMode:
     def createExtensionUIContext(self) -> _ExtensionUIContext:
         """Create the ExtensionUIContext for extensions."""
         return _ExtensionUIContext(self)
-
-    # MISAKA fork: extension dialogs (selector, input, editor and custom components) run one at a time. Sisters,
-    # research and extension parts can all ask at once; pi lets a new dialog displace the open one, which strands the
-    # displaced caller's promise. Here a second dialog waits for the first, a dialog opened from inside another is
-    # refused, and resetting the extension UI cancels both the open and the waiting one.
 
     async def _acquireExtensionPrompt(self, signal: Any = None) -> object | None:
         task = asyncio.current_task()
@@ -2958,7 +2871,6 @@ class InteractiveMode:
 
     async def showExtensionCustom(self, factory: Any, options: Any = None) -> Any:
         """Show a custom component with keyboard focus. Overlay mode renders on top of existing content."""
-        # MISAKA fork: one extension dialog at a time (see `_acquireExtensionPrompt`).
         owner = await self._acquireExtensionPrompt()
         if owner is None:
             return None
@@ -2970,7 +2882,6 @@ class InteractiveMode:
     async def _showExtensionCustom(self, owner: object, factory: Any, options: Any) -> Any:
         savedText = self.editor.getText()
         isOverlay = read_field(options, "overlay") or False
-        # MISAKA fork: a component may name the dialog status to report while it waits (AskUserQuestion does).
         blocked: BlockedStatus | None = read_field(options, "blocked")
 
         def restoreEditor() -> None:
@@ -3019,7 +2930,6 @@ class InteractiveMode:
                     factoryTask = asyncio.ensure_future(created)
                     completed, _pending = await asyncio.wait({factoryTask, future}, return_when=asyncio.FIRST_COMPLETED)
                     if factoryTask not in completed:
-                        # MISAKA fork: closed before its component was built, so the build is cancelled.
                         return await future
                     c = factoryTask.result()
                 else:
@@ -3061,8 +2971,6 @@ class InteractiveMode:
         finally:
             if factoryTask is not None and not factoryTask.done():
                 factoryTask.cancel()
-            # MISAKA fork: a caller that stops waiting (its task is cancelled) closes the component, so the editor
-            # is not left behind it.
             close(None)
 
     def showExtensionError(self, extensionPath: str, error: str, stack: str | None = None) -> None:
@@ -3152,8 +3060,6 @@ class InteractiveMode:
         # images are attached via temporary files, and plain text is the final fallback.
         self.defaultEditor.onPasteImage = lambda: self._schedule_task(self.handleClipboardPaste())
 
-    # MISAKA fork (D1): no `handleRightClickPaste` (right-click paste is a fullscreen feature).
-
     async def handleClipboardPaste(self) -> None:
         insertTextAtCursor = getattr(self.editor, "insertTextAtCursor", None)
         try:
@@ -3182,7 +3088,6 @@ class InteractiveMode:
             if image:
                 tmpDir = tempfile.gettempdir()
                 ext = extensionForImageMimeType(image.mimeType) or "png"
-                # MISAKA fork: the product name in the file name.
                 fileName = f"misaka-clipboard-{uuid.uuid4()}.{ext}"
                 filePath = os.path.join(tmpDir, fileName)
                 with open(filePath, "wb") as file:  # noqa: ASYNC230 - upstream writes synchronously
@@ -3242,7 +3147,6 @@ class InteractiveMode:
                 await self.handleShareCommand()
                 self.editor.setText("")
                 return
-            # MISAKA fork: no `/bug` (pi's reports go to the Pi developers).
             if text == "/copy":
                 await self.handleCopyCommand()
                 self.editor.setText("")
@@ -3255,7 +3159,6 @@ class InteractiveMode:
                 self.handleSessionCommand()
                 self.editor.setText("")
                 return
-            # MISAKA fork: no `/changelog` (no changelog ships).
             if text == "/hotkeys":
                 self.handleHotkeysCommand()
                 self.editor.setText("")
@@ -3285,12 +3188,10 @@ class InteractiveMode:
                 self._schedule_task(self.showOAuthSelector("logout"))
                 self.editor.setText("")
                 return
-            # MISAKA fork: `/new --carry` hands the context to the new session through the context engine.
             if text == "/new" or text == "/new --carry":
                 self.editor.setText("")
                 await self.handleClearCommand(carry=text == "/new --carry")
                 return
-            # MISAKA fork: `/clear` empties the chat and the context; `/board` opens the team board.
             if text == "/clear":
                 self.editor.setText("")
                 await self.handleTrueClearCommand()
@@ -3312,7 +3213,6 @@ class InteractiveMode:
                 self.handleDebugCommand()
                 self.editor.setText("")
                 return
-            # MISAKA fork: no `/arminsayshi` or `/dementedelves` (easter eggs).
             if text == "/resume":
                 self.showSessionSelector()
                 self.editor.setText("")
@@ -3322,9 +3222,6 @@ class InteractiveMode:
                 await self.shutdown()
                 return
 
-            # MISAKA fork: an unknown slash command fails loudly instead of going to the model as text, which showed
-            # only the working indicator and looked as though the command had run. Prompt templates, extension
-            # commands and core commands pass through; `//name` sends the text as is.
             if (
                 text.startswith("/")
                 and not text.startswith("//")
@@ -3392,14 +3289,10 @@ class InteractiveMode:
             if callable(addToHistory):
                 addToHistory(text)
 
-        # MISAKA fork: the editor calls `onSubmit` synchronously, so the handler runs as a task.
         self.defaultEditor.onSubmit = lambda text: self._schedule_task(onSubmit(text))
 
     def subscribeToAgent(self) -> None:
         def listener(event: Any) -> None:
-            # MISAKA fork: the session calls listeners synchronously; the handler starts at once, as a JavaScript
-            # async listener runs up to its first await, so compaction-end queue delivery can beat the agent loop's
-            # post-compaction steering poll.
             self._schedule_task(self.handleEvent(event))
 
         self.unsubscribe = self.session.subscribe(listener)
@@ -3471,8 +3364,6 @@ class InteractiveMode:
                     entriesAfterCompaction = {read_field(branchEntry, "id") for branchEntry in branch[compactionIndex + 1 :]}
                     retainedEntries = entries[1:]
                     if read_field(entry, "contextMessages") is not None:
-                        # MISAKA fork: a context engine's compaction carries the context it keeps, which is drawn in
-                        # context order in place of the summary.
                         self.renderSessionEntries(entries)
                     else:
                         self.renderSessionEntries(
@@ -3597,8 +3488,6 @@ class InteractiveMode:
                     self.streamingMessage = None
                     self.footer.invalidate()
                 elif role == "custom" and self._customMessageIsInTranscript(message):
-                    # MISAKA fork: a custom message the session defers until its entry exists is placed by redrawing
-                    # the session (see `_customMessageIsInTranscript`).
                     self.renderCurrentSessionState()
                 self.ui.requestRender()
 
@@ -3705,8 +3594,6 @@ class InteractiveMode:
                         raise RuntimeError("Completed compaction is missing from the session context")
                     self.chatContainer.clear()
                     if read_field(entries[0], "contextMessages") is not None:
-                        # MISAKA fork: a context engine's compaction carries the context it keeps, which is drawn in
-                        # place of the summary.
                         self.renderSessionEntries(entries)
                     else:
                         # The latest compaction is prepended for model context; append it below at its chronological
@@ -3973,9 +3860,6 @@ class InteractiveMode:
                                 self.getMarkdownTransformers(),
                             )
                         )
-                    # MISAKA fork: pi's editor history lives in memory, so every render of a session refills it from
-                    # the transcript. An editor whose history is a file already holds what was typed, and refilling it
-                    # appended the whole session again on every open, resume and reload.
                     if read_field(options, "populateHistory") and not getattr(self.editor, "historyFile", None):
                         addToHistory = getattr(self.editor, "addToHistory", None)
                         if callable(addToHistory):
@@ -4088,15 +3972,12 @@ class InteractiveMode:
         @param options.updateFooter Update footer state
         @param options.populateHistory Add user messages to editor history
         """
-        # MISAKA fork (D1): no text selection to reset (`TuiAltScreen.resetTextSelection`).
         items: list[Any] = []
         for entry in entries:
             entryType = read_field(entry, "type")
             if entryType == "custom" or (entryType == "usage" and read_field(entry, "kind") == "cache_warm"):
                 items.append(entry)
                 continue
-            # MISAKA fork: a context engine's compaction shows its summaries as compaction summaries, never as
-            # user turns (`session_entry_to_display_messages`).
             messages = session_entry_to_display_messages(entry)
             if entryType in ("compaction", "branch_summary") and read_field(entry, "usage") and len(messages) > 0:
                 items.extend([*messages, {"type": "compaction_cost", "kind": entryType, "usage": read_field(entry, "usage")}])
@@ -4227,8 +4108,6 @@ class InteractiveMode:
 
         if len(self.chatContainer.children) > 0:
             self.chatContainer.addChild(Spacer(1))
-        # MISAKA fork: names what an untrusted project loses in MISAKA (settings, prompts, themes and Sisters agent
-        # definitions) and the product to restart.
         self.chatContainer.addChild(
             ThemedText(
                 lambda: theme.fg(
@@ -4248,7 +4127,6 @@ class InteractiveMode:
             return self.pendingUserInputs.pop(0)
 
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        # MISAKA fork: `shutdown` cancels the waiting input, since the process is not exited from inside.
         self._pendingUserInputFuture = future
 
         def onInputCallback(text: str) -> None:
@@ -4279,8 +4157,6 @@ class InteractiveMode:
             self._schedule_task(self.shutdown())
             return
         self.lastSigintTime = now
-        # MISAKA fork: Ctrl+C while busy interrupts through the same abort path as Escape (pi only clears the line);
-        # a double press still exits and an idle press still clears.
         if self.session.isStreaming:
             self.restoreQueuedMessagesToEditor({"abort": True})
             return
@@ -4305,7 +4181,6 @@ class InteractiveMode:
         self.isShuttingDown = True
         # Keep signal handlers registered until terminal cleanup has completed.
 
-        # MISAKA fork: the input loop stops waiting for input.
         if self._pendingUserInputFuture is not None and not self._pendingUserInputFuture.done():
             self._pendingUserInputFuture.cancel()
         self.onInputCallback = None
@@ -4317,7 +4192,6 @@ class InteractiveMode:
             # skipped if a later terminal-restore write fails on a dead or stalled
             # terminal.
             await self.runtimeHost.dispose()
-            # MISAKA fork (D11): no theme auto-sync to disable.
             await self.ui.terminal.drainInput(1000)
             self.stop()
             return self._finishShutdown()
@@ -4350,7 +4224,6 @@ class InteractiveMode:
         killTrackedDetachedChildren()
         # The terminal is gone. Do not run normal shutdown because TUI and
         # extension cleanup can write restore sequences and re-trigger EIO.
-        # MISAKA fork: `SystemExit` in place of `process.exit(129)`.
         raise SystemExit(129)
 
     def uncaughtCrash(self, error: BaseException) -> NoReturn:
@@ -4381,7 +4254,6 @@ class InteractiveMode:
         extensionHint = self.getCrashExtensionHint(error)
         if extensionHint:
             print(f"\n{extensionHint}", file=sys.stderr)
-        # MISAKA fork: no crash record or `/bug` instructions (MISAKA has no `/bug`).
         raise SystemExit(1)
 
     async def checkShutdownRequested(self) -> None:
@@ -4418,10 +4290,6 @@ class InteractiveMode:
 
             self.signalCleanupHandlers.append(restore)
 
-        # MISAKA fork: pi also listens for stream errors on stdin/stdout/stderr and turns a dead terminal's EIO/ENOTTY
-        # into emergencyTerminalExit. Python's standard streams have no error events; a dead terminal's OSError
-        # reaches `uncaughtCrash` below, which exits the same way.
-
         # Restore the terminal before the process dies on any uncaught throw.
         # Without this, an unhandled exception from extension code (or anywhere
         # in the app) leaves the terminal in raw mode with no cursor.
@@ -4433,8 +4301,6 @@ class InteractiveMode:
         sys.excepthook = uncaughtExceptionHandler
         self.signalCleanupHandlers.append(lambda: setattr(sys, "excepthook", previousExcepthook))
 
-        # MISAKA fork: an exception that escapes a helper thread is handled on the UI thread, which owns the terminal
-        # and the signal handlers (Node has one thread).
         previousThreadingExcepthook = threading.excepthook
         try:
             ownerLoop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
@@ -4453,8 +4319,6 @@ class InteractiveMode:
         threading.excepthook = threadingExcepthook
         self.signalCleanupHandlers.append(lambda: setattr(threading, "excepthook", previousThreadingExcepthook))
 
-        # MISAKA fork: an exception raised in an event-loop callback, or a task failure nobody awaited, is what Node
-        # reports as an uncaught exception or an unhandled rejection; asyncio hands both to the loop's handler.
         if ownerLoop is not None:
             previousLoopHandler = ownerLoop.get_exception_handler()
 
@@ -4481,8 +4345,6 @@ class InteractiveMode:
             self.showStatus("Suspend to background is not supported on Windows")
             return
 
-        # MISAKA fork: Python keeps running while suspended, so no keep-alive timer is needed.
-
         # Ignore SIGINT while suspended so Ctrl+C in the terminal does not
         # kill the backgrounded process. The handler is removed on resume.
         previousSigint = signal.getsignal(signal.SIGINT)
@@ -4505,7 +4367,6 @@ class InteractiveMode:
             # Stop the TUI (restore terminal to normal mode)
             self.ui.stop()
 
-            # MISAKA fork: a stopped process is not a stalled event loop.
             loop_watchdog.suspend()
             # Send SIGTSTP to process group (pid=0 means all processes in group)
             os.kill(0, signal.SIGTSTP)  # windows-footgun: ok - guarded above
@@ -4669,9 +4530,6 @@ class InteractiveMode:
         self.chatContainer.addChild(ThemedText(lambda: theme.fg("warning", f"Warning: {warningMessage}"), 1, 0))
         self.ui.requestRender()
 
-    # MISAKA fork: no `showNewVersionNotification` or `showPackageUpdateNotification` (no pi version check and no
-    # package sources).
-
     def getAllQueuedMessages(self) -> dict[str, list[str]]:
         """Get all queued messages (read-only).
         Combines session queue and compaction queue.
@@ -4750,7 +4608,6 @@ class InteractiveMode:
     def isExtensionCommand(self, text: str) -> bool:
         if not text.startswith("/"):
             return False
-        # MISAKA fork: a core prompt command (a skill) is prepared and sent as a prompt, not run as a command.
         if self.isCorePromptCommand(text):
             return False
 
@@ -4758,7 +4615,6 @@ class InteractiveMode:
 
         spaceIndex = text.find(" ")
         commandName = text[1:] if spaceIndex == -1 else text[1:spaceIndex]
-        # MISAKA fork: a core part's command runs the same way as an extension's.
         return bool(extensionRunner.getCommand(commandName)) or self.session.moments.command(commandName) is not None
 
     def isCorePromptCommand(self, text: str) -> bool:
@@ -4781,10 +4637,6 @@ class InteractiveMode:
         self.compactionQueuedMessages = []
         self.updatePendingMessagesDisplay()
 
-        # MISAKA fork: a skill's preparation can outlast even a compaction retry, so a failure restores only the
-        # messages the session has not accepted yet: already accepted steering and follow-ups are never cleared, and
-        # a prompt that reached its preflight acceptance is never sent twice. pi clears the session queue and restores
-        # every message.
         pending = list(queuedMessages)
         restored = False
         promptTask: asyncio.Task[Any] | None = None
@@ -4810,7 +4662,6 @@ class InteractiveMode:
             if self.isExtensionCommand(message["text"]):
                 await self.session.prompt(message["text"])
             elif self.isCorePromptCommand(message["text"]) or (not forceQueue and not self.session.isStreaming):
-                # MISAKA fork: prompt() decides whether to queue or start once the skill is prepared.
                 await self.session.prompt(
                     message["text"],
                     {"streamingBehavior": message["mode"], "preflightResult": lambda _disposition: accepted(message)},
@@ -4879,8 +4730,6 @@ class InteractiveMode:
                         preflight.set_result(False)
 
             promptTask = spawn(promptFirst(), self._backgroundTasks)
-            # MISAKA fork: later messages wait until the first prompt is accepted, so its failure cannot restore
-            # messages they already sent.
             if not await asyncio.shield(preflight):
                 return
 
@@ -5072,7 +4921,6 @@ class InteractiveMode:
                     autoResizeImages=self.settingsManager.getImageAutoResize(),
                     blockImages=self.settingsManager.getBlockImages(),
                     enableSkillCommands=self.settingsManager.getEnableSkillCommands(),
-                    # MISAKA fork: the codemode switch of each kind of agent (`roles.<kind>.codemode`).
                     codemode={roleType: self.settingsManager.getRoleCodemode(roleType) for roleType in ROLE_TYPES},
                     steeringMode=self.session.steeringMode,
                     followUpMode=self.session.followUpMode,
@@ -5083,7 +4931,6 @@ class InteractiveMode:
                     thinkingLevel=self.settingsManager.getDefaultThinkingLevel() or DEFAULT_THINKING_LEVEL,
                     availableThinkingLevels=[*THINKING_LEVEL_OPTIONS],
                     modelThinkingLevels=self.settingsManager.getAllModelThinkingLevels(),
-                    # MISAKA fork (D11): without a saved selection, the built-in theme matching the terminal.
                     currentTheme=self.themeController.getThemeSelection() or self.themeController.resolveThemeName(),
                     terminalTheme=self.themeController.getTerminalTheme(),
                     availableThemes=getAvailableThemes(),
@@ -5102,7 +4949,6 @@ class InteractiveMode:
                     quietStartup=self.settingsManager.getQuietStartup(),
                     clearOnShrink=self.settingsManager.getClearOnShrink(),
                     showTerminalProgress=self.settingsManager.getShowTerminalProgress(),
-                    # MISAKA fork (D1): no `tuiMode` or fullscreen settings.
                     warnings=self.settingsManager.getWarnings(),
                 ),
                 SettingsCallbacks(
@@ -5119,8 +4965,6 @@ class InteractiveMode:
                     onSessionShareDestinationChange=onSessionShareDestinationChange,
                     onHttpIdleTimeoutMsChange=onHttpIdleTimeoutMsChange,
                     onCacheWarmingModeChange=onCacheWarmingModeChange,
-                    # MISAKA fork: the panel's thinking level row saves the default (this agent's own in a Last Order
-                    # or Sister window), like every other row of the panel.
                     onThinkingLevelChange=lambda level: self.selectThinkingLevel(level, True),
                     onModelThinkingLevelChange=onModelThinkingLevelChange,
                     onModelThinkingLevelRemove=onModelThinkingLevelRemove,
@@ -5154,11 +4998,8 @@ class InteractiveMode:
         self.showSelector(create)
 
     def handleThinkingCommand(self, searchTerm: str | None = None) -> None:
-        # MISAKA fork: a model or thinking level switch waits for a running compaction.
         if self._refuseSwitchDuringCompaction("thinking level"):
             return
-        # MISAKA fork: `/thinking --default [level]` also saves the level as the startup default (and `--default`
-        # alone opens the selector in that mode).
         parsed = parse_default_flag_args("thinking", searchTerm)
         if parsed.error:
             self.showError(parsed.error)
@@ -5179,8 +5020,6 @@ class InteractiveMode:
 
     def selectThinkingLevel(self, level: ThinkingLevel, persist: bool) -> None:
         try:
-            # MISAKA fork: the default is saved through the settings first, which in a Last Order or Sister window
-            # is the agent's own role file; a role file that refuses the write leaves the session level as it was.
             if persist:
                 try:
                     self.settingsManager.setDefaultThinkingLevel(level)
@@ -5190,7 +5029,6 @@ class InteractiveMode:
             self.session.setThinkingLevel(level)
             self.footer.invalidate()
             self.updateEditorBorderColor()
-            # MISAKA fork: an agent's own default names itself.
             whose = " for this agent" if self.settingsManager.getModelProfile() else ""
             self.showStatus(f"Default thinking level{whose}: {level}" if persist else f"Thinking level: {level}")
         except Exception as error:  # noqa: BLE001 - shown to the user
@@ -5209,7 +5047,6 @@ class InteractiveMode:
             selector = ThinkingSelectorComponent(
                 self.session.thinkingLevel or DEFAULT_THINKING_LEVEL,
                 self.session.getAvailableThinkingLevels(),
-                # MISAKA fork: `/thinking --default` opens the selector in save-as-default mode.
                 lambda level: selectLevel(level, persist),
                 onCancel,
                 lambda level: selectLevel(level, True),
@@ -5220,7 +5057,6 @@ class InteractiveMode:
         self.showSelector(create)
 
     async def handleModelCommand(self, searchTerm: str | None = None) -> None:
-        # MISAKA fork: a model or thinking level switch waits for a running compaction.
         if self._refuseSwitchDuringCompaction("model"):
             return
         if not searchTerm:
@@ -5386,7 +5222,6 @@ class InteractiveMode:
                 self.ui,
                 self.session.model,
                 self.session.modelRuntime,
-                # MISAKA fork: the session keeps its scoped models as dicts.
                 [
                     ScopedModelItem(model=read_field(scoped, "model"), thinkingLevel=read_field(scoped, "thinkingLevel"))
                     for scoped in self.session.scopedModels
@@ -5747,9 +5582,6 @@ class InteractiveMode:
                     signal,
                 )
 
-            # MISAKA fork: every window keeps its sessions in a store of its own (Last Order's, a Sister's, a DM's),
-            # so the all-sessions tab lists that store's root, as `misaka chat -r` does; the engine's default root
-            # would show another window's sessions or none.
             def allSessionsLoader(onProgress: Any = None, signal: Any = None) -> Any:
                 return SessionManager.listAll(sessions_root_of(self.sessionManager.getSessionDir()), onProgress, signal)
 
@@ -5869,9 +5701,6 @@ class InteractiveMode:
             for provider in self.getLoginProviderOptions()
             if provider.id.lower() == normalizedProviderRef or provider.name.lower() == normalizedProviderRef
         ]
-
-    # MISAKA fork: `/login PROVIDER --account NAME` stores a named credential record, so the login methods below
-    # carry the account through to `loginProvider`.
 
     async def handleLoginCommand(self, providerRef: str | None = None) -> None:
         if not providerRef:
@@ -6136,7 +5965,6 @@ class InteractiveMode:
     ) -> None:
         actionLabel = f"Logged in to {providerName}" if authType == "oauth" else f"Saved API key for {providerName}"
 
-        # MISAKA fork: a named account record leaves the main-model credentials and the session model alone.
         if account is not None:
             self.showStatus(
                 f"{actionLabel} (account: {account}). Saved to {get_auth_path()}; main-model credentials unchanged."
@@ -6144,9 +5972,6 @@ class InteractiveMode:
             return
 
         session = self.session
-        # MISAKA fork: pi adopts the new provider's model only on the `unknown/unknown` sentinel, its one modelless
-        # state. A MISAKA session without a saved default starts on a catalogue pair nothing can call, so a session
-        # whose model is not available counts as modelless too.
         needsModel = isUnknownModel(previousModel) or not any(
             model.provider == read_field(previousModel, "provider") and model.id == read_field(previousModel, "id")
             for model in session.modelRuntime.getAvailableSnapshot()
@@ -6171,8 +5996,6 @@ class InteractiveMode:
                 # mode to the built-in extension.
                 if providerId == "llama.cpp":
                     selectionError = llamaCppPostLoginGuidance(actionLabel, len(providerModels))
-                # MISAKA fork: a provider defined in models.json has no built-in default, and its first available
-                # model serves the person who just configured their own gateway better than an error.
                 elif len(providerModels) == 0:
                     selectionError = (
                         f"{actionLabel}, but no models are available for that provider. Use /model to select a model."
@@ -6278,7 +6101,6 @@ class InteractiveMode:
         *,
         account: str | None = None,
     ) -> None:
-        # MISAKA fork: Bedrock signs in through AWS profiles, which have no named records.
         if providerId == "amazon-bedrock" and account is not None:
             self.showError("Bedrock uses AWS profiles rather than named API-key records")
             return
@@ -6291,7 +6113,6 @@ class InteractiveMode:
         dialog = LoginDialogComponent(self.ui, providerId, onComplete, providerName)
 
         if providerId == "amazon-bedrock":
-            # MISAKA fork: no "See: providers.md" lines (MISAKA ships no providers.md).
             dialog.showDetails(
                 [theme.fg("text", "You can also use an AWS profile, IAM keys, or role-based credentials.")]
             )
@@ -6377,7 +6198,6 @@ class InteractiveMode:
             return await response
         if signal_aborted(signal):
             raise RuntimeError("Login cancelled")
-        # MISAKA fork: `raceWithAbortSignal` stands in for the race against an abort listener.
         try:
             return await raceWithAbortSignal(response, signal)
         except RuntimeError as error:
@@ -6416,7 +6236,6 @@ class InteractiveMode:
                     prompt=lambda prompt: self.showAuthPrompt(dialog, prompt, providerId),
                     notify=lambda event: self.notifyAuthDialog(dialog, event),
                 ),
-                # MISAKA fork: MISAKA introduces itself by its own name (OpenAI's agent name hint, Codex originator).
                 LoginOptions(getDeviceId=lambda: self.settingsManager.getOrCreateDeviceId(), agentName=CLIENT_NAME),
                 credentialId=oauth_account_key(providerId, account) if account is not None else None,
             )
@@ -6464,9 +6283,6 @@ class InteractiveMode:
     def offerRadiusMcpServer(self, providerId: str, providerName: str) -> None:
         """Offer to point the Radius MCP server in the global mcp.json at the Radius login, adding the server
         when missing. Nothing is asked when a global server already uses this login."""
-        # MISAKA fork: the one module outside the bundled extensions that imports one, by the owner's decision
-        # (2026-10-12) to follow upstream here; imported on use, so a session that never logs in to Radius
-        # does not load it.
         from misaka.extensions.mcp.config import addMcpServerConfig, loadMcpConfig
 
         mcpPath = os.path.join(get_agent_dir(), "mcp.json")
@@ -6563,7 +6379,6 @@ class InteractiveMode:
         self.editorContainer.addChild(reloadBox)
         self.ui.setFocus(reloadBox)
         self.ui.requestRender(True)
-        # MISAKA fork: one turn of the event loop stands in for `process.nextTick`.
         await asyncio.sleep(0)
 
         def dismissReloadBox(editor: Any) -> None:
@@ -6677,7 +6492,6 @@ class InteractiveMode:
                 self.showStatus("Import cancelled")
                 return
             self.showStatus(f"Session imported from: {inputPath}")
-        # MISAKA fork: a file that is not a session is reported like a missing one, not as a fatal error.
         except (SessionImportFileNotFoundError, InvalidSessionFileError) as error:
             self.showError(f"Failed to import session: {errorMessage(error)}")
         except Exception as error:  # noqa: BLE001 - fatal, as upstream
@@ -6695,10 +6509,7 @@ class InteractiveMode:
             )
         )
 
-    # MISAKA fork: no `handleBugCommand` (no `/bug`).
-
     async def handleCopyCommand(self, options: dict[str, Any] | None = None) -> None:
-        # MISAKA fork (D1): copying the selection and flashing the confirmation belong to the fullscreen renderer.
         text = self.session.getLastAssistantText()
         if not text:
             self.showError("No agent messages to copy yet.")
@@ -6753,7 +6564,6 @@ class InteractiveMode:
         selectedModelKey = f"{read_field(model, 'provider')}/{read_field(model, 'id')}"
 
         def localeString(value: float) -> str:
-            # MISAKA fork: `toLocaleString()` in the en-US form: digits grouped, at most three decimals.
             return f"{value:,.3f}".rstrip("0").rstrip(".")
 
         def renderInfo() -> str:
@@ -6824,8 +6634,6 @@ class InteractiveMode:
         self.chatContainer.addChild(ThemedText(renderInfo, 1, 0))
         self.ui.requestRender()
 
-    # MISAKA fork: no `handleChangelogCommand` (no changelog ships).
-
     def getAppKeyDisplay(self, action: str) -> str:
         """Get capitalized display string for an app keybinding action."""
         return keyDisplayText(action)
@@ -6878,8 +6686,6 @@ class InteractiveMode:
         dequeue = self.getAppKeyDisplay("app.message.dequeue")
         pasteImage = self.getAppKeyDisplay("app.clipboard.pasteImage")
 
-        # MISAKA fork: "Copy last assistant message" (selections belong to the fullscreen renderer, D1), and copied
-        # files paste on Windows as well.
         hotkeys = f"""
 **Navigation**
 | Key | Action |
@@ -6963,7 +6769,6 @@ class InteractiveMode:
             self.ui.requestRender()
             return True
         except ContextCarryUnsupportedError as error:
-            # MISAKA fork: the context engine refused the carry-over; the current session is intact.
             self.showError(errorMessage(error))
             return False
         except Exception as error:  # noqa: BLE001 - fatal, as upstream
@@ -7009,7 +6814,6 @@ class InteractiveMode:
         allLines = self.ui.render(width)
 
         def jsonDefault(value: Any) -> Any:
-            # MISAKA fork: messages are dataclasses, which `json.dumps` cannot write by itself.
             if is_dataclass(value) and not isinstance(value, type):
                 return asdict(value)
             return getattr(value, "__dict__", None) or str(value)
@@ -7022,8 +6826,6 @@ class InteractiveMode:
                 f"Total lines: {len(allLines)}",
                 "",
                 "=== All rendered lines with visible widths ===",
-                # MISAKA fork: the lines without their escape sequences, so the dump stays readable: since 1.2 a
-                # rendered line also carries the fake cursor's APC markers.
                 *[
                     f"[{idx}] (w={visibleWidth(line)}) {jsonStringify(stripTerminalSequences(line))}"
                     for idx, line in enumerate(allLines)
@@ -7035,7 +6837,6 @@ class InteractiveMode:
             ]
         )
 
-        # MISAKA fork: the dump carries the whole conversation, so it is written the way auth.json is.
         os.makedirs(os.path.dirname(debugLogPath), mode=0o700, exist_ok=True)
         with open(debugLogPath, "w", encoding="utf-8") as file:
             file.write(debugData)
@@ -7047,8 +6848,6 @@ class InteractiveMode:
             ThemedText(lambda: f"{theme.fg('accent', '✓ Debug log written')}\n{theme.fg('muted', debugLogPath)}", 1, 1)
         )
         self.ui.requestRender()
-
-    # MISAKA fork: no `handleArminSaysHi` or `handleDementedDelves` (easter eggs).
 
     async def handleBashCommand(self, command: str, excludeFromContext: bool = False) -> None:
         extensionRunner = self.session.extensionRunner
@@ -7146,14 +6945,11 @@ class InteractiveMode:
             pass
 
     def stop(self) -> None:
-        # MISAKA fork (D1): no fullscreen exit output to choose.
         self.disposeActiveSelector()
-        # MISAKA fork: cancels the extension dialog waiting for its turn as well.
         self._resetExtensionPrompts()
         if self.settingsManager.getShowTerminalProgress():
             self.ui.terminal.setProgress(False)
         self.clearStatusIndicator()
-        # MISAKA fork (D11): no theme auto-sync to disable.
         self.clearExtensionTerminalInputListeners()
         self.footer.dispose()
         self.footerDataProvider.dispose()
@@ -7163,8 +6959,6 @@ class InteractiveMode:
             self.stopInteractiveTui()
             self.isInitialized = False
         self.unregisterSignalHandlers()
-
-    # MISAKA fork: Python helpers.
 
     def _schedule_task(self, awaitable: Coroutine[Any, Any, Any]) -> None:
         """MISAKA fork: ``void promise`` -- the coroutine starts at once, as a JavaScript async call does, and is held

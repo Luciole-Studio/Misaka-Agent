@@ -20,13 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ENV_HOME = "MISAKA_HOME"
-# The default home's name under $HOME, and the name of a project's own config directory.
 DIR_NAME = ".misaka"
-# Sub-agent type definitions, under this one name at every level: the home, a role, a project.
 SUBAGENTS_DIR = "subagents"
-# sockaddr_un.sun_path: 104 bytes on the BSDs and macOS, 108 on Linux, terminator included. On
-# Windows the socket is a named pipe named after the path (utils/local_socket), and a pipe name
-# is at most 256 characters, the pipe namespace prefix included.
 _SOCKET_PATH_MAX = 103 if sys.platform == "darwin" else 247 if sys.platform == "win32" else 107
 
 
@@ -49,19 +44,11 @@ class Entry:
 
 
 LAYOUT: dict[str, Entry] = {
-    # What you edit sits shallow at the root. It is also what pi calls the agent directory:
-    # its own joins (settings, models, keybindings, themes, prompts, extensions) land here.
-    # Every other setting is a section of settings.json (allies, skills, moa, web), read through
-    # SettingsManager; a role's settings.json holds what ROLE_SETTING_KEYS lists. An extension reads its own
-    # section the same way and keeps its files under plugins/<name>/: nothing here names one.
     "agent": Entry("", "edit", 0o700),
     "settings": Entry("settings.json", "edit"),
     "models": Entry("models.json", "edit"),
     "keybindings": Entry("keybindings.json", "edit"),
-    # MCP servers (`mcpServers`): the home's are global, read by every role; a role directory's
-    # (`profiles.mcp_dir`) overlays them for her. A trusted project may add its own.
     "mcp_config": Entry("mcp.json", "edit"),
-    # The shared layer: what every role sees. A role directory overlays it, first match winning.
     "shared_soul": Entry("MISAKA.md", "edit"),
     "shared_skills": Entry("skills", "edit"),
     "skill_bundles": Entry("skill-bundles", "edit"),
@@ -71,19 +58,13 @@ LAYOUT: dict[str, Entry] = {
     "subagents": Entry(SUBAGENTS_DIR, "edit"),
     "roles_root": Entry("profiles", "edit"),
     "profiles_root": Entry("profiles/sisters", "edit"),
-    # Environment for code that is not MISAKA (a plugin's knobs, an SDK's variables, the keys a
-    # skill's script expects); a role may overlay it. Loaded by ``config.env`` at process start.
-    # The user edits it, so it sits at the root like settings.json -- but owner-only, as it holds keys.
     "env": Entry(".env", "edit", 0o600),
     "credentials": Entry("credentials", "secret", 0o700),
     "auth": Entry("credentials/auth.json", "secret", 0o600),
     "vault": Entry("credentials/vault", "secret", 0o700),
-    # MCP sign-ins, beside the `mcp.json` that defines the server: the home's for global servers, a
-    # role directory's for hers.
     "mcp_auth": Entry("credentials/mcp-auth.json", "secret", 0o600),
     "db": Entry("state/board.db", "state"),
     "messages_db": Entry("state/messages.db", "state"),
-    # The panel's spaces by durable id -> folder and name, for every space a session belongs to.
     "spaces": Entry("state/spaces.json", "state"),
     "trust": Entry("state/trust.json", "state"),
     "models_store": Entry("state/models-store.json", "state"),
@@ -97,7 +78,6 @@ LAYOUT: dict[str, Entry] = {
     "skills_state": Entry("state/skills", "state"),
     "skills_pending": Entry("state/skills-pending", "state"),
     "web_evidence": Entry("state/web-evidence", "state"),
-    # What `misaka update` copies before it changes anything (``cli.backup``); owner-only when made.
     "backups": Entry("state/backups", "state"),
     "shared": Entry("shared", "shared"),
     "bin": Entry("cache/bin", "cache"),
@@ -115,7 +95,6 @@ LAYOUT: dict[str, Entry] = {
     "warnings_log": Entry("logs/misaka-warnings.log", "logs"),
     "panel_crash_log": Entry("logs/panel-crash.log", "logs"),
     "stall_logs": Entry("logs/stalls", "logs"),
-    # Messages MCP servers send with `notifications/message`, one file for every process (the MCP extension).
     "mcp_log": Entry("logs/mcp/mcp.log", "logs"),
     "web_logs": Entry("logs/web", "logs"),
     "moa_traces": Entry("logs/moa-traces", "logs"),
@@ -149,7 +128,7 @@ def path(name: str, role_dir: str | os.PathLike[str] | None = None) -> Path:
     target = home() / LAYOUT[name].rel
     if target.suffix == ".sock" and len(os.fsencode(target)) > _SOCKET_PATH_MAX:
         tag = hashlib.sha256(os.fsencode(home())).hexdigest()[:8]
-        if sys.platform == "win32":        # the temp directory is already this user's alone
+        if sys.platform == "win32":
             return Path(tempfile.gettempdir()) / f"misaka-{tag}" / target.name
         return Path("/tmp") / f"misaka-{os.geteuid()}-{tag}" / target.name  # windows-footgun: ok - POSIX branch
     return target
@@ -178,9 +157,6 @@ def private_dir(directory: str | os.PathLike[str]) -> None:
     os.makedirs(directory, mode=0o700, exist_ok=True)
     info = os.lstat(directory)
     if sys.platform == "win32":
-        # Windows has no owner or mode bits to check here: the directory sits in the user's
-        # profile, and the pipe behind the socket path carries an owner-only DACL of its own
-        # (herdr ipc.rs: restrict_socket_permissions is a no-op there).
         if not stat.S_ISDIR(info.st_mode):
             raise RuntimeError(f"{directory} is not a directory; refusing to use it.")
         return
@@ -213,7 +189,7 @@ def project_dir(directory: str | os.PathLike[str]) -> Path | None:
 
 def strays() -> list[str]:
     """Top-level names in the home that no row of the table accounts for."""
-    known = {entry.rel.split("/", 1)[0] for entry in LAYOUT.values()} | {".DS_Store"}   # Finder's, not ours
+    known = {entry.rel.split("/", 1)[0] for entry in LAYOUT.values()} | {".DS_Store"}
     sidecars = (".lock", "-wal", "-shm", "-journal")
     try:
         names = os.listdir(home())
@@ -223,11 +199,8 @@ def strays() -> list[str]:
                   and not any(name.endswith(tail) and name[:-len(tail)] in known for tail in sidecars))
 
 
-# The file systems MISAKA's users run fold case (APFS, NTFS): ``~/.MISAKA/Credentials`` is
-# ``~/.misaka/credentials`` there, and a check that compared names exactly let the variant through
-# (0.18.9 sweep). Linux's do not, and there a variant is another file.
 FOLDS_CASE = sys.platform in ("darwin", "win32")
-FOLDS_UNICODE = sys.platform == "darwin"     # APFS: one name for its NFC and NFD spellings; NTFS: two
+FOLDS_UNICODE = sys.platform == "darwin"
 
 
 def fold(text: str) -> str:

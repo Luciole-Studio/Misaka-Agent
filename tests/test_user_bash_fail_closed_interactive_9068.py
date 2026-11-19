@@ -44,7 +44,6 @@ async def test_fails_closed_when_a_handler_returns_an_empty_result(monkeypatch, 
             outputPad=1,
             showError=Mock(),
             updateEditorBorderColor=Mock(),
-            # MISAKA fork: the editor calls `onSubmit` synchronously, so the handler runs as a task.
             _schedule_task=lambda coroutine: tasks.append(startTask(coroutine)),
         )
         context.handleBashCommand = MethodType(InteractiveMode.handleBashCommand, context)

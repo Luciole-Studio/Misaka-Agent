@@ -38,7 +38,7 @@ SCHEMA = {
     },
 }
 ROOT = "N0"
-BIND = "reading-bind"      # the conversation entry that makes it a reading's leader (window, cli.chat)
+BIND = "reading-bind"
 LEASE_SECONDS = 300
 RENEW_SECONDS = 60
 
@@ -82,8 +82,6 @@ def new_run_id(con, question, parent):
     from misaka.core import graph
 
     stamp = datetime.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
-    # No trailing dot or space either: Windows drops them from a folder's name, and the reading's
-    # files would then go to a folder that is not there.
     slug = re.sub(r'[\\/:*?"<>|\s]+', "-", question).strip("-. ")[:24].strip("-. ")
     base = f"{stamp}-{slug or 'reading'}"
     run_id, n = base, 1
@@ -113,7 +111,7 @@ def _dead(holder):
     return not psutil.pid_exists(int(parts[2]))
 
 
-_LIVE = set()      # the lease tokens this process's operations and changes hold right now
+_LIVE = set()
 
 
 def _stale(holder):
@@ -142,8 +140,6 @@ def _leased(con, gid, run_id):
         try:
             graph.release(con, gid, token)
         except sqlite3.Error:
-            # What the block did stands; a lease the board was too busy to take back is stale to
-            # this process at once (``_stale``) and runs out for the others (LEASE_SECONDS).
             pass
 
 
@@ -221,8 +217,6 @@ class Run:
     def sessions_directory(self):
         return os.path.join(self.directory, "sessions")
 
-    # -- writing ---------------------------------------------------------------------------
-
     def commit(self, token, op, payload, apply):
         """One journal entry ``op``: ``apply(change)`` makes it, the schema checks it, all or nothing.
         A change the graph refuses (its schema, a lost lease, a board too busy to write) is the
@@ -245,8 +239,6 @@ class Run:
         process's operation holds it, the reading is busy."""
         from misaka.core import graph
 
-        # The lease is what excludes others, so no board transaction is held open meanwhile: what
-        # is done under it (writing the reading's files) must not keep every other board writer waiting.
         try:
             holder = graph.get(self.con, self.gid).lease_token
         except sqlite3.Error as error:
@@ -276,8 +268,6 @@ class Run:
 
             async def keep():
                 nonlocal lost
-                # A renewal the board is too busy for is tried again: the lease is lost only once
-                # another holder has it, and the commit refuses a writer without it either way.
                 while True:
                     await asyncio.sleep(RENEW_SECONDS)
                     try:
@@ -293,8 +283,6 @@ class Run:
             try:
                 yield token
             except asyncio.CancelledError:
-                # As ``asyncio.timeout``: the cancellation made here is taken back, and becomes the
-                # reason; one the caller made as well (a stop) stands.
                 if lost and owner.uncancel() <= cancelling:
                     raise ReadingError(f"Reading {self.id} was taken over while this operation ran; it was "
                                        "stopped and nothing of it was recorded.") from None
@@ -320,7 +308,7 @@ def create(con, run_id, *, question, intent, workspace, directory, sources):
         change.add_node("reading", reading_attrs(question, None, [{"doc_id": s["doc_id"]} for s in sources], at),
                         id=ROOT)
 
-    with write_txn(con):                      # the graph and its first entry, or neither
+    with write_txn(con):
         graph.create(con, GRAPH_KIND, SCHEMA, id=graph_id(run_id))
         run = Run(con, run_id)
         run.write("open", {"question": question, "sources": [s["doc_id"] for s in sources]}, apply)

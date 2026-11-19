@@ -32,8 +32,6 @@ def detectInstallChange(metadataPath: Path | None = None) -> InstallChange | Non
     package on the path.
     """
     path = metadataPath if metadataPath is not None else _startupMetadataPath
-    # MISAKA fork: a release archive keeps every version in a directory of its own, so replacing it does not
-    # affect this process (pi: the Bun binary embeds its code).
     if bundle_root() is not None or not path:
         return None
     try:

@@ -23,8 +23,6 @@ def parseFrontmatter(content: str) -> ParsedFrontmatter[dict[str, Any]]:
         return ParsedFrontmatter(frontmatter={}, body=body)
 
     parsed = _yaml_load(yaml_string)
-    # MISAKA fork: YAML that is not a mapping reads as no frontmatter (pi returns the parsed value as is); every
-    # caller reads it as a mapping.
     if not isinstance(parsed, dict):
         parsed = {}
     return ParsedFrontmatter(frontmatter=parsed, body=body)
@@ -43,8 +41,6 @@ def extractFrontmatter(content: str) -> tuple[str | None, str]:
     if end_index == -1:
         return None, normalized
 
-    # MISAKA fork: the YAML keeps its last line break (pi slices it off); the `yaml` package ends a `|` block at the
-    # end of input with a line break, ruamel only with one in the input.
     return normalized[4 : end_index + 1], jsTrim(normalized[end_index + 4 :])
 
 

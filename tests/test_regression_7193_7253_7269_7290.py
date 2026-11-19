@@ -175,10 +175,7 @@ def test_stops_parsing_options_while_retaining_file_handling():
 
     assert parsed.unknownFlags.get("unknown-flag") == "value"
     assert parsed.provider is None
-    # MISAKA fork: Args keeps `continue` as `continue_`, a bool that defaults to False where pi's is undefined.
     assert parsed.continue_ is False
-    # MISAKA fork: past `--` an `@path` argument stays message text (card contracts are passed there verbatim),
-    # where pi reads it as a file (`messages` without it, `fileArgs == ["prompt.md"]`).
     assert parsed.messages == ["--provider", "openai", "-c", "@prompt.md"]
     assert parsed.fileArgs == []
     assert parsed.diagnostics == []

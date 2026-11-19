@@ -28,8 +28,6 @@ def _xml(path):
                        if name.startswith("ppt/slides/slide") and name.endswith(".xml"))
 
 
-# ---- create ------------------------------------------------------------------------------
-
 def test_create_builds_the_slides_it_was_given(tmp_path):
     path = tmp_path / "deck.pptx"
     outcome = writer.write(str(path), "create", {"slides": [
@@ -89,8 +87,6 @@ def test_a_cjk_font_is_written_where_cjk_text_reads_it(tmp_path):
     assert '<a:ea typeface="SimSun"' in xml or 'a:ea' in xml and "SimSun" in xml
 
 
-# ---- editing -----------------------------------------------------------------------------
-
 def test_add_slide_appends_and_can_be_placed_by_index(tmp_path):
     path = _deck(tmp_path, [{"title": "One"}, {"title": "Three"}])
     writer.write(str(path), "add_slide", {"layout": "title_only", "title": "Two",
@@ -137,8 +133,6 @@ def test_format_text_applies_to_the_matching_runs(tmp_path):
                                                       "bold": True, "font_size": 30})
     assert outcome["ok"]
     out = reader.render(str(path))
-    # A line that is uniform end to end keeps its markers, and the size is stated once in
-    # the shape meta -- see the reader's own tests for why that is not per-run noise.
     assert "**target line**" in out
     assert "30pt" in out
 
@@ -160,7 +154,7 @@ def test_duplicate_slide_carries_its_relationships(tmp_path):
         slide = archive.read("ppt/slides/slide2.xml").decode("utf-8")
     assert "media/" in rels
     for token in slide.split('r:embed="')[1:]:
-        assert token.split('"')[0] in rels          # every reference resolves
+        assert token.split('"')[0] in rels
 
 
 def test_add_table_and_add_chart_reach_the_readout(tmp_path):

@@ -49,9 +49,6 @@ def workerLauncher(options: CodemodeSandboxOptions) -> VmLauncher:
                 releaseWorker()
             raise RuntimeError(f"Failed to start worker: {errorMessage(error)}") from error
         if releaseWorker is not None:
-            # MISAKA fork: released from the worker thread as it ends (upstream: `worker.once("exit", releaseWorker)`).
-            # The "exit" event reaches the host's event loop, which may have closed while a cancelled thread is still
-            # inside a built-in; the reservation would then never be returned.
             worker.threadExited.add_done_callback(lambda _future: releaseWorker())
         worker.on("message", events.message)
         worker.on("error", lambda error: events.failure({

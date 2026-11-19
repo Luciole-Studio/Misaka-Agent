@@ -268,8 +268,6 @@ def streamProxy(model: Model, context: TranscriptContext, options: ProxyStreamOp
             decoder = Utf8Decoder()
             buffer = ""
             sawTerminalEvent = False
-            # MISAKA fork: upstream keeps `partialJson` on the tool-call block; a ToolCall model has no such field,
-            # so the raw argument text lives here, keyed by content index.
             partialJson: dict[int, str] = {}
 
             def processLine(line: str) -> None:
@@ -440,8 +438,6 @@ def _processProxyEvent(
                     if key in ToolCall.model_fields:
                         setattr(content, key, getattr(finalized, key))
                 raw = partialJson.pop(proxyEvent["contentIndex"], None)
-                # MISAKA fork: the server's final arguments win; only an empty object is checked against the streamed
-                # text, so a malformed stream still surfaces as `argumentsError` (as `pi_messages` does).
                 if raw and content.argumentsError is None and not content.arguments:
                     StreamingArgs(raw).finish_into(content)
                 return ToolCallEndEvent(
@@ -452,8 +448,6 @@ def _processProxyEvent(
             return None
 
         case "done":
-            # MISAKA fork: a tool call the server never ended keeps a streaming preview, which is not an executable
-            # argument set; it gets the strict final parse (and an error receipt when the JSON is incomplete).
             for index, raw in partialJson.items():
                 content = _contentAt(partial, index)
                 if raw and content is not None and content.type == "toolCall":

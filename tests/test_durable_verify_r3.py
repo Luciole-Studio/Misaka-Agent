@@ -49,9 +49,6 @@ def fsevents() -> Any:
     return _FSEvents.get()
 
 
-# --- R3-N1: one stream per loop; no process-wide cap of 512 streams ------------------------------------------------
-
-
 @macOS
 async def test_r3_n1_two_hundred_concurrent_watchers_share_one_stream_and_all_report_a_change() -> None:
     from misaka.durable.env.node_watch import NodeFileWatcher
@@ -69,7 +66,6 @@ async def test_r3_n1_two_hundred_concurrent_watchers_share_one_stream_and_all_re
         assert [watcher.mode for watcher, _, _ in watchers] == ["native"] * 200
         assert not any(change.get("overflow") for _, changes, _ in watchers for change in changes)
         assert await until(lambda: fsevents().openStreams() == 1)
-        # Past macOS's settle rescans: only the stream's own events can report the writes now.
         await asyncio.sleep(1)
         for _, changes, target in watchers:
             changes.clear()
@@ -81,9 +77,6 @@ async def test_r3_n1_two_hundred_concurrent_watchers_share_one_stream_and_all_re
     assert await until(lambda: fsevents().openStreams() == 0)
 
 
-# --- R3-N2: a forked child does not touch the parent's streams --------------------------------------------------
-
-
 @macOS
 async def test_r3_n2_a_forked_child_exits_normally_with_a_stream_open_in_its_parent() -> None:
     from misaka.durable.env.node_watch import _FSEvents, _fsWatch
@@ -91,22 +84,18 @@ async def test_r3_n2_a_forked_child_exits_normally_with_a_stream_open_in_its_par
     directory = os.path.realpath(tempfile.mkdtemp(prefix="misaka-r3-fork-"))
     watcher = _fsWatch(directory, False, lambda name: None, lambda: None)
     try:
-        # The stream starts on the dispatch queue.
         await asyncio.sleep(0.3)
         import warnings
 
         parent = _FSEvents.instance
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)  # fork() in a multi-threaded process
+            warnings.simplefilter("ignore", DeprecationWarning)
             pid = os.fork()  # windows-footgun: ok - the test runs on macOS only
         if pid == 0:
             code = 3
             try:
-                # What a normal exit runs for the watcher (not the other exit handlers: they would clean up the
-                # parent's files). It must not reach the parent's CoreFoundation objects, which crashed the child.
                 assert parent is not None
                 parent._closeAll()
-                # libuv watches a directory with kqueue in such a child; nothing reaches CoreFoundation again.
                 code = 0 if _FSEvents.forked and _FSEvents.instance is None else 4
             finally:
                 os._exit(code)
@@ -114,9 +103,6 @@ async def test_r3_n2_a_forked_child_exits_normally_with_a_stream_open_in_its_par
         assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, status
     finally:
         watcher.close()
-
-
-# --- R3-N3: a loop closed without closing its watchers stops watching -------------------------------------------
 
 
 @macOS
@@ -131,15 +117,11 @@ def test_r3_n3_a_watch_left_open_when_its_loop_closed_releases_the_stream() -> N
 
     before = fsevents().openStreams()
     asyncio.run(leave())
-    # The next event for it finds its loop closed.
     writeFile(os.path.join(directory, "f"), "x")
     deadline = time.monotonic() + 5
     while fsevents().openStreams() > before and time.monotonic() < deadline:
         time.sleep(0.02)
     assert fsevents().openStreams() == before
-
-
-# --- R3-N4 / R3-N5: names as libuv gives them ----------------------------------------------------------------------
 
 
 @macOS
@@ -192,9 +174,6 @@ async def test_r3_n5_a_watched_path_spelled_unlike_the_disk_still_names_entries(
         watcher.close()
 
 
-# --- R3-N6: a wait given up while queued on the line registers nothing ---------------------------------------------
-
-
 async def test_r3_n6_polling_wait_for_task_with_a_zero_timeout_holds_no_waiter() -> None:
     setup = chatSetup()
     started, release = asyncio.Event(), asyncio.Event()
@@ -223,9 +202,6 @@ async def test_r3_n6_polling_wait_for_task_with_a_zero_timeout_holds_no_waiter()
     release.set()
     await asyncio.wait_for(submission.wait(context), 10)
     await opened.harness.close(context)
-
-
-# --- IMG-B04: Photon's own bound (image 0.24.9's 512 MiB decode limit, then its WebAssembly memory) -----------------
 
 
 def _chunk(kind: bytes, data: bytes) -> bytes:
@@ -261,7 +237,6 @@ PALETTE, TRANSPARENT = _chunk(b"PLTE", b"\0\0\0"), _chunk(b"tRNS", b"\0")
 
 
 BOUNDS = [
-        # Measured on @silvia-odwyer/photon 0.3.3 under node 26.
         ("rgba16 at 512 MiB", _pngHeader(8192, 8192, 16, 6), True),
         ("rgba16 over", _pngHeader(8192, 8193, 16, 6), False),
         ("rgb8 over", _pngHeader(13378, 13377, 8, 2), False),
@@ -269,8 +244,6 @@ BOUNDS = [
         ("palette with tRNS: RGBA, over", _pngHeader(11586, 11585, 8, 3, PALETTE, TRANSPARENT), False),
         ("grey with tRNS: grey and alpha, over", _pngHeader(16385, 16384, 8, 0, _chunk(b"tRNS", b"\0\0")), False),
         ("16-bit grey with tRNS, over", _pngHeader(11586, 11585, 16, 0, _chunk(b"tRNS", b"\0\0")), False),
-        # Derived, not measured (more than 4 GB): 8-bit grey passes the decode limit, then must fit 4 GiB of WebAssembly
-        # memory with its RGBA copy and that copy's copy.
         ("rgb8 at the limit", _pngHeader(13377, 13377, 8, 2), True),
         ("grey8 that fits WebAssembly memory", _pngHeader(20000, 20000, 8, 0), True),
         ("grey8 under the decode limit but over the memory", _pngHeader(23170, 23170, 8, 0), False),
@@ -297,7 +270,6 @@ def test_img_b04_photon_decodes_exactly_what_image_0_24_and_its_memory_allow(lab
 async def test_img_b04_a_palette_png_with_transparency_over_photons_limit_is_not_prepared() -> None:
     from misaka.durable.images import createPhotonImages
 
-    # 11586 x 11585 decodes to RGBA (4 bytes a pixel) because of tRNS: 537 MB, over image 0.24's 512 MiB.
     compressor = zlib.compressobj(9)
     row = b"\0" * (11586 + 1)
     pixels = b"".join(compressor.compress(row) for _ in range(11585)) + compressor.flush()
@@ -306,7 +278,6 @@ async def test_img_b04_a_palette_png_with_transparency_over_photons_limit_is_not
     started = time.perf_counter()
     limits = {"maxWidth": 2000, "maxHeight": 2000, "maxBytes": 4_718_592}
     assert await createPhotonImages().prepare(data, "image/png", limits) is None  # type: ignore[arg-type]
-    # Refused from the header, before any pixel is decoded.
     assert time.perf_counter() - started < 2
 
 

@@ -48,9 +48,9 @@ from misaka.core.network.ally.presets import START_SECONDS
 from misaka.core.network.ally.transcript import Transcript
 from misaka.core.platform import tasks as db
 
-PROGRESS_SECONDS = 60       # how often a busy ally stamps progress on its card (as a Sister does)
-UNSETTLED_GRACE_SECONDS = 30   # how long a card told it is still running may wait with nothing typed or mailed
-CANCEL_SECONDS = 10         # how long a cancelled turn has to end before its agent is stopped
+PROGRESS_SECONDS = 60
+UNSETTLED_GRACE_SECONDS = 30
+CANCEL_SECONDS = 10
 PREVIEW_CHARS = 160
 
 EARLIER = ("This card was worked on before, in a conversation you do not have. It is recorded at `{path}`; "
@@ -96,20 +96,18 @@ class Attempt:
         self.mail = None
         self.client = None
         self.transcript = None
-        self.earlier = None             # the card's transcript from before, when the agent does not have it
+        self.earlier = None
         self.acp_session = None
         self.parts = []
-        self.busy = False               # a turn is running
-        self.replaying = False          # ``session/load`` is replaying history, which is dropped
+        self.busy = False
+        self.replaying = False
         self.stopping = False
-        self.typed = []                 # lines typed in the pane, waiting for the next turn
-        self.wake = asyncio.Event()     # something arrived for an idle session
-        self._progressed = False        # an update came since the last progress stamp
+        self.typed = []
+        self.wake = asyncio.Event()
+        self._progressed = False
         self._midline = False
         self._held = self._nudged = self._continued = False
-        self._idle_ends = False         # the wait after this turn ends the attempt unsettled (``idle``)
-
-    # -- the pane --
+        self._idle_ends = False
 
     def _print(self, text):
         if self.out is not None:
@@ -155,9 +153,7 @@ class Attempt:
         if force:
             await asyncio.sleep(CANCEL_SECONDS)
             if self.busy:
-                await self.client.close()   # the pending prompt fails and the attempt unwinds
-
-    # -- the agent --
+                await self.client.close()
 
     def _update(self, params):
         if self.replaying or params.get("sessionId") != self.acp_session:
@@ -173,7 +169,7 @@ class Attempt:
         elif kind == "tool_call":
             self.transcript.tool_call(update)
             self._print(f"· {update.get('title') or update.get('kind') or 'tool'}")
-            self.transcript.tool_update(update)        # a call reported already finished
+            self.transcript.tool_update(update)
         elif kind == "tool_call_update":
             self.transcript.tool_update(update)
             if update.get("status") == "failed":
@@ -216,7 +212,6 @@ class Attempt:
             raise _Over
         from misaka.core.session_manager import SessionManager
 
-        # The card's transcript goes on in the same file, whichever ACP session writes it.
         session_dir = session_roots.card_session_dir(self.task)
         previous = worker.continue_flags(self.task.get("session_file"), session_dir)
         manager = (SessionManager.open(previous[1]) if previous
@@ -243,7 +238,7 @@ class Attempt:
                         timeout=START_SECONDS)
                     self.acp_session, loaded = self.task["agent_id"], True
                 except AcpRemoteError:
-                    pass                  # the agent no longer has it: a new one, told where the old one is
+                    pass
                 finally:
                     self.replaying = False
             if not loaded:
@@ -262,7 +257,7 @@ class Attempt:
             db.set_runtime(self.con, self.task_id, self.acp_session, manager.getSessionFile(),
                            generation=self.generation, claim_lock=self.claim_lock)
             worker.record_output_baseline(self.con, row)
-        if self.consult is None:           # a consultation changes nothing the claim fences
+        if self.consult is None:
             await asyncio.to_thread(record)
 
         from misaka.core import session_catalog
@@ -272,7 +267,7 @@ class Attempt:
         spec = SessionSpec(profile_dir="", role=self.name, workspace=self.workspace, kind="card",
                            sender=self.name, receive_messages=True, task_id=self.task_id)
         catalog = session_catalog.part(spec)
-        catalog.steer = False               # mail waits for the turn to end; SendMessage says so
+        catalog.steer = False
         self.parts = [catalog, *filter(None, [panel.part(spec)])]
         await self._announce("session_start")
         return loaded
@@ -285,10 +280,8 @@ class Attempt:
         """The catalog record and the pane's state, as a session's own parts publish them."""
         ctx = SimpleNamespace(sessionManager=self.transcript.manager, isIdle=lambda: not self.busy)
         for part in self.parts:
-            with contextlib.suppress(Exception):   # a record or a status ping never stops the card
+            with contextlib.suppress(Exception):
                 await getattr(part, hook)(None, ctx)
-
-    # -- the board --
 
     def _owned(self):
         """The card, its lease renewed, while this attempt still holds it; else None. For a
@@ -353,12 +346,10 @@ class Attempt:
             if not (self._progressed or self.transcript.calls_open):
                 continue
             self._progressed = False
-            with contextlib.suppress(Exception):   # a busy board skips one stamp, not the rest
+            with contextlib.suppress(Exception):
                 if await asyncio.to_thread(self._owned) is None:
                     self.leave()
                     return
-
-    # -- turns --
 
     async def turn(self, text):
         """One ACP turn; returns ``(stopReason, error)``."""
@@ -405,9 +396,8 @@ class Attempt:
             return text
         row = await asyncio.to_thread(self._owned)
         if row is None:
-            raise _Over                   # stopped, parked for input, or reclaimed
+            raise _Over
         if self.consult is not None:
-            # Answered. What the turn changed is declared again (a Sister's _redeclare_if_done).
             from misaka.core.network import dispatch
             if row["status"] == "done":
                 await asyncio.to_thread(dispatch.redeclare, self.con, row)
@@ -502,7 +492,6 @@ def _first_prompt(task, *, loaded, say, earlier):
         return say
     contract = worker.card_prompt(task)
     if task.get("_owner_context"):
-        # A Sister has this in her system prompt; ACP has none, so it opens the conversation.
         from misaka.core.platform import owners
         owner = owners.named(task.get("_owner"))
         if owner is not None:
@@ -521,8 +510,6 @@ async def run_attempt(task, generation, claim_lock, *, db_path, say=None, out=No
     if out is not None:
         loop = asyncio.get_running_loop()
         if sys.platform == "win32":
-            # A Windows event loop takes no signal handlers, and ctrl+c is the one signal a
-            # console program gets: closing the pane's console ends it outright.
             signal.signal(signal.SIGINT, lambda *_: loop.call_soon_threadsafe(attempt.interrupt))
         else:
             loop.add_signal_handler(signal.SIGINT, attempt.interrupt)  # windows-footgun: ok - POSIX branch
@@ -535,7 +522,6 @@ async def run_attempt(task, generation, claim_lock, *, db_path, say=None, out=No
 def _read_lines(loop, deliver):
     """Lines typed in the pane (its terminal is in line mode), each handed to ``deliver``."""
     if sys.platform == "win32":
-        # A console cannot be watched by the event loop: a thread reads its lines.
         def pump():
             for line in sys.stdin:
                 loop.call_soon_threadsafe(deliver, line.rstrip("\r\n"))
@@ -562,7 +548,7 @@ def _read_lines(loop, deliver):
         if lines:
             deliver(b"\n".join(lines).decode("utf-8", errors="replace"))
 
-    with contextlib.suppress(OSError, ValueError):   # no terminal to read (a stdin kqueue refuses)
+    with contextlib.suppress(OSError, ValueError):
         loop.add_reader(fd, ready)
 
 

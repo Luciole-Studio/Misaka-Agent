@@ -18,7 +18,7 @@ def test_a_hand_edited_status_is_put_back_with_a_record(tmp_path, request):
     request.addfinalizer(con.close)
     tid = cards.create(con, str(tmp_path), "T4 crossover", BODY, "10032")
     assert tasks.mark_stopped(con, tid)
-    con.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))       # what Last Order did
+    con.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
     con.commit()
     assert cards.reconcile_one(con, str(tmp_path), tid) is not None
     assert tasks.get(con, tid)["status"] == "stopped"

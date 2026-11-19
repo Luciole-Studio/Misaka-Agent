@@ -13,7 +13,7 @@ from misaka.core.network import dispatch
 from misaka.core.platform import cards, tasks
 from misaka.core.research import runs, workflow
 
-REAL_SETTLE = workflow.settle_done_tasks       # captured before any fixture patches it
+REAL_SETTLE = workflow.settle_done_tasks
 
 
 async def test_an_interrupted_run_registers_what_the_sisters_delivered(root_run, monkeypatch):  # noqa: F811
@@ -28,7 +28,7 @@ async def test_an_interrupted_run_registers_what_the_sisters_delivered(root_run,
     assert dispatch.accept_state(con, tasks.get(con, tid), {"summary": "fixture", "artifacts": [rel]},
                                  generation=task["generation"], claim_lock="fixture")
     assert tasks.get(con, tid)["status"] == "done"
-    assert runs.artifacts(con, run["id"], task_id=tid) == []          # nothing registered until a settle
+    assert runs.artifacts(con, run["id"], task_id=tid) == []
 
     monkeypatch.setattr(workflow, "settle_done_tasks", REAL_SETTLE)
 
@@ -43,4 +43,4 @@ async def test_an_interrupted_run_registers_what_the_sisters_delivered(root_run,
     assert [row["kind"] for row in registered] == ["task_output"]
     assert registered[0]["sha256"] == hashlib.sha256(evidence.read_bytes()).hexdigest()
     assert tasks.latest_payload(con, tid, "research_v2_settled", generation=task["generation"])
-    assert "evidence.md" in result["final"]["content"]              # the partial report lists it
+    assert "evidence.md" in result["final"]["content"]

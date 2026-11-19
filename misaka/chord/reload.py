@@ -269,9 +269,6 @@ class Reload:
             raise
         except BaseException as error:  # every failure rolls back
             await self.rollback()
-            # MISAKA fork: JavaScript cannot cancel a reload, and a caller that stops waiting cannot cancel one here
-            # either (`HostImpl.reload` hands out a shielded view). Its task is cancelled only when the loop shuts down:
-            # the reload then rolls back as a failed one does, and the cancellation goes on.
             if not isRejection(error):
                 raise
             raise reloadError(error)

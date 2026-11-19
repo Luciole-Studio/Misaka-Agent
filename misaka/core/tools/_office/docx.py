@@ -23,11 +23,9 @@ SUFFIXES = frozenset({".docx"})
 _ALIGN = {"left": "LEFT", "center": "CENTER", "centre": "CENTER",
           "right": "RIGHT", "justify": "JUSTIFY"}
 
-# Word's page-number field formats, by the names the tool contract uses.
 _PAGE_FORMATS = {"decimal": "decimal", "roman_lower": "lowerRoman",
                  "roman_upper": "upperRoman", "alpha": "lowerLetter"}
 
-# The colour Word itself uses for a hyperlink.
 _LINK_COLOR = "0563C1"
 
 OPS = ("create", "replace_text", "insert_paragraph", "insert_heading", "insert_table",
@@ -98,10 +96,6 @@ def _apply_runs(paragraph, text):
             run.font.size = Pt(float(spec["size"]))
         if spec.get("font"):
             run.font.name = spec["font"]
-            # python-docx writes only w:ascii and w:hAnsi. CJK characters take their font
-            # from w:eastAsia, so without this ``"font": "SimSun"`` has no effect at all on
-            # Chinese, Japanese or Korean text -- the theme font is used and the document
-            # comes out in something other than what was asked for.
             run._element.rPr.rFonts.set(qn("w:eastAsia"), spec["font"])
 
 
@@ -193,9 +187,6 @@ def _column_widths(table, widths):
         return
     from docx.oxml.ns import qn
     from docx.shared import Inches
-    # The ``autofit`` setter inserts ``w:tblLayout`` where the schema's sequence requires
-    # it, before ``w:tblLook``. Appending the element by hand puts it after, which Word
-    # reports as a corrupt file (LibreOffice is lenient and would hide the mistake).
     table.autofit = False
     columns = len(table.columns)
     twips = []
@@ -210,7 +201,6 @@ def _column_widths(table, widths):
         for index, value in enumerate(twips):
             if value is not None and index < len(grid_columns):
                 grid_columns[index].set(qn("w:w"), str(value))
-    # Iterating rows rather than columns: the column iterator repeats merged cells.
     for row in table.rows:
         for index, value in enumerate(twips):
             if value is not None and index < len(row.cells):
@@ -225,7 +215,6 @@ def _paragraphs(document):
     """
     from docx.oxml.ns import qn
     from docx.text.paragraph import Paragraph
-    # XML order visits merged cells once and includes nested tables/content controls.
     for element in document.element.body.iter(qn("w:p")):
         yield Paragraph(element, document)
 
@@ -273,9 +262,6 @@ def _table(document, rows, args):
     if args.get("cant_split"):
         for row in table.rows:
             properties = row._tr.get_or_add_trPr()
-            # The schema fixes the order inside ``w:trPr`` and a header row has already
-            # appended ``w:tblHeader``; appending here would invert the two and produce a
-            # file Word refuses. ``insert_element_before`` also guards a second call.
             if properties.find(qn("w:cantSplit")) is None:
                 properties.insert_element_before(
                     OxmlElement("w:cantSplit"),
@@ -290,10 +276,6 @@ def _block(document, spec):
     kind = spec.get("type", "paragraph")
     if not spec.get("type") and not any(
             spec.get(field) for field in ("text", "items", "rows", "path", "image_path")):
-        # A block with neither a type nor any content is a mistake, not a spacer. Writing
-        # an empty paragraph for it and counting it makes ``create`` report success for a
-        # document that is blank. An explicit ``{"type": "paragraph"}`` still gets its
-        # empty paragraph -- that one was asked for.
         return None
     if kind == "heading":
         heading = document.add_heading("", level=int(spec.get("level", 1)))
@@ -337,7 +319,6 @@ def _block(document, spec):
     if kind == "page_break":
         document.add_page_break()
         return "page_break"
-    # Unknown block type, but it carries content: write it rather than drop it silently.
     if spec.get("items"):
         for item in spec["items"]:
             _apply_runs(document.add_paragraph(style="List Bullet"), item)
@@ -568,8 +549,6 @@ def write(path, op, args, *, overwrite=False):
                 offset += length
             if any(run._r.getparent() is not paragraph._p for run, _ in matches):
                 return "[error] add_hyperlink overlaps an existing hyperlink; existing content left unchanged"
-            # Unlike the upstream whole-paragraph rewrite, leave every unrelated
-            # run and hyperlink intact. Only the selected text becomes a new link.
             link = _hyperlink(paragraph, url, find)
             for index, (run, offset) in enumerate(matches):
                 text = run.text
@@ -601,8 +580,6 @@ def write(path, op, args, *, overwrite=False):
         wanted = str(args.get("orientation", "portrait")).lower()
         landscape = wanted.startswith("land")
         section.orientation = WD_ORIENT.LANDSCAPE if landscape else WD_ORIENT.PORTRAIT
-        # Setting the orientation does not swap the page dimensions, and a landscape
-        # section on a portrait-sized page is still a portrait page.
         width, height = section.page_width, section.page_height
         if (landscape and width < height) or (not landscape and width > height):
             section.page_width, section.page_height = height, width

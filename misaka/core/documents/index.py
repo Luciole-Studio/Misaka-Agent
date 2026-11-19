@@ -96,8 +96,6 @@ def under(path, workspace):
         return False
 
 
-# Content extraction and addressing
-
 def sha256_file(p):
     h = hashlib.sha256()
     with open(p, "rb") as f:
@@ -119,10 +117,6 @@ def _pdf_text_layer(p):
             return _form_feed_pages(out.stdout)
     except (OSError, subprocess.SubprocessError):
         pass
-    # The pdfium fallback runs in a child process: a native fault inside the library on a
-    # malformed PDF (a double free, seen once on a downloaded broker report) then ends the
-    # child and the extraction reports no text, instead of taking the Sister's whole process
-    # -- her session, her card -- down with SIGABRT.
     try:
         out = subprocess.run([sys.executable, "-c", _PDFIUM_TEXT_CHILD, p], capture_output=True,
                              text=True, encoding="utf-8", errors="replace", timeout=300, check=False)
@@ -178,25 +172,10 @@ def _note(meta, key, value):
         meta[key] = value
 
 
-# -- which pages need OCR -------------------------------------------------------------------------
-#
-# Page by page, after the gate in FrontierAgent's PDF reader (plugins/tools/_reader_pdf.py at
-# 9e533db, the upstream of the Office port; THIRD_PARTY_NOTICES.md). The corpus used to ask one
-# question of a whole file -- do a fifth of its pages carry text? -- and OCR all of it or none on
-# the answer. A scanned book with a typeset introduction, a document collection whose facsimiles
-# follow the editor's pages, and a scan stamped "Downloaded from ..." on every page all answered
-# yes, and their scanned pages entered the corpus empty, without a word to anyone.
-#
-# Three of the upstream rules are taken: a page with no text, a page whose text layer is garbled,
-# and a page dominated by a raster image. The last is narrowed to pages that also carry little
-# text: upstream sends any image-dominated page to a layout-aware OCR service, and here the engine
-# is tesseract, whose reading would stand in for a publisher's text layer -- the layer doc_verify
-# locates quotations in. Its maths-font and vector-drawing rules route a page to vision, which in
-# the corpus is doc_page_image's job, and are not taken.
-EMPTY_PAGE_CHARS = 10    # fewer characters than this, running lines set aside: no text of its own
-GARBLE_RATIO = 0.15      # replacement and private-use characters above this share: a broken font encoding
-IMAGE_COVER = 1 / 6      # rasters covering more of the page than this ...
-SPARSE_TEXT = 200        # ... over less text than this: a scan under a typeset line, or a plate and its caption
+EMPTY_PAGE_CHARS = 10
+GARBLE_RATIO = 0.15
+IMAGE_COVER = 1 / 6
+SPARSE_TEXT = 200
 
 ROUTE_EMPTY = "no text layer"
 ROUTE_GARBLED = "a garbled text layer"
@@ -222,7 +201,7 @@ def _running_lines(pages):
     return frozenset(line for line, n in counts.items() if n >= max(3, len(pages) // 2))
 
 
-RUNNING_LINES_AT_MOST = 2   # a running head, a folio, a stamp: a line or two at either end
+RUNNING_LINES_AT_MOST = 2
 
 
 def _own_text(text, running):
@@ -273,10 +252,6 @@ def _route(pages, visuals=None):
     return routed
 
 
-# Top-level objects only: pdfium reports an object nested in a form XObject in the form's own
-# coordinates, so a scan or a chart wrapped in a form (a common producer habit) is measured by the
-# form's placement on the page instead. Boxes are counted from the crop box's lower-left corner,
-# where a render's crop is counted from. Run in a child for the reason ``_PDFIUM_TEXT_CHILD`` is.
 _PDFIUM_VISUALS_CHILD = """
 import json, sys
 import pypdfium2 as pdfium
@@ -354,26 +329,12 @@ def _cover_and_marked(p, learned=None):
     return ask
 
 
-# -- figures the text layer does not carry ----------------------------------------------------------
-#
-# FrontierAgent's reader marks, on every page it reads from the text layer, a picture the text
-# cannot carry -- "figure not read: embedded image (covers 35% of page)" -- and counts a page's
-# drawing operators without concluding anything from them, so the model knows where to look and
-# looks only there. Its thresholds are taken as they are. A box the document repeats on half its
-# pages or more (a page background, a letterhead) is set aside the way a running line is.
-#
-# A raster covering the whole page is the page itself: a scan, with a text layer OCR'd under it
-# (archive.org's books, most of a humanities corpus) -- often twice over, a background and a
-# foreground layer of the same scan. Upstream finds the figures inside such a page with a
-# layout-aware OCR service; tesseract does not, so here a scanned page is named instead when it
-# carries far less text than the book's scanned pages usually do -- which is what a map, a plate
-# or a table of figures looks like from its text layer.
-FIGURE_COVER = 0.08      # rasters over this share of a page: a figure ("_PDF_INLINE_IMG_COVER")
-FIGURE_WIDTH = 0.15      # a raster narrower than this share of the page is a logo or an icon ("_OCR_FIG_MIN_WPCT")
-FIGURE_STROKES = 100     # past this many path segments a page is drawn on, not only ruled ("_PDF_DRAW_OPS_FLOOR")
-FIGURE_PAGE = 0.9        # a raster over this share of the page is the page's own scan
-SCAN_SPARSE = 0.25       # a scanned page with under this share of the book's usual text
-SCAN_USUAL_MIN = 400     # ... in a book whose scanned pages usually carry this much
+FIGURE_COVER = 0.08
+FIGURE_WIDTH = 0.15
+FIGURE_STROKES = 100
+FIGURE_PAGE = 0.9
+SCAN_SPARSE = 0.25
+SCAN_USUAL_MIN = 400
 FIGURES_VERSION = 1
 
 
@@ -542,24 +503,11 @@ def embedded_image(doc_id, page, figure, workspace=None):
     return data, member
 
 
-# -- the number printed on a page -------------------------------------------------------------------
-#
-# A page here is a page of the file, counted from 1, and that is the locator every tool and every
-# citation uses -- it never shifts. What a reader looks up in the book is the number printed on the
-# page, and the two part company at a cover, Roman-numbered front matter, an unnumbered plate, or a
-# journal article whose pages start at 1361 (GitHub issue #9: a scanned book thirteen pages out, a
-# delivered card citing the file's pages as the book's). So the printed number is found where it
-# can be, and shown beside the file's page -- never in place of it.
-#
-# Two sources, in this order. A PDF that says what each page is labelled (/PageLabels: 32 of the 98
-# PDFs in one real corpus, front matter and journal offsets alike). Otherwise the numbers at the top
-# or bottom of the pages themselves, believed only where many pages nearby agree on the same
-# distance from the file's page, so a year in a running head or a footnote number never passes.
 LABELS_VERSION = 1
-FOLIO_WINDOW = 12            # pages either side that are asked to agree
-FOLIO_SUPPORT = 4            # ... and how many of them must
-FOLIO_MIN_PAGES = 10         # fewer agreeing pages than this in a book: no printed numbers claimed
-FOLIO_GAP = 6                # an unnumbered page between two that agree takes their number
+FOLIO_WINDOW = 12
+FOLIO_SUPPORT = 4
+FOLIO_MIN_PAGES = 10
+FOLIO_GAP = 6
 
 _PDFIUM_LABELS_CHILD = """
 import json, sys
@@ -571,8 +519,8 @@ finally:
     pdf.close()
 """
 _FOLIO_ALONE = re.compile(r"^[\s\-–—·•.\[(（]*(?:第\s*)?(\d{1,4})(?:\s*[页頁])?[\s\-–—·•.\])）]*$")
-_FOLIO_LEADS = re.compile(r"^(\d{1,4})\s+\S")      # "338  EAST JIN": a head on a left-hand page
-_FOLIO_ENDS = re.compile(r"\S\s+(\d{1,4})$")       # "The Mind in the Machine  219"
+_FOLIO_LEADS = re.compile(r"^(\d{1,4})\s+\S")
+_FOLIO_ENDS = re.compile(r"\S\s+(\d{1,4})$")
 
 
 def _pdf_page_labels(p):
@@ -659,24 +607,14 @@ def printed(doc_id, page, workspace=None):
     return f"printed p. {labels[page]}" if page in labels else ""
 
 
-# -- OCR: an optional external binary, fail-closed ------------------------------------------------
-#
-# ingest used to refuse a scan with "run OCR first" -- advice the product could not carry out,
-# because there was no OCR anywhere in it. Archival scans, pre-2000 books and 影印本 therefore
-# could not enter the corpus at all. ocrmypdf is not a dependency and never becomes one: when it
-# is absent the refusal stands, and it now names the install instead of an imperative into thin
-# air.
 OCR_BINARY = "ocrmypdf"
 OCR_LANGS_DEFAULT = "eng+chi_sim+jpn"
 OCR_MISSING = "ocrmypdf is not installed (brew install ocrmypdf)"
-OCR_FOUND_NOTHING = "OCR found no text on it"      # a blank scan, a photograph, a map without names
-# A book-length scan is minutes of work per hundred pages; the bound is what keeps one stuck OCR
-# from owning an ingest forever (pdftotext above is bounded the same way, smaller).
+OCR_FOUND_NOTHING = "OCR found no text on it"
 OCR_TIMEOUT = 900
-# ocrmypdf accepts --sidecar together with --pages from 11.7 on; an older one OCRs every page.
 OCR_PAGES_SINCE = (11, 7)
 _SKIPPED = re.compile(r"\[OCR skipped on page\(s\) (\d+)(?:-(\d+))?\]")
-_NO_OCR = (OCR_MISSING, mineru.MISSING)        # how a page waiting for OCR says so
+_NO_OCR = (OCR_MISSING, mineru.MISSING)
 
 
 def _ocr_engine():
@@ -747,7 +685,7 @@ def _sidecar_pages(text, count=None):
             return out
         if len(entries) < 2 or entries[-1].strip():
             return None
-        entries = entries[:-1]          # a closing form feed, written by some versions
+        entries = entries[:-1]
     return None
 
 
@@ -790,8 +728,6 @@ def _ocrmypdf_pages(p, meta=None, numbers=None, count=None):
     from misaka.config.product import setting
 
     langs = setting("documents", "ocr_langs", OCR_LANGS_DEFAULT, str) or OCR_LANGS_DEFAULT
-    # The system's temporary folder, not the source's: a library folder may be read-only, and since
-    # one routed page is enough to OCR, such a folder refused whole books it used to index.
     with tempfile.TemporaryDirectory(prefix="misaka-ocr-") as tmp:
         sidecar = os.path.join(tmp, "sidecar.txt")
         argv = [OCR_BINARY, "--force-ocr", "--output-type", "pdf", "--sidecar", sidecar, "-l", langs]
@@ -809,7 +745,7 @@ def _ocrmypdf_pages(p, meta=None, numbers=None, count=None):
             with open(sidecar, encoding="utf-8") as f:
                 text = f.read()
         except (OSError, ValueError, subprocess.SubprocessError) as error:
-            _note(meta, "ocr_error", str(error)[:200])   # missing or unreadable sidecar, timeout
+            _note(meta, "ocr_error", str(error)[:200])
             return None
     pages = _sidecar_pages(text, count)
     if pages is None:
@@ -874,15 +810,14 @@ def _pdf_pages(p, meta=None):
     learned = meta if meta is not None else {}
     pages = _pdf_text_layer(p)
     if not pages:
-        # Neither extractor could so much as count the pages: OCR the file whole, as it reads.
         read = _ocr_pages(p, learned)
         if not read:
             return []
         _note(meta, "ocr", True)
-        return [read.get(number, "") for number in range(1, max(read) + 1)]     # a gap keeps its number
+        return [read.get(number, "") for number in range(1, max(read) + 1)]
     routed = _route(pages, _cover_and_marked(p, learned))
     if not routed:
-        return pages                        # a real text layer on every page: never OCR over it
+        return pages
     ocr = _ocr_pages(p, learned, sorted(routed), len(pages))
     merged, ocred, unread = _merge_ocr(pages, ocr, routed, _why_not_read(learned))
     _record_reading(meta, merged, ocred, unread)
@@ -914,94 +849,23 @@ def _no_text_error(p, pages, ocr_error=None):
     return ValueError(f"No text layer found; {tried}: {name}")
 
 
-# -- decoding text that is not UTF-8 --------------------------------------------------------------
-#
-# Strictly, or not at all. Text files used to be opened with errors='replace', which never fails
-# and never says so: a Shift-JIS 青空文庫 book and a GB18030 file both entered the corpus as pages
-# of '��y�͔L�ł���', and passed the text check because replacement characters are characters.
-# Everything downstream -- doc_find, doc_verify, the ledger's quote check -- then operated on
-# garbage in silence, and a ledger that "verifies" a quotation against mojibake is worse than one
-# that cannot read the book at all.
-#
-# The order below is not the obvious one, and the reason is measured rather than theoretical.
-# These encodings are not mutually exclusive: decoding one language's bytes under another's codec
-# usually *succeeds*. Measured on a paragraph of each (the fixtures in
-# tests/test_documents_encoding.py):
-#
-#   bytes \ codec   cp932       cp949            gb18030             cp950
-#   Japanese        correct     refuses          clean, wrong Han    refuses
-#   Korean          refuses     correct          clean, wrong Han    refuses
-#   Chinese         refuses     Hangul/Han mix   correct             clean, wrong Han
-#   Big5            refuses     refuses          private-use junk    correct
-#
-# So first-clean-wins is only as honest as its order, and no order suffices on its own: cp950
-# accepts Chinese and gb18030 accepts Big5, so "must be tried first" has a cycle. Ordering does
-# the work it can (cp932 is the pickiest and goes first; gb18030 accepts nearly any byte stream
-# and goes late), and the coherence rule below catches the two mis-decodes that would otherwise
-# win their slot.
-#
-# The codecs are the vendor supersets, not the bare standards, because the supersets are what the
-# files are actually written in. Python's ``shift_jis`` is JIS X 0208 and *rejects* the NEC/IBM
-# extension rows -- ① № Ⅰ ㈱ ℡ ㍉ 髙 﨑 -- which is to say it rejects what Japanese Windows and
-# 青空文庫 write; the decode then fell through to gb18030, which accepts nearly anything, and a
-# Japanese book entered the corpus as mojibake that the ledger would later "verify" quotations
-# against. Each swap was checked exhaustively over the whole one- and two-byte space (the codecs
-# are two-byte, so that is all of them) and each wide codec accepts every sequence its narrow one
-# accepts -- zero new rejections. They disagree on 6 sequences (shift_jis/cp932), 0 (euc_kr/cp949)
-# and 11 (big5/cp950), and every disagreement is the vendor variant of one glyph (wave dash vs.
-# fullwidth tilde, ¢ vs. ￠), never a different character. big5hkscs was rejected for this: it
-# reassigns 249 sequences in the ETen kana rows to HKSCS characters, so it is not a superset.
-# tests/test_documents_encoding.py re-runs that check.
-#
-# Character *frequency* cannot help, however tempting: two two-byte codecs over the same bytes
-# give the same frequency profile, only different characters. Telling rare Han from common Han
-# needs a per-language character table -- that is a charset detector, and this is not one.
 TEXT_ENCODINGS = ("utf-8", "utf-8-sig", "cp932", "cp949", "gb18030", "cp950")
 
-# The character ranges a document in any of these encodings is made of -- which is to say, what
-# these charsets can actually encode, enumerated from the codecs themselves rather than guessed:
-# ASCII and Latin letters, punctuation and currency, the Greek and Cyrillic rows (JIS X 0208 rows
-# 6-7, KS X 1001, GB 2312 all carry them), arrows and mathematical operators, the enclosed and
-# squared forms 青空文庫 and Japanese Windows are full of (① ㈱ ㍉ Ⅰ), box drawing and the
-# geometric shapes that rule a Japanese table (■ ● ★), Bopomofo, radicals, CJK punctuation and
-# forms, kana, Hangul, Han.
-#
-# Running that census over every one- and two-byte sequence of all four codecs leaves the private
-# use areas as essentially the only thing outside these ranges -- which is the point. Private use
-# is what a wrong codec produces, and control bytes are what any codec produces from a file that
-# is not text. Big5 read as GB18030 is still 39% outside, eight times the rule's bar.
 _TEXT_RANGES = ((0x09, 0x0D), (0x20, 0x7E), (0xA0, 0x24F), (0x370, 0x4FF), (0x1100, 0x11FF),
                 (0x2000, 0x206F), (0x20A0, 0x20CF), (0x2100, 0x22FF), (0x2460, 0x24FF),
                 (0x2500, 0x26FF), (0x2E80, 0x2FDF), (0x3000, 0x30FF), (0x3100, 0x318F),
                 (0x31F0, 0x31FF), (0x3200, 0x33FF), (0x3400, 0x4DBF), (0x4E00, 0x9FFF),
                 (0xAC00, 0xD7A3), (0xF900, 0xFAFF), (0xFE30, 0xFE6F), (0xFF00, 0xFFEF),
                 (0x20000, 0x2FA1F))
-# A wrong codec is wrong on every line, so a sample settles it; a book pays for its decode, not
-# for a second pass over itself to guess the language.
 _COHERENCE_SAMPLE = 64 * 1024
 
-# The half-width katakana block U+FF61-FF9F is where a wrong codec lands most often, because the
-# single bytes 0xA1-0xDF cp932 spends on it are exactly the trail bytes GB 2312, KS X 1001 and Big5
-# spend on ordinary characters -- and cp932 is tried before all three. Quantity cannot separate
-# that from a real half-width file (they exist: old data files, receipt and EDI records), because
-# both are wall-to-wall kana. Orthography can: the syllabary's modifiers attach to a fixed set of
-# bases, and a codec that is scattering bytes attaches them at random. Measured over 910 Chinese
-# samples read as cp932, 786 carry a modifier and 49% of those modifiers are illegally placed;
-# over real half-width Japanese, 47 modifiers and not one violation.
-_KANA_BASE = frozenset(range(0xFF71, 0xFF9E))                       # ｱ..ﾝ, a full kana
-_KANA_DAKUTEN = frozenset({0xFF66, 0xFF73, 0xFF9C}                  # ｦ ｳ ﾜ
-                          | set(range(0xFF76, 0xFF85))              # ｶ..ﾄ
-                          | set(range(0xFF8A, 0xFF8F)))             # ﾊ..ﾎ
-_KANA_HANDAKUTEN = frozenset(range(0xFF8A, 0xFF8F))                 # ﾊ..ﾎ and nothing else
-# How much better a later codec has to look before it takes a document away from an earlier one.
-# The wrong readings measured here score 0.29 to 1.00 against a right reading's 0.00, so the bar
-# can sit low without being reachable by noise -- a Japanese file with a stray gaiji in the private
-# use area scores a thousandth and keeps its own codec.
+_KANA_BASE = frozenset(range(0xFF71, 0xFF9E))
+_KANA_DAKUTEN = frozenset({0xFF66, 0xFF73, 0xFF9C}
+                          | set(range(0xFF76, 0xFF85))
+                          | set(range(0xFF8A, 0xFF8F)))
+_KANA_HANDAKUTEN = frozenset(range(0xFF8A, 0xFF8F))
 _CODEC_MARGIN = 0.05
 
-# The encoding an HTML or XML file names for itself -- `<meta charset>`, the `http-equiv`
-# content type, or the XML declaration. Archive pages in windows-1251 or koi8-r are none of the
-# guessed codecs and were refused (2026-09-28, the 1812 manifesto).
 _DECLARED_CHARSET = re.compile(
     rb"""<meta[^>]+charset\s*=\s*["']?([A-Za-z0-9._:-]+)|<\?xml[^>]+encoding\s*=\s*["']([A-Za-z0-9._:-]+)""",
     re.IGNORECASE)
@@ -1082,47 +946,43 @@ def _mojibake(text, cjk_codec=True):
     for ch in sample:
         o = ord(ch)
         here = False
-        if 0x20 <= o <= 0x7E or 0x09 <= o <= 0x0D:                      # ASCII, the common case
+        if 0x20 <= o <= 0x7E or 0x09 <= o <= 0x0D:
             pass
         elif o == 0:
-            return None                                                 # rule 0
+            return None
         elif 0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF or 0xF900 <= o <= 0xFAFF:
             han += 1
             here = True
-            # Korean writes the stem in hanja and the particle after it in hangul, never the other
-            # way round, so a Han character *behind* a hangul syllable is not Korean orthography.
-            # Chinese read as cp949 comes out mostly hangul with hanja wedged in at random: 51% of
-            # its Han sit behind a syllable, against 0 of real Korean's.
-            misplaced += 0xAC00 <= prev <= 0xD7A3                       # rule 6
+            misplaced += 0xAC00 <= prev <= 0xD7A3
         elif 0x3040 <= o <= 0x30FF or 0x31F0 <= o <= 0x31FF:
             kana += 1
             here = True
         elif 0xAC00 <= o <= 0xD7A3 or 0x1100 <= o <= 0x11FF or 0x3130 <= o <= 0x318F:
             hangul += 1
             here = True
-        elif 0xFF61 <= o <= 0xFF9F:               # half-width kana
+        elif 0xFF61 <= o <= 0xFF9F:
             halfwidth += 1
             here = True
-            if 0xFF67 <= o <= 0xFF6F:             # a small kana or ｯ, after a kana or a mark (ｳﾞｧ)
+            if 0xFF67 <= o <= 0xFF6F:
                 misplaced += prev not in _KANA_BASE and prev not in (0xFF9E, 0xFF9F)
-            elif o == 0xFF70:                     # ｰ, after any of them (ﾃﾞｰﾀ, ﾌｧｰｽﾄ)
+            elif o == 0xFF70:
                 misplaced += not 0xFF67 <= prev <= 0xFF9F
             elif o == 0xFF9E:
                 misplaced += prev not in _KANA_DAKUTEN
             elif o == 0xFF9F:
                 misplaced += prev not in _KANA_HANDAKUTEN
-        elif 0xFF00 <= o <= 0xFFEF:               # full-width forms
+        elif 0xFF00 <= o <= 0xFFEF:
             here = True
         elif not any(lo <= o <= hi for lo, hi in _TEXT_RANGES):
             alien += 1
         if here:
             cjk += 1
-            run += 1                              # how long the CJK run ending here is so far
+            run += 1
         else:
             alone += run == 1
             run = 0
         prev = o
-    alone += run == 1                             # a sample that ends mid-run
+    alone += run == 1
     if not cjk_codec:
         return 0.0
     if alien > 2 and alien * 20 > len(sample):
@@ -1133,7 +993,7 @@ def _mojibake(text, cjk_codec=True):
     if hangul and (kana * 5 > script or han * 5 > script):
         return None
     wrong = alien + misplaced
-    if halfwidth * 2 > cjk and script + alien:                          # rule 5
+    if halfwidth * 2 > cjk and script + alien:
         wrong += halfwidth
     return wrong / max(1, len(sample))
 
@@ -1161,11 +1021,11 @@ def _decode_bytes(raw, what):
         try:
             return raw.decode(encoding), encoding
         except (UnicodeDecodeError, LookupError):
-            pass                                  # a false declaration falls back to the guesses
+            pass
     best = best_text = best_encoding = None
     for encoding in TEXT_ENCODINGS:
         if encoding == "utf-8" and raw.startswith(b"\xef\xbb\xbf"):
-            continue          # plain utf-8 decodes a BOM into the text; utf-8-sig drops it
+            continue
         try:
             text = raw.decode(encoding)
         except (UnicodeDecodeError, LookupError):
@@ -1179,7 +1039,7 @@ def _decode_bytes(raw, what):
             best, best_text, best_encoding = wrong, text, encoding
     if best_text is None:
         if what.lower().endswith((".htm", ".html")):
-            try:                                  # the HTML standard's default for a page that names none
+            try:
                 return raw.decode("cp1252"), "cp1252"
             except UnicodeDecodeError:
                 pass
@@ -1201,7 +1061,7 @@ def _read_text(p, meta=None):
     return text
 
 
-PAGE_CEILING = 4          # a page may run this many times over ``chars`` before it is cut anyway
+PAGE_CEILING = 4
 
 
 def _paginate(s, chars=3000):
@@ -1225,8 +1085,6 @@ def _paginate(s, chars=3000):
         page = "".join(buf)
         buf.clear()
         while len(page) > ceiling:
-            # Only the back half is searched for a line break: a heading's newline near the start
-            # would otherwise cut a one-line page off the front of a book chapter.
             cut = page.rfind("\n", ceiling // 2, ceiling)
             cut = cut + 1 if cut > 0 else ceiling
             out.append(page[:cut])
@@ -1245,10 +1103,6 @@ def _paginate(s, chars=3000):
         flush()
     return out
 
-
-# Every extractor takes the same two arguments: the file, and a dict to record what it learned
-# about the source in (the encoding it had to decode, whether the pages came out of OCR). ingest
-# writes that into meta.json, so what a page is made of stays on the record.
 
 def _text_pages(p, chars=3000, meta=None):
     return _paginate(_read_text(p, meta), chars)
@@ -1324,40 +1178,11 @@ def _xls_pages(p, chars, meta):
     return pages or None
 
 
-# -- EPUB ---------------------------------------------------------------------------------------
-#
-# An EPUB is a zip holding XHTML chapters plus a package document that says which of them the
-# book consists of and in what order. Reading it means reading those three things -- the
-# container, the package document, the spine -- with the standard library and nothing else.
-#
-# Every member is read by the name the package document gives, out of the archive; nothing is
-# ever extracted to a path. A crafted href of "../../etc/passwd" is therefore a lookup that
-# misses, not a file on this machine.
-
-# An archive member declares its uncompressed size in the central directory, so a "book" that
-# would decompress to a gigabyte is skipped before it is read -- an EPUB now also arrives by
-# download and is indexed on arrival, and the reader that opens whatever it is handed is the
-# one that gets handed a zip bomb. 16 MiB is several million words of XHTML; a chapter that
-# large is not a chapter.
 _EPUB_MEMBER_BYTES = 16 * 1024 * 1024
 
-# The member cap bounds one chapter; these bound the book, which is the number an archive can
-# multiply. Many manifest items may share one href and the spine may list them all, so a ~250 KB
-# archive holding a single 1 MB member can name it a thousand times: deduplication below removes
-# that amplification, and these two are what remains true when the members are all distinct.
-#
-# 16 Mi characters is the whole book's markup, counted as it is decoded. Every codec here yields
-# at most one character per byte read, so it bounds the decompression too, and markup is a third
-# to a half of a chapter file -- so this is roughly a ten-million-character book. War and Peace is
-# 3.2M characters and the complete Shakespeare 5.5M: the ceiling holds either one twice over, and
-# a "book" that does not fit is not one. 10,000 spine entries is the same judgement about work
-# rather than memory: one archive read each, and a page-per-file scan of a 1,000-page book uses a
-# tenth of it.
 _EPUB_BOOK_CHARS = 16 * 1024 * 1024
 _EPUB_SPINE_MAX = 10_000
 
-# What a spine entry has to be declared as to be read as text. EPUB content documents are
-# XHTML; a spine that points at an image would otherwise render as junk.
 _EPUB_TEXT_TYPES = ("html", "xml")
 
 
@@ -1367,7 +1192,7 @@ def _zip_read(archive, name, limit=_EPUB_MEMBER_BYTES):
         if archive.getinfo(name).file_size > limit:
             return None
         with archive.open(name) as member:
-            return member.read(limit)       # the declared size is attacker-written; this is not
+            return member.read(limit)
     except Exception:  # noqa: BLE001 - a missing or corrupt member is not a chapter; the rest of the book still reads
         return None
 
@@ -1399,7 +1224,7 @@ def _epub_xml(data, what):
 def _epub_member(base, href):
     """The archive member a manifest href names, relative to the package document, or ""."""
     href = urllib.parse.unquote(href.split("#", 1)[0].strip())
-    if not href or "://" in href:                     # a remote chapter is not part of the book
+    if not href or "://" in href:
         return ""
     return posixpath.normpath(posixpath.join(base, href)).lstrip("/")
 
@@ -1431,14 +1256,9 @@ def _epub_spine(archive):
     for idref in spine:
         href, media_type = manifest.get(idref, ("", ""))
         member = _epub_member(base, href)
-        # One member is read once however many manifest items point at it. A book that genuinely
-        # printed a chapter twice reads the same either way; an archive that names one member a
-        # thousand times is multiplying itself, and this is where that stops.
         if member in seen:
             continue
         seen.add(member)
-        # A spine entry the archive does not carry is skipped rather than fatal: half a book is
-        # what a reader gets from a damaged file too, and it is worth more than none of it.
         if member in present and (not media_type or any(t in media_type for t in _EPUB_TEXT_TYPES)):
             members.append(member)
     if not members:
@@ -1489,13 +1309,10 @@ def _epub_read(p, chars, images):
                 markup = _decode_markup(data)
                 budget -= len(markup)
                 if budget < 0:
-                    # Counted as it is decoded, so the refusal happens before the memory is spent
-                    # rather than after: this is the shape a zip bomb arrives in, and an EPUB is
-                    # downloaded and indexed on arrival without anybody looking at it first.
                     raise ValueError(
                         f"Refused {os.path.basename(p)}: its spine expands past "
                         f"{_EPUB_BOOK_CHARS // (1024 * 1024)} MiB of markup, larger than any book")
-                start = len(images)                  # one list for the book: "image N" counts book-wide
+                start = len(images)
                 pages.extend(_paginate(htmltext.readable(markup, images=images)[0], chars))
                 for image in images[start:]:
                     src = urllib.parse.unquote(image.pop("src").split("#")[0].split("?")[0])
@@ -1518,21 +1335,13 @@ def _decode_markup(data, what="EPUB chapter"):
     """
     if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
         try:
-            return data.decode("utf-16")             # a BOM is a declaration, not a guess
+            return data.decode("utf-16")
         except UnicodeDecodeError as error:
             raise ValueError(
                 f"not UTF-16 text despite its byte order mark: {what} ({error})") from error
     return _decode_bytes(data, what)[0]
 
 
-# -- what the corpus can read -------------------------------------------------------------------
-#
-# One table, and a suffix with no extractor is refused by name instead of being read as text: a
-# single-file ingest used to accept anything, so an EPUB entered the corpus as pages of
-# "PK\x03\x04..." -- which passed the text check, because the XHTML inside the archive leaks
-# through the compression -- and an HTML page entered with its tags and its <script> counted as
-# prose.
-#
 DJVU_TEXT_BINARY = "djvused"
 DJVU_RENDER_BINARY = "ddjvu"
 DJVU_TIMEOUT = 300
@@ -1618,13 +1427,6 @@ def _djvu_pages(p, meta=None):
     return merged
 
 
-# The last group is text with no format of its own: a card's analysis.csv, results.json, run.log
-# or paper.tex. These entered the corpus as text before this table existed, and the path that
-# carries them (``documents/workspace.ingest_artifacts``) swallows a ValueError without a word --
-# so refusing a suffix here dropped the card's deliverable in silence. What was actually wrong
-# with reading them as text was never the suffix: it was errors='replace', and _decode_bytes has
-# closed that door for every format at once.
-
 _EXTRACTORS = {
     ".pdf": _pdf_pages,
     ".djvu": _djvu_pages,
@@ -1635,9 +1437,6 @@ _EXTRACTORS = {
     ".pptx": _office_pages, ".pptm": _office_pages,
     ".doc": _legacy_office_pages, ".xls": _legacy_office_pages,
     ".ppt": _legacy_office_pages,
-    # A csv moved off ``_text_pages``: read as running text it is a wall of commas with no
-    # header row named and no column typed, and the corpus can say all three. It stays a
-    # swept suffix, so ``doc scan`` picks up a folder of data files as it always did.
     ".csv": _office_pages, ".tsv": _office_pages,
     ".md": _text_pages, ".markdown": _text_pages, ".txt": _text_pages,
     ".bib": _text_pages, ".rst": _text_pages,
@@ -1646,18 +1445,9 @@ _EXTRACTORS = {
     ".yaml": _text_pages, ".yml": _text_pages,
 }
 
-# "Can the corpus read this file" and "should a folder walk collect it by itself" are not the
-# same question, and one answer to both is what makes the second one wrong. ``scan`` walks
-# whatever it is pointed at -- ``misaka doc scan`` defaults to the working directory -- and a
-# working tree is full of package.json, config.yml and run.log that nobody meant as materials.
-# Named one by one they are read; swept up by a net they are noise, and download_file indexes
-# arrivals by this set too. Everything else in the table is document-shaped enough for both.
-# The legacy three join them for a different reason: reading one costs a LibreOffice
-# process, so a folder walk that happens to pass a directory of 1990s attachments would
-# spend minutes converting files nobody asked for. Named one by one they are read.
 _NOT_SWEPT = frozenset({".json", ".jsonl", ".ndjson", ".log", ".yaml", ".yml",
                         ".doc", ".xls", ".ppt"})
-READABLE_SUFFIXES = frozenset(_EXTRACTORS)       # what ingest reads when a file is named
+READABLE_SUFFIXES = frozenset(_EXTRACTORS)
 SCAN_SUFFIXES = READABLE_SUFFIXES - _NOT_SWEPT
 
 
@@ -1696,7 +1486,6 @@ def source_title(p):
         elif _EXTRACTORS.get(ext) is _html_pages:
             title = htmltext.readable(_read_text(p))[1]
         elif office.format_of(p) in office.TITLE_OF:
-            # A .docx carries ``dc:title`` and a .pptx carries its first slide's title.
             title = office.TITLE_OF[office.format_of(p)](p)
         else:
             return None
@@ -1705,17 +1494,8 @@ def source_title(p):
     return htmltext.clip(title.strip(), htmltext.MAX_TITLE_CHARS) or None
 
 
-# How many pdfium subprocesses one outline build may open. PageIndex's own default is
-# "CPU count - 1", which is the right answer for a lone command and the wrong one here: this
-# runs in the tail of a research card's settlement, and the cards are already N-way parallel
-# (sister_parallel per node, and the nodes run in parallel too), so the auto default
-# multiplies -- 3 nodes x 4 cards x 7 workers is 84 pdfium processes on an 8-core machine.
-# A caller that owns the whole machine passes its own `workers`.
 TREE_WORKERS = 2
 
-# Below this a document is short enough to navigate by page, so ingestion does not pay for an
-# outline. The backfill on re-ingest uses the same threshold, or it would keep retrying for
-# documents the first pass deliberately skipped.
 TREE_MIN_PAGES = 20
 
 _warned_no_pageindex = False
@@ -1746,8 +1526,6 @@ def _warn_no_pageindex(p):
           file=sys.stderr)
 
 
-# Formats whose outline is read from the text itself (documents/text_outline) rather than from a
-# PDF's layout: transcribed books and saved pages, the long ones of which had no tree at all.
 TEXT_TREE_SUFFIXES = frozenset({".txt", ".md", ".markdown"})
 
 
@@ -1811,9 +1589,6 @@ def _printed_tree(p, count, reason):
     return json.dumps(nodes, ensure_ascii=False)
 
 
-# PDFium is not thread-safe. Text extraction and page renders run it in child processes; the
-# outline is its one caller inside this process, and ingests run on worker threads: two of them
-# in PDFium at once corrupted the heap and killed a Sister (2026-09-28, SIGTRAP in its font scan).
 _PDFIUM = threading.Lock()
 
 
@@ -1856,7 +1631,6 @@ def build_tree(p, *, workers=TREE_WORKERS, reason=None):
         _note(reason, "tree", "none_found")
         return None
     except PageIndexUnavailable:
-        # Actionable and identical for every document, unlike a parse failure: name it.
         _warn_no_pageindex(p)
         _note(reason, "tree", "extra_missing")
         return None
@@ -1865,26 +1639,16 @@ def build_tree(p, *, workers=TREE_WORKERS, reason=None):
         return None
 
 
-# File-tree storage
-
 def _page_path(ddir, page):
-    # ponytail: four digits keep the names aligned up to 9,999 pages; readers sort by number, so more still works.
     return os.path.join(ddir, "pages", f"p{page:04d}.txt")
 
 
-# Bumping this re-asks `build_tree` for every document that had no outline last time. Raise it
-# when the extractor gains the ability to find one where it previously could not.
 TREE_ATTEMPT_VERSION = 1
 
 
-# Bumping this re-reads a PDF, a DjVu or an EPUB indexed by an older extractor the next time it is
-# ingested (``_reread``). 2: pages chosen for OCR one by one (``_route``), OCR sidecars and DjVu
-# text lined up with the file's own page numbers, and an EPUB's pictures marked where they stand.
-# 3: a statistical table is no longer taken for running lines and sent to OCR, and an EPUB's
-# pictures framed in <svg> are marked too.
 EXTRACT_VERSION = 3
 REREAD_SUFFIXES = (".pdf", ".djvu", ".epub")
-REREAD_TRIES = 3            # the re-read pdfium cannot route on this many ingests in a row is given up
+REREAD_TRIES = 3
 
 
 def _needs_reread(pages):
@@ -1922,11 +1686,6 @@ def _reread(ddir, p, count):
     ext = os.path.splitext(p)[1].lower()
     old = _stored_pages(ddir, count) if ext in REREAD_SUFFIXES else None
     pages, learned = None, {}
-    # djvutxt skipped a page with no hidden text outright, so a DjVu stored out of step can have
-    # nothing but full pages to show for it: only its page count gives it away. An EPUB's text
-    # used to drop its pictures (all of them before 2, those framed in <svg> before 3), so one
-    # with fewer ``![...]`` markers than pictures is read again. Version 2 sent a statistical
-    # table's pages to OCR: a document with some pages OCR'd is routed again.
     if ext == ".epub":
         stale = old is not None and sum(text.count("![") for text in old) < len(_epub_images(p))
     else:
@@ -1936,13 +1695,8 @@ def _reread(ddir, p, count):
     if stale:
         pages = extract_pages(p, meta=learned)
         if not _has_text_layer(pages):
-            return count                    # nothing better to offer; asked again next time
+            return count
         if learned.pop("visuals_unread", False):
-            # Routed by text alone, a plate OCR read by its image cover would go back to its
-            # caption for good: read again when pdfium answers (0.18.9 sweep) -- up to
-            # REREAD_TRIES times; a file pdfium never reads keeps what is stored, stamped current.
-            # Not given up while it holds pages waiting for an OCR this machine lacks: those are
-            # read once ocrmypdf is installed, as everywhere else in a re-read.
             with _meta_lock(ddir):
                 m = _read_meta_at(ddir) or {}
                 put_off = m.get("reread_put_off") if isinstance(m.get("reread_put_off"), dict) else {}
@@ -1962,26 +1716,23 @@ def _reread(ddir, p, count):
     changed, final_ocr = [], was_ocr
     if pages is not None and len(pages) != count:
         if ocr_missing and was_ocr:
-            return count                    # the stored pages hold OCR this machine cannot redo
+            return count
         changed, final_ocr = list(range(1, len(pages) + 1)), now_ocr
     elif pages is not None:
-        # A page OCR'd before and not routed now (a table version 2 took for a scan) goes back to
-        # its text layer; one still routed whose OCR this machine cannot redo keeps its reading.
         changed = [n for n in range(1, count + 1)
                    if (ext == ".epub" or n in now_ocr or (n in was_ocr and n not in unread)
                        or _SKIPPED.search(old[n - 1])) and pages[n - 1] != old[n - 1]]
         final_ocr = (was_ocr - set(changed)) | (now_ocr & set(changed))
-        # A page still holding an earlier OCR's reading has been read, whatever this run managed.
         unread = {n: why for n, why in unread.items() if n in changed or n not in was_ocr}
     total = len(pages) if changed else count
     with _meta_lock(ddir):
         for n in changed:
             atomic.write_text(_page_path(ddir, n), pages[n - 1])
-        for n in range(total + 1, count + 1):           # a count that shrank
+        for n in range(total + 1, count + 1):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(_page_path(ddir, n))
         if changed:
-            for derived in ("figures.json", "labels.json"):   # read off the old pages: found again on asking
+            for derived in ("figures.json", "labels.json"):
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(os.path.join(ddir, derived))
         m = _read_meta_at(ddir) or {}
@@ -1994,7 +1745,7 @@ def _reread(ddir, p, count):
             m["reread"] = {"at": int(time.time()), "pages": changed, "pages_before": count}
         if not ocr_missing:
             m["extract_version"] = EXTRACT_VERSION
-            m.pop("reread_put_off", None)       # a later try that pdfium answered
+            m.pop("reread_put_off", None)
         atomic.write_text(os.path.join(ddir, "meta.json"), json.dumps(m, ensure_ascii=False, indent=2))
     return total
 
@@ -2030,9 +1781,9 @@ def _tree(doc_id, workspace=None):
         return None
 
 
-STAGE_SUFFIX = ".part-"     # an in-progress document: "<doc_id>.part-<pid>-<thread>", never listed
-STAGE_GRACE = 2 * OCR_TIMEOUT   # untouched for this long: the process that owned it is not coming back
-_swept = False                  # the reclaim below runs once per process, not once per ingested file
+STAGE_SUFFIX = ".part-"
+STAGE_GRACE = 2 * OCR_TIMEOUT
+_swept = False
 
 
 def _sweep_stale_stages(root):
@@ -2045,7 +1796,7 @@ def _sweep_stale_stages(root):
     A stage belonging to this process is never touched, nor is one still being written to.
     """
     global _swept
-    if _swept:                     # once per process: `scan` ingests a whole directory in a loop
+    if _swept:
         return
     _swept = True
     mine, cutoff = f"{STAGE_SUFFIX}{os.getpid()}-", time.time() - STAGE_GRACE
@@ -2078,7 +1829,7 @@ def _fsync_stage(stage):
                 continue
             try:
                 os.fsync(fd)
-            except OSError:      # a filesystem that refuses fsync on this file: nothing to do
+            except OSError:
                 pass
             finally:
                 os.close(fd)
@@ -2089,7 +1840,7 @@ def _fsync_stage(stage):
             continue
         try:
             os.fsync(fd)
-        except OSError:          # directory fsync is unsupported on some platforms
+        except OSError:
             pass
         finally:
             os.close(fd)
@@ -2144,7 +1895,7 @@ def ingest(p, title=None, with_tree=True, task_id=None, workspace=None):
     check_material_read(p)
     if workspace is not None and not under(p, workspace):
         raise ValueError("Document source resolves outside the workspace.")
-    _extractor(p)          # refuse an unreadable format before hashing, and before extracting
+    _extractor(p)
     sha = sha256_file(p)
     ddir = os.path.join(corpus_root(workspace), sha[:12])
     with _reading_lock(ddir):
@@ -2160,15 +1911,6 @@ def _index(p, sha, ddir, title, with_tree, task_id, workspace):
             raise ValueError(f"Document ID collision: {doc_id}")
         count = _link(existing, p, task_id)
         count = _reread(existing, p, count)
-        # Without this, installing the pageindex extra repairs nothing: every document already
-        # in the corpus stays outline-less forever, because re-ingest used to stop at the link.
-        #
-        # "No tree.json" is not the same as "not tried yet". Plenty of PDFs have no outline to
-        # extract, and for those `build_tree` returns None however many times it is asked --
-        # so keying the backfill on the file's absence alone re-ran the whole PageIndex parse
-        # on every scan. That is 14 seconds for a 758-page document, and a process pool past 64
-        # pages. The attempt is recorded the way this module already records what an extractor
-        # learned (`meta['ocr_error']`), and only a newer extractor changes the answer.
         meta = _read_meta_at(existing) or {}
         if (with_tree and count >= TREE_MIN_PAGES
                 and not _real_file(os.path.join(existing, "tree.json"), existing)
@@ -2179,9 +1921,6 @@ def _index(p, sha, ddir, title, with_tree, task_id, workspace):
             if tree:
                 atomic.write_text(os.path.join(existing, "tree.json"), tree)
             elif why.get("tree") == "none_found":
-                # Settled: this document has no outline to find. A missing extra or a failed
-                # parse is not settled -- installing the extra is how a corpus gets repaired,
-                # so those keep asking.
                 with _meta_lock(existing):
                     meta = _read_meta_at(existing) or {}
                     meta["tree_attempted_version"] = TREE_ATTEMPT_VERSION
@@ -2190,18 +1929,16 @@ def _index(p, sha, ddir, title, with_tree, task_id, workspace):
         return doc_id, count
     if os.path.lexists(ddir):
         raise ValueError(f"Invalid or colliding corpus entry: {doc_id}")
-    extracted = {}                          # what the extractor learned: encoding, OCR
+    extracted = {}
     pages = extract_pages(p, meta=extracted)
     if not _has_text_layer(pages):
         raise _no_text_error(p, pages, extracted.pop("ocr_error", None))
-    extracted.pop("ocr_error", None)        # the pages it cost are in unread_pages, with the reason
-    extracted.pop("visuals_unread", None)   # only a re-read asks it
+    extracted.pop("ocr_error", None)
+    extracted.pop("visuals_unread", None)
     tree_wanted = with_tree and len(pages) >= TREE_MIN_PAGES
     tree_reason = {}
     tree = _outline_for(p, os.path.splitext(p)[1].lower(), pages, tree_reason) if tree_wanted else None
-    # Build the document beside its final place and move it in with one rename: the corpus holds
-    # a complete document or none, never a half-written directory that reads as "already indexed".
-    _sweep_stale_stages(corpus_root(workspace))      # whatever a killed ingest left behind, before adding ours
+    _sweep_stale_stages(corpus_root(workspace))
     stage = f"{ddir}{STAGE_SUFFIX}{os.getpid()}-{threading.get_ident()}"
     shutil.rmtree(stage, ignore_errors=True)
     try:
@@ -2213,8 +1950,6 @@ def _index(p, sha, ddir, title, with_tree, task_id, workspace):
         if tree:
             with open(os.path.join(stage, "tree.json"), "w", encoding="utf-8") as f:
                 f.write(tree)
-        # Asked for an outline and got none: record that, so re-ingest links the document
-        # instead of paying for the same parse again (see the backfill branch above).
         attempted = ({"tree_attempted_version": TREE_ATTEMPT_VERSION}
                      if tree_reason.get("tree") == "none_found" else {})
         meta = {"doc_id": doc_id, "title": title or source_title(p) or os.path.basename(p),
@@ -2224,19 +1959,18 @@ def _index(p, sha, ddir, title, with_tree, task_id, workspace):
                 **extracted}
         with open(os.path.join(stage, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
-        _fsync_stage(stage)     # durability, before the rename hands the directory its real name
+        _fsync_stage(stage)
         try:
             os.replace(stage, ddir)
         except OSError:
             existing = resolve_doc(doc_id, workspace=workspace)
             if not existing or (_read_meta_at(existing) or {}).get("sha256") != sha:
-                # Not a concurrent ingest of the same content.
                 raise
-            _link(existing, p, task_id)          # the loser still owns this task's link to the document
+            _link(existing, p, task_id)
     except BaseException:
         shutil.rmtree(stage, ignore_errors=True)
         raise
-    shutil.rmtree(stage, ignore_errors=True)    # left only when another ingest won the rename
+    shutil.rmtree(stage, ignore_errors=True)
     return doc_id, len(pages)
 
 
@@ -2288,7 +2022,7 @@ def _iter_pages(doc_id, lo=None, hi=None, workspace=None):
     if not _real_directory(pdir, ddir):
         return
     numbered = [(int(m.group(1)), fn) for fn in os.listdir(pdir) if (m := re.match(r"p(\d+)\.txt$", fn))]
-    for pg, fn in sorted(numbered):                       # by number: p10000 comes after p9999
+    for pg, fn in sorted(numbered):
         if (lo is not None and pg < lo) or (hi is not None and pg > hi):
             continue
         page_path = os.path.join(pdir, fn)
@@ -2321,23 +2055,9 @@ def page_heads(doc_id, workspace=None):
     return out
 
 
-# Quote matching
-#
-# One rule, used by every literal comparison against a document: corpus search, corpus
-# verification, and the research ledger's quote check (it imports normalize_for_quote_match).
-# Two normalizers meant two answers to "is this passage in the book", and both of the old ones
-# only stripped whitespace -- so a quotation a model copied correctly was reported missing.
-
 _WHITESPACE = re.compile(r"\s+")
-# pdftotext breaks a word across lines with a trailing hyphen ("exam-\nple"), on nearly every line
-# of a real book; the hyphen belongs to the layout, not to the word.
 _HYPHEN_BREAK = re.compile(r"-[^\S\r\n]*\r?\n")
 
-# NFKC compatibility classes whose folding merges notation onto plain text the page never prints:
-# superscript and subscript footnote markers, circled and parenthesized list numbers, and vulgar
-# fractions all decompose to real digits. Folding them mints numbers ("享年52①" -> "享年521") that
-# verify_quote then swears the document states. Width folds (Ａ -> A, ｶ -> カ) and ligatures
-# (ﬁ -> fi) are genuine extraction artefacts and must keep folding.
 _NOTATION_TAGS = ("<super>", "<sub>", "<circle>", "<fraction>")
 
 
@@ -2349,10 +2069,6 @@ def _keeps_notation(ch):
     decomp = unicodedata.decomposition(ch)
     if decomp.startswith(_NOTATION_TAGS):
         return True
-    # ⑴ and ⒈ carry the generic <compat> tag yet fold to "(1)" and "1." -- "3⒈" would become
-    # "31." and match the quote "31", the same minted-digit bug as the tagged classes. Keep any
-    # <compat> form that folds to a digit; digit-free <compat> folds (ﬁ -> fi, compat jamo ㄱ ->
-    # choseong) are the artefacts the folding exists for and still fold.
     return decomp.startswith("<compat>") and any(
         "0" <= c <= "9" for c in unicodedata.normalize("NFKD", ch))
 
@@ -2411,7 +2127,7 @@ def _attaches(ch):
     first = (unicodedata.normalize("NFKD", ch) or ch)[0]
     return (unicodedata.combining(ch) != 0
             or unicodedata.combining(first) != 0
-            or "\u1160" <= ch <= "\u11ff"       # Hangul jungseong/jongseong
+            or "\u1160" <= ch <= "\u11ff"
             or "\u1160" <= first <= "\u11ff")
 
 
@@ -2429,7 +2145,7 @@ def _folded_spans(text, keep_break_hyphens=False):
     """
     dropped = (set() if keep_break_hyphens
                else {i for m in _HYPHEN_BREAK.finditer(text) for i in range(*m.span())})
-    segments = []                                    # [start, end, raw characters]
+    segments = []
     for i, ch in enumerate(text):
         if i in dropped or ch == "\u00ad":
             continue
@@ -2465,11 +2181,11 @@ def _locate(text, needle):
     readings = (False, True) if _HYPHEN_BREAK.search(text) else (False,)
     for keep in readings:
         if needle not in _normalized_page(text, keep):
-            continue           # cheap reject: one C call per page, the span walk runs only on a hit
+            continue
         folded, spans = _folded_spans(text, keep_break_hyphens=keep)
         pos = folded.find(needle)
         if pos < 0:
-            continue           # the segment walk folded less than the whole-string rule did
+            continue
         return spans[pos][0], spans[pos + len(needle) - 1][1]
     return None
 
@@ -2529,8 +2245,6 @@ def verify_quote(doc_id, quote, page=None, workspace=None):
         return None
     candidates = None
     if page is None:
-        # The whole document: pages that cannot hold it are set aside on its normalised text,
-        # read once per version of the index, instead of reading and folding every page per quotation.
         candidates = _pages_holding(doc_id, workspace, needle)
         if not candidates:
             return None
@@ -2669,13 +2383,7 @@ def structure(doc_id, workspace=None):
     tree = _tree(doc_id, workspace=workspace)
     if tree:
         return {"mode": "tree", "title": m["title"], "tree": tree}
-    # ``mode`` is a display string -- its only reader prints it -- so the reason the outline is
-    # missing rides along with it. "(pages)" on its own reads as a property of the document
-    # rather than as "structure extraction never ran on this machine".
     mode = "pages only, no structure tree"
-    # Outlines come from PageIndex, which reads PDFs. A workbook or a deck has no outline
-    # to miss, so naming the pageindex extra there sends a user to install something that
-    # would change nothing -- and leaves them believing their corpus is broken.
     if os.path.splitext(m.get("orig_path") or "")[1].lower() != ".pdf":
         mode += " (this format has no outline)"
     elif not pageindex_available():

@@ -105,8 +105,6 @@ async def test_length_truncated_tool_calls_are_failed_without_execution(monkeypa
     assert all(
         "output token limit" in message.content[0].text for message in tool_results
     )
-    # pi 0.87: the loop declares the executable tools to the model with a system message
-    # before the first request, since the context's transcript did not yet declare them.
     assert [getattr(message, "role", None) for message in messages] == [
         "system",
         "user",

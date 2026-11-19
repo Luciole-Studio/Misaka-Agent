@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/cloudflare-workers-ai.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "cloudflare-workers-ai.json").read_text(encoding="utf-8"))
 
 CLOUDFLARE_WORKERS_AI_MODELS = flattenChatModelCatalog("cloudflare-workers-ai", _values)

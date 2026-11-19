@@ -61,7 +61,6 @@ class ReadToolInput(BaseModel):
     path: str = Field(description="Path to the file to read (relative or absolute)")
     offset: int | None = Field(default=None, description="Line number to start reading from (1-indexed)", json_schema_extra=_NUMBER)
     limit: int | None = Field(default=None, description="Maximum number of lines to read", json_schema_extra=_NUMBER)
-    # MISAKA fork: one region of a spreadsheet.
     cell_range: str | None = Field(
         default=None,
         description=(
@@ -91,7 +90,6 @@ readOutputSchema: dict[str, Any] = {
     ]
 }
 
-# MISAKA fork: `Static<typeof readOutputSchema>` is the text, or a mapping of the image block.
 type ReadToolOutput = str | dict[str, str]
 
 
@@ -114,9 +112,6 @@ class ReadOperations(Protocol):
 
 
 def _openText(path: str) -> TextIO:
-    # MISAKA fork: pi reads the whole file and splits it. Text is streamed instead (see
-    # ``_scan_text``), decoded exactly as ``bytes.decode("utf-8", "replace")`` would be and
-    # split only on "\n", so a multi-gigabyte log pages with offset/limit in bounded memory.
     return open(path, encoding="utf-8", errors="replace", newline="\n")
 
 
@@ -138,7 +133,6 @@ class ReadToolOptions:
     operations: ReadOperations | None = None
 
 
-# MISAKA fork: an Office file is rendered in memory; past this size the rendering is refused.
 MAX_OFFICE_READ_BYTES = 100 * 1024 * 1024
 _SCAN_CHUNK_CHARS = 1024 * 1024
 # The selection's first characters that decide ``truncate_head`` exactly as the whole selection
@@ -231,8 +225,6 @@ def getNonVisionImageNote(model: Model[Api] | None) -> str | None:
         return None
     return "[Current model does not support images. The image will be omitted from this request.]"
 
-
-# MISAKA fork: Office documents.
 
 
 def _office_format(absolute_path: str) -> str | None:
@@ -342,13 +334,6 @@ def createReadToolDefinition(
                     ]
             else:
                 # Read text content.
-                # MISAKA fork: an Office file is rendered rather than decoded: its bytes are a zip, and
-                # ``errors="replace"`` on them produces pages of replacement characters that
-                # look like content and quote against nothing. The rendering is the corpus'
-                # own (``documents/office``), so what is shown here is what ``doc_read``
-                # would show -- a quotation copied out of this verifies against the indexed
-                # document. Everything below is unchanged: offset/limit page the rendering
-                # exactly as they page a text file.
                 startLine = max(0, parsed.offset - 1) if parsed.offset else 0
                 openText = getattr(ops, "openText", None)
                 if _office_format(absolutePath) is not None:
@@ -450,7 +435,6 @@ def createReadToolDefinition(
         name="read",
         label="read",
         description=(
-            # MISAKA fork: Office documents are named, and how each kind is rendered.
             "Read the contents of a file. Supports text files, Office documents "
             "(xlsx, xlsm, csv, tsv, docx, docm, pptx, pptm), and images "
             "(jpg, png, gif, webp, bmp). "

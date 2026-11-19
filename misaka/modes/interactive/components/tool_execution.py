@@ -139,7 +139,6 @@ class ToolExecutionComponent(Container):
         if self.hasRendererDefinition():
             self.addChild(self.selfRenderContainer if self.getRenderShell() == "self" else self.contentBox)
         else:
-            # MISAKA fork (D1): no MouseRegion around the text.
             self.addChild(self.contentText)
 
         self.updateDisplay()

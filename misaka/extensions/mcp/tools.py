@@ -98,7 +98,6 @@ type McpOutputSaver = Callable[[str | bytes, str], Awaitable[str]]
 
 
 async def saveToTempFile(data: str | bytes, extension: str) -> str:
-    # MISAKA fork: `misaka-mcp` rather than `pi-mcp`, as misaka names its files.
     return await writeOutputFile("misaka-mcp", extension, data)
 
 
@@ -124,7 +123,6 @@ def textOf(content: Sequence[TextContent | ImageContent]) -> str:
 
 
 def _contentText(value: Any) -> str:
-    # MISAKA fork: a content model's field cannot be `undefined`; a missing one is empty, as `join` prints it.
     if value is None or value is UNDEFINED:
         return ""
     return value if isinstance(value, str) else jsString(value)

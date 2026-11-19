@@ -18,18 +18,12 @@ from misaka.config import CFG, current_config, home
 from tests import posix
 
 PACKAGE = Path(__file__).resolve().parents[1] / "misaka"
-# Shipped skill assets and vendored upstream code are not MISAKA's own source.
 _NOT_OURS = ("/core/skills/assets/", "/vendor/")
-# ``~/.misaka`` or a path component that is exactly ``.misaka`` -- not ``.misaka-lcm-cache``,
-# not the dotted module name ``misaka.extensions.misaka_lcm``.
 _SPELLS_THE_HOME = re.compile(r"(^|[/~\s`'\"(])\.misaka(/|$|[\s`'\").,;:])")
-# The layout knobs that existed before the home did. One knob replaced them all.
 _RETIRED = ("MISAKA_CODING_AGENT_DIR", "MISAKA_CODING_AGENT_SESSION_DIR", "MISAKA_PROFILES", "MISAKA_SESSIONS",
             "MISAKA_DB", "MISAKA_MESSAGES", "MISAKA_TASKS", "MISAKA_WEB_CONFIG", "MISAKA_WEB_CACHE",
             "MISAKA_OFFICE_CACHE", "MISAKA_OFFICE_INTENT", "MISAKA_NET_SOCK", "MISAKA_NET_SNAPSHOT",
             "MISAKA_MCP_CACHE", "MISAKA_WORKTREE_DIR",
-            # Knobs that became settings.json sections (2026-09-22): a MISAKA_* name in the
-            # environment is a parent's hand-off to a child, never a setting.
             "MISAKA_PROVIDER", "MISAKA_MODEL", "MISAKA_LO_MODEL", "MISAKA_FORCE_MODEL", "MISAKA_JUDGE_TIMEOUT",
             "MISAKA_TOKEN_CAP", "MISAKA_BEAST_AT", "MISAKA_RESEARCH_PLAN_APPROVAL", "MISAKA_MAX_CONCURRENT_SISTERS",
             "MISAKA_MAX_CONCURRENT_PER_SISTER", "MISAKA_MCP_CALL_TIMEOUT", "MISAKA_MCP_INIT_TIMEOUT",
@@ -97,8 +91,8 @@ def test_paths_follow_the_home_at_each_lookup_and_a_test_override_is_undone(tmp_
     monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "one"))
     assert CFG["db"] == str(home.path("db")) and CFG["db"].startswith(str((tmp_path / "one").resolve()))
     monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "two"))
-    assert CFG["db"].startswith(str((tmp_path / "two").resolve()))          # nothing was cached
-    assert current_config()["tasks_root"] == str(home.path("tasks_root"))   # the materialised view has them too
+    assert CFG["db"].startswith(str((tmp_path / "two").resolve()))
+    assert current_config()["tasks_root"] == str(home.path("tasks_root"))
     with monkeypatch.context() as scoped:
         scoped.setitem(CFG, "db", "/elsewhere/board.db")
         assert CFG["db"] == "/elsewhere/board.db"
@@ -111,16 +105,14 @@ def test_the_home_is_never_a_project(tmp_path, monkeypatch):
     real = tmp_path / "user" / home.DIR_NAME
     real.mkdir(parents=True)
     monkeypatch.setenv(home.ENV_HOME, str(real))
-    assert home.project_dir(tmp_path / "user") is None                      # run from $HOME
+    assert home.project_dir(tmp_path / "user") is None
     assert home.project_dir(real / "tasks" / "t_1") == real / "tasks" / "t_1" / home.DIR_NAME
     assert home.project_dir(tmp_path / "repo") == tmp_path / "repo" / home.DIR_NAME
 
-    # The home reached through a symlink is still the home.
     (tmp_path / "linked").mkdir()
     (tmp_path / "linked" / home.DIR_NAME).symlink_to(real)
     assert home.project_dir(tmp_path / "linked") is None
 
-    # A home that is not called .misaka is only a project's config directory by coincidence.
     custom = tmp_path / "custom-home"
     custom.mkdir()
     monkeypatch.setenv(home.ENV_HOME, str(custom))
@@ -149,7 +141,6 @@ def test_project_scope_is_absent_when_the_working_directory_is_the_users_home(tm
     assert manager.getProjectSettings() == {}
     assert manager.getGlobalSettings() == {"theme": "from-the-home"}
 
-    # An ordinary project beside it still has its scope.
     repo = tmp_path / "repo"
     (repo / home.DIR_NAME / home.SUBAGENTS_DIR).mkdir(parents=True)
     assert project_trust.hasTrustRequiringProjectResources(str(repo))
@@ -164,14 +155,13 @@ def test_a_pointer_into_the_home_is_stored_relative_and_comes_back(tmp_path, mon
     outside = tmp_path / "project" / "notes.md"
     assert home.stored(outside) == str(outside.resolve())
     assert home.from_stored(home.stored(outside)) == outside.resolve()
-    # Moving the home moves the pointer with it.
     monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "moved"))
     assert home.from_stored("sessions/cards/t_1/a.jsonl").is_relative_to((tmp_path / "moved").resolve())
 
 
 def test_display_is_what_a_user_would_type(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))       # what Path.home() reads on Windows
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.delenv(home.ENV_HOME, raising=False)
     assert home.display() == f"~/{home.DIR_NAME}"
     assert home.display(home.path("auth")) == f"~/{home.DIR_NAME}/{home.LAYOUT['auth'].rel}"
@@ -186,22 +176,22 @@ def test_a_socket_too_deep_for_the_kernel_moves_to_a_short_private_directory(tmp
         assert home.path("net_sock").is_relative_to(home.home())
 
     deep = tmp_path / ("d" * 60) / ("e" * 60)
-    if os.name == "nt":                     # a pipe name holds 256 characters, not a sockaddr's 104
+    if os.name == "nt":
         deep = deep / ("f" * 60) / ("g" * 60)
     monkeypatch.setenv(home.ENV_HOME, str(deep))
     moved = home.path("net_sock")
     assert not moved.is_relative_to(home.home()) and len(os.fsencode(moved)) < 100
-    assert moved == home.path("net_sock")                                   # a daemon and its clients agree
-    assert home.path("net_snapshot").is_relative_to(home.home())            # only the socket has the limit
+    assert moved == home.path("net_sock")
+    assert home.path("net_snapshot").is_relative_to(home.home())
     monkeypatch.setenv(home.ENV_HOME, str(deep / "other"))
-    assert home.path("net_sock") != moved                                   # one directory per home
+    assert home.path("net_sock") != moved
 
 
 def test_a_socket_directory_that_is_not_ours_alone_is_refused_or_closed(tmp_path):
     ours = tmp_path / "run"
     ours.mkdir(mode=0o755)
     home.private_dir(ours)
-    if os.name != "nt":                     # POSIX modes; Windows keeps the profile private by ACL
+    if os.name != "nt":
         assert ours.stat().st_mode & 0o077 == 0
     (tmp_path / "file").write_text("not a directory", encoding="utf-8")
     with pytest.raises((RuntimeError, OSError)):
@@ -222,12 +212,10 @@ def test_the_board_stores_session_pointers_relative_and_reads_them_back_as_paths
         row = tasks.get(con, card)
         assert row["session_file"] == str(session) and row["session_dir"] == str(session.parent)
         assert dict(row)["session_file"] == str(session)
-        # A run row copies the card's pointer: read decoded through Row, it must be stored relative again.
         tasks._start_run(con, card, int(row["generation"]), "worker", "lock-1", 1, "id-1")
     finally:
         con.close()
 
-    # On disk there is no trace of where the home was.
     raw = sqlite3.connect(CFG["db"])
     try:
         stored = raw.execute("SELECT session_file, session_dir FROM tasks WHERE id=?", (card,)).fetchone()
@@ -239,7 +227,6 @@ def test_the_board_stores_session_pointers_relative_and_reads_them_back_as_paths
     finally:
         raw.close()
 
-    # The same board under a moved home resolves against the new one.
     moved = tmp_path / "moved"
     (tmp_path / "home").rename(moved)
     monkeypatch.setenv(home.ENV_HOME, str(moved))
@@ -254,12 +241,12 @@ def test_the_board_stores_session_pointers_relative_and_reads_them_back_as_paths
 def test_ensure_makes_the_home_and_its_credentials_owner_only(tmp_path, monkeypatch):
     monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
     home.ensure()
-    home.ensure()                                                            # idempotent
+    home.ensure()
     for name in ("agent", "credentials"):
         assert home.path(name).stat().st_mode & 0o777 == 0o700, name
     home.path("credentials").chmod(0o755)
     home.ensure()
-    assert home.path("credentials").stat().st_mode & 0o777 == 0o700         # a widened one is closed again
+    assert home.path("credentials").stat().st_mode & 0o777 == 0o700
 
 
 def test_the_home_root_holds_only_what_a_user_edits_and_one_directory_per_kind():
@@ -276,7 +263,7 @@ def test_the_home_root_holds_only_what_a_user_edits_and_one_directory_per_kind()
 def test_ensure_narrows_a_credential_file_that_was_left_readable(tmp_path, monkeypatch):
     monkeypatch.setenv(home.ENV_HOME, str(tmp_path / "home"))
     home.ensure()
-    assert not home.path("auth").exists()                                    # never created here
+    assert not home.path("auth").exists()
     home.path("auth").write_text("{}", encoding="utf-8")
     home.path("auth").chmod(0o644)
     home.ensure()
@@ -301,7 +288,7 @@ def test_a_v9_board_is_carried_forward(tmp_path, monkeypatch):
         assert con.execute("SELECT MAX(version) FROM schema_migrations WHERE component='tasks'").fetchone()[0] == 10
     finally:
         con.close()
-    tasks.connect(CFG["db"]).close()                                                # current: a no-op
+    tasks.connect(CFG["db"]).close()
 
 
 def test_a_board_written_by_another_build_is_refused_by_version_and_left_alone(tmp_path, monkeypatch):
@@ -316,26 +303,23 @@ def test_a_board_written_by_another_build_is_refused_by_version_and_left_alone(t
         assert con.execute("SELECT version FROM schema_migrations WHERE component='tasks'").fetchone()[0] == tasks.TASK_SCHEMA_VERSION
         runs.init(con)
         assert con.execute("SELECT version FROM schema_migrations WHERE component='research'").fetchone()[0] == runs.RESEARCH_SCHEMA_VERSION
-        runs.init(con)                                                              # current: a no-op
+        runs.init(con)
     finally:
         con.close()
     raw = sqlite3.connect(CFG["db"])
-    # Older than the first release (v9 is carried forward; anything before it is pre-release).
     raw.execute("UPDATE schema_migrations SET version=8 WHERE component='tasks'")
     raw.commit()
     raw.close()
     with pytest.raises(RuntimeError, match="pre-release MISAKA .v8"):
         tasks.connect(CFG["db"])
-    raw = sqlite3.connect(CFG["db"])                                                # nothing was reshaped
+    raw = sqlite3.connect(CFG["db"])
     assert raw.execute("SELECT version FROM schema_migrations WHERE component='tasks'").fetchone()[0] == 8
-    # A newer build's board: the way out is an update, not a new home.
     raw.execute("UPDATE schema_migrations SET version=? WHERE component='tasks'", (tasks.TASK_SCHEMA_VERSION + 1,))
     raw.commit()
     raw.close()
     with pytest.raises(RuntimeError, match=f"newer MISAKA .v{tasks.TASK_SCHEMA_VERSION + 1}.*misaka update"):
         tasks.connect(CFG["db"])
 
-    # A populated board with no marker at all is another build's too.
     other = tmp_path / "unmarked.db"
     raw = sqlite3.connect(other)
     raw.executescript(tasks.SCHEMA)
@@ -356,18 +340,16 @@ def test_a_role_session_writes_its_own_keys_to_its_file_and_everything_else_glob
     role.mkdir(parents=True)
     manager = SettingsManager.forRole(str(role))
 
-    manager.updateSection("web", lambda section: section.update({"search_backend": "tavily"}))   # a role key
-    manager.setValue("theme", "light")                                                         # not one
+    manager.updateSection("web", lambda section: section.update({"search_backend": "tavily"}))
+    manager.setValue("theme", "light")
     assert json.loads((role / "settings.json").read_text(encoding="utf-8")) == {"web": {"search_backend": "tavily"}}
     assert json.loads(home.path("settings").read_text(encoding="utf-8"))["theme"] == "light"
     assert json.loads(home.path("settings").read_text(encoding="utf-8"))["web"] == {"search_backend": "exa", "cache_ttl_minutes": 5}
 
-    # Reads: the role's value over the home's, the home's where the role says nothing.
     assert manager.getSection("web") == {"search_backend": "tavily", "cache_ttl_minutes": 5}
     assert manager.getScopedSection("role", "web") == {"search_backend": "tavily"}
     assert SettingsManager.forRole(None).getSection("web") == {"search_backend": "exa", "cache_ttl_minutes": 5}
 
-    # Another role sees none of it, and the table is what decides.
     other = home.path("profiles_root") / "10036"
     other.mkdir()
     assert SettingsManager.forRole(str(other)).getSection("web") == {"search_backend": "exa", "cache_ttl_minutes": 5}
@@ -388,10 +370,10 @@ def test_a_new_home_gives_last_order_a_soul_she_can_go_without(tmp_path, monkeyp
         layout.LAST_ORDER_SOUL.strip(), identity.COMMON_CHARTER, identity.COORDINATOR_ROLE]
     soul.write_text("Answer with the conclusion first.", encoding="utf-8")
     layout.ensure()
-    assert soul.read_text(encoding="utf-8") == "Answer with the conclusion first."    # never overwritten
+    assert soul.read_text(encoding="utf-8") == "Answer with the conclusion first."
     soul.unlink()
     layout.ensure()
-    assert not soul.exists()                                                      # taken out on purpose
+    assert not soul.exists()
     assert identity.prompt_sections(str(role), "last_order") == [identity.COMMON_CHARTER, identity.COORDINATOR_ROLE]
 
 
@@ -419,8 +401,8 @@ def test_a_section_write_edits_the_file_as_it_is_now_not_this_managers_stale_cop
 
     first = SettingsManager.forRole(None, str(tmp_path))
     first.updateSection("web", lambda section: section.update({"a": 1}))
-    second = SettingsManager.forRole(None, str(tmp_path))          # loaded now: sees a=1
+    second = SettingsManager.forRole(None, str(tmp_path))
     first.updateSection("web", lambda section: section.update({"b": 2}))
     second.updateSection("web", lambda section: section.update({"c": 3}))
     assert SettingsManager.forRole(None, str(tmp_path)).getSection("web") == {"a": 1, "b": 2, "c": 3}
-    assert second.getSection("web") == {"a": 1, "b": 2, "c": 3}   # its copy caught up with the file
+    assert second.getSection("web") == {"a": 1, "b": 2, "c": 3}

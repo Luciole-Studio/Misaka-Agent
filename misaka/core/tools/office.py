@@ -41,8 +41,6 @@ from misaka.core.tools.tool_definition_wrapper import wrapToolDefinition
 from misaka.ui.tui import Text
 from misaka.utils.values import read_field, signal_aborted
 
-# The shorthand fields that fold into a single ``create``. A model asked for a text file
-# should not have to know the ops grammar to write one.
 _SHORTHAND = ("content", "rows", "data")
 
 
@@ -165,8 +163,6 @@ def _desugar(parsed):
     """
     shorthand = {name: getattr(parsed, name) for name in _SHORTHAND
                  if getattr(parsed, name) is not None}
-    # The ops grammar sent in `content` -- '{"create": {"content": "..."}}' -- would land in the
-    # file as that JSON text and pass every "file exists" gate (2026-09-28, a 38-byte deliverable).
     if parsed.ops is None and isinstance(parsed.content, str) and _looks_like_ops(parsed.content):
         return None, ("content holds the ops grammar; pass that JSON as ops (an array of single-key "
                       "objects), or pass the file's text itself as content")
@@ -229,8 +225,6 @@ def createOfficeToolDefinition(
 
         async def mutate() -> AgentToolResult:
             async def worker() -> AgentToolResult:
-                # Parsing and saving an OOXML package is CPU-bound and unbounded in the
-                # size of the document; on the event loop it stalls every other session.
                 receipt = await asyncio.to_thread(
                     _office.run_ops, absolute_path, ops, overwrite=parsed.overwrite)
                 from misaka.core.tools._office._intent import archive
@@ -250,8 +244,6 @@ def createOfficeToolDefinition(
                         raise RuntimeError("Operation aborted")
                     return await asyncio.shield(worker_task)
             finally:
-                # to_thread cannot stop an in-flight save. Hold every destination lock
-                # through completion even when the caller aborts or cancels this task.
                 while not worker_task.done():
                     try:
                         await asyncio.shield(worker_task)
@@ -260,10 +252,8 @@ def createOfficeToolDefinition(
                     except Exception:  # noqa: BLE001 - preserve the caller cancellation
                         break
                 if not worker_task.cancelled():
-                    worker_task.exception()  # retrieve failures when cancellation won
+                    worker_task.exception()
 
-        # Exports mutate a second path. Canonical, sorted lock order prevents both
-        # cross-document export races and deadlocks when two calls share destinations.
         paths = sorted({os.path.realpath(p) for p in output_paths(absolute_path, ops)})
 
         async def locked(index=0):

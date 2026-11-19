@@ -108,8 +108,6 @@ class McpOAuthProvider:
         store = options.get("store")
         self._store: McpOAuthStateStore = store if store is not None else MemoryOAuthStateStore()
         self._onRedirect = options["onRedirect"]
-        # MISAKA fork: `Promise.resolve()` starts the write chain; a future needs a running loop, so
-        # `None` stands for "nothing pending".
         self._writes: asyncio.Future[None] | None = None
 
     async def state(self) -> str:
@@ -200,8 +198,6 @@ class McpOAuthProvider:
                 await asyncio.shield(previous)
             await maybe_await(self._store.save(update(self._own(await maybe_await(self._store.load())))))
 
-        # MISAKA fork: each write is a task chained on the previous one and shielded from its caller,
-        # as a promise keeps running when nobody awaits it; its failure is observed either way.
         self._writes = asyncio.ensure_future(write())
         self._writes.add_done_callback(lambda done: done.cancelled() or done.exception())
         await asyncio.shield(self._writes)

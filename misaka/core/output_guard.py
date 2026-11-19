@@ -135,7 +135,6 @@ def writeRawStdout(text: str) -> None:
 
 
 async def waitForRawStdoutBackpressure() -> None:
-    # MISAKA fork: every chunk is pushed through synchronously, so nothing is pending by the time a caller awaits this.
     return
 
 

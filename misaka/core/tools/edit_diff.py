@@ -183,8 +183,6 @@ def applyReplacementsPreservingUnchangedLines(
     return result
 
 
-# MISAKA fork: the lossless splice that replaces applyReplacementsPreservingUnchangedLines for fuzzy edits.
-
 
 def _normFrag(text: str) -> str:
     """``normalizeForFuzzyMatch`` for an intra-line fragment: no per-line trimEnd."""
@@ -456,9 +454,6 @@ def applyEditsToNormalizedContent(
     ]
 
     for i, edit in enumerate(normalizedEdits):
-        # MISAKA fork: empty *after* normalization, not just literally empty: matching folds each line's
-        # trailing whitespace away, so a whitespace-only oldText would match at offset 0 with
-        # length 0 and splice newText in as an insertion reported as a replacement.
         if normalizeForFuzzyMatch(edit.oldText) == "":
             raise getEmptyOldTextError(path, i, len(normalizedEdits))
 
@@ -496,12 +491,6 @@ def applyEditsToNormalizedContent(
 
     baseContent = normalizedContent
     if usedFuzzyMatch:
-        # MISAKA fork (pi: applyReplacementsPreservingUnchangedLines rewrites every touched line from the normalized
-        # base). Fuzzy coordinates, original spelling: matches were found in the normalized text, but
-        # the file must not be rewritten in normalized form — that silently NFKC-folds every
-        # untouched line (curly quotes, full-width characters, ligatures), which for a corpus
-        # of humanities sources is data corruption, not normalization. Splice each newText at
-        # its matched span and recover every gap between spans from the original content.
         def isNoop(matched: MatchedEdit) -> bool:
             edit = normalizedEdits[matched.editIndex]
             if edit.newText == edit.oldText:
@@ -675,7 +664,6 @@ async def computeEditsDiff(path: str, edits: list[Edit | dict[str, str]], cwd: s
         try:
             rawContent = buffer.decode("utf-8")
         except UnicodeDecodeError as error:
-            # MISAKA fork: the edit refuses a file that is not UTF-8, so its preview does too.
             return EditDiffError(
                 error=f"Could not edit file: {path}. It is not valid UTF-8 text ({error}); "
                 "editing it as text would corrupt it. Use bash for binary files."

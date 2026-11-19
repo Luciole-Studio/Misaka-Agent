@@ -191,8 +191,6 @@ class HarnessImpl(SessionImpl):
         )
         self._submissions = Submissions(self, storage, self._now, settings, lambda: self._tasks.resume())
         self._taskGraph = TaskGraphView(self, storage)
-        # MISAKA fork: upstream's `#host`; `_host` is the Session kernel's here, where private fields are not per
-        # class.
         self._conversationHost = _ConversationHost(
             self, storage, lambda target, createOptions, createContext: self._create(target, createOptions, createContext)
         )

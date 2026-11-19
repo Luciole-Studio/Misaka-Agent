@@ -34,8 +34,6 @@ from misaka.cli import update
 from misaka.cli.setup_ui import SetupCancelled, SetupGoBack, prompt_choice
 from misaka.config import home
 
-# A project's .misaka/ mirrors the half of the home a person edits; any other name in it was
-# written by MISAKA or one of its plugins for sessions and runs the home records.
 _USER_CONFIG = {entry.rel.split("/", 1)[0] for entry in home.LAYOUT.values() if entry.kind == "edit" and entry.rel}
 
 
@@ -77,7 +75,7 @@ def _projects(db_path: str) -> list[str]:
                 try:
                     rows += con.execute(f"SELECT DISTINCT workspace FROM {table} WHERE workspace IS NOT NULL").fetchall()
                 except sqlite3.OperationalError:
-                    pass                         # a board that never held that table
+                    pass
     except sqlite3.Error:
         return []
     root = str(home.home())
@@ -85,9 +83,6 @@ def _projects(db_path: str) -> list[str]:
     found = []
     for (workspace,) in rows:
         path = os.path.realpath(os.path.expanduser(str(workspace)))
-        # The home directory turns up when a card was created from a shell sitting in it, and
-        # it is not a project: `misaka init` refuses it. Listing it here would read as a claim
-        # that MISAKA considers the whole home directory one.
         if path in (root, user_home) or path.startswith(root + os.sep) or not os.path.isdir(path):
             continue
         found.append(path)
@@ -165,8 +160,6 @@ def _remove(path: str) -> tuple[bool, str]:
     return True, ""
 
 
-# -- Windows: it deletes neither a running program nor a file a process holds open ----------------
-
 def _this_install(exe: str | None) -> bool:
     """Whether ``exe`` belongs to this install: its environment's interpreter, or a launcher."""
     exe = os.path.normcase(exe or "")
@@ -188,7 +181,6 @@ def _holders(*, daemon: bool) -> list[str]:
                 not daemon and "misaka.ui.panel.daemon" in command):
             continue
         found[proc.info["pid"]] = (proc.info["ppid"], command or proc.info.get("exe"))
-    # One line per window: a launcher's interpreter is listed under the launcher.
     return [f"{pid}  {command}" for pid, (parent, command) in found.items() if parent not in found]
 
 
@@ -223,9 +215,7 @@ def _remove_after_exit(remover: list[str]) -> Path | None:
               f"& {quoted(executable)} {' '.join(quoted(arg) for arg in remover[1:])} 2>&1 "
               f"| ForEach-Object {{ \"$_\" }} | Out-File -FilePath {quoted(str(log))} -Encoding utf8")
     try:
-        # Its own hidden console, not DETACHED_PROCESS: PowerShell does not run without one. That
-        # console is also why closing this window does not stop it.
-        subprocess.Popen(                 # encoded, so nothing re-parses the script as a command line
+        subprocess.Popen(
             ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand",
              base64.b64encode(script.encode("utf-16-le")).decode("ascii")],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,

@@ -8,22 +8,17 @@ their approval state, output format and delivery mechanism.
 
 import os
 
-# Fallback identity for roles without a default of their own.
 DEFAULT_IDENTITY = (
     "You are an agent of the MISAKA Network, a multi-agent research system for the "
     "humanities and social sciences. You are direct and honest and do not pad: report "
     "what you actually did, and when something cannot be found, say so plainly."
 )
 
-# Known roles need no invented personality when SOUL.md is absent. Their identity
-# and duties live in the charter, so a personality file never removes them.
 ROLE_IDENTITY = {
     "last_order": "",
     "sisters": "",
 }
 
-# Tool-level coordination rules. Charters state responsibilities, not a second
-# copy of the dispatch protocol; the builder deduplicates identical tool rules.
 COORDINATOR_APPROVAL = (
     "In ordinary board chat, lay out the created cards and their boundaries, then wait for the user's go-ahead "
     "before starting work that costs money. In Research, follow the current phase's approval gate: "
@@ -94,7 +89,6 @@ Understand the user's goal and the request received from Last Order, a workflow,
 - Deliver findings, supporting material, counterevidence, methodological limits and unresolved questions to the requester. Follow a card's completion contract when working on a card; direct conversation need not pretend to be a card.
 """
 
-# Charters are system contracts appended after the identity slot; SOUL.md cannot replace them.
 ROLE_CHARTER = {
     "last_order": COORDINATOR_ROLE,
     "sisters": SISTER_ROLE,

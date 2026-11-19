@@ -75,7 +75,7 @@ def test_project_paths_ignore_global_overrides_and_bind_all_content(tmp_path, mo
     assert conf.database_path == str(root / "lcm.db")
     assert Path(conf.extraction_output_path).parent == root
     assert Path(conf.large_output_externalization_path).parent == root
-    assert not root.exists()  # resolving a path is not opening a runtime
+    assert not root.exists()
 
 
 def test_misaka_gives_lcm_grep_thirty_seconds_unless_the_env_says_otherwise(tmp_path, monkeypatch):
@@ -134,7 +134,7 @@ def test_project_isolation_shared_roles_and_session_switch(tmp_path):
     ce.release_project(a)
     assert Path(config_bridge.database_path(sister)).is_file()
     ce.close(sister)
-    assert Path(config_bridge.database_path(sister)).is_file()  # /new or reload is not application exit
+    assert Path(config_bridge.database_path(sister)).is_file()
     ce.release_project(sister)
     assert storage.clear(storage.project(a))
     assert Path(config_bridge.database_path(b)).is_file()
@@ -227,7 +227,7 @@ def test_a_retried_attempt_after_a_checkpoint_leaves_its_frontier_owned(tmp_path
     let upstream's surplus-skip matcher hand the checkpoint's row to nobody, and compaction
     raised "frontier contains sources outside the transcript archive" in Last Order's turn."""
     ctx = session(tmp_path / "project")
-    failed_attempt(ctx, 0, retried=False)                    # retries exhausted: it stays, and is stored
+    failed_attempt(ctx, 0, retried=False)
     summary(ctx)
     say(ctx, "after the checkpoint", tick=1)
     ce.sync(ctx)
@@ -250,7 +250,7 @@ def test_a_rebind_does_not_ingest_the_attempts_a_retry_dropped(tmp_path):
     ce.sync(ctx)
     built = ce.bound_engine(ctx)
     stored = count(built)
-    ce.start(ctx)                                            # session_compact_failed, a tree switch, a restart
+    ce.start(ctx)
     ce.sync(ctx)
     assert count(built) == stored == 2
     _, rows = ce._archive_map(built, ce.snapshot(ctx))
@@ -291,7 +291,6 @@ def test_carry_rebuild_after_reordered_row_ids_and_chained_carry(tmp_path):
     saved = {p: p.read_bytes() for p in source_files}
     ce.close_all()
     assert storage.clear(storage.project(original))
-    # Change row allocation before rebuilding. Old store IDs must not select this text.
     other = session(tmp_path / "project")
     say(other, "DECOY new cache row one")
     ce.sync(other)
@@ -305,7 +304,7 @@ def test_carry_rebuild_after_reordered_row_ids_and_chained_carry(tmp_path):
     assert not built._store.get_batch(old_rows)
     assert built._dag.get_node(old_node.node_id) is None
     ce.sync(final_ctx)
-    assert count(built) == 2  # idempotent restore, not duplicate import
+    assert count(built) == 2
     assert all(p.read_bytes() == saved[p] for p in source_files)
 
 
@@ -344,8 +343,6 @@ def test_core_tool_schemas_unchanged_and_product_guidance(tmp_path):
     from misaka.extensions.misaka_lcm.vendor.engine import LCMEngine
     for schema in LCMEngine.get_tool_schemas():
         definition = tools._definition(schema, str(tmp_path))
-        # The contract is upstream's; only the prose is said in misaka's terms (2026-10-17). One
-        # exception: `role` takes `agent:<name>`, which no closed list can hold (2026-11-07).
         contract = _contract(schema["parameters"])
         contract.get("properties", {}).get("role", {}).pop("enum", None)
         assert _contract(definition.parameters) == contract
@@ -372,7 +369,7 @@ def test_the_leaf_chunk_follows_the_session_s_window_and_the_tail_stays_upstream
     built = ce.bound_engine(ctx)
     assert (built._config.fresh_tail_count, built._config.leaf_chunk_tokens) == (32, 156_250)
     assert built._config.config_sources["leaf_chunk_tokens"] == "misaka.default"
-    ctx._ctx.model = _model(128_000, "small-model")          # a model switch re-sizes them
+    ctx._ctx.model = _model(128_000, "small-model")
     ce.bound_engine(ctx)
     assert (built._config.fresh_tail_count, built._config.leaf_chunk_tokens) == (32, 20_000)
 
@@ -395,7 +392,7 @@ def test_the_leaf_chunk_fits_the_summariser_and_an_explicit_setting_stands(monke
     config = LCMConfig()
     config_bridge.scale_to_window(config, 1_000_000, summariser_window=200_000)
     assert config.leaf_chunk_tokens == 120_000
-    assert (config.fresh_tail_count, config.fresh_tail_max_tokens) == (32, 0)    # upstream's tail
+    assert (config.fresh_tail_count, config.fresh_tail_max_tokens) == (32, 0)
     monkeypatch.setenv("LCM_LEAF_CHUNK_TOKENS", "90000")
     config = LCMConfig(leaf_chunk_tokens=90_000)
     config_bridge.scale_to_window(config, 1_000_000, summariser_window=1_000_000)
@@ -441,17 +438,17 @@ def test_a_cache_deleted_under_a_running_session_is_rebuilt_from_its_transcript(
     assert new is not old
     assert (root / storage._MARKER).read_text(encoding="utf-8") == storage._STAMP
     assert new._store.db_path == root / "lcm.db"
-    assert count(new) == 2                      # both turns, re-ingested from the transcript
+    assert count(new) == 2
     assert storage.current(storage.project(ctx)) == new._misaka_cache
 
 
 def test_a_joiner_restores_a_cache_that_is_missing_or_unmarked(tmp_path):
     project = (tmp_path / "project").resolve()
-    proc = child(project)                       # a live owner holds the lease
+    proc = child(project)
     try:
         root = storage.directory(project)
         shutil.rmtree(root)
-        storage.acquire(project)                # cannot take the exclusive lease, restores anyway
+        storage.acquire(project)
         assert (root / storage._MARKER).read_text(encoding="utf-8") == storage._STAMP
         storage.release(project)
     finally:
@@ -517,7 +514,7 @@ def test_the_cache_outlives_its_owners_and_only_an_idle_one_is_cleared(tmp_path)
     root = storage.directory(project)
     (root / "payload").write_text("kept", encoding="utf-8")
     storage.release(project)
-    assert not storage.clear(project)  # a sibling is using it
+    assert not storage.clear(project)
     assert (root / "payload").exists()
     out, err = proc.communicate("finish\n", timeout=20)
     assert proc.returncode == 0, (out, err)
@@ -525,7 +522,7 @@ def test_the_cache_outlives_its_owners_and_only_an_idle_one_is_cleared(tmp_path)
     proc = child(project)
     proc.kill()
     proc.communicate(timeout=20)
-    storage.acquire(project)  # an interrupted run leaves it as it was
+    storage.acquire(project)
     assert (root / "payload").exists()
     storage.release(project)
     assert storage.clear(project) and not root.exists()
@@ -542,7 +539,7 @@ ctx = SimpleNamespace(cwd=sys.argv[1], model=None, sessionManager=SessionManager
 context_engine.bound_engine(ctx)
 ''', str(project)], capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr
-    assert storage.clear(project)  # exiting let the lease go
+    assert storage.clear(project)
 
 
 def test_real_compaction_rebuild_then_fork(tmp_path, monkeypatch):
@@ -638,8 +635,6 @@ def test_research_restores_the_recall_rules_without_repeating_them(tmp_path):
     rule = tools.recall_guideline()
     assert rule in prompt and rule not in system_context(session, list(definitions), prompt)
     assert rule in system_context(session, list(definitions), "USER SYSTEM")
-    # 2026-09-29 (user): products first, the conversation only as their context -- said by the
-    # plugin with its tools, not written into the prompts of whatever uses the sessions.
     text = " ".join(rule.split())
     assert "Work products come before conversations." in text
     assert "a conversation supplements its products, never replaces them" in text
@@ -876,8 +871,6 @@ def test_audit_cleaned_carry_sources_rebuild_without_stale_node_hint(tmp_path):
         nodes = ce._checkpoint_nodes(built, ce._checkpoint(snap), snap)
         assert nodes and all(built._store.get_batch(carry.source_ids(built, node)) for node in nodes)
         _delete_clean_candidates_atomically(built, {original.sessionManager.getSessionId()})
-        # A same-process resume keeps this project's cache, but must rebuild
-        # archive-backed references removed by explicit operator maintenance.
         ce.close(target)
 
 
@@ -1080,4 +1073,4 @@ def test_a_research_conversation_is_not_all_fresh_tail(monkeypatch):
     messages = [{"role": "user" if i % 2 else "assistant", "content": memo} for i in range(84)]
     tail = resolve_fresh_tail_boundary(messages, fresh_tail_count=config.fresh_tail_count,
                                        fresh_tail_max_tokens=config.fresh_tail_max_tokens)
-    assert tail.start == 84 - 32                               # the older 52 can be summarised
+    assert tail.start == 84 - 32

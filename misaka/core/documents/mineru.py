@@ -33,36 +33,19 @@ from misaka.utils.tools_manager import find_tool
 
 BINARY = "mineru-kit"
 MISSING = "mineru-kit is not installed (uv tool install mineru)"
-# Its strongest reading, and the only one that reads what it takes for a picture: a handwritten
-# judgment on a plate came back at 85% of its characters, where the others returned none of it.
 ADVANCED = "advanced"
 BASIC = "basic"
-# A failed run costs its batch, not the book, and the slowest pages seen (19 s each) leave a batch
-# well inside the limit.
 BATCH = 25
 TIMEOUT = 900
-# The picture-reading model behind standard and advanced can fall into repeating itself on a table
-# or a contents page: 4 of 54 pages of two scans on standard, one of them 4,000 characters of a
-# three-character run. basic has no such model. A phrase a gazette really repeats came to 8 on a page.
 STUCK_RUN = 8
 STUCK_REPEATS = 15
 TESSERACT = "tesseract"
-# Its orientation detection never took an upright page for one on its side, in 159 pages of print,
-# manuscript and handwriting, and found six of nine pages that were. Which way up it does not know:
-# on handwriting its answer changes with the resolution. basic does: the right way read more on all
-# nine, three times as much on eight. A page upside down is left alone, being rare, and the answer
-# five upright pages wrongly got.
 SIDEWAYS = (90, 270)
 TURN_CONFIDENCE = 0.6
 TURN_TIMEOUT = 60
-# What the model writes for a picture it finds nothing to read on.
 NO_TEXT = "[NO TEXT]"
 TITLE_BLOCKS = ("doc_title", "paragraph_title")
-# A title this short is a leaf number or a stray character, not a heading.
 TITLE_LEAST = 2
-# The same heading on this many pages is the running head of the book, not a run of sections. OCR
-# reads one a little differently each time, so near enough counts -- scaled by length, or "附表六"
-# and "附表八" would be the same heading.
 HEAD_PAGES = 3
 HEAD_EDITS = 4
 
@@ -76,7 +59,6 @@ for number in numbers:
     for turn in (0, 90, 270):
         page.render(scale=2, rotation=turn, grayscale=True).to_pil().save(f"{folder}/{number}-{turn}.png")
 """
-# A copy, not pixels: the reader gets the scan at its own resolution, only its rotation changed.
 _TURNED_COPY_CHILD = """
 import json, sys
 import pypdfium2 as pdfium
@@ -110,7 +92,6 @@ def _turns(path, numbers):
     """``{page: clockwise degrees}`` for the pages of ``numbers`` lying on their side. tesseract says
     which they are and basic which way up: the way that reads more. Nothing here is worth failing a
     reading over, and a page that cannot be judged is read as it lies."""
-    # ``find_tool``: on Windows its installer leaves it off PATH, and the path found is the one run.
     tesseract = None if numbers is None else find_tool(TESSERACT)
     if not tesseract:
         return {}

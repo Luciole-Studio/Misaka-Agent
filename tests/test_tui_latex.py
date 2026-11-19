@@ -509,7 +509,6 @@ def test_returns_undefined_for_malformed_groups_and_environments():
 
 
 def test_an_empty_matrix_or_cases_body_renders_as_nothing():
-    # MISAKA: `Math.max(0, ...[])` is 0; Python's `max(0, *())` raised TypeError. Values recorded from upstream.
     for display in (False, True):
         options = RenderLatexOptions(display=display)
         assert renderLatex(r"\begin{array}{cc}\scriptstyle{}\end{array}", options) == ""

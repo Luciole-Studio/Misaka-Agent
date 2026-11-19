@@ -154,9 +154,6 @@ def codemodeSection(
             return -1
         if b["namespace"] is None:
             return 1
-        # MISAKA fork: `misaka.utils.collation` orders ASCII names as ICU's root collation does and puts other
-        # characters after them by code point; upstream's `localeCompare` follows the process locale, so its own order
-        # of non-ASCII names differs from one machine to another (ICU puts `ß` beside `ss`, `ja-JP` puts Han first).
         return localeCompare(a["namespace"]["name"], b["namespace"]["name"])
 
     ordered = sorted(groups.values(), key=functools.cmp_to_key(compare))

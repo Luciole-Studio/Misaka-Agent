@@ -81,8 +81,6 @@ def getCompactReadClassification(args: Any, cwd: str) -> CompactReadClassificati
     if fileName == "SKILL.md":
         return CompactReadClassification(kind="skill", label=os.path.basename(os.path.dirname(absolutePath)) or fileName)
 
-    # MISAKA fork: no pi documentation classification (see the module docstring).
-
     if fileName in COMPACT_RESOURCE_FILE_NAMES:
         return CompactReadClassification(
             kind="resource", label=formatPathRelativeToCwdOrAbsolute(absolutePath, cwd)

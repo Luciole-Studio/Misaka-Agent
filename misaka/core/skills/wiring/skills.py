@@ -53,8 +53,6 @@ def _runtime_name(entry):
 
 
 def _command_name(entry):
-    # Provider-qualified identities already name a command. Hermes' Telegram slugger
-    # strips their namespace delimiters and rewrites underscores; the TUI accepts both.
     name = _runtime_name(entry)
     return name if entry.get("namespace") else skill_index.slug(name)
 
@@ -91,8 +89,6 @@ def _render_loaded(loaded, entry, *, activation_note, user_instruction="", sessi
         return preprocess_skill_content(content, directory, task_id,
                                         layer=entry.get("origin_layer", entry.get("layer")))
 
-    # One raw read, one preprocessing pass. Native ordering/markers are preserved;
-    # only explicit host config, linked-file containment and source identity differ.
     return hermes_commands._build_skill_message(
         loaded, Path(entry["dir"]), activation_note, user_instruction=user_instruction, session_id=session_id,
         preprocess=preprocess, inject_config=inject_config,
@@ -106,7 +102,6 @@ def build_skill_message(entry, *, user_instruction="", session_id=None, activati
     owned = runtime is None
     runtime = SkillRuntime(profile_dir) if owned else runtime
     try:
-        # Keep the same owner through readiness AND message preprocessing.
         with using_runtime(runtime):
             loaded = reader.load(entry, session_id, profile_dir=profile_dir, preprocess=False, runtime=runtime)
             if not loaded.get("success"):
@@ -203,10 +198,7 @@ class SkillsPart:
                 "", description="OPTIONAL: Path to a linked file within the skill (e.g., 'references/api.md', "
                                 "'templates/config.yaml', 'scripts/validate.py'). Omit to get the main SKILL.md content.")
 
-        # ── the index in the system prompt (hermes build_skills_system_prompt) ──
         async def advertise(event, _ctx):
-            # The prompt's `skills` section, the name pi gives its own skill list. A section rather than
-            # a returned prompt, which would be forced and leave out the sections extensions add later.
             sections = event["systemPromptOptions"]["sections"]
             active = self._active_tools()
             if active is not None and "skill_view" not in active:
@@ -228,10 +220,6 @@ class SkillsPart:
 
         self._advertise, self._fresh = advertise, fresh
 
-        # ── the [Skills] block on the startup screen ──
-        # The engine loads no skills of its own, so it has no section to show; this one takes
-        # that place (same name, same style) and shows the index instead: names collapsed, the
-        # full category tree behind ctrl+o.
         from misaka.core.extensions import startup_sections
 
         def _dim(text):
@@ -247,7 +235,6 @@ class SkillsPart:
                                   name_key="runtime_name", description_key="list_description")
                               ) or _dim("  (none)"))
 
-        # ── tools ──
         async def list_execute(tool_call_id, raw, signal, on_update, ctx):
             args = raw if isinstance(raw, ListParams) else ListParams(**(raw or {}))
             from misaka.core.skills.vendor.view import skills_list
@@ -278,8 +265,6 @@ class SkillsPart:
             if err:
                 return {"content": [{"type": "text", "text": err}], "isError": True}
             async with self._read_lock:
-                # Resolve identity BEFORE dedup: same names across sources never
-                # share state, and disabled/quarantined entries cannot hit a stub.
                 source = Path(entry["dir"]) / args.file_path if args.file_path else Path(entry["path"])
                 try:
                     st = source.stat()
@@ -288,7 +273,6 @@ class SkillsPart:
                     fingerprint = None
                 key = (entry["path"], args.file_path)
                 from misaka.core.skills.layers import load_skills_config
-                # Setup/config can change without touching SKILL.md.
                 ready = reader.readiness(entry.get("frontmatter", {}), profile_dir, runtime=self.runtime)
                 state = (fingerprint, json.dumps(load_skills_config(), sort_keys=True),
                          tuple((e["name"], bool(self.runtime.load_env().get(e["name"]))) for e in ready["required_environment_variables"]),
@@ -349,7 +333,6 @@ class SkillsPart:
                 "When the user-controlled gate blocks a write, report it and do not seek a bypass.",
             ]))
 
-        # ── commands ──
         async def skill_cmd(args, ctx):
             raw = (args or "").strip()
             found = _slash_entries(entries())
@@ -393,7 +376,6 @@ class SkillsPart:
             os.makedirs(target, exist_ok=True)
             prompt = build_learn_prompt(args or "", target_dir=target,
                                         available_tools=self.session.getActiveToolNames() if self.session else ())
-            # Every write goes through the skill gate, validation, scan, and ledger.
             decision, note = skill_write.evaluate_gate()
             if decision == "off":
                 raise ValueError("Skill writing is disabled globally. Change the write mode before using /learn.")
@@ -409,7 +391,6 @@ class SkillsPart:
             return prompt
 
         async def skill_mode_cmd(args, ctx):
-            # Slash commands originate from user input, so this is the user-only write-mode entry point.
             from misaka.core.skills import layers as skill_layers
             from misaka.core.skills import write as skill_write
             value = (args or "").strip().lower()
@@ -430,13 +411,11 @@ class SkillsPart:
             try:
                 skill_layers.write_skills_config(cfg)
             except skill_layers.SkillsConfigError as error:
-                # A settings.json the user broke by hand is their file to fix; the
-                # refusal is the point, so say it rather than crash the command.
                 ctx.ui.notify(str(error), "error")
                 return
             ctx.ui.notify(f"Skill write mode set to {value}; it takes effect immediately.", "info")
 
-        if kind == "foreground":         # the write mode is the user's to set, at the keyboard
+        if kind == "foreground":
             self._commands.append(CoreCommand(
                 "skill-mode",
                 "Show or change the skill write mode: off, forbid / ask (writes wait for your review), or allow.",
@@ -546,7 +525,7 @@ class SkillsPart:
             disabled_names=disabled)
 
     async def _prepare_provider(self, name, source=None):
-        if self._base_roots is not None:  # a caller's explicit roots never activate live extensions
+        if self._base_roots is not None:
             return
         from misaka.core.skills.providers import prepare
         if not source and isinstance(name, str) and ':' in name:
@@ -554,7 +533,7 @@ class SkillsPart:
             entry, error = skill_index.resolve(self._roots, name, platform=self._platform)
             if error:
                 self._activated_providers.discard(parse_skill_name(name)[0])
-                return  # The normal resolver reports missing/disabled/ambiguous, without activation.
+                return
             source = entry['path']
         await prepare(getattr(self.session, "resourceLoader", None), name, self._activated_providers, source=source)
 
@@ -622,7 +601,7 @@ class SkillsPart:
                         await settle(task)
                     except (asyncio.CancelledError, Exception):  # noqa: BLE001, S110 - drain every capture before propagating the original cancellation
                         pass
-                raise error  # repeated cancellation or worker failure cannot orphan the work
+                raise error
 
     @staticmethod
     def _session_id(ctx):
@@ -672,7 +651,7 @@ class SkillsPart:
         if error:
             return None
         if skill_index.is_disabled(entry, self._platform, disabled=disabled):
-            return {}, None, _runtime_name(entry)  # native block loader skips BEFORE any preprocessing
+            return {}, None, _runtime_name(entry)
         try:
             loaded = reader.load(entry, task_id, profile_dir=self._profile_dir, preprocess=False, runtime=self.runtime)
         except (OSError, ValueError):
@@ -729,8 +708,6 @@ class SkillsPart:
             manager._skill_runtime = self.runtime
 
     def _refresh_roots(self):
-        # Hermes discovers current roots on access. Extension contributions are a
-        # replaceable set, not an append-only history; a caller's explicit roots stay pinned.
         loader = getattr(self.session, "resourceLoader", None)
         extension_paths = extension_resources(loader)
         live = skill_roots(self._profile_dir, self._workspace, extension_paths=extension_paths)
@@ -826,7 +803,6 @@ class SkillsPart:
         from misaka.core.skills.vendor import curator
         with using_scope(self.scope):
             cfg = load_config().get("background_review", {})
-            # HOST: enabling a newly ported feature must not silently bill existing sessions.
             enabled = isinstance(cfg, dict) and cfg.get("enabled") is True
             curate = curator.is_enabled()
             delay = max(0.0, curator.get_min_idle_hours() * 3600.0) if curate else 0
@@ -865,7 +841,7 @@ class SkillsPart:
         self.runtime.close()
 
     async def session_shutdown(self, event, ctx):
-        self._closed = True  # Fence queued review/reload callbacks before awaiting.
+        self._closed = True
         await settle(asyncio.create_task(self._shutdown(event)))
 
     async def _shutdown(self, event):

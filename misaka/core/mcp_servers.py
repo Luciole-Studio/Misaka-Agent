@@ -120,7 +120,6 @@ class McpOAuthConfig(TypedDict, total=False):
     # How pi identifies itself without `clientId`. `dcr` (default): dynamic client registration. `cimd`:
     # pi's Client ID Metadata Document on pi.dev, for authorization servers that allow pi by that URL. The
     # server must support it for public clients, and the callback must use the default path `/callback`.
-    # MISAKA fork: `cimd` is rejected, since misaka has no document of its own and does not present pi's.
     clientRegistration: Literal["dcr", "cimd"]
     # Authorization server metadata document (RFC 8414 or OpenID Connect discovery) to use instead of
     # discovery through the server, for servers that advertise a wrong authorization server or none.
@@ -206,7 +205,6 @@ def _validateOAuth(value: Any) -> str | None:
         callback = URL(value["callbackUrl"]) if isinstance(value.get("callbackUrl"), str) else None
         if callback and (callback.hostname == "[::1]" or callback.pathname != "/callback"):
             return 'oauth.clientRegistration "cimd" requires oauth.callbackUrl on localhost or 127.0.0.1 with path /callback'
-        # MISAKA fork: the mechanism is ported, but the only documents it could name are pi's on pi.dev.
         return 'oauth.clientRegistration "cimd" is not supported: misaka has no Client ID Metadata Document of its own'
     if "authServerMetadataUrl" in value:
         metadataUrl = value["authServerMetadataUrl"]
@@ -239,8 +237,6 @@ def _resolveExposureAliases(value: Mapping[str, Any]) -> dict[str, Any]:
 def getMcpToolExposure(config: McpServerConfig, toolName: str) -> McpExposure:
     """Exposure of one tool of a server: its ``toolExposure`` entry, else the server's ``exposure``."""
     overrides = config.get("toolExposure") or {}
-    # MISAKA fork: a plain dict lookup; pi's `overrides[toolName]` also finds Object.prototype keys
-    # (a tool named "constructor" or "toString").
     exact = overrides.get(toolName)
     if exact is not None:
         return exact

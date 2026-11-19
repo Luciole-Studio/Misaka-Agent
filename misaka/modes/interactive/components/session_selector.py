@@ -53,8 +53,6 @@ type SessionScope = Literal["current", "all"]
 
 
 def shortenPath(path: str) -> str:
-    # MISAKA fork: the footer's component-wise home collapse; pi's `startsWith(home)` turns /home/abc/x into "~c/x"
-    # when HOME is /home/ab (audit 2026-09-02).
     home = os.path.expanduser("~")
     if not path:
         return path
@@ -354,7 +352,6 @@ class SessionList:
         self.onRenameSession: Callable[[str], None] | None = None
         self.onError: Callable[[str], None] | None = None
         self.maxVisible: int = 10  # Max sessions visible (one line each)
-        # MISAKA fork: holds the running `void this.onDeleteSession(...)` (asyncio holds tasks weakly).
         self._tasks: set[asyncio.Task[Any]] = set()
 
         # Focusable implementation - propagate to searchInput for IME cursor positioning
@@ -605,7 +602,6 @@ class SessionList:
         if kb.matches(keyData, "app.session.rename"):
             selected = jsIndex(self.filteredSessions, self.selectedIndex)
             if selected and self.onRenameSession:
-                # MISAKA: Hermes offers no Rename on a bot's canonical Bot Chat (session-actions-menu).
                 info = selected.session
                 role = session_paths.canonical_contact(info.path, info.name, info.parentSessionPath)
                 if role is not None:
@@ -667,7 +663,6 @@ async def deleteSessionFile(sessionPath: str) -> DeleteSessionResult:
     """Delete a session file, trying the `trash` CLI first, then falling back to unlink"""
     # Try `trash` first (if installed)
     trashArgs = ["--", sessionPath] if sessionPath.startswith("-") else [sessionPath]
-    # MISAKA fork: `spawnSync`'s result fields (`status`, `stderr`, `error`) as three variables.
     trashError: OSError | None = None
     trashStatus: int | None = None
     trashStderr: str | None = None
@@ -778,8 +773,6 @@ class SessionSelectorComponent(Container):
 
         # Focusable implementation - propagate to sessionList for IME cursor positioning
         self._focused = False
-        # MISAKA fork: holds the running `void this.loadScope(...)`/`void this.confirmRename(...)` (asyncio holds
-        # tasks weakly).
         self._tasks: set[asyncio.Task[Any]] = set()
 
         keybindings = options.get("keybindings") if options else None
@@ -969,7 +962,7 @@ class SessionSelectorComponent(Container):
         try:
             await renameSession(target, next)
             await self.refreshSessionsAfterMutation()
-        except ValueError as refusal:   # MISAKA: a role's canonical Bot Chat keeps its name
+        except ValueError as refusal:
             self.header.setStatusMessage({"type": "error", "message": str(refusal)}, 3000)
         finally:
             self.exitRenameMode()

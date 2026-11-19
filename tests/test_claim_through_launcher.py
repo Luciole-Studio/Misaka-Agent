@@ -20,8 +20,6 @@ from misaka.core.research import runs, workflow
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# The node's side: wait for the driver's record when told to, as a node that takes a second to
-# import finds it, then claim the row and report what it is.
 NODE = textwrap.dedent("""
     import os, sys, time
     from contextlib import closing
@@ -58,7 +56,7 @@ def _through_a_launcher():
         return []
     if os.name == "nt":
         return ["cmd", "/c"]
-    return ["/bin/sh", "-c", '"$@"; exit $?', "launcher"]     # a list, so the shell forks instead of exec'ing
+    return ["/bin/sh", "-c", '"$@"; exit $?', "launcher"]
 
 
 def _node_row(tmp_path):
@@ -98,15 +96,15 @@ def test_a_node_started_through_a_launcher_claims_its_row(tmp_path):
         launcher = subprocess.Popen(
             [*_through_a_launcher(), sys.executable, str(tmp_path / "node.py"), str(tmp_path / "board.db"),
              node_id, key, "wait"], env=_env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        workflow._record_runner(con, "research_execution", node_id, launcher, key=key)   # as the driver does
+        workflow._record_runner(con, "research_execution", node_id, launcher, key=key)
         assert runs.node(con, node_id)["runner_pid"] == launcher.pid
         out, err = launcher.communicate(timeout=60)
         assert launcher.returncode == 0, err
         claimed, pid, identity = out.splitlines()[0].split("|")
         assert claimed == "True", out
-        assert int(pid) != launcher.pid                     # the node is the launcher's child, not the launcher
+        assert int(pid) != launcher.pid
         row = runs.node(con, node_id)
-        assert (row["runner_pid"], row["runner_identity"]) == (int(pid), identity)   # the node's own reading
+        assert (row["runner_pid"], row["runner_identity"]) == (int(pid), identity)
 
 
 def test_a_claimed_nodes_own_child_with_the_same_key_cannot_take_its_row(tmp_path):
@@ -114,13 +112,13 @@ def test_a_claimed_nodes_own_child_with_the_same_key_cannot_take_its_row(tmp_pat
     con, node_id = _node_row(tmp_path)
     with closing(con):
         key = runs.prepare_runner(con, "research_execution", node_id)
-        assert runs.claim_runner(con, "research_execution", node_id, key) is True     # this process is the node
+        assert runs.claim_runner(con, "research_execution", node_id, key) is True
         child = subprocess.run([sys.executable, str(tmp_path / "node.py"), str(tmp_path / "board.db"), node_id,
                                 key, "now"], env=_env(), capture_output=True, text=True, timeout=60, check=False)
         assert child.stdout.startswith("False|"), child.stdout + child.stderr
         assert "runner identity mismatch" in child.stdout
         assert runs.node(con, node_id)["runner_pid"] == os.getpid()
-        assert runs.claim_runner(con, "research_execution", node_id, key) is True     # still the node's
+        assert runs.claim_runner(con, "research_execution", node_id, key) is True
 
 
 class _LandsAfterTheRead:

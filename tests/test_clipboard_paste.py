@@ -144,8 +144,6 @@ async def test_a_failing_native_file_read_is_not_swallowed(monkeypatch):
         await clipboard.readClipboardFilePaths()
 
 
-# -- the native readers (MISAKA fork: in-process stand-ins for pi's native addons) ----------------
-
 
 def test_the_files_copied_in_finder_are_read_through_osascript(monkeypatch):
     seen: list = []

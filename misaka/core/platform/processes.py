@@ -14,18 +14,10 @@ from dataclasses import dataclass
 import psutil
 
 _LOG = logging.getLogger(__name__)
-_REPORTED: set[tuple] = set()      # liveness anomalies already logged by this process (one line each)
+_REPORTED: set[tuple] = set()
 
-# psutil's create_time() on macOS is corrected by the difference between the boot time it read
-# when the process imported psutil and the boot time now (_psosx.adjust_proc_create_time), and
-# `kern.boottime` moves by whole seconds under NTP. Two processes therefore disagree about a
-# third one's start time by exactly that drift once it reaches a second: a daemon or Last
-# Order hours old judged every session dead and every fresh node "superseded" (2026-09-18
-# B20/B33; pinned 2026-09-24 on eight fork nodes, row `…154.054516` against the child's own
-# `…153.054516`). A start time is compared within this tolerance; a reused PID starts hours
-# later, so the defence against it is untouched.
 IDENTITY_TOLERANCE_SECONDS = 5.0
-_SELF_IDENTITY: str | None = None  # what this process computed for itself the first time it checked
+_SELF_IDENTITY: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +91,6 @@ def explain_liveness(pid: int | None, expected: str | None) -> tuple[bool, str]:
         return False, "no pid or no recorded identity"
     current = identity(pid)
     if current is None:
-        # An unreadable identity does not prove death; stay conservative while the PID exists.
         try:
             exists = psutil.pid_exists(int(pid))
         except ValueError:
@@ -135,7 +126,6 @@ def _self_check() -> None:
 def identity_is_alive(pid: int | None, expected: str | None) -> bool:
     alive, reason = explain_liveness(pid, expected)
     if not alive and reason not in ("pid gone", "no pid or no recorded identity"):
-        # A gone PID is the normal way a session ends; anything else is the anomaly to keep.
         key = (int(pid) if pid else None, reason.split(":")[0])
         if key not in _REPORTED:
             _REPORTED.add(key)
@@ -151,7 +141,6 @@ def _group_exists(pgid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        # It exists, but proving it empty is impossible for this owner.
         return True
     except OSError as error:
         return error.errno != errno.ESRCH
@@ -182,11 +171,8 @@ def terminate_orphaned_group(pgid: int, leader_identity: str) -> bool:
         return False
     current = identity(pgid)
     if current is not None and not same_identity(current, leader_identity):
-        # PID reuse implies the prior PID/PGID namespace entry was released;
-        # this is an unrelated new process and the old group is already empty.
         return True
     if current is None and psutil.pid_exists(pgid):
-        # A live but unreadable leader cannot be safely identified as the orphan.
         return False
     if not _group_exists(pgid):
         return True
@@ -216,12 +202,12 @@ def _terminate_recorded_tree(pid: int, leader_identity: str) -> bool:
         return False
     current = identity(pid)
     if current is not None and not same_identity(current, leader_identity):
-        return True                                # the PID is another process's now (this one's, even)
+        return True
     if pid == os.getpid():
         return False
     if current is None:
         if psutil.pid_exists(pid):
-            return False                           # alive but unreadable cannot be named the orphan
+            return False
         for child in _outlived_children(pid, leader_identity):
             terminate(child.pid)
         return True
@@ -297,9 +283,6 @@ def terminate(
     unique = {item.pid: item for item in tokens}
     processes = _resolve(list(unique.values()))
 
-    # Freeze known parents before signalling so they cannot fork an escaping
-    # child in the terminate/kill gap.  Pull in one final descendant snapshot
-    # after suspension to cover a child created during enumeration.
     for process in processes:
         try:
             process.suspend()
@@ -322,7 +305,6 @@ def terminate(
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     for process in processes:
-        # Resume stopped processes so they can receive SIGTERM before the SIGKILL fallback.
         try:
             process.resume()
         except (psutil.NoSuchProcess, psutil.AccessDenied):

@@ -98,7 +98,6 @@ def test_preserves_editor_guidance_in_the_generated_theme_schema():
     schema = _rendered("theme")
     accent = schema["properties"]["colors"]["properties"]["accent"]
     colorValue = schema["$defs"]["ColorValue"] if "$ref" in accent else accent
-    # MISAKA fork: MISAKA's title and description.
     assert schema["title"] == "MISAKA Coding Agent Theme"
     assert schema["description"] == "Theme schema for the MISAKA coding agent"
     colors = schema["properties"]["colors"]
@@ -107,7 +106,6 @@ def test_preserves_editor_guidance_in_the_generated_theme_schema():
     assert accent["description"] == "Primary accent color (logo, selected items, cursor)"
     assert "defaults derived from userMessageBg" in schema["properties"]["export"]["description"]
     assert "Hex color" in colorValue["anyOf"][0]["description"]
-    # MISAKA fork: no OKLCH or OKHSL values (D11).
     assert "OKLCH" not in colorValue["anyOf"][0]["description"]
 
 
@@ -138,7 +136,6 @@ def test_preserves_moved_model_and_settings_guidance():
                 "id": "model",
                 "inputLimits": {"maxRequestBytes": 1024, "images": {"maxPerRequest": 2}},
                 "promptCache": {"short": 300},
-                # MISAKA fork: TypeBox's `Type.Null()` survives the generator.
                 "thinkingLevelMap": {"minimal": None, "high": "max"},
             }],
         }}},
@@ -194,7 +191,6 @@ def test_validates_keybinding_syntax():
 
 
 def test_keybindings_schema_lists_misakas_keybindings():
-    # MISAKA fork: MISAKA's ids, without pi's `tui.altScreen.*` (no fullscreen renderer, D1).
     properties = _rendered("keybindings")["properties"]
     assert list(properties) == ["$schema", *KEYBINDINGS]
     assert not [name for name in properties if name.startswith("tui.altScreen.")]
@@ -209,7 +205,6 @@ def test_theme_schema_lists_the_theme_tokens():
     colors = _rendered("theme")["properties"]["colors"]
     assert list(colors["properties"]) == list(THEME_TOKENS)
     assert colors["required"] == [name for name, token in THEME_TOKENS.items() if "fallback" not in token]
-    # MISAKA fork: MISAKA's own tokens are optional.
     assert {"sectionTitle", "appTitle", "appTitleOnLight"} <= set(colors["properties"])
     assert not {"sectionTitle", "appTitle", "appTitleOnLight"} & set(colors["required"])
 
@@ -223,7 +218,6 @@ _RUNTIME_REJECTS = [
     {"httpIdleTimeoutMs": "bogus"},
     {"websocketConnectTimeoutMs": "30000"},
     {"codemode": {"inlineBudget": -1}},
-    # MISAKA fork: a product knob of the wrong type stops a process at start (config/product.validate_settings).
     {"research": {"plan_approval": "sometimes"}},
     {"subagents": {"max_concurrent": "many"}},
 ]
@@ -256,7 +250,6 @@ def test_settings_defaults_are_the_schema_defaults():
     assert properties["compaction"]["properties"]["reserveTokens"]["default"] == SETTINGS_DEFAULTS["compaction"]["reserveTokens"]
     assert properties["codemode"]["properties"]["inlineBudget"]["default"] == SETTINGS_DEFAULTS["codemode"]["inlineBudget"]
     assert properties["retry"]["properties"]["provider"]["properties"]["maxRetryDelayMs"]["default"] == 60000
-    # MISAKA fork: client attribution is off unless the user turns it on.
     assert properties["enableInstallTelemetry"]["default"] is False
     assert "misaka" in properties["enableInstallTelemetry"]["description"]
 
@@ -304,7 +297,6 @@ def test_accepts_schema_in_settings_json_and_preserves_unknown_settings(tmp_path
 
 
 def test_a_roles_settings_json_keeps_schema_through_a_role_write(tmp_path):
-    # MISAKA fork: a role's own settings.json is written by the manager itself (ROLE_SETTING_KEYS).
     home = tmp_path / "home"
     home.mkdir()
     role = tmp_path / "role"
@@ -335,8 +327,6 @@ def test_accepts_schema_in_keybindings_json_without_treating_it_as_an_action(tmp
 
 
 def test_drops_keybindings_the_schema_rejects():
-    # MISAKA: what changes for a keybindings.json written for 1.1, where any string was kept and matched by
-    # `parseKeyId` after lowercasing.
     assert toKeybindingsConfig({
         "app.session.new": "Ctrl+N",
         "app.session.tree": ["ctrl+t", "control+t"],
@@ -366,7 +356,6 @@ def test_accepts_schema_in_themes_and_rejects_malformed_themes():
     "path", [Path(get_themes_dir()) / f"{name}.json" for name in sorted(getBuiltinThemes())], ids=lambda path: path.name
 )
 def test_every_bundled_theme_validates_and_names_this_releases_theme_schema(path):
-    # MISAKA fork: the bundled themes carry MISAKA's tokens, and their `$schema` is rewritten by the generator.
     theme = json.loads(path.read_text(encoding="utf-8"))
     assert validateThemeJson(path.name, theme)["name"] == path.stem
     assert theme["$schema"] == schemaUrl("theme")
@@ -409,10 +398,6 @@ def test_no_leftover_file_sits_beside_the_bundled_themes():
     assert not (folder / "theme_json.py").exists()
 
 
-# MISAKA fork: `typing` caches `Union[...]` by equality, and `Literal` equality ignores order, so a schema's `enum`
-# could follow whatever the process built first (`TypeBoxLiteralUnion`). A fresh interpreter renders the schemas after
-# importing modules in different orders, or after building every schema `Literal` of two or more values in a
-# different order inside the unions a field could collide with; every run gives the committed bytes.
 _RENDER_AFTER = """
 import ast, importlib, importlib.util, json, pathlib, sys
 from typing import Literal, Optional

@@ -26,29 +26,17 @@ from itertools import combinations
 from misaka.ai.utils.pi_user_agent import getPiUserAgent
 from misaka.ai.utils.typebox_helpers import typeboxSchema
 
-# `builtin:coverage`, like every bundled extension: hidden from the startup list, and disabled with
-# `-builtin:coverage` in the `extensions` setting.
 BUILTIN = True
 SESSION_KINDS = {"foreground", "dm", "card", "bare"}
 API = "https://api.openalex.org"
-# The most groups OpenAlex puts in one answer, those with most works first. A scan asks for that
-# many and lists every one it gets: the first eight of fifty-five languages, unmarked, read as the
-# eight there were, and the scholarship in the other forty-seven was what the scan was run to find.
 GROUPS = 200
 MAX_FACETS = 6
 MAX_TERMS = 16
 SKILLS = os.path.join(os.path.dirname(__file__), "skills")
-# What each scan is grouped by: where a literature lives (subfield, topic), which literatures
-# the index holds (language), and what kind of publication carries it (type).
 FACET_GROUPS = (("Subfields", "primary_topic.subfield.id"), ("Topics", "primary_topic.id"),
                 ("Languages", "language"), ("Types", "type"))
-# ``keywords.id``: OpenAlex stopped taking ``keywords.keyword`` (HTTP 400, "not a valid field"), and
-# every scan of two facets or more then printed its keywords as a failed request.
 ALL_GROUPS = (*FACET_GROUPS, ("Keywords", "keywords.id"))
 KEY_ENV = "OPENALEX_API_KEY"
-# OpenAlex holds a search with more than five boolean operators to one request a second per client,
-# five with an API key. A scan's pairs and its "all together" are such searches (2026-09-27: eight
-# workers sent them at once and lost nearly every pair to HTTP 429).
 HEAVY_OPERATORS = 5
 RETRIES = 2
 
@@ -76,9 +64,6 @@ class _Pacer:
 
 
 def _get(path, **params):
-    # The one client string this install sends, rather than a version literal that stopped
-    # tracking the package three releases ago: OpenAlex reads the UA to tell clients apart,
-    # and every other outbound request in the repo already identifies itself this way.
     if os.environ.get(KEY_ENV):
         params["api_key"] = os.environ[KEY_ENV]
     url = f"{API}{path}?{urllib.parse.urlencode(params)}"
@@ -88,8 +73,6 @@ def _get(path, **params):
         with urllib.request.urlopen(request, timeout=25) as response:
             return json.load(response)
     except urllib.error.HTTPError as error:
-        # OpenAlex says why in the body ("Anonymous search is paused ... use a free API key");
-        # the status line alone read as an outage.
         try:
             detail = json.loads(error.read() or b"{}").get("message") or ""
         except (ValueError, AttributeError):
@@ -170,7 +153,6 @@ def scan(facets):
                 return None, f"{type(error).__name__}: {error}"
         return None, "unreachable"
 
-    # Up to 44 list requests. Light ones go in parallel; heavy ones wait their turn on the pacer.
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = dict(zip(jobs, pool.map(fetch, jobs.values()), strict=True))
     failures = sorted({error for _, error in results.values() if error})
@@ -183,8 +165,6 @@ def scan(facets):
         count = next((data["meta"]["count"] for data in found if data), None)
         lines = [f"## {title} — " + (f"{count:,} works" if count is not None else "not scanned"), f"Query: {query}"]
         if count == 0 and kind == "facet":
-            # Each term is an exact phrase: "Royal Navy French Navy" is one rare phrase, not two
-            # navies, and a zero read as "the literature is thin" (2026-09-27).
             lines.append("No work has any of these exact phrases: a term that names two things matches only as "
                          "that whole phrase -- split it into one term per concept and scan again before reading "
                          "this as a gap.")
@@ -193,8 +173,6 @@ def scan(facets):
                 lines.append(f"{label}: (request failed: unknown, not zero)")
                 continue
             items = [f"{_group_name(g)} {g['count']:,}" for g in data["group_by"]]
-            # A full page is where one answer stops, not where the groups ran out: OpenAlex pages
-            # past it by key, not by count, so the scan says there are that many or more.
             count = len(items)
             size = f"{count}+, the {count} with most works" if count >= _page(data) else str(count)
             lines.append(f"{label} ({size}): " + " · ".join(items) if items else f"{label}: none")
@@ -248,8 +226,6 @@ def register(harn):
     async def execute(tool_call_id, raw, signal, on_update, ctx):
         params = raw if isinstance(raw, ScanParams) else ScanParams(**(raw or {}))
         try:
-            # Dozens of urllib calls at up to 25s each: never on the event loop
-            # (the same rule documents.py states for its corpus calls).
             text = await asyncio.to_thread(scan, [(facet.name, facet.terms) for facet in params.facets])
         except Exception as error:  # noqa: BLE001 - the radar is optional; planning goes on without it
             text = f"OpenAlex is unreachable ({type(error).__name__}: {error}); plan from the coverage maps alone."

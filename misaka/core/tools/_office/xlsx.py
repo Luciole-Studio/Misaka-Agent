@@ -27,8 +27,6 @@ from misaka.core.tools._office._receipt import result
 
 SUFFIXES = frozenset({".xlsx"})
 
-# The named number formats, so a model does not have to know Excel's format language. A raw
-# format string is accepted too and passes through untouched.
 NUMBER_FORMATS = {
     "general": "General", "integer": "0", "number2": "0.00",
     "percent": "0%", "percent2": "0.00%",
@@ -40,16 +38,12 @@ NUMBER_FORMATS = {
 
 PAPER_SIZES = {"a4": 9, "letter": 1, "legal": 5, "a3": 8, "tabloid": 3, "a5": 11}
 
-# Column width bounds for the content-based autofit. Deterministic, no model involved.
 MIN_WIDTH, MAX_WIDTH = 8, 60
 
 SHEET_NAME_CHARS = 31
 
 _DATE_FORMATS = ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%m/%d/%Y")
 
-# The ops whose ``sheet`` does not name an existing worksheet: ``add_sheet`` names the one
-# to create, and a named range is a workbook-level object. Resolving a sheet for these
-# would refuse them for the very sheet they are about to make.
 NO_EXISTING_SHEET = frozenset({"create", "add_sheet", "delete_named_range"})
 
 OPS = ("create", "set_cell", "set_range", "add_sheet", "delete_sheet", "rename_sheet",
@@ -97,7 +91,7 @@ def _typed(value, kind):
         return "" if value is None else str(value)
     if wanted == "number":
         if isinstance(value, float):
-            return value  # int(float) would silently discard the fractional part.
+            return value
         for cast in (int, float):
             try:
                 return cast(value)
@@ -130,7 +124,6 @@ def _is_formula(value):
 def _assign(cell, value, kind):
     cell.value = _typed(value, kind)
     if (kind or "auto").lower() == "text":
-        # openpyxl otherwise re-infers formulas and error codes from the string.
         cell.data_type = "s"
     return cell.data_type == "f"
 
@@ -303,9 +296,6 @@ def _add_chart(sheet, args):
         chart.title = args["title"]
     left, top, right, bottom = range_boundaries(args["data_range"])
     header = args.get("include_header", True)
-    # Which column holds the category labels. FrontierAgent computes this and then discards
-    # it, so its ``categories_col`` never did anything; a chart of columns C:E labelled from
-    # column A came out labelled 1, 2, 3.
     categories = args.get("categories_col")
     if categories is None:
         category_column = left
@@ -322,7 +312,7 @@ def _add_chart(sheet, args):
     chart.set_categories(Reference(sheet, min_col=category_column,
                                    min_row=(top + 1 if header else top), max_row=bottom))
     if args.get("width"):
-        chart.width = float(args["width"])       # centimetres, openpyxl's unit
+        chart.width = float(args["width"])
     if args.get("height"):
         chart.height = float(args["height"])
     sheet.add_chart(chart, args.get("anchor_cell", "E2"))
@@ -337,7 +327,7 @@ def _validation(sheet, args):
         formula = ",".join(str(item) for item in formula)
     if (kind == "list" and not str(formula).startswith('"')
             and "," in str(formula) and "!" not in str(formula)):
-        formula = f'"{formula}"'          # an inline list has to be a quoted literal
+        formula = f'"{formula}"'
     validation = DataValidation(
         type=kind, formula1=formula, formula2=args.get("formula2"),
         operator=args.get("operator", "between"),
@@ -616,8 +606,6 @@ def write(path, op, args, *, overwrite=False):
         reference = args["cell_range"]
         name = args.get("name") or f"Table{len(sheet.tables) + 1}"
         if args.get("headers"):
-            # A ListObject requires unique names on its first row; write them when the
-            # caller supplied them rather than failing on an empty header row.
             left, top, _right, _bottom = range_boundaries(reference)
             for index, header in enumerate(args["headers"]):
                 sheet[f"{get_column_letter(left + index)}{top}"] = header

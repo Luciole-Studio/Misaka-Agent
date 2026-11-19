@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import re
 
-# Each pattern names the parameter the model should have used instead. A hint that only
-# says "this looks like Markdown" leaves the model to guess the replacement.
 _MARKDOWN = [
     (re.compile(r"\*\*[^*\n]+\*\*"), "**bold** → a run's bold field"),
     (re.compile(r"\[[^\]\n]+\]\((?:https?|mailto):"), "[text](url) → a run's link field, or add_hyperlink"),
@@ -105,7 +103,6 @@ def splice_runs(runs, find, replace, budget):
     if not positions:
         return 0
 
-    # Right to left: an earlier replacement would shift every later offset.
     for start in reversed(positions):
         end = start + len(find)
         written = False

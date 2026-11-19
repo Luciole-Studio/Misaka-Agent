@@ -350,7 +350,6 @@ async def test_keeps_the_saved_list_and_saves_nothing_when_personalization_fails
         await refreshProvider(provider, store)
     assert _ids(provider.getModels()) == ["allowed"]
     assert await store.read(provider.id) == saved
-    # MISAKA fork: no catalog endpoint, no pi.dev request.
     assert len(calls) == (1 if catalogBaseUrl else 0)
 
 
@@ -375,7 +374,6 @@ async def test_restores_a_saved_list_as_is_and_falls_back_to_the_built_in_models
 
 
 async def test_without_a_catalog_endpoint_the_built_in_catalog_is_personalized_and_saved(monkeypatch):
-    # MISAKA fork: catalogBaseUrl None (ModelRuntime's default) never asks pi.dev.
     calls = _queue(monkeypatch, [])
     seen: list[list[str]] = []
 
@@ -463,8 +461,6 @@ async def test_model_runtime_narrows_openrouter_to_the_keys_list_and_keeps_it_of
 
 
 def test_without_a_catalog_endpoint_there_is_no_remote_overlay():
-    # MISAKA fork: no default endpoint (pi: https://pi.dev), so nothing can fall back to pi's service. An embedder
-    # that runs a catalog server still passes its URL as `catalogBaseUrl`.
     from misaka.core.remote_catalog_provider import DEFAULT_CATALOG_BASE_URL
 
     builtin = _builtinProvider()

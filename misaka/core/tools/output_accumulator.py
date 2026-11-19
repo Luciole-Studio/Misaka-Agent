@@ -48,7 +48,6 @@ class OutputAccumulator:
         self.maxLines = resolved.maxLines if resolved.maxLines is not None else DEFAULT_MAX_LINES
         self.maxBytes = resolved.maxBytes if resolved.maxBytes is not None else DEFAULT_MAX_BYTES
         self.maxRollingBytes = max(self.maxBytes * 2, 1)
-        # MISAKA fork: output files are named after misaka (upstream: `pi-output`).
         self.tempFilePrefix = resolved.tempFilePrefix or "misaka-output"
         # errors="replace" like core/bash_executor.py: a command that emits non-UTF-8 bytes
         # (grep on a binary, cat a PNG) must cost the offending bytes, not the whole output —

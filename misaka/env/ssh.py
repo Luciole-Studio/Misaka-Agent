@@ -368,7 +368,6 @@ async def forgetHostKey(target: SshTarget) -> None:
     )
 
 
-# MISAKA fork: each probe also reports a Python 3.9 or later on the remote, or `-`.
 _POSIX_PYTHON = (
     'py=-; for p in python3 python; do c=$(command -v "$p" 2>/dev/null) || continue; '
     '"$c" -c "import sys; sys.exit(sys.version_info < (3, 9))" 2>/dev/null && { py=$c; break; }; done; echo "$py"'
@@ -535,7 +534,6 @@ def daemonPath(remote: RemotePlatform, sha256: str) -> str:
     """Where a daemon with this content lives on the remote machine: named by its SHA-256, so versions never collide."""
     name = f"pi-env-{sha256[:32]}"
     if remote["platform"] == "windows":
-        # MISAKA fork: a zip application, not an executable.
         return f"{remote['home']}\\.pi\\mobile\\tools\\{name}.pyz"
     return f"{remote['home']}/.pi/mobile/tools/{name}"
 

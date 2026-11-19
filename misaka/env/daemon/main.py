@@ -19,8 +19,6 @@ from collections.abc import Callable
 from typing import Any, BinaryIO
 
 from . import exec, fs, pty, scan, system, watch
-
-# MISAKA fork: Rust's `list` module, imported under another name so that it does not shadow Python's `list`.
 from . import list as listing
 from .errors import Failure
 from .exec import Control
@@ -43,8 +41,6 @@ from .output import Output
 PROTOCOL = 1
 # Operations added after protocol 1's first release; clients check `hello.features` before using them.
 FEATURES = ["listFiles"]
-# MISAKA fork: pi's build.rs bakes in the version of the npm package the daemon ships with; this is the pi-env release
-# the port follows.
 VERSION = "1.3.0"
 PING_INTERVAL = 5.0
 SILENCE_LIMIT_MS = 30_000
@@ -374,7 +370,7 @@ def respond(server: Server, id: int, request: Frame, control: Control) -> None:
         reply = Frame(RESULT, id, json, payload)
     except Failure as failure:
         reply = Frame(ERROR, id, failure.to_json())
-    except Exception as error:  # noqa: BLE001 - MISAKA fork: a Rust panic would leave the request unanswered
+    except Exception as error:  # noqa: BLE001
         reply = Frame(ERROR, id, Failure("unknown", f"pi-env: {error}").to_json())
     with server.controls_lock:
         server.controls.pop(id, None)
@@ -424,7 +420,7 @@ def serve_frames(server: Server, input: BinaryIO) -> None:
                 reply = Frame(RESULT, request.id, answer)
             except Failure as failure:
                 reply = Frame(ERROR, request.id, failure.to_json())
-            except Exception as error:  # noqa: BLE001 - MISAKA fork: as in `respond`, where Rust cannot fail
+            except Exception as error:  # noqa: BLE001
                 reply = Frame(ERROR, request.id, Failure("unknown", f"pi-env: {error}").to_json())
             server.output.control(reply)
         elif request.kind == REQUEST:
@@ -468,8 +464,6 @@ def serve_frames(server: Server, input: BinaryIO) -> None:
 
 
 def serve(token: str) -> None:
-    # MISAKA fork: Rust's watcher threads get 16 MiB stacks for their recursion through trees; Python sets one size for
-    # every thread it starts afterwards, and a recursion limit to match.
     threading.stack_size(16 * 1024 * 1024)
     sys.setrecursionlimit(max(sys.getrecursionlimit(), 10_000))
     system.prepare_children()

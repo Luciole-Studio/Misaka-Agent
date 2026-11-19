@@ -39,7 +39,6 @@ def _extract_heredocs(command):
     backslashes = 0
     for match in _HEREDOC.finditer(command):
         start, end = match.span()
-        # Comment-blind quote tracking: preserve the source's conservative skips.
         for ch in command[pos:start]:
             if ch == '\n':
                 comment = False
@@ -76,7 +75,6 @@ def _extract_heredocs(command):
             continue
         if end < len(command) and command[end] not in ' \t\n|&;()<>':
             continue
-        # Logical line ends only outside quotes; continuation is checked below.
         sq = dq = False
         k = end
         while k < len(command):
@@ -182,7 +180,7 @@ def _parse(command):
                     i = end
                 elif char and char in '*@#?$!_-':
                     name = char
-                    i += 1  # Source skips the following character in this branch.
+                    i += 1
                 else:
                     rest = s[i:]
                     end_match = re.search(r'[^\w\d_]', rest, re.ASCII)
@@ -256,7 +254,6 @@ def _static_redirect_target(target):
 
 def split_command(command: str) -> list[str]:
     """Source splitCommand_DEPRECATED (whole commands, NOT argv)."""
-    # JS charAt/index arithmetic uses UTF-16 units (including lone surrogates).
     command = ''.join(chr(unit) for (unit,) in struct.iter_unpack('<H', command.encode('utf-16-le', 'surrogatepass')))
     parts = _split_with_operators(command)
     for i, part in enumerate(parts):

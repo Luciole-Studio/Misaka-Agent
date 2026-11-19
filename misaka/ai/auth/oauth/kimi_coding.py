@@ -61,7 +61,6 @@ class _TokenResponse:
 
 def _getOauthHost() -> str:
     override = getProviderEnvValue("KIMI_CODE_OAUTH_HOST") or getProviderEnvValue("KIMI_OAUTH_HOST")
-    # MISAKA fork: `\Z`, as Python's `$` also matches before a trailing newline.
     return re.sub(r"/+\Z", "", override or _DEFAULT_OAUTH_HOST)
 
 
@@ -76,7 +75,6 @@ def _formUrlEncode(fields: dict[str, str]) -> str:
 async def _readJson(response: Response) -> dict[str, Any] | None:
     try:
         json = await response.json()
-        # MISAKA fork: `typeof json === "object"` holds for an array too; only a dict has the fields read below.
         return json if isinstance(json, dict) else None
     except Exception:  # noqa: BLE001 - `catch { return null; }`
         return None
@@ -305,7 +303,6 @@ async def _refreshToken(oauthHost: str, refreshTokenValue: str, signal: Any) -> 
 
 
 async def _loginKimiCoding(interaction: ProviderAuthInteraction, options: LoginOptions | None = None) -> OAuthCredential:
-    # MISAKA fork: `options` is accepted because every login is called with it.
     oauthHost = _getOauthHost()
     device = await _startDeviceAuthorization(oauthHost, interaction.signal)
     interaction.notify(

@@ -26,9 +26,6 @@ from .tool import (
 )
 
 EXTENSION_NAME = "codemode"
-# MISAKA fork: bundled-extension metadata for misaka's loader.
-# `builtin:codemode`, as upstream bundles it. Replaceable: an extension that registers `codemode` takes
-# over instead of running alongside it.
 BUILTIN = True
 REPLACEABLE = True
 SESSION_KINDS = KINDS

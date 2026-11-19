@@ -49,7 +49,6 @@ def test_prefers_the_reported_scheme_then_colorfgbg_then_dark():
 
 
 def test_misaka_theme_pins_the_terminal_theme():
-    # MISAKA: the panel sets MISAKA_THEME for its panes.
     assert detectTerminalTheme({}, "dark", {"MISAKA_THEME": "light"}) == "light"
     assert detectTerminalTheme({}, None, {"MISAKA_THEME": "dark", "COLORFGBG": "0;15"}) == "dark"
     assert detectTerminalTheme({}, None, {"MISAKA_THEME": "other", "COLORFGBG": "0;15"}) == "light"

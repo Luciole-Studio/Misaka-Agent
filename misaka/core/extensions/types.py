@@ -253,8 +253,6 @@ class _CustomUIOptions(TypedDict, total=False):
     overlay: bool
     overlayOptions: OverlayOptions | Callable[[], OverlayOptions]
     onHandle: Callable[[OverlayHandle], None]
-    # MISAKA fork: the status reported to the terminal (OSC 7501) while the component waits for the user, as
-    # `{"kind": "question" | "permission" | "auth", "message": <dialog title>}`; AskUserQuestion reports its question.
     blocked: dict[str, str]
 
 

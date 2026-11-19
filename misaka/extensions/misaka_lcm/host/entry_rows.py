@@ -125,7 +125,7 @@ def bound(store, store_ids):
                 f"SELECT store_id, entry_id, position FROM rows WHERE store_id IN ({','.join('?' * len(chunk))})",
                 chunk))
     result: dict[str, dict[int, int]] = {}
-    for store_id in ids:                                     # ascending: the first row at a position wins
+    for store_id in ids:
         if store_id in found:
             entry_id, position = found[store_id]
             result.setdefault(entry_id, {}).setdefault(position, store_id)

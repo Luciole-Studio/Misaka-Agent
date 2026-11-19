@@ -24,23 +24,14 @@ from misaka.core.web.url_safety import (
     sensitive_query_param_name,
 )
 
-# Long enough to clear every ``{10,}`` in the prefix table, short enough to read.
 _BODY = "abcdefghij0123456789"
 
 
-# --- normalisation ------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("raw, expected", [
-    # Non-ASCII path is percent-encoded: an IRI is not something httpx will dial.
     ("https://wttr.in/Köln", "https://wttr.in/K%C3%B6ln"),
-    # Existing escapes survive -- ``%`` is in the safe set, so no double-encoding.
     ("https://wttr.in/K%C3%B6ln", "https://wttr.in/K%C3%B6ln"),
-    # The host goes through IDNA, not percent-encoding: DNS has no way to read %C3.
     ("https://münich.example/Köln", "https://xn--mnich-kva.example/K%C3%B6ln"),
-    # Whitespace in path and fragment is encoded rather than repaired.
     ("https://example.com/a b#frag ment", "https://example.com/a%20b#frag%20ment"),
-    # Reserved sub-delims stay literal: re-encoding ``&`` would rewrite the query.
     ("https://example.com/s?a=1&b=2", "https://example.com/s?a=1&b=2"),
 ])
 def test_encodes_url_parts(raw, expected):
@@ -86,25 +77,22 @@ def test_non_str_input_comes_back_unchanged(value):
     assert normalize_url_for_request(value) is value
 
 
-# --- credentials in the URL text ----------------------------------------------------
-
-
 @pytest.mark.parametrize("url", [
-    f"https://example.com/?k=sk-{_BODY}",                 # OpenAI / Anthropic
-    f"https://api.example.com/x?t=ghp_{_BODY}",           # GitHub PAT
-    f"https://example.com/search?key=tvly-{_BODY}",       # Tavily
-    "https://example.com/?k=xai-" + "a" * 30,             # xAI (30-char minimum)
-    "https://example.com/?id=AKIAIOSFODNN7EXAMPLE",       # AWS access key id
-    f"https://example.com/crawl/fc-{_BODY}",              # Firecrawl
+    f"https://example.com/?k=sk-{_BODY}",
+    f"https://api.example.com/x?t=ghp_{_BODY}",
+    f"https://example.com/search?key=tvly-{_BODY}",
+    "https://example.com/?k=xai-" + "a" * 30,
+    "https://example.com/?id=AKIAIOSFODNN7EXAMPLE",
+    f"https://example.com/crawl/fc-{_BODY}",
 ])
 def test_credential_families_are_detected(url):
     assert secret_in_url(url) is True
 
 
 @pytest.mark.parametrize("url", [
-    "https://example.com/ask-abcdefghijklmnop",  # lookbehind: 'a' precedes 'sk-'
+    "https://example.com/ask-abcdefghijklmnop",
     "https://example.com/docs/basket-report",
-    "https://example.com/?q=sk-short",           # below the 10-char body minimum
+    "https://example.com/?q=sk-short",
     "https://example.com/plain/page",
     "",
 ])
@@ -113,13 +101,13 @@ def test_ordinary_urls_are_not_credentials(url):
 
 
 @pytest.mark.parametrize("url", [
-    "https://www.digmandarin.com/hsk-vocabulary",       # hsk- + a 10-letter word
-    "https://example.com/fc-bayernmunich/news",         # fc- (Firecrawl) + a football club
-    "https://docs.example.com/guide/npm_dependencies",  # npm_ + the word every repo uses
+    "https://www.digmandarin.com/hsk-vocabulary",
+    "https://example.com/fc-bayernmunich/news",
+    "https://docs.example.com/guide/npm_dependencies",
     "https://example.com/pypi-package-listing",
     "https://example.com/rk_live_documentation",
     "https://example.com/sk_test_documentation",
-    "https://example.com/blog/am_i_doing_this_right",   # am_ + an English sentence-slug
+    "https://example.com/blog/am_i_doing_this_right",
     "https://shop.example.com/p?am_campaign_id=summer",
     "https://example.com/sk_configuration_guide",
     "https://example.com/fal_something_here",
@@ -139,16 +127,16 @@ def test_a_word_shaped_path_slug_is_not_a_credential(url):
 
 
 @pytest.mark.parametrize("key", [
-    "fc-" + "0a" * 16,                 # Firecrawl, 32 hex
-    "npm_" + "a" * 36,                 # npm access token
-    "hf_" + "a" * 34,                  # HuggingFace
-    "r8_" + "a" * 40,                  # Replicate
-    "sk_" + "a" * 32,                  # ElevenLabs
-    "rk_live_" + "a" * 24,             # Stripe restricted key
-    "sk_test_" + "a" * 24,             # Stripe secret key (test)
-    "glpat-" + "a" * 20,               # GitLab PAT -- the shortest body in the table
-    "pk-lf-" + "a" * 36,               # Langfuse, whose own floor is 8
-    "SG." + "a" * 22 + "." + "b" * 43,  # SendGrid: the body stops at the dot
+    "fc-" + "0a" * 16,
+    "npm_" + "a" * 36,
+    "hf_" + "a" * 34,
+    "r8_" + "a" * 40,
+    "sk_" + "a" * 32,
+    "rk_live_" + "a" * 24,
+    "sk_test_" + "a" * 24,
+    "glpat-" + "a" * 20,
+    "pk-lf-" + "a" * 36,
+    "SG." + "a" * 22 + "." + "b" * 43,
 ])
 def test_the_raised_floor_still_clears_every_real_key_length(key):
     """The floor is only worth raising if it costs no detection.
@@ -183,9 +171,9 @@ def test_every_other_body_floor_is_raised_to_the_url_minimum():
         pattern.split("[", 1)[0]: url_safety._url_pattern(pattern)
         for pattern in url_safety._PREFIX_PATTERNS
     }
-    assert raised["sk-"] == "sk-[A-Za-z0-9_-]{10,}"          # untouched
-    assert raised["AKIA"] == "AKIA[A-Z0-9]{16}"              # a fixed count is not a floor
-    assert raised["AIza"].endswith("{30,}")                  # already above the minimum
+    assert raised["sk-"] == "sk-[A-Za-z0-9_-]{10,}"
+    assert raised["AKIA"] == "AKIA[A-Z0-9]{16}"
+    assert raised["AIza"].endswith("{30,}")
     for prefix, pattern in raised.items():
         floor = url_safety._BODY_FLOOR_RE.search(pattern)
         if floor is not None and prefix not in url_safety._UNRAISED_PREFIXES:
@@ -205,9 +193,6 @@ def test_percent_encoded_key_is_caught_by_the_decoded_form():
     hidden = f"https://example.com/?k=%73k-{_BODY}"
     assert url_safety._PREFIX_RE.search(hidden) is None
     assert secret_in_url(hidden) is True
-
-
-# --- credential-named query parameters ----------------------------------------------
 
 
 @pytest.mark.parametrize("name", sorted(url_safety._SENSITIVE_QUERY_PARAM_NAMES))
@@ -242,9 +227,9 @@ def test_param_name_matching_ignores_case_and_encoding():
 
 
 @pytest.mark.parametrize("url", [
-    "https://example.com/p?token=",       # an unfilled form is not a credential
-    "https://example.com/p",              # no query at all
-    "ftp://example.com/p?token=abc",      # not a scheme these tools fetch
+    "https://example.com/p?token=",
+    "https://example.com/p",
+    "ftp://example.com/p?token=abc",
     "not a url at all",
 ])
 def test_no_sensitive_param(url):
@@ -253,9 +238,6 @@ def test_no_sensitive_param(url):
 
 def test_non_str_has_no_sensitive_params():
     assert sensitive_query_param_name(None) is None
-
-
-# --- the always-blocked floor -------------------------------------------------------
 
 
 @pytest.mark.parametrize("host", sorted(url_safety._BLOCKED_HOSTNAMES))
@@ -274,18 +256,18 @@ def test_ordinary_hostnames_are_not_in_the_floor(host):
 
 
 @pytest.mark.parametrize("value", [
-    "169.254.169.254",              # AWS/GCP/Azure/DO/Oracle IMDS
-    "169.254.170.2",                # ECS task metadata (task IAM credentials)
-    "169.254.169.253",              # Azure IMDS wire server
-    "100.100.100.200",              # Alibaba Cloud
-    "fd00:ec2::254",                # AWS metadata over IPv6
-    "::ffff:169.254.169.254",       # ... and the IPv4-mapped forms of each,
-    "::ffff:169.254.170.2",         # which ipaddress treats as distinct values,
-    "::ffff:169.254.169.253",       # so a resolver answering ::ffff: would
-    "::ffff:100.100.100.200",       # otherwise walk straight past the set.
-    "169.254.42.1",                 # any link-local address, not just the sentinels
+    "169.254.169.254",
+    "169.254.170.2",
+    "169.254.169.253",
+    "100.100.100.200",
+    "fd00:ec2::254",
+    "::ffff:169.254.169.254",
+    "::ffff:169.254.170.2",
+    "::ffff:169.254.169.253",
+    "::ffff:100.100.100.200",
+    "169.254.42.1",
     "::ffff:169.254.42.1",
-    "::ffff:169.254.169.254%eth0",  # a scope id must not make it unparseable
+    "::ffff:169.254.169.254%eth0",
 ])
 def test_always_blocked_addresses(value):
     assert always_blocked_address(value) is True
@@ -293,12 +275,12 @@ def test_always_blocked_addresses(value):
 
 
 @pytest.mark.parametrize("value", [
-    "127.0.0.1",        # private, but the floor is narrower than the SSRF gate:
-    "10.0.0.7",         # these are the operator's to allow.
-    "100.64.0.1",       # CGNAT
-    "93.184.216.34",    # plainly public
+    "127.0.0.1",
+    "10.0.0.7",
+    "100.64.0.1",
+    "93.184.216.34",
     "2606:4700::1",
-    "example.com",      # a name is the resolver's question, not this one's
+    "example.com",
     "",
 ])
 def test_addresses_outside_the_floor(value):
@@ -318,9 +300,6 @@ def test_every_listed_metadata_ip_is_covered_by_the_public_helper():
     assert all(always_blocked_address(ip) for ip in url_safety._ALWAYS_BLOCKED_IPS)
 
 
-# --- CGNAT ---------------------------------------------------------------------------
-
-
 def test_cgnat_is_the_range_ipaddress_will_not_flag():
     """Why CGNAT_NETWORK is exported instead of left to ``is_private``.
 
@@ -337,13 +316,10 @@ def test_cgnat_is_the_range_ipaddress_will_not_flag():
     assert ipaddress.ip_address("100.128.0.0") not in CGNAT_NETWORK
 
 
-# --- the operator opt-out ------------------------------------------------------------
-
-
 @pytest.fixture
 def web_json():
     """A throwaway web configuration, empty."""
-    return home.path("settings")           # the "web" section lives here now
+    return home.path("settings")
 
 
 def test_nothing_set_means_blocked(web_json):
@@ -371,7 +347,7 @@ def test_the_environment_no_longer_has_a_say(web_json, monkeypatch):
     ("true", True),
     ("yes", True),
     (False, False),
-    ("false", False),   # bool("false") is True; reading it that way would open the gate
+    ("false", False),
     ("off", False),
     (None, False),
     ("", False),
@@ -388,7 +364,7 @@ def test_unset_key_in_an_existing_config_means_blocked(web_json):
 
 @pytest.mark.parametrize("body", ["{not json", "[]", '"a string"'])
 def test_a_malformed_config_never_raises_and_stays_closed(web_json, body):
-    web_json.write_text(body, encoding="utf-8")   # the settings file itself, malformed
+    web_json.write_text(body, encoding="utf-8")
     assert allow_private_urls() is False
 
 

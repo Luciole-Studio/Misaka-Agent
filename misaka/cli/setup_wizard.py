@@ -59,12 +59,6 @@ from misaka.utils.tools_manager import find_tool, install_command
 OPENALEX_KEY_URL = "https://openalex.org/rest-api"
 SECTIONS = ("environment", "model", "sisters", "skills", "documents", "web", "research", "project")
 
-# The providers a fresh install is most likely to want, in the order they are offered; every
-# other provider the registry knows is one menu entry further ("Another provider...").
-#
-# Ordered so the ones that sign in through a browser come first. A subscription is the path
-# that needs no API key at all. A ChatGPT subscription signs in to `openai` itself ("Sign in
-# with ChatGPT"); `openai-codex` is the legacy route to it and stays one menu further.
 SCAN_READERS = {"auto": "auto: MinerU where it is installed, ocrmypdf otherwise",
                 "mineru": "mineru: MinerU only",
                 "ocrmypdf": "ocrmypdf: ocrmypdf only"}
@@ -76,15 +70,12 @@ FEATURED_PROVIDERS = ("anthropic", "openai", "github-copilot", "xai", "openroute
                       "google", "mistral", "amazon-bedrock", "ollama")
 
 
-# The package manager line for a missing binary on this OS: one table with the tools' own messages.
 _install_command = install_command
 
 
 class Wizard:
     def __init__(self):
         self.state: dict = {"missing": []}
-
-    # -- 1. environment -----------------------------------------------------------------------
 
     def environment(self) -> None:
         ui.print_header("Environment")
@@ -122,11 +113,7 @@ class Wizard:
                              "`misaka setup project` afterwards.")
         if missing:
             ui.print_info("", "Install what is missing in another terminal; the wizard goes on regardless.")
-        # Named, not checked: a network call here would make the wizard hang on a bad
-        # connection, and nothing about MISAKA polls for updates on its own.
         ui.print_info("", ui.color("  `misaka update` says whether this install is behind the repository.", ui.DIM))
-
-    # -- 2. model & provider ------------------------------------------------------------------
 
     def model(self) -> None:
         from misaka.cli.auth_overview import create_auth_runtime, missing_sdk_extras
@@ -135,7 +122,7 @@ class Wizard:
         from misaka.core.network import roster
         ui.print_header("Model & Provider")
         for key in ("credential", "sdk", "verified"):
-            self.state.pop(key, None)       # ← back into this section starts it over
+            self.state.pop(key, None)
         cfg = current_config()
         auth_runtime = asyncio.run(create_auth_runtime(read_only=False, refresh=True))
         runtime = auth_runtime.runtime
@@ -154,7 +141,6 @@ class Wizard:
             else:
                 from misaka.core.model_runtime import personalizedCatalogHint
 
-                # A pin the user's OpenRouter key no longer lists has left the catalog, not become ambiguous.
                 hint = personalizedCatalogHint(pinned.partition("/")[0] if "/" in pinned else None)
                 ui.print_warning(f"Saved role default {pinned!r} is not uniquely identified in the catalog; choose it below."
                                  + hint)
@@ -176,14 +162,12 @@ class Wizard:
             provider = others[prompt_choice("Provider", self._provider_labels(runtime, others, oauth_ids))]
         else:
             provider = featured[picked]
-        # The SDK is installed per provider; a missing one is the most common first-run failure.
         extras = missing_sdk_extras(runtime, provider)
         if extras:
             ui.print_warning(f"The SDK for {provider} is not installed (misaka's {', '.join(extras)} extra).")
             self._add_extras(extras)
         self._credential(runtime, auth_runtime.credentials, provider)
-        # A failed or skipped sign-in only prints a line; the summary reads this, not the choice.
-        with contextlib.suppress(Exception):     # unknown is left out of the summary, as before
+        with contextlib.suppress(Exception):
             self.state["credential"] = has_credential(provider)
         model_id = self._pick_model(runtime, provider, cfg)
         from misaka.core.settings_manager import SettingsManager
@@ -234,7 +218,6 @@ class Wizard:
                           "`misaka auth check amazon-bedrock`.")
             return
         oauth = next((p.auth.oauth for p in runtime.getProviders() if p.id == provider), None)
-        # The method's own label ("Sign in with ChatGPT") names the subscription it uses.
         kinds = ["API key"] + ([oauth.loginLabel or "Subscription login in the browser (OAuth)"] if oauth else [])
         kind = prompt_choice(f"How do you want to sign in to {provider}?", kinds, 0)
         if kind == 1:
@@ -288,8 +271,6 @@ class Wizard:
         def notify(event) -> None:
             kind = getattr(event, "type", "")
             if kind == "auth_url":
-                # Hand the URL to the desktop, the way the chat's login dialog does: printing it and waiting is what
-                # made the browser logins look like a hang. Opening is best-effort; the URL is printed either way.
                 ui.print_info(f"Opening your browser: {event.url}")
                 if getattr(event, "instructions", None):
                     ui.print_info(str(event.instructions))
@@ -299,8 +280,6 @@ class Wizard:
             else:
                 ui.print_info(str(getattr(event, "message", "")))
 
-        # One door, as in the chat's own login dialog: every provider's OAuth method, built-in
-        # or from models.json or an extension, runs through the model runtime.
         interaction = SimpleNamespace(signal=None, prompt=ask, notify=notify)
 
         from misaka.ai.auth.types import LoginOptions
@@ -312,15 +291,12 @@ class Wizard:
                     provider,
                     "oauth",
                     interaction,
-                    # MISAKA fork: misaka introduces itself by its own name.
                     LoginOptions(
                         getDeviceId=lambda: SettingsManager.create(os.getcwd()).getOrCreateDeviceId(),
                         agentName=CLIENT_NAME,
                     ),
                 )
             finally:
-                # Inside the coroutine, so the paste worker is already on its way out when
-                # the runner goes to join the executor. See the docstring.
                 cancel.set()
 
         try:
@@ -331,8 +307,6 @@ class Wizard:
         except Exception as error:  # noqa: BLE001 - a failed login is reported, the wizard goes on
             ui.print_error(f"Login failed: {error}")
         finally:
-            # Give the released worker the moment it needs to restore the terminal before
-            # the next question is asked.
             cancel.set()
             time.sleep(0.25)
 
@@ -398,15 +372,11 @@ class Wizard:
             ui.print_info("Check the credential (or `misaka auth check`) and run `misaka setup model` again.")
             self.state["verified"] = False
 
-    # -- 3. sisters ---------------------------------------------------------------------------
-
     def sisters(self) -> None:
         from misaka.config import CFG, profiles
         from misaka.core.network import roster
         ui.print_header("Roles")
         roles_root = os.path.expanduser(CFG["roles_root"])
-        # The identity files shape every run and are seeded silently on first start, so a
-        # wizard that never names them leaves the most useful edit undiscoverable.
         ui.print_info("Two roles do the work, and both read plain files you can edit:",
                       f"  {ui.tilde(profiles.shared_soul())}",
                       "      the shared identity every role loads first",
@@ -465,8 +435,6 @@ class Wizard:
         selected = models[prompt_choice("Model for the Sisters (all configured providers)", labels, 0)]
         return f"{selected.provider}/{selected.id}"
 
-    # -- 4. skills ----------------------------------------------------------------------------
-
     def skills(self) -> None:
         from misaka.config import CFG
         from misaka.core.skills import layers as skill_layers
@@ -494,8 +462,6 @@ class Wizard:
                       "  misaka skills optional-list                 what ships, by category",
                       "  misaka skills hub-install <name>            install one",
                       "  misaka skills pending / approve <id>        the review step each install goes through")
-
-    # -- 5. documents -------------------------------------------------------------------------
 
     def documents(self) -> None:
         from misaka.core.documents.pageindex import available as pageindex_available
@@ -577,16 +543,12 @@ class Wizard:
             SettingsManager.create(os.getcwd()).updateSection("documents", lambda section: section.__setitem__(key, chosen))
         return chosen
 
-    # -- 6. web -------------------------------------------------------------------------------
-
     def web(self) -> None:
         from misaka.cli.web import run
 
         run(SimpleNamespace(op="configure", profile=None, extension=[], key=None, value=None,
                             capability=None, tier=None, install=False, login=False, yes=False), from_setup=True)
         self.state["web"] = "Settings reviewed; use misaka web status for local readiness (not a network test)"
-
-    # -- 7. research --------------------------------------------------------------------------
 
     def research(self) -> None:
         """Report the run defaults without changing them (the /research picker saves a per-run
@@ -641,8 +603,6 @@ class Wizard:
             ui.print_success(f"Saved to {ui.tilde(str(env_file.path()))}; MISAKA processes read it when they start.")
         self.state["openalex"] = stored or bool(os.environ.get(name))
 
-    # -- 8. project ---------------------------------------------------------------------------
-
     def project(self) -> None:
         from misaka.core.platform import cards
         ui.print_header("Project folder")
@@ -692,8 +652,6 @@ class Wizard:
             if ingested else f"Nothing was indexed; all {len(skipped)} candidate(s) were skipped.")
         self.state["documents"] = len(ingested)
 
-    # -- summary ------------------------------------------------------------------------------
-
     def summary(self) -> None:
         from misaka.core.network import roster
         state = self.state
@@ -733,7 +691,7 @@ class Wizard:
             ui.print_check(False, "model", "run `misaka setup model`")
             return
         chosen = f"{state['provider']} / {state['model']}"
-        verified = state.get("verified")    # None: not tested; False: the request failed
+        verified = state.get("verified")
         if state.get("credential") is False:
             ui.print_check(False, "model", f"{chosen}  (no credential stored: the sign-in failed or was skipped;"
                                            " run `misaka setup model`)")
@@ -743,8 +701,6 @@ class Wizard:
             ui.print_check(False, "model", f"{chosen}  (the test request failed; the stored credential does not work)")
         else:
             ui.print_check(True, "model", chosen + ("  (not tested)" if verified is None else ""))
-
-    # -- helpers ------------------------------------------------------------------------------
 
     @staticmethod
     def _importable(*modules: str) -> bool:
@@ -764,7 +720,6 @@ class Wizard:
         from misaka.cli import update
         install = update.describe()
         if install.kind == "bundle":
-            # A release archive carries what it was built with (misaka[providers]) and no pip.
             ui.print_info(f"This MISAKA is a release archive, built without {', '.join(extras)}. To add it,",
                           "install MISAKA from the repository instead (README: Install).")
             self.state["sdk"] = "install MISAKA from the repository (README: Install)"
@@ -832,7 +787,6 @@ def model_saved() -> bool:
 
 def run(section: str | None = None) -> int:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        # The line a shell on this OS takes: `export` is an error in PowerShell and in cmd.
         key = ('$env:ANTHROPIC_API_KEY = "..."   (in cmd: set ANTHROPIC_API_KEY=...; or another provider\'s key)'
                if sys.platform == "win32" else "export ANTHROPIC_API_KEY=...   (or another provider's key)")
         print("misaka setup needs a terminal. Without one, configure by hand:\n"
@@ -856,7 +810,7 @@ def run(section: str | None = None) -> int:
             ui.run_steps([(label, action)])
             if section == "model":
                 ui.print_info("")
-                wizard._model_check()   # "done." stood under a sign-in that had just failed
+                wizard._model_check()
             else:
                 ui.print_success(f"{label} done.")
             return 0

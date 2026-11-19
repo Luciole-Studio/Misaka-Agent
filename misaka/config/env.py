@@ -31,8 +31,6 @@ NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 RESERVED_PREFIX = "MISAKA_"
 _ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "$": "$"}
 
-# Names set from the home's file, so a role's file may override them (the shell's own are
-# never overridden). Per process; children inherit the values, not this bookkeeping.
 _loaded_from_home: set[str] = set()
 
 
@@ -86,7 +84,6 @@ def _value(rest: str, source: str, number: int) -> str:
         if trailing and not trailing.startswith("#"):
             raise EnvFileError(f"{source}:{number}: text after the closing quote")
         return rest[1:end]
-    # Unquoted: a comment starts at the first `#` that follows whitespace.
     comment = re.search(r"\s#", rest)
     return (rest[:comment.start()] if comment else rest).strip()
 
@@ -185,7 +182,7 @@ def write(changes: dict[str, str], role_dir: str | os.PathLike[str] | None = Non
             lines = target.read_text(encoding="utf-8-sig").splitlines()
         except FileNotFoundError:
             lines = []
-        parse("\n".join(lines), source=home.display(target))      # never edit a file we cannot read back
+        parse("\n".join(lines), source=home.display(target))
         pending = dict(changes)
         kept: list[str] = []
         for raw in lines:

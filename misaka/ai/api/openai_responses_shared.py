@@ -293,8 +293,6 @@ def convertResponsesMessages(
                         msgId = fallbackMessageId
                     elif len(msgId) > 64:
                         msgId = f"msg_{shortHash(msgId)}"
-                    # MISAKA fork: pi's `phase: undefined` leaves the key out of the JSON; a Python
-                    # `None` would be sent as `null`.
                     phase = None if parsedSignature is None else parsedSignature.get("phase")
                     output.append({
                         "type": "message",
@@ -322,8 +320,6 @@ def convertResponsesMessages(
                     if isDifferentModel or itemId is None or not itemId.startswith(itemIdPrefix):
                         itemId = None
 
-                    # MISAKA fork: pi's `id: undefined` leaves the key out of the JSON; a Python
-                    # `None` would be sent as `null`.
                     itemIdField = {} if itemId is None else {"id": itemId}
                     if customInputProperty is not None:
                         output.append({
@@ -440,7 +436,6 @@ class _StreamingToolCallScratch:
     customInput: _CustomToolCallInput | None = None
 
 
-# MISAKA fork (both helpers): the scratch rides beside the block, so it is passed in.
 def _getCustomToolCallInput(block: ToolCall, scratch: _StreamingToolCallScratch) -> str:
     property = None if scratch.customInput is None else scratch.customInput.property
     if property is None:
@@ -477,7 +472,6 @@ async def processResponsesStream(
     sawTerminalResponseEvent = False
     outputSlots: dict[Any, _ResponsesOutputSlot] = {}
     reasoningBlocksById: dict[Any, ThinkingContent] = {}
-    # MISAKA fork: the scratch fields of the streaming tool calls, keyed by content index.
     streamingToolCalls: dict[int, _StreamingToolCallScratch] = {}
     grammarToolInputProperties = None if options is None else options.get("grammarToolInputProperties")
 

@@ -1,20 +1,11 @@
-# MISAKA: dependencies are the union of the inlined pi/harn Python engine and the MISAKA product layer.
-# Development environment: `uv sync` (the dev group brings every provider SDK and the pageindex extra).
-# A user install picks its provider: `pip install 'misaka[anthropic]'` (or `misaka[providers]` for all).
 [project]
 name = "misaka"
 version = "0.19.29"
 description = "A research team of AI agents for the humanities and social sciences"
-readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "makiko", email = "nishikinokki@gmail.com" }]
-# Apache-2.0 is the one licence that covers every origin in this tree: misaka/ui/panel/ is a port of
-# herdr (Apache-2.0), which cannot be relicensed to MIT, while pi, hermes-lcm, PageIndex, Hermes agent
-# and ghostty are all MIT and flow into Apache-2.0. Per-file upstream notices stay where they are and
-# THIRD_PARTY_NOTICES.md indexes them.
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "LICENSES/*.txt"]
-# The name "misaka" on PyPI belongs to an unrelated package: this one installs from the repository (README).
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
@@ -23,51 +14,32 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-    # engine/ai (formerly harn_ai)
     "pydantic>=2.10",
     "jsonschema>=4.23",
-    # misaka/ai/utils/validation.py catches `referencing.exceptions.Unresolvable` itself (jsonschema's resolver library).
     "referencing>=0.36",
     "httpx>=0.28",
-    # The official MCP SDK serves the ally bridge's stdio MCP server; [ws] brings websockets, which
-    # the Codex WebSocket transport and the browser's CDP connection use.
     "mcp[ws]>=1.30,<2",
-    # engine/agent (formerly harn_agent)
     "ruamel.yaml>=0.18",
     "pathspec>=0.12",
-    # net (pane hosting: one terminal emulator screen per pane)
     "pyte>=0.8.2",
-    # engine/coding_agent (formerly harn_coding_agent)
     "psutil>=6.1",
     "wcmatch>=10.0",
     "filelock>=3.32.3",
     "pygments>=2.18",
-    # MISAKA's own (the vendored skills and LCM code read YAML)
     "pyyaml>=6.0",
-    # documents: PDF page text, and PageIndex's chapter outlines for long PDFs (regex comes with
-    # tiktoken). The outline packages were the `pageindex` extra until 2026-10-07 (GitHub issue
-    # #9): a release archive cannot add an extra, so no archive install ever had an outline. The
-    # pins are PageIndex's.
     "pypdfium2==4.30.0",
     "PyPDF2==3.0.1",
     "regex>=2024.0.0",
     "sortedcontainers==2.4.0",
-    # utils/image_resize, clipboard_image (was only transitively present through term-image)
     "pillow>=10",
-    # tools/office: the .docx / .xlsx / .pptx readers and writers
     "python-docx>=1.1",
     "openpyxl>=3.1",
     "python-pptx>=1.0",
     "tiktoken>=0.14.0",
-    # codemode runs quickjs-wasi's QuickJS wasm on wasmtime (misaka/codemode/quickjs_wasi). wasmtime-py changes its
-    # API between major versions, so the major is pinned.
     "wasmtime>=49,<50",
 ]
 
 [project.optional-dependencies]
-# Provider SDKs are extras: a user install picks the ones it talks to.
-# 0.99 is the first SDK whose in-memory workload identity federation `config=` honours `workspace_id`; below 1, as
-# pi pins its SDK to one 0.x release: 1.x moved to httpx2 and 2.x sends an API key as `Authorization: Bearer`.
 anthropic = ["anthropic>=0.99,<1"]
 openai = ["openai>=1.60"]
 google = ["google-genai>=1.0"]
@@ -75,7 +47,6 @@ bedrock = ["boto3>=1.35"]
 providers = ["misaka[anthropic,openai,google,bedrock]"]
 browser = ["websockets>=15,<17", "cryptography>=43"]
 lcm-semantic = ["fastembed"]
-# Outlines come with every install now; the name stays so `misaka[...,pageindex]` still installs.
 pageindex = []
 
 [project.scripts]
@@ -89,15 +60,10 @@ build-backend = "hatchling.build"
 dev = ["misaka[providers,pageindex]", "pytest>=8", "pytest-asyncio>=1", "ruff>=0.5"]
 
 [tool.hatch.build]
-# Do not follow ignored build-tree symlinks before visiting the real package.
 skip-excluded-dirs = true
 
 [tool.hatch.build.targets.wheel]
-# Every importable package at the repo root (exposed by the editable install; replaces a hand-written .pth)
 packages = ["misaka"]
-# The pinned hermes-lcm tree is whole in the repository, where its tests run and its hashes are
-# checked. An install needs its runtime, its operator scripts, its skill and its prose -- not
-# 3.6 MB of tests, the benchmark harnesses, CI files, or 6 MB of documentation images.
 exclude = [
   "misaka/extensions/misaka_lcm/vendor/tests",
   "misaka/extensions/misaka_lcm/vendor/benchmarks",
@@ -108,22 +74,12 @@ exclude = [
 ]
 
 [tool.ruff]
-# Vendored verbatim from upstream hermes-lcm: linting it would be a diff against the pin.
-# scripts/check-windows-footguns.py is Hermes's checker, kept as close to upstream as MISAKA allows.
 extend-exclude = ["misaka/core/skills/assets", "misaka/core/skills/vendor", "tests/skills_hermes_native", "misaka/extensions/misaka_lcm/vendor", "misaka/extensions/misaka_lcm/native", "tests/hermes_lcm_native", "tests/web/fixtures", "scripts/check-windows-footguns.py"]
 
 [tool.ruff.lint]
-# 默认集（E4/E7/E9/F）之外，只加"今天就是零命中"的阻塞调用棘轮：它挡不住我们自己的
-# 函数在内部阻塞（没有 linter 能知道），但能挡住新代码在 async 里直接调标准库的阻塞
-# 接口。既有的 `# noqa: ASYNC2xx - 原因` 注释因此从失效变为真正生效。
-# 刻意不启用：ASYNC240（要求改用 trio/anyio 的 Path，本仓库不用，55 处纯噪声）；
-# ASYNC110（4 处轮询循环改 Event 会改变唤醒语义，留给第二波逐个判断）。
 extend-select = ["ASYNC210", "ASYNC220", "ASYNC221", "ASYNC222", "ASYNC230", "ASYNC251"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-# Upstream hermes-lcm's own suite lives under tests/ but is not written to misaka's
-# -W error standard, so it is not part of the main run. `make vendor-test` names that
-# directory explicitly, which overrides this, and `make check` gates on both.
 norecursedirs = ["hermes_lcm_vendor", "hermes_lcm_native"]

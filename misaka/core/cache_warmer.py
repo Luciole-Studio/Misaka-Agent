@@ -33,7 +33,6 @@ IDLE_CONTINUATION_PROBABILITY = 0.15
 
 CacheWarmingMode = Literal["off", "streaming", "idle"]
 
-# MISAKA fork: asyncio holds tasks weakly; `void this.refresh(run)` keeps its task here until it settles.
 _background: set[asyncio.Task[Any]] = set()
 
 
@@ -312,8 +311,6 @@ class CacheWarmer:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            # MISAKA fork: no loop to schedule on (a synchronous caller outside the session's loop): the
-            # entry simply expires, as it would without warming.
             self.stop("no event loop for cache warming")
             return
         run.timer = loop.call_later(

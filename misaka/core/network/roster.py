@@ -10,7 +10,7 @@ from misaka.config.product import CFG, current_config
 from misaka.core.moments import CoreCommand
 
 ROOT = CFG["profiles_root"]
-ACTIVE = ("running", "review", "ready", "todo", "blocked", "triage")   # anything a Sister still owes
+ACTIVE = ("running", "review", "ready", "todo", "blocked", "triage")
 DEFAULT_CHOICE = "default (use global setting)"
 CUSTOM_CHOICE = "Custom…"
 PIN_EXAMPLE = "anthropic/claude-opus-5"
@@ -70,8 +70,6 @@ def _valid(sid):
 
 
 def _valid_new(sid):
-    # ``\w`` also matches Chinese, so text pasted into the ID prompt became a Sister. Existing
-    # IDs still pass ``_valid``; only a new one is held to the ASCII the message promises.
     return _valid(sid) and sid.isascii()
 
 
@@ -110,8 +108,6 @@ def create_sister(sid, root=None, specialty=None, model=None, thinking=None, run
         return False, f"Sister {sid} is already registered: {prof}"
     pin = None
     if model:
-        # Resolve before anything is written: a bad reference must not leave a half-made
-        # profile behind that then reports the ID as already registered.
         try:
             pin = resolve_pin(model, runtime if runtime is not None else _runtime())
         except ValueError as error:
@@ -126,9 +122,6 @@ def create_sister(sid, root=None, specialty=None, model=None, thinking=None, run
     with open(os.path.join(prof, "SOUL.md"), "w", encoding="utf-8") as f:
         f.write(SOUL_TEMPLATE.format(sid=sid))
     with open(os.path.join(prof, "DESCRIBE.md"), "w", encoding="utf-8") as f:
-        # Quoted as a JSON string, which YAML reads as a double-quoted scalar: a plain one ends
-        # at the first ": ", so "Economic history: late imperial China" wrote a profile nobody
-        # could read, and the Sister dropped out of every plan while create reported success.
         f.write(DESCRIBE_TEMPLATE.format(
             sid=sid, specialty=json.dumps(specialty, ensure_ascii=False),
             specialty_line=specialty or "Not specified yet."))
@@ -186,13 +179,6 @@ def describe(sid, root=None):
     except OSError:
         return None, None
     except ValueError as error:
-        # DESCRIBE.md is a file people are told to edit by hand, and parseFrontmatter raises
-        # FrontmatterError (a ValueError) on malformed YAML. Every caller here walks the *whole*
-        # roster -- the /sister menu, misaka_board's roster line, the chat banner -- so letting
-        # one member's typo out would take down the entire list. The description line alone is
-        # read as written first: `misaka create --desc` wrote it unquoted before 0.18.7, so any
-        # description with a colon in it is in exactly this state. Only when that line is not
-        # there either is the file named: whoever sees the roster is the person who can fix it.
         description, body = _read_by_hand(path)
         return description or f"DESCRIBE.md could not be read ({' '.join(str(error).split())})", body
     desc = str(parsed.frontmatter.get("description") or "").strip()
@@ -264,7 +250,6 @@ def capability_catalog(root=None, *, workspace=None, platform="cli"):
                     "profile_path": os.path.join(profile, "DESCRIBE.md"),
                     "skills": [{"name": e.get("runtime_name", e["name"]), "description": e["description"],
                                 "path": e["path"], "layer": e["layer"]} for e in entries]})
-    # An ally brings its own skills and tools; misaka has no profile or skill stack to show.
     return out + [{**_ally_entry(ally), "profile_path": None, "skills": []} for ally in allies().values()]
 
 
@@ -281,9 +266,6 @@ def remove_sister(sid, root=None, db_path=None):
     shutil.rmtree(prof)
     rest = ','.join(f"{k}×{v}" for k, v in sorted(counts.items())) or 'none'
     return True, f"Sister {sid} was removed. Historical cards ({rest}), workspaces, and transcripts were preserved."
-
-
-# ── TUI: /create and /remove (configuration wizard) ────────────────────────
 
 
 def commands():
@@ -321,7 +303,6 @@ def commands():
         elif model_pick != DEFAULT_CHOICE:
             model = model_pick
         if model:
-            # Resolve now so the confirmation shows the provider the pin actually lands on.
             try:
                 model = resolve_pin(model, runtime)
             except ValueError as error:
@@ -383,9 +364,6 @@ class RosterPart:
     def __init__(self):
         self.tools = []
         self.commands = commands()
-
-
-# ── CLI: misaka create / misaka remove ──────────────────────────────
 
 
 def cli_create(sid=None, desc=None, model=None, root=None, thinking=None):

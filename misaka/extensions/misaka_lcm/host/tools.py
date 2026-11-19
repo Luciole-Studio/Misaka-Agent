@@ -43,9 +43,7 @@ from . import context_engine, execution, fence, storage
 
 logger = logging.getLogger(__name__)
 
-# Upstream sentences that are not true in misaka, and what misaka says instead ("" removes one).
 _REWRITES = {
-    # Hermes's session search is a host tool misaka does not have.
     " For Hermes-tracked session history outside the LCM database, use session_search.": "",
     " For Hermes-tracked session history outside the LCM database, prefer session_search.": "",
     "\n- Hermes-tracked history outside `lcm.db`: use the host's `session_search` when available.": "",
@@ -55,11 +53,9 @@ _REWRITES = {
         "For other sessions in this project, use lcm_recall or lcm_grep(session_scope='all') first.",
     "for cross-session recall, use session_search first.":
         "for other sessions in this project, use lcm_recall or lcm_grep(session_scope='all') first.",
-    # Hermes's memory is one agent's, across all its chats; this cache is one project's sessions.
     "Search the agent's entire memory across ALL conversations and all time by meaning.":
         "Search every session loaded into this project's LCM cache -- Last Order's and her Sisters' -- "
         "by meaning.",
-    # Hermes's sources are chat platforms; here a row's source is the session that wrote it.
     "Optional raw-message role filter. When supplied, lcm_grep returns raw message hits only.":
         "Optional raw-message role filter: `user` (the user, or a work order), `assistant`, `tool`, `system`, "
         "`notice` (a system notice), or `agent:<name>` (mail from that agent: `agent:10032`, `agent:last-order`). "
@@ -74,10 +70,6 @@ _REWRITES = {
         "with /new --carry; its id is the first session's id.",
 }
 
-# One LCM result is at most this many tokens. Upstream bounds each part of a call -- rows, characters
-# per row, hits -- but not their product: a default lcm_load_session page is up to 100 rows of 4,000
-# characters and its hard caps allow 200 of 20,000, so one call could pour a Sister's whole research
-# session into the caller's window. 25k tokens is under a tenth of misaka's smallest (272k) window.
 RESULT_BUDGET_TOKENS = 25_000
 
 
@@ -102,7 +94,6 @@ def _snapshot(ctx) -> context_engine.Transcript | None:
     """Freeze archive and branch together before entering the worker queue."""
     try:
         return context_engine.snapshot(ctx)
-    # A tool blind to the live turn still reads everything already stored.
     except Exception:
         logger.debug("LCM could not read the active context for a tool call.", exc_info=True)
         return None
@@ -129,8 +120,6 @@ def _tokens(name: str, payload) -> int:
     the untrusted-data fence, every marker in it lengthened by the defang. Fenced or not, the text
     the model receives is at most this, which is what makes the budget a bound."""
     text = untrusted(f"lcm:{name}", _json(payload))
-    # A UTF-8 character is at most four bytes and a token at least one, so a text this short is
-    # within budget without counting; ordinary results never reach the tokenizer.
     if len(text) * 4 <= RESULT_BUDGET_TOKENS:
         return 0
     from ..vendor.tokens import count_tokens
@@ -146,13 +135,11 @@ def _within_budget(name: str, payload):
     if (name == "lcm_load_session" and isinstance(rows, list) and rows
             and all(isinstance(row, dict) and type(row.get("store_id")) is int for row in rows)):
         def page(count):
-            # Upstream's own cursor contract: `next_cursor` is the last returned row's store_id,
-            # passed back as `after_store_id`.
             return {**payload, "messages": rows[:count], "returned_messages": count, "has_more": True,
                     "next_cursor": rows[count - 1]["store_id"],
                     "trimmed_to_budget": {"budget_tokens": RESULT_BUDGET_TOKENS,
                                           "dropped_messages": len(rows) - count}}
-        fits, low, high = 0, 1, len(rows)  # the most leading rows that fit; a page only grows with them
+        fits, low, high = 0, 1, len(rows)
         while low <= high:
             middle = (low + high) // 2
             if _tokens(name, page(middle)) <= RESULT_BUDGET_TOKENS:
@@ -234,7 +221,7 @@ def _deliver(name: str, output: str, engine=None) -> str:
     try:
         payload = json.loads(output)
     except ValueError:
-        return output  # not upstream's JSON: refence fences it unread
+        return output
     if engine is not None:
         payload = _attribute(engine, payload)
         if name == "lcm_expand":
@@ -286,9 +273,6 @@ def recall_guideline() -> str:
             "identifiers, not conversation content stored in LCM. Use the LCM session/content counts and actual "
             "retrieval results to establish what is available; do not claim prior-session recall from catalog-only "
             "entries. Status also does not establish which project files exist or have been read.\n\n"
-            # misaka's rules, not upstream's: sessions here leave work products (delivered files, card
-            # notes), and one cache holds Last Order and every Sister. Stated with the tools, so they come
-            # and go with the plugin instead of being written into the prompts of whatever uses them.
             "Work products come before conversations. When another session's work left products -- files it "
             "delivered, notes and findings on its card -- read those first; open its conversation only where a "
             "product is unclear or needs the context it came from: a conversation supplements its products, "
@@ -312,7 +296,7 @@ def _parameters(schema: dict) -> dict:
         if isinstance(spec, dict) and isinstance(spec.get("description"), str):
             spec["description"] = misaka_text(spec["description"])
             if name == "role":
-                spec.pop("enum", None)      # `agent:<name>` is no closed list
+                spec.pop("enum", None)
     return parameters
 
 
@@ -355,7 +339,7 @@ def register(harn, *, workspace=None, source=None) -> None:
 
     try:
         dormant = _dormant(LCMConfig.from_env(host_config=config_bridge.load_auxiliary_config()))
-    except Exception:  # an unreadable configuration keeps upstream's whole surface
+    except Exception:
         logger.warning("LCM could not read its configuration; every tool is registered.", exc_info=True)
         dormant = set()
     for schema in LCMEngine.get_tool_schemas():

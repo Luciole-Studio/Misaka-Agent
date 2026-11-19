@@ -36,9 +36,6 @@ def lint_content(content, skill_dir=None):
     name = fm.get("name")
     if isinstance(name, str) and len(name) > 64:
         findings.append(Finding("name-format", "error", "name exceeds 64 characters"))
-    # The upstream manager permits dots but its advisory linter still rejects
-    # them. Keep the manager's rule; do not turn an advisory inconsistency into
-    # an inaccessible write path.
     if isinstance(name, str) and NAME_RE.fullmatch(name) and len(name) <= 64:
         findings = [f for f in findings if f.rule != "name-format"]
     findings = [f for f in findings if f.rule != "author-caps"]

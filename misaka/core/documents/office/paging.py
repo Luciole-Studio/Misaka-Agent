@@ -20,30 +20,15 @@ from __future__ import annotations
 import itertools
 import re
 
-# One pattern per format, anchored at the start of a line. ``(?!.*\(continued\)$)`` is what
-# keeps re-splitting an already-paged rendering idempotent: a continuation header is body,
-# not a new block, or paging a document twice would multiply its blocks.
 _BOUNDARY = {
     "xlsx": re.compile(r"^## Sheet: (?!.*\(continued\)$).*$", re.MULTILINE),
-    # A csv is one table and so one block, but it uses the sheet boundary anyway: that is
-    # what gives ``resume_context`` a title line to repeat, and a data file is exactly the
-    # kind of document that is long enough to need continuation pages at all.
     "csv": re.compile(r"^## Sheet: (?!.*\(continued\)$).*$", re.MULTILINE),
     "pptx": re.compile(r"^## Slide \d+(?::|\b)(?!.*\(continued\)$).*$", re.MULTILINE),
     "docx": re.compile(r"^# (?!.*\(continued\)$).*$", re.MULTILINE),
 }
 
-# A fenced block in a rendering is content -- a cell holding "## Sheet: totals", a code
-# sample in a Word document -- and a boundary found inside one is not a boundary.
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)", re.MULTILINE)
 
-# The header row a tabular block opens with. Repeating it is what makes a continuation
-# page of 400 numbers readable at all; borrowed from FrontierAgent
-# (plugins/tools/_reader_core.py:430 _resume_ctx), which rebuilds the same two things.
-#
-# A workbook's is the column-letter row, which is recognisable on sight. A csv's is its own
-# first row, which is not -- it is whatever the file called its columns -- so it is found
-# by position instead: the line after the ```meta fence closes.
 _COLUMN_LETTERS = re.compile(r"^\t(?:[A-Z]{1,3}\t)*[A-Z]{1,3}$")
 _FENCE_CLOSE = "```"
 
@@ -84,11 +69,6 @@ def blocks(text, fmt):
     spans = _fenced_spans(text)
     found = [m.start() for m in pattern.finditer(text)
              if not any(lo <= m.start() < hi for lo, hi in spans)]
-    # The FIRST boundary is not a cut: the first block starts at 0 and whatever precedes
-    # that boundary -- a document's front matter, a workbook-level note -- belongs to it
-    # rather than becoming a section of its own. Same rule as FrontierAgent's
-    # ``_reader_core.py:415 _split_blocks`` ("the first block starts at 0; legend /
-    # lead-in belong to it").
     cuts = found[1:]
     if not cuts:
         return [text]

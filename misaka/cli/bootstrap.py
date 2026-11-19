@@ -31,7 +31,6 @@ from misaka.core import wiring
 
 
 def install(*, check_settings: bool = True) -> None:
-    # MISAKA fork: pi's only entry is `main()`; MISAKA's other entries build sessions without it.
     from misaka.modes.interactive.theme.theme import setThemeJsonValidator
     from misaka.modes.interactive.theme.theme_schema import validateThemeJson
     setThemeJsonValidator(validateThemeJson)
@@ -40,9 +39,9 @@ def install(*, check_settings: bool = True) -> None:
                          + "\n  ".join(errors))
     wiring.bundled = extensions.discover
     from misaka.core.platform import metering
-    metering.install()          # every model request of a metered session is leased and recorded
+    metering.install()
     from misaka.core.research import owner
-    owner.install()             # research answers for its cards wherever the board asks (platform.owners)
+    owner.install()
 
 
 __all__ = ["install"]

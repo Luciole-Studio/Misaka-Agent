@@ -59,7 +59,6 @@ class ExtensionEditorComponent(Container):
     ) -> None:
         super().__init__()
         self._focused = False
-        # MISAKA fork: holds the running `void this.handleOpenExternalEditor()` (asyncio holds tasks weakly).
         self._tasks: set[asyncio.Task[Any]] = set()
 
         self.tui = tui

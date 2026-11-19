@@ -101,7 +101,6 @@ async def test_policy_refusal_is_not_a_keyless_throttle(monkeypatch, tmp_path, h
             return httpx.Response(200, json={"success": True, "data": {
                 "markdown": "blocked redirect body",
                 "metadata": {"sourceURL": f"https://{host}/final"}}})
-        # The next ring member does not report its redirect target.
         return httpx.Response(200, json={"content": "blocked redirect body"})
 
     fake_http(monkeypatch, handle)
@@ -212,7 +211,6 @@ async def test_cancelled_xai_force_refresh_still_persists_the_refresh_it_started
         await asyncio.wait_for(task, 2)
     release.set()
     for _ in range(200):
-        # While the refresh holds the store lock a fresh reader cannot load the file and reads nothing.
         current = auth_storage.AuthStorage.create(path).readState.data.get("xai")
         if current is not None and current["access"] == "rotated":
             break

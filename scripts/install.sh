@@ -1,16 +1,4 @@
 #!/bin/sh
-# Install a prebuilt MISAKA archive for this machine.
-#
-# The archive contains uv, git, ripgrep (rg), fd and poppler (pdftotext).
-# bin/misaka puts tools/ on PATH when it runs.
-#
-#   curl -fsSL https://raw.githubusercontent.com/Luciole-Studio/Misaka-Agent/main/scripts/install.sh | sh
-#
-# Optional: a version (0.18.5 or v0.18.5), else the latest GitHub release.
-# MISAKA_PREFIX  install root (default ~/.local/share/misaka)
-# MISAKA_BIN     directory for the misaka link (default ~/.local/bin)
-# MISAKA_REPO    GitHub owner/name
-# MISAKA_REPLACE set to 1 to replace a misaka command another install put in MISAKA_BIN
 
 set -eu
 
@@ -50,8 +38,6 @@ if [ -z "$version" ]; then
   exit 1
 fi
 
-# The link goes where `uv tool install` puts its misaka too. Replacing an archive's link is an
-# update; replacing anything else would take that install's command away without a word.
 link="${BIN_DIR}/misaka"
 if [ -e "$link" ] || [ -L "$link" ]; then
   current=$(readlink "$link" 2>/dev/null || echo "$link")

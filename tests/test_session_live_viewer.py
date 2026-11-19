@@ -54,7 +54,6 @@ def viewer(monkeypatch, tmp_path):
     monkeypatch.setattr(session_catalog, "owner_record", lambda _path: owner)
 
     async def next_poll(awaitable, *, timeout):
-        # Replace only polling delay; follow_session still owns and checks its real close event.
         awaitable.close()
         await asyncio.sleep(0)
         raise TimeoutError
@@ -102,7 +101,7 @@ async def test_follow_live_thinking_text_commit_and_sanitize(viewer, monkeypatch
 
     async def request(_owner, operation, **arguments):
         calls.append((operation, arguments))
-        assert operation == "snapshot"  # Watching must not send input, resume, or create an owner.
+        assert operation == "snapshot"
         poll = len(calls)
         if poll == 1:
             assert arguments.get("stream_cursor") is None
@@ -124,7 +123,6 @@ async def test_follow_live_thinking_text_commit_and_sanitize(viewer, monkeypatch
             assert screen.entries == history
             return snapshot("history-1", "stream-2", workflow=workflow)
         if poll == 4:
-            # An unchanged stream cursor with a null payload means "no update", not "clear".
             assert assistants(screen) == live
             return snapshot("history-2", "stream-3", [*history, entry("a", final)], workflow=workflow)
         assert poll == 5
@@ -154,7 +152,6 @@ async def test_follow_disconnect_clears_live_and_reconnects_without_replaying_in
             return snapshot("same-history", "same-stream", [], message("IN_PROGRESS"))
         if poll == 2:
             assert "IN_PROGRESS" in rendered(screen)
-            # Unsent editor text remains local across disconnects.
             screen.editor.setText("LOCAL_DRAFT")
             raise OSError("fixture disconnect")
         if poll == 3:

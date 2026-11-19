@@ -51,7 +51,6 @@ def test_an_empty_settings_file_reads_every_default():
 
 
 def test_install_telemetry_keeps_misakas_default_off():
-    # MISAKA fork: the key names the client "misaka" to gateways; upstream's install ping defaults on.
     assert SETTINGS_DEFAULTS["enableInstallTelemetry"] is False
     assert SettingsManager.inMemory().getEnableInstallTelemetry() is False
     assert SettingsManager.inMemory({"enableInstallTelemetry": True}).getEnableInstallTelemetry() is True

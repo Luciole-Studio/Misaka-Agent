@@ -40,7 +40,6 @@ def test_the_file_tools_may_not_write_what_a_running_research_saved(lab):
     draft = _saved_draft(con, run)
     reason = runs.frozen_refusal(draft["path"])
     assert reason and "draft" in reason and "final adjudication" in reason
-    # A card's own deliverable stays its Sister's; an unregistered file is anyone's.
     card_file = Path(run["workspace"]) / "nodes" / "b" / "cards" / "t_card" / "notes.md"
     card_file.parent.mkdir(parents=True)
     card_file.write_text("mine\n", encoding="utf-8")
@@ -48,7 +47,6 @@ def test_the_file_tools_may_not_write_what_a_running_research_saved(lab):
                        sha256=hashlib.sha256(card_file.read_bytes()).hexdigest(), task_id="t_card")
     assert runs.frozen_refusal(str(card_file)) is None
     assert runs.frozen_refusal(str(Path(run["workspace"]) / "scratch.md")) is None
-    # Once the run is over its files are anyone's again.
     con.execute("UPDATE research_runs SET status='done' WHERE id=?", (run["id"],))
     assert runs.frozen_refusal(draft["path"]) is None
 
@@ -60,7 +58,7 @@ def test_a_draft_changed_after_it_was_saved_is_put_back_and_the_change_kept(lab)
     path.write_text(DRAFT + "\nAn edit made between phases.\n", encoding="utf-8")
     with pytest.raises(ValueError, match="changed since it was registered"):
         runs.artifact_text(draft)
-    again = report._checkpoint(con, run, "draft")              # the resume that used to fail
+    again = report._checkpoint(con, run, "draft")
     assert runs.artifact_text(again) == DRAFT.strip() + "\n"
     [kept] = path.parent.glob(f"{path.stem}.edited-*{path.suffix}")
     assert "An edit made between phases." in kept.read_text(encoding="utf-8")
@@ -79,7 +77,7 @@ def test_a_draft_moved_away_is_rebuilt_from_the_run(lab):
 
 def test_a_changed_checkpoint_with_nothing_to_rebuild_it_from_stays_an_error(lab):
     con, run = lab
-    report._save(con, run, "draft", DRAFT)                      # no recorded command behind it
+    report._save(con, run, "draft", DRAFT)
     path = Path(runs.artifacts(con, run["id"], kind="draft", run_level=True)[-1]["path"])
     path.write_text("something else\n", encoding="utf-8")
     with pytest.raises(ValueError, match="changed since it was registered"):

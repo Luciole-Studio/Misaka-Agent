@@ -91,8 +91,6 @@ async def copy_included_files(repo: Path, work: Path, run: Callable, warn: Calla
 
 
 async def create(repo: str, path: Path, branch: str, settings: Mapping[str, Any], run: Callable, warn: Callable, *, prepare: bool = True) -> tuple[str, bool]:
-    # Existing path must really be a linked worktree, not an arbitrary parent
-    # repository reached by Git's upward traversal.
     if (path/'.git').is_file():
         code, head, _ = await run(['git', '-C', str(path), 'rev-parse', 'HEAD'])
         if not code:
@@ -131,11 +129,10 @@ async def create(repo: str, path: Path, branch: str, settings: Mapping[str, Any]
                 try:
                     await asyncio.to_thread(destination.symlink_to, source, target_is_directory=True)
                 except OSError:
-                    pass  # CCB ignores missing/already present destinations.
+                    pass
         if prepare:
             await copy_included_files(Path(repo), path, run, warn)
     except BaseException:
-        # A registered-but-empty sparse tree must not become a successful resume.
         await run(['git', '-C', repo, 'worktree', 'remove', '--force', str(path)])
         raise
     return head.strip(), False
@@ -169,8 +166,6 @@ async def run_vcs_hooks(hooks: Mapping[str, Any], event: str, payload: Mapping[s
                 return True, str(target.resolve())
         raise RuntimeError("WorktreeCreate hook failed: " + "; ".join(
             str(result.get("reason") or "no successful output") for result, _ in results))
-    # Upstream reports 'ran' even on failure. Retain owner metadata on failures
-    # here: deleting it would orphan the user's VCS working directory.
     if any(code != 0 for _, code in results):
         raise RuntimeError("WorktreeRemove hook failed: " + "; ".join(
             str(result.get("reason") or code) for result, code in results if code != 0))
@@ -226,7 +221,6 @@ async def cleanup_stale(repo: str, root: Path, cutoff: float, run: Callable,
             if data.get('branch') != 'refs/heads/' + branch:
                 continue
             with activity_lock(path).acquire(timeout=0):
-                # Check AFTER acquiring the same fence used by create/resume.
                 if path.stat().st_mtime >= cutoff:
                     continue
                 status, unpushed = await asyncio.gather(
@@ -244,7 +238,7 @@ async def cleanup_stale(repo: str, root: Path, cutoff: float, run: Callable,
                 if code:
                     warn(f'Could not remove stale agent branch {branch}: {error.strip()}')
         except (OSError, ValueError, Timeout):
-            continue  # Source fail-closed filesystem checks; another owner wins.
+            continue
     if removed:
         await run(['git', '-C', repo, 'worktree', 'prune'])
     return removed

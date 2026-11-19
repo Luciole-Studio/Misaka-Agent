@@ -45,7 +45,6 @@ jobs:
           import urllib.request
 
           repo = os.environ.get("INPUT_REPO", "").strip()
-          # An uninterpolated workflow expression left in the form field is not a repository name.
           if not repo or ("${" + "{") in repo:
               repo = os.environ["GITHUB_REPOSITORY"]
           if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):

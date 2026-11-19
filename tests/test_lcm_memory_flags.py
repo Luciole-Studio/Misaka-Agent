@@ -26,7 +26,6 @@ def test_a_feed_entry_marked_not_memory_never_reaches_the_archive():
     ]
     archived = [ingest._text_of(message["content"]) for message in ingest.upstream_messages(messages)]
     assert archived == ["question", "Card done: read it.", "unmarked"]
-    # The same rule on the alignment projection, so live view and originals agree per entry.
     assert ingest.source_messages([messages[1]]) == []
     assert len(ingest.source_messages([messages[2]])) == 1
 
@@ -67,8 +66,6 @@ def test_the_replay_join_numbers_sources_the_way_the_archive_does():
     ]
     replay = ingest.Replay(messages)
     view = ingest.upstream_messages(messages)
-    # prepare() zips the join's rows with positions computed over the archive's view: the two
-    # must be the same length and describe the same rows.
     assert len(replay.messages) == len(view) == 2
     assert [ingest._text_of(m["content"]) for m in replay.messages] == ["question", "# Research plan"]
     joined = [{**row, "content": view[i]["content"]} for i, row in enumerate(replay.messages)]

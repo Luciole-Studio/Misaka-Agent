@@ -47,7 +47,6 @@ from misaka.utils.js import UNDEFINED
 # - Failures must be encoded in the returned stream via protocol events and a
 #   final AssistantMessage with stopReason "error" or "aborted" and errorMessage.
 type StreamFn = Callable[
-    # MISAKA fork: the options are any object or mapping carrying the stream options (the loop hands over a namespace).
     [Model, TranscriptContext, Any],
     AssistantMessageEventStream | Awaitable[AssistantMessageEventStream],
 ]
@@ -83,7 +82,6 @@ class BeforeToolCallResult:
     # Hint that the agent should stop after the current tool batch when this call is blocked.
     # Early termination only happens when every finalized tool result in the batch sets this to true.
     terminate: bool | None = None
-    # MISAKA fork: CCB PreToolUse.updatedInput; the replacement arguments are validated again before use.
     updatedInput: dict[str, Any] | None = None
 
 
@@ -349,8 +347,6 @@ class AgentLoopConfig:
     maxRetries: int | None = None
     metadata: dict[str, Any] | None = None
     # The rest of `SimpleStreamOptions`, absent unless set: the loop's spread leaves an unset one out, as
-    # `{ ...config }` does with a property that was never assigned. MISAKA fork: no `fetch` (the adapters own their
-    # HTTP clients) and no `signal` (the loop is handed one).
     telemetryContext: Any = UNDEFINED  # TelemetryContext
     env: Any = UNDEFINED  # dict[str, str | None]
     samplingParams: Any = UNDEFINED  # SamplingParams
@@ -499,7 +495,6 @@ class AgentTool(Tool):
 
     # Human-readable label for UI display.
     label: str
-    # MISAKA fork: runtime-only legacy names a call may still use; never advertised as duplicate provider tool schemas.
     aliases: tuple[str, ...] = Field(default=(), exclude=True)
     # Optional compatibility shim for raw tool-call arguments before schema validation.
     # Must return an object that matches `TParameters`.
@@ -589,9 +584,6 @@ class ToolExecutionStartEvent:
     toolName: str
     args: Any
     type: Literal["tool_execution_start"] = "tool_execution_start"
-    # MISAKA fork: upstream widens the session's event type with `parentToolCallId` for calls a
-    # tool made through `ctx.executeTool()`; here the field lives on the event, unset for
-    # model-issued calls.
     parentToolCallId: str | None = None
 
 
@@ -602,7 +594,6 @@ class ToolExecutionUpdateEvent:
     args: Any
     partialResult: Any
     type: Literal["tool_execution_update"] = "tool_execution_update"
-    # MISAKA fork: see `ToolExecutionStartEvent.parentToolCallId`.
     parentToolCallId: str | None = None
 
 
@@ -615,7 +606,6 @@ class ToolExecutionEndEvent:
     # Milliseconds `execute()` took, measured with a monotonic clock; absent when the tool did not run.
     durationMs: int | None = None
     type: Literal["tool_execution_end"] = "tool_execution_end"
-    # MISAKA fork: see `ToolExecutionStartEvent.parentToolCallId`.
     parentToolCallId: str | None = None
 
 

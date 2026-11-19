@@ -19,8 +19,6 @@ from typing import Any
 
 from misaka.utils.values import signal_aborted
 
-# How often a flag-only signal is re-read. Short enough that a person pressing Esc does not notice, cheap enough that
-# an idle wait costs nothing measurable.
 FLAG_POLL_INTERVAL_S = 0.05
 
 
@@ -77,8 +75,6 @@ class AnyAbortSignal:
 
     async def wait(self) -> None:
         if not self._signals:
-            # Nothing can tell us about an abort, so waiting forever is honest; reporting one immediately would abort
-            # work that was never cancelled.
             await asyncio.Event().wait()
             return
         tasks = [asyncio.ensure_future(wait_for_abort(signal)) for signal in self._signals]

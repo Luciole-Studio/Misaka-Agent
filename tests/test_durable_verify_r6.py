@@ -28,8 +28,6 @@ def writeFile(path: str, content: str) -> None:
         file.write(content)
 
 
-# --- R6-N2: closing every stream at exit while a rescheduling is queued ------------------------------------------
-
 @macOS
 async def test_r6_n2_closing_every_stream_while_a_rescheduling_is_queued_never_destroys_one_twice() -> None:
     from misaka.durable.env import node_watch
@@ -43,7 +41,6 @@ async def test_r6_n2_closing_every_stream_while_a_rescheduling_is_queued_never_d
     destroy = fs._destroyStream
 
     def counted(stream: Any) -> int:
-        # Slow, so a second owner would come in while the first is still at it; never twice for real (that crashes).
         first = stream not in destroyed
         destroyed.append(stream)
         time.sleep(0.05)
@@ -57,17 +54,12 @@ async def test_r6_n2_closing_every_stream_while_a_rescheduling_is_queued_never_d
         deadline = time.monotonic() + 2
         while fs.openStreams() == 0 and time.monotonic() < deadline:
             await asyncio.sleep(0.002)
-        # The close queues a rescheduling that destroys the stream; what atexit runs destroys every stream.
         close()
         await asyncio.sleep(0.01)
         fs._closeAll()
         fs.inert = False
         perCycle.append(len(destroyed))
-    # One stream per cycle (a released stream's address may come back in a later cycle), destroyed once.
     assert perCycle == [1] * 10
-
-
-# --- R6-N3 / R7-N1 / R7-N3: the stream is recreated exactly as libuv recreates it --------------------------------
 
 
 @macOS
@@ -99,7 +91,6 @@ async def test_r7_n1_every_added_or_removed_watch_recreates_the_stream_from_now_
     loop = asyncio.get_running_loop()
 
     async def settled() -> None:
-        # The rescheduling runs on the dispatch queue.
         await asyncio.to_thread(fs.dispatchSync, fs.queue, None, fs.workType(lambda _info: None))
 
     try:
@@ -118,11 +109,7 @@ async def test_r7_n1_every_added_or_removed_watch_recreates_the_stream_from_now_
     for step in steps:
         if step[0] == "create":
             assert step[1:4] == (0xFFFFFFFFFFFFFFFF, 0.05, 0x02 | 0x10)
-    # Each destroy is of the stream created just before it.
     assert [step[1] for step in steps if step[0] == "destroy"] == [step[4] for step in steps if step[0] == "create"]
-
-
-# --- R7-N2: a watch below a directory the stream covers gets each event once ----------------------------------------
 
 
 _NESTED_WRITER = """
@@ -151,15 +138,11 @@ async def test_r7_n2_a_watch_below_a_covered_directory_gets_each_event_once() ->
     while fs.openStreams() == 0 and time.monotonic() < deadline:
         await asyncio.sleep(0.01)
     await asyncio.sleep(0.3)
-    # Another process writes, so busy threads here (the GIL) do not split a file's creation and its write into two
-    # events.
     writer = await asyncio.create_subprocess_exec(sys.executable, "-c", _NESTED_WRITER, sub)
     names: collections.Counter[str | None] = collections.Counter()
     schedule = fs._schedule
     try:
         await asyncio.sleep(0.2)
-        # The inner watch's rescheduling waits 0.3 s on a busy queue; meanwhile the stream gives it its events through
-        # the outer watch's path, and the new stream starts from now.
         fs._schedule = lambda id_: threading.Timer(0.3, schedule, (id_,)).start()  # type: ignore[method-assign]
         inner = _fsWatch(sub, False, lambda name: names.update([name]), lambda: None)
         await asyncio.sleep(0.9)
@@ -175,8 +158,6 @@ async def test_r7_n2_a_watch_below_a_covered_directory_gets_each_event_once() ->
             await writer.wait()
         outer.close()
     assert len(names) > 20
-    # FSEvents may report one file's creation as two events (`Created`, then `Created|Modified`), and libuv, so Node,
-    # reports both: a name or two twice is native. A replay through the covered path gave dozens (36–42).
     assert len([name for name, count in names.items() if count > 1]) < 5
 
 
@@ -195,7 +176,6 @@ async def test_r6_n3_a_watch_is_not_given_what_happened_before_it_was_opened() -
     watchA = _fsWatch(first, False, namesA.append, lambda: None)
     try:
         await asyncio.sleep(0.4)
-        # Written before `b` is watched; the stream recreated for `b` resumes from `a`'s last event.
         writeFile(os.path.join(second, "before-b"), "x")
         await asyncio.sleep(0.3)
         watchB = _fsWatch(second, False, namesB.append, lambda: None)
@@ -212,9 +192,6 @@ async def test_r6_n3_a_watch_is_not_given_what_happened_before_it_was_opened() -
         watchA.close()
     assert "before-a" not in namesA and "after-a" in namesA
     assert "before-b" not in namesB and "after-b" in namesB
-
-
-# --- The spill-backpressure flake: the draining check exists before the child can exit -----------------------------
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the command needs a POSIX shell with tr and a background job")

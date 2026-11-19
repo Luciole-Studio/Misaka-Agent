@@ -57,8 +57,6 @@ def nonNegativeSafeInteger() -> Any:
 # `timeoutSetting(options)` without its options, which are the field's.
 _TimeoutSetting = Annotated[float, Field(ge=0)] | Literal["disabled"]
 
-# MISAKA fork: `ModelThinkingLevelSchema` as a field: a multi-value `Literal` in a schema is a `TypeBoxLiteralUnion`, so
-# its `enum` keeps the declared order whatever else the process imported.
 _ModelThinkingLevelField = TypeBoxLiteralUnion(*MODEL_THINKING_LEVELS)
 
 
@@ -104,7 +102,6 @@ class RetrySettingsSchema(TypeBoxObject):
     )
     maxAgentDelayMs: float | None = _optional(default=SETTINGS_DEFAULTS["retry"]["maxAgentDelayMs"])
     provider: ProviderRetrySettingsSchema | None = None
-    # MISAKA fork: no legacy `maxDelayMs` (misaka never shipped it and has no settings migration).
 
 
 class TerminalSettingsSchema(TypeBoxObject):
@@ -172,8 +169,6 @@ class CodemodeSettingsSchema(TypeBoxObject):
 class _SkillsSettingsSchema(TypeBoxObject):
     """MISAKA's skill index: more skill folders, and skills to hide. A list of skill paths is not read here."""
 
-    # MISAKA fork: the whole class (MISAKA's skill index, core/skills/layers.py, replaced upstream's skills and its
-    # list of skill paths).
     external_dirs: str | list[str] | None = _optional(
         "More folders of skills to read; ~/.agents/skills is always read when it exists."
     )
@@ -183,10 +178,6 @@ class _SkillsSettingsSchema(TypeBoxObject):
     )
 
 
-# MISAKA fork: the product knobs (`config/product.KNOBS`), one object per settings.json section. A knob's type is
-# what `product.setting()` casts its value to; its default stays with the caller (two are computed), so none is given.
-# The schema gives the canonical JSON type; `setting()` also takes its string spellings ("8", "yes"), which an editor
-# then flags. A knob that may not be negative (`product.NOT_NEGATIVE`) is refused at start, and has `minimum: 0`.
 _KNOB_TYPES: dict[Any, Any] = {int: TypeBoxInteger(), float: float, bool: bool, str: str, None: Any}
 _NOT_NEGATIVE_KNOB_TYPES: dict[Any, Any] = {int: TypeBoxInteger(ge=0), float: Annotated[float, Field(ge=0)]}
 _PRODUCT_SECTIONS: dict[str, str] = {
@@ -314,12 +305,10 @@ class _PiSettingsSchema(_SettingsSchemaObject):
         "Prefix prepended to every bash command, for example to enable shell aliases."
     )
     collapseChangelog: bool | None = _optional(
-        # MISAKA fork: no changelog ships, so the setting changes nothing.
         "Kept for compatibility; MISAKA ships no changelog, so this has no effect.",
         SETTINGS_DEFAULTS["collapseChangelog"],
     )
     enableInstallTelemetry: bool | None = _optional(
-        # MISAKA fork: misaka's meaning (no install ping), default off.
         'Name this client "misaka" to aggregator gateways such as OpenRouter, NVIDIA and Cloudflare; nothing else is sent.',
         SETTINGS_DEFAULTS["enableInstallTelemetry"],
     )
@@ -382,10 +371,6 @@ class _PiSettingsSchema(_SettingsSchemaObject):
     )
 
 
-# MISAKA fork: MISAKA's own sections, whose modules read whatever shape they are given and normalize it.
-# MISAKA fork: the sub-agent system's own keys (core/subagent, ported from CCB), read from the home's settings.json,
-# a trusted project's and the managed settings.
-# The modes a top-level session can start in (subagent.configuration.TOP_LEVEL_PERMISSION_MODES).
 _TopLevelPermissionModeField = TypeBoxLiteralUnion("default", "plan", "acceptEdits", "bypassPermissions", "dontAsk")
 
 
@@ -418,7 +403,6 @@ class _SubagentWorktreeSchema(TypeBoxObject):
     )
 
 
-# MISAKA fork: what each kind of agent starts with. pi has one kind of session, and `defaultTools` for all of it.
 class _RoleTypeSettingsSchema(TypeBoxObject):
     """What new sessions of one kind of agent start with."""
 
@@ -490,7 +474,6 @@ SettingsSchema: type[_SettingsSchemaObject] = create_model(  # type: ignore[call
 )
 
 
-# `Static<typeof ...>`. MISAKA fork: settings are read as plain JSON mappings, so the object types are mappings.
 type CompactionModelOverride = dict[str, Any]
 type CompactionSettings = dict[str, Any]
 type BranchSummarySettings = dict[str, Any]
@@ -523,7 +506,6 @@ type QuietStartup = bool | Literal["header"]
 type TransportSetting = Transport
 type SessionShareDestination = Literal["auto", "gist", "radius"]
 type CacheWarmingMode = Literal["off", "streaming", "idle"]
-# MISAKA fork: `skills` is MISAKA's skill-index section, not pi's `string[]`.
 type Settings = dict[str, Any]
 
 

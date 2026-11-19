@@ -99,7 +99,6 @@ def stream(
             stopReason="pending",
             timestamp=time.time_ns() // 1_000_000,
         )
-        # MISAKA fork: the client this request opened, closed in `finally`.
         client: Any = None
 
         try:
@@ -137,7 +136,6 @@ def stream(
                 )
             stream.push(StartEvent(partial=output))
 
-            # MISAKA fork: the event iterator is closed with the reply (GitHub issue #6).
             async with contextlib.aclosing(_openai_sdk._iterate_stream(openaiStream, _option(options, "signal"))) as events:
                 await processResponsesStream(
                     events,
@@ -161,14 +159,11 @@ def stream(
             stream.push(DoneEvent(reason=output.stopReason, message=output))
             stream.end()
         except Exception as error:  # noqa: BLE001 - every failure becomes the stream's error event
-            # MISAKA fork: streaming scratch buffers live beside the blocks
-            # (`openai_responses_shared._StreamingToolCallScratch`), so there is nothing to strip here.
             output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
             output.errorMessage = _formatAzureOpenAIError(error)
             stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
             stream.end()
         finally:
-            # MISAKA fork: close the client this request opened while its loop still runs.
             await _openai_sdk._close_client(client)
 
     spawn_stream_task(run(), stream=stream)

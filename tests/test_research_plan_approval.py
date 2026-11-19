@@ -118,7 +118,6 @@ async def test_chat_mode_survives_pending_and_startup_retry(chat, board, tmp_pat
         expected_labels = ["Require approval", "Automatic"] if default else ["Automatic", "Require approval"]
         approval = next(q for q in chat.questions if q["question"] == research._APPROVAL_QUESTION)
         assert [option["label"] for option in approval["options"]] == expected_labels
-    # Selecting a mode is a per-run snapshot, not a write to the global setting.
     assert chat.cfg["research_plan_approval"] is default
     chat.cfg["research_plan_approval"] = not expected
     if entry != "direct":
@@ -127,7 +126,7 @@ async def test_chat_mode_survives_pending_and_startup_retry(chat, board, tmp_pat
         assert await chat.part.input({"text": "Fixture question", "source": "user"}, chat.ctx) == {"action": "handled"}
     if entry == "retry":
         await asyncio.wait_for(chat.startup_failed.wait(), 3)
-        await asyncio.sleep(0)  # Let the failed startup task's done callback remove it.
+        await asyncio.sleep(0)
         await chat.command("status", chat.ctx)
         assert f"plan approval {mode}" in chat.notices[-1][0]
         await chat.part.input({"text": "Fixture question", "source": "user"}, chat.ctx)
@@ -150,11 +149,9 @@ async def test_dismissed_or_invalid_picker_does_not_arm_research(chat, board, ac
     assert runs.listing(board) == []
     assert chat.driven == []
     assert bool(chat.user_messages) is (action == "clarify")
-    # A run a notification woke may be starting when the picker returns: the choice is queued, not refused.
     assert all(options == {"deliverAs": "followUp"} for _content, options in chat.user_messages)
     if action == "invalid":
         assert chat.notices[-1][1] == "error"
-    # A dismissed selection must not leak a mode into the next explicit activation.
     chat.cfg["research_plan_approval"] = False
     await chat.command("2 Fixture question", chat.ctx)
     await asyncio.wait_for(chat.started.wait(), 3)
@@ -211,7 +208,6 @@ async def test_driver_uses_saved_mode_for_each_node_and_round(board, tmp_path, m
     run = runs.create(board, workspace=str(tmp_path), question="Driver policy", limits={"plan_approval": saved})
     root = runs.nodes(board, run["id"])[0]
     node = runs.create_node(board, run["id"], question="Child", parents=[root["id"]]) if fork else root
-    # One card: a plan without cards is a pure branch point, which never reaches card submission.
     plan = {"status": "ready", "plan_markdown": "Fixture plan", "red_team": {},
             "tasks": [{"local_id": "a", "title": "A", "assignee": "10032", "dependencies": []}]}
     runs.record_action(board, run, node, runs.plan_key(round_number), plan,

@@ -47,7 +47,6 @@ class ToolPromptGovernanceTests(unittest.TestCase):
             _cwd=self.workspace, _resourceLoader=loader,
             _toolRegistry=self.tools, _toolDefinitions=self.tools,
         )
-        # pi 0.87: the rebuild sets the base options; the text is rendered from them.
         AgentSession._rebuildSystemPrompt(session, names)
         return buildSystemPrompt(session._baseSystemPromptOptions)
 

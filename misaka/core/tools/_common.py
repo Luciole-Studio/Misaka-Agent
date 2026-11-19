@@ -27,7 +27,7 @@ from misaka.utils import atomic
 from misaka.utils.async_lifecycle import settle
 from misaka.utils.values import signal_aborted
 
-try:  # POSIX only; on Windows there is no O_NONBLOCK to clear either.
+try:
     import fcntl
 except ImportError:  # pragma: no cover - exercised only off POSIX
     fcntl = None  # type: ignore[assignment]
@@ -247,15 +247,9 @@ def write_file_text(path: str, content: str) -> None:
         handle.write(data)
         handle.flush()
         if regular:
-            # fsync is meaningless on a pipe and an error on some platforms; the durability
-            # this buys is only owed to files that have durable contents in the first place.
             os.fsync(handle.fileno())
 
 
-# MISAKA fork: pi checks ``fs.access`` and then reads the whole file. A FIFO or a character
-# device passes that check and then blocks, or (``/dev/zero``) never ends; the read runs on a
-# worker thread an abort cannot interrupt, so the tool call never comes back. Tools open
-# regular files only, and a whole-file read has a ceiling.
 MAX_WHOLE_READ_BYTES = 50 * 1024 * 1024
 
 
@@ -287,7 +281,5 @@ def whole_file_bytes(absolute_path: str, what: str) -> bytes:
     with open(absolute_path, "rb") as handle:
         data = handle.read(limit + 1)
     if len(data) > limit:
-        # It grew past the limit after the stat: handing back the first ``limit`` bytes would let
-        # edit rewrite the file from a truncated copy.
         raise refuse(len(data))
     return data

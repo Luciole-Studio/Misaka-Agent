@@ -278,7 +278,6 @@ def test_validates_the_oauth_callback_url_scope_and_client_name(tmp_path):
         {},
     )
     loaded = loadMcpConfig({**paths, "projectTrusted": False})
-    # MISAKA fork: a valid `cimd` entry is rejected too, so "cimd" is not among the servers.
     assert [server["name"] for server in loaded["servers"]] == ["ok", "ipv6", "same", "named", "metadata"]
     expected = [
         'server "remote": oauth.callbackUrl must be an http URI on localhost',

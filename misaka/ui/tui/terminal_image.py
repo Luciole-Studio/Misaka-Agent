@@ -70,7 +70,6 @@ def getCellDimensions() -> CellDimensions:
 
 def setCellDimensions(dims: CellDimensions | dict[str, int]) -> None:
     global cellDimensions
-    # MISAKA fork: a `{widthPx, heightPx}` mapping (the object literal callers write upstream) works too.
     if isinstance(dims, dict):
         dims = CellDimensions(widthPx=dims["widthPx"], heightPx=dims["heightPx"])
     cellDimensions = dims
@@ -117,8 +116,6 @@ def detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: Callable[[], bool])
     if termProgram == "herdr":
         return TerminalCapabilities(images="kitty", trueColor=hasTrueColorHint, hyperlinks=True)
 
-    # MISAKA fork: a pane of MISAKA's panel draws through the panel's own emulator, which shows neither image
-    # protocol nor hyperlinks. The host's variables may leak into the pane, so this comes before them too.
     if termProgram == "misaka":
         return TerminalCapabilities(images=None, trueColor=hasTrueColorHint, hyperlinks=False)
 
@@ -167,7 +164,6 @@ def parseBooleanCapabilityOverride(value: str | None) -> bool | None:
 def detectCapabilities(tmuxForwardsHyperlink: Callable[[], bool] | None = None) -> TerminalCapabilities:
     if tmuxForwardsHyperlink is None:
         tmuxForwardsHyperlink = probeTmuxHyperlinks
-    # MISAKA fork: the overrides are `MISAKA_*` (pi: `PI_HYPERLINKS`, `PI_IMAGE_PROTOCOL`, `PI_TRUE_COLOR`).
     hyperlinks = parseBooleanCapabilityOverride(os.environ.get("MISAKA_HYPERLINKS"))
     detected = detectCapabilitiesFromEnvironment(
         tmuxForwardsHyperlink if hyperlinks is None else lambda: hyperlinks,
@@ -300,8 +296,6 @@ def deleteKittyImage(imageId: int) -> str:
     return f"\x1b_Ga=d,d=I,i={imageId},q=2\x1b\\"
 
 
-# MISAKA fork (D1): upstream's `deleteAllKittyImages` and `deleteAllKittyPlacements` follow here.
-
 
 def base64ByteLength(base64Data: str) -> int:
     """MISAKA fork: ``Buffer.byteLength(base64Data, "base64")``: the decoded size, counting up to two ``=`` as
@@ -343,9 +337,6 @@ class ImageCellSize:
     columns: int
     rows: int
 
-
-# MISAKA fork (D1): upstream's Kitty image metadata registry, placement-only commands and line cropping
-# (`KittyImageMetadata` through `cropKittyImageLine`) follow here; only the fullscreen renderer reads them.
 
 
 def chooseLessDistortedCellCount(upperCount: int, idealCount: float) -> int:
@@ -563,7 +554,6 @@ def renderImage(
     )
 
     if caps.images == "kitty":
-        # MISAKA fork (D1): upstream registers the image's metadata here for the fullscreen renderer.
         sequence = encodeKitty(
             base64Data,
             {

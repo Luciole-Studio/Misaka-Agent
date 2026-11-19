@@ -54,71 +54,43 @@ from misaka.core.web.screening import screen_url
 from misaka.utils.async_lifecycle import run_in_thread
 from misaka.utils.values import signal_aborted
 
-#: Ceiling on one downloaded file. Sized for what research actually pulls -- a paper
-#: PDF is single-digit MB, a supplementary dataset tens -- while staying small enough
-#: that a runaway transfer cannot fill a laptop's disk.
-#: ponytail: a constant, not configuration. Nobody has needed a second value; the
-#: upgrade path when someone does is one env read here, not a settings key.
 MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
 
-#: Downloads land here, under the workspace, and nowhere else.
-
-# HTTP phase default; whole transfer/tool defaults live in core.web.timeouts.
 _STREAM_TIMEOUT = 60.0
 
-# Bytes kept for the signature check. 512 covers the deepest signature we look at
-# (tar's, at offset 257).
 _MAGIC_BYTES = 512
 
-# Filename length cap, in *bytes*: the common filesystem limit is 255 bytes, not
-# characters, and a CJK name costs three bytes each.
 _MAX_NAME_BYTES = 180
 
-# Collision suffixes tried before giving up. A workspace with a thousand copies of one
-# filename has a different problem than this tool can solve.
 _MAX_COLLISIONS = 1000
 
 _REQUEST_HEADERS = {
     "Accept": "*/*",
-    # Identity encoding keeps the declared Content-Length comparable with the bytes we
-    # count: under gzip the two measure different things, and the check that the server
-    # told the truth about size would compare a compressed number with a raw one.
     "Accept-Encoding": "identity",
     "User-Agent": "misaka-download/1.0",
 }
 
 _DISPOSITION_NAME = re.compile(r"""filename\*?=(?:UTF-8''|["']?)([^;"']+)""", re.IGNORECASE)
 
-# A Content-Type is free text from the far end and it ends up in messages the model
-# reads, so it is reduced to the characters a media type is actually made of.
 _TYPE_JUNK = re.compile(r"[^A-Za-z0-9._+/-]")
 
 _ZIP_HEADS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 _OLE_HEADS = (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",)
 
-# suffix -> (offset, acceptable byte sequences at that offset). Membership is also the
-# "we can verify this type" rule: a binary type with no entry cannot be checked, so it
-# is not accepted at all.
 _SIGNATURES: dict[str, tuple[int, tuple[bytes, ...]]] = {
     ".pdf": (0, (b"%PDF-",)),
-    # DjVu is how CADAL and Wikimedia carry most scanned Chinese classics (2026-09-18, B10).
     ".djvu": (0, (b"AT&TFORM",)),
     ".gz": (0, (b"\x1f\x8b",)),
     ".png": (0, (b"\x89PNG\r\n\x1a\n",)),
     ".jpg": (0, (b"\xff\xd8\xff",)),
     ".jpeg": (0, (b"\xff\xd8\xff",)),
     ".gif": (0, (b"GIF87a", b"GIF89a")),
-    # RIFF alone is also AVI and WAV; the format tag at offset 8 is what makes it WebP.
     ".webp": (8, (b"WEBP",)),
-    # ustar lives at offset 257, so a file too short to hold one is not a tar.
     ".tar": (257, (b"ustar",)),
     **dict.fromkeys([".zip", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".epub"], (0, _ZIP_HEADS)),
     **dict.fromkeys([".doc", ".xls", ".ppt"], (0, _OLE_HEADS)),
 }
 
-# Text-shaped payloads, which no signature identifies. They get the one check that
-# still means something: text does not contain NUL, so a binary blob wearing a .csv
-# name is caught even though a genuine .csv has nothing to match against.
 _TEXT_SUFFIXES = frozenset({
     ".bib", ".csv", ".htm", ".html", ".json", ".jsonl", ".log", ".md", ".ndjson",
     ".rst", ".svg", ".tex", ".tsv", ".txt", ".xml", ".yaml", ".yml",
@@ -126,9 +98,6 @@ _TEXT_SUFFIXES = frozenset({
 
 _ACCEPTED_SUFFIXES = frozenset(_SIGNATURES) | _TEXT_SUFFIXES
 
-# Declared types consulted before ``mimetypes`` (Hermes's ``DEFAULT_MIME_TO_EXT`` pattern):
-# DjVu is in no table Python ships, so it resolved only where the system lists it --
-# /etc/mime.types on a full Linux, not a slim image, not the Windows registry.
 _DECLARED_SUFFIXES = {"image/vnd.djvu": ".djvu", "image/x-djvu": ".djvu"}
 
 
@@ -167,7 +136,6 @@ def _sanitize_name(candidate: str) -> str:
     """
     name = PurePosixPath(candidate.replace("\\", "/")).name
     name = "".join(char for char in name if unicodedata.category(char)[0] != "C")
-    # Leading dots would make the download invisible to ls and to the model.
     return name.strip().strip(".").strip()
 
 
@@ -182,10 +150,9 @@ def _fit_name(name: str) -> str:
     if len(name.encode()) <= _MAX_NAME_BYTES:
         return name
     stem, suffix = os.path.splitext(name)
-    if len(suffix.encode()) > 16:  # a dotted filename, not an extension
+    if len(suffix.encode()) > 16:
         stem, suffix = name, ""
     room = max(_MAX_NAME_BYTES - len(suffix.encode()), 1)
-    # errors="ignore" drops a codepoint cut in half by the byte slice.
     stem = stem.encode()[:room].decode("utf-8", errors="ignore")
     return (stem or "download") + suffix
 
@@ -205,10 +172,6 @@ def _target_name(requested: str, final_url: str, headers: httpx.Headers, content
     if not candidate:
         candidate = "download"
     if os.path.splitext(candidate)[1].lower() not in _ACCEPTED_SUFFIXES:
-        # No usable extension: take one from the declared type, so a URL like
-        # /article/12345 served as application/pdf still lands as a .pdf and still
-        # gets signature-checked. A wrong declaration only renames the file -- the
-        # signature check below is what decides whether it is kept.
         guessed = (_DECLARED_SUFFIXES.get(content_type) or mimetypes.guess_extension(content_type)
                    or "").lower() if content_type else ""
         if guessed in _ACCEPTED_SUFFIXES:
@@ -225,7 +188,6 @@ def _magic_mismatch(suffix: str, head: bytes) -> bool:
                     "utf-16" if head.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else None)
         if encoding:
             try:
-                # This is a prefix, so its final codepoint may span the sample boundary.
                 return "\x00" in codecs.getincrementaldecoder(encoding)().decode(head, final=False)
             except UnicodeError:
                 return True
@@ -236,9 +198,6 @@ def _magic_mismatch(suffix: str, head: bytes) -> bool:
 
 def _declared_length(headers: httpx.Headers) -> int | None:
     raw = headers.get("content-length", "").strip()
-    # ``isascii`` before ``isdigit``: the latter is true of superscripts and other
-    # non-decimal Unicode digits that ``int`` then refuses, which would turn a header
-    # the far end chose into an exception escaping this tool.
     if not (raw.isascii() and raw.isdigit()):
         return None
     return int(raw)
@@ -255,9 +214,6 @@ def _publish(part: str, directory: str, name: str) -> str:
         except FileExistsError:
             continue
         except OSError as error:
-            # A filesystem without hard links (exFAT, a network share; on Windows
-            # ERROR_INVALID_FUNCTION or ERROR_NOT_SUPPORTED): claim the name exclusively, then
-            # move the finished file onto that claim -- still never over an existing download.
             if (error.errno not in {errno.EXDEV, errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP}
                     and getattr(error, "winerror", None) not in (1, 50)):
                 raise
@@ -276,7 +232,7 @@ def _discard(path: str) -> None:
     try:
         os.unlink(path)
     except OSError:
-        pass  # nothing to undo if the partial file is already gone
+        pass
 
 
 async def _stream_to_disk(
@@ -301,9 +257,6 @@ async def _stream_to_disk(
                     "deleted. Find a smaller source, or fetch only the part you need."
                 )
             if signal_aborted(signal):
-                # Checked per chunk, not just before the request: this is the one tool
-                # that can legitimately run for minutes, and an abort the caller has
-                # already issued must not keep a transfer alive behind their back.
                 raise RuntimeError("Operation aborted")
             if time.monotonic() > deadline:
                 raise _Refused(
@@ -328,15 +281,9 @@ async def _index_in_corpus(path: str, workspace: str) -> tuple[str, str | None]:
     The project-local store deduplicates identical documents without moving the download.
     """
     try:
-        # pdftotext runs under a 300s timeout inside ingest, and page files are written one
-        # by one: on the event loop that is the whole session held still for minutes.
         doc_id, pages = await run_in_thread(corpus.ingest, path, workspace=workspace)
     except Exception as error:  # noqa: BLE001 - the file is downloaded, verified and kept; indexing is the step after, and its failures may damage nothing but themselves
-        # ValueError is ingest's documented refusal (a scan no OCR could read, or with no OCR
-        # program installed), and its text says which. Any
-        # other failure is reported the same way rather than swallowed: the file is on disk
-        # either way, and a download that succeeded must not be reported as one that failed.
-        reason = str(error) or type(error).__name__  # some OSErrors carry no message at all
+        reason = str(error) or type(error).__name__
         return f"  not indexed: {reason}", None
     note = (f"  indexed as doc {doc_id} ({pages} pages) — navigate it with doc_outline / doc_read, "
             "and use doc_verify when you need help locating a passage")
@@ -367,8 +314,6 @@ async def _download(url: str, requested: str, directory: str, signal: Any, works
 
             declared = _declared_length(response.headers)
             if declared is not None and declared > MAX_DOWNLOAD_BYTES:
-                # Refused before a single body byte is read: the stream is still open, and
-                # leaving this context closes the connection.
                 return _result(
                     f"Refused to download {url}: the server declares {declared} bytes, over the "
                     f"{MAX_DOWNLOAD_BYTES} byte limit. Nothing was transferred. Find a smaller source."
@@ -384,21 +329,12 @@ async def _download(url: str, requested: str, directory: str, signal: Any, works
                 )
 
             os.makedirs(directory, exist_ok=True)
-            # Streamed into a dotted staging name, never straight to the destination: until
-            # the byte count and the signature have both passed there is nothing here worth
-            # a real filename, and a process killed mid-transfer must not leave a truncated
-            # file sitting under one.
             descriptor, part = tempfile.mkstemp(dir=directory, prefix=".partial-")
             total, sha256, head = await _stream_to_disk(
                 response, os.fdopen(descriptor, "wb"), deadline, signal
             )
 
         if _magic_mismatch(suffix, head):
-            # The overwhelmingly common case is a paywall or login page served with a 200
-            # in place of the PDF. Keeping the file would put an HTML page into the ledger
-            # under a paper's name, so it is deleted and the failure is reported as one.
-            # The name is deliberately not echoed here: it is the server's text, and this
-            # message is one of the few that reach the model outside the untrusted fence.
             return _result(
                 f"Refused to keep the download from {url}: its first bytes are not {suffix} content "
                 f"(the server sent {content_type or 'an unknown type'} — usually a paywall, login, or "
@@ -428,12 +364,8 @@ async def _download(url: str, requested: str, directory: str, signal: Any, works
         f"  sha256: {sha256}",
     ]
     if final_url != citable_url(url):
-        # Compared query-free on both sides: a request URL that carries its own query
-        # is not a redirect, and reporting one would be a lie about where this came from.
         lines.insert(1, f"  redirected to: {final_url}")
 
-    # What the corpus can extract text from is defined there, not here: a format added to
-    # SCAN_SUFFIXES starts being indexed on arrival without a second edit in this file.
     ingestable = suffix in corpus.SCAN_SUFFIXES
     doc_id = None
     if ingestable:
@@ -444,13 +376,9 @@ async def _download(url: str, requested: str, directory: str, signal: Any, works
     if doc_id:
         lines.append("The file is on disk, not in this result — work with it through the doc tools above.")
     elif ingestable:
-        # Telling the model to "read" an unindexed PDF is what this tool used to do, and it
-        # is the one instruction that cannot work; the reason above is the actionable one.
         lines.append("The file is on disk and was kept. Fix what the line above reports, then index it with doc_add.")
     else:
         lines.append("The file is on disk, not in this result — use the read tool to open it.")
-    # The URL, the server's filename, and the declared type are all written by the far
-    # end, so the block goes to the model fenced as data like every other tool's.
     return _result(untrusted("download", "\n".join(lines)), details, is_error=False)
 
 
@@ -477,9 +405,6 @@ def create_download_file_tool_definition(
         if signal_aborted(signal):
             raise RuntimeError("Operation aborted")
 
-        # A download writes the URL into the file's provenance sidecar, so a credential in
-        # the address would outlive the request on disk. Screened before anything resolves
-        # it, on the same terms as web_fetch.
         screened = screen_url(url)
         if not screened.allowed:
             return _result(screened.refusal)

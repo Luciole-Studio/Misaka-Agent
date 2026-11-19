@@ -60,8 +60,6 @@ class ModelRegistry:
     def __init__(self, runtime: ModelRuntime) -> None:
         self._runtime = runtime
 
-    # -- MISAKA fork: what extensions reach through the facade that pi's do not -------------
-
     @property
     def modelRuntime(self) -> ModelRuntime:
         return self._runtime

@@ -41,8 +41,6 @@ def _shown(result):
     return Image.open(io.BytesIO(base64.b64decode(image.data)))
 
 
-# -- where a picture's marker puts it ------------------------------------------------------------------
-
 def test_pictures_are_put_on_the_page_their_marker_is_on():
     pages = ["Intro ![Map of Russia] text", "no pictures here", "![image 2] and ![Plate 3]"]
     listed = [{"marker": "![Map of Russia]", "alt": "Map of Russia", "member": "a.png"},
@@ -57,8 +55,6 @@ def test_a_marker_the_pages_lost_stops_the_list_rather_than_misplacing_it():
               {"marker": "![b]", "alt": "b", "member": "b.png"}]
     assert list(corpus._embedded_inventory(["![a]", "![b]"], listed)) == [1]
 
-
-# -- a Word document ----------------------------------------------------------------------------------------
 
 async def test_a_word_document_shows_each_picture_it_embeds(tmp_path):
     import docx
@@ -83,8 +79,6 @@ async def test_a_word_document_shows_each_picture_it_embeds(tmp_path):
     with pytest.raises(ValueError, match="no printed page"):
         await _call("doc_page_image", {"doc_id": doc_id, "page": page}, str(workspace))
 
-
-# -- an EPUB ------------------------------------------------------------------------------------------------
 
 CHAPTER = ('<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Chapter One</h1>'
            '<p>The army crossed the river at dawn, and the map below shows where.</p>'
@@ -121,8 +115,6 @@ def test_a_web_page_is_not_given_picture_markers():
     from misaka.core.documents import htmltext
     assert "![" not in htmltext.readable('<p>Price <img src="/icon.png" alt="cart"> 12 EUR</p>')[0]
 
-
-# -- a deck -------------------------------------------------------------------------------------------------
 
 def _deck(path, tmp_path):
     from pptx import Presentation
@@ -185,13 +177,13 @@ def test_an_epub_indexed_before_markers_is_read_again_and_its_pictures_named(tmp
     with open(page, encoding="utf-8") as f:
         text = f.read()
     with open(page, "w", encoding="utf-8") as f:
-        f.write(text.replace("![Map of the crossing]", ""))            # what version 1 stored
+        f.write(text.replace("![Map of the crossing]", ""))
     with open(f"{ddir}/meta.json", encoding="utf-8") as f:
         meta = json.load(f)
     meta.pop("extract_version")
     with open(f"{ddir}/meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f)
-    assert corpus.figures(doc_id, workspace=str(workspace)) == {}      # and found nothing to name
+    assert corpus.figures(doc_id, workspace=str(workspace)) == {}
     _ingest(book, workspace)
     assert "![Map of the crossing]" in corpus.read_page(doc_id, 1, workspace=str(workspace))
     assert corpus.figures(doc_id, workspace=str(workspace))[1]["embedded"][0]["member"] == "OEBPS/Images/map 1.png"

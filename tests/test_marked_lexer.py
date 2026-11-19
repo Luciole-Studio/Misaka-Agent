@@ -72,8 +72,6 @@ def test_a_tokenizer_override_and_an_inline_extension_run_as_upstream():
 
 
 def test_a_loose_task_item_puts_its_checkbox_inside_the_first_paragraph():
-    # Node: [[["paragraph"],["checkbox","text"]],[["paragraph"],["checkbox","text"]]]. The paragraph's inline tokens
-    # are still an empty array when the checkbox is placed, and an empty array is truthy in JavaScript.
     items = Marked().lexer("- [ ] a\n\n- [x] b")[0].items
     assert [([t.type for t in item.tokens], [t.type for t in item.tokens[0].tokens]) for item in items] == [
         (["paragraph"], ["checkbox", "text"]),
@@ -91,7 +89,6 @@ def test_regexp_keeps_javascript_semantics():
     assert RegExp("^b$", "m").test("a\rb")
     assert RegExp(r"[\p{L}\p{N}]", "u").test("п")
     assert RegExp(r"\s").test("﻿") and not RegExp(r"\s").test("\x1c")
-    # `é` is not a word character in JavaScript, so there is a word boundary before the `_`.
     assert not RegExp(r"\w").test("é") and RegExp(r"\b_").test("é_")
     assert not RegExp(".").test(" ")
     assert RegExp(r"(?<a>x)\k<a>").exec("xx").groups == {"a": "x"}

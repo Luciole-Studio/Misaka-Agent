@@ -923,7 +923,6 @@ async def test_publishes_refresh_models_results_without_forcing_models_store_per
 
 
 async def test_publishes_refresh_models_results_given_as_model_objects():
-    # MISAKA addition: refreshModels may return model objects, as registerProvider's `models` may (pi #8964 port).
     runtime = await _create(authStorage=AuthStorage.inMemory(), modelsStore=InMemoryModelsStore(), allowModelNetwork=False)
     liveModel = _model("extension-objects", "live")
 
@@ -1185,8 +1184,6 @@ async def test_fails_unrouted_stream_calls_on_virtual_models():
     assert "must be routed before streaming" in message.errorMessage
 
 
-# -- MISAKA forks ----------------------------------------------------------------------------
-
 
 def _oauth_provider(id: str, refreshed: list):
     """A native OAuth provider whose token is the stored access token."""
@@ -1336,8 +1333,6 @@ async def test_a_stored_record_the_models_cannot_read_is_no_credential_not_an_er
 
 
 async def test_moa_presets_follow_a_login_of_their_aggregators_provider(monkeypatch):
-    # MISAKA fork: the MoA presets are published only while the aggregator can run, and a
-    # credential change of that provider alone must reach them.
     from misaka.core.moa import provider as moa_provider
 
     monkeypatch.setattr(moa_provider, "load_moa_config", lambda: {"presets": {

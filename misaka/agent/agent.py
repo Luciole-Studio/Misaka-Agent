@@ -87,7 +87,6 @@ _DEFAULT_MODEL = Model(
 
 
 # Initial state for `Agent`. `systemPrompt` and `tools` become the leading system message unless `messages` already
-# starts with one. MISAKA fork: a mapping or any object with those attributes (such as an `AgentState`).
 type AgentInitialState = Mapping[str, Any] | Any
 
 
@@ -155,7 +154,7 @@ class _PendingMessageQueue:
     def __init__(self, mode: QueueMode) -> None:
         self._messages: list[AgentMessage] = []
         self.mode = mode
-        self.together: Callable[[AgentMessage], bool] | None = None  # MISAKA fork: Agent.deliverTogether
+        self.together: Callable[[AgentMessage], bool] | None = None
 
     def enqueue(self, message: AgentMessage) -> None:
         self._messages.append(message)
@@ -204,7 +203,6 @@ class Agent:
 
     def __init__(self, options: AgentOptions | Mapping[str, Any] | None = None, **kwargs: Any) -> None:
         # Older compiled consumers may omit options or streamFn even though the current API requires them.
-        # MISAKA fork: the options may also be given as a mapping or as keyword arguments.
         runtimeOptions = _agentOptions(options, kwargs)
         self._state = _createMutableAgentState(runtimeOptions.initialState)
         self._listeners: dict[AgentListener, None] = {}
@@ -344,7 +342,6 @@ class Agent:
         This resolves after `agent_end` listeners settle.
         """
         if self._activeRun is not None:
-            # MISAKA fork: shielded, so a waiter that is cancelled does not cancel the run's promise.
             return asyncio.shield(self._activeRun.promise)
         resolved: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         resolved.set_result(None)
@@ -411,7 +408,6 @@ class Agent:
     def _normalizePromptInput(
         self, input: str | AgentMessage | Sequence[AgentMessage], images: Sequence[ImageContent] | None = None
     ) -> list[AgentMessage]:
-        # MISAKA fork: LLM messages given as mappings become message models (`_normalizeStandardMessage`).
         if isinstance(input, Sequence) and not isinstance(input, str | BaseModel):
             return [_normalizeStandardMessage(message) for message in input]
 
@@ -506,8 +502,6 @@ class Agent:
         try:
             await executor(abortController.signal)
         except BaseException as error:
-            # MISAKA fork: KeyboardInterrupt and SystemExit are not the model erroring (JavaScript has no such exits),
-            # and a cancellation that is not our own abort belongs to the caller, so none of them is answered here.
             if isinstance(error, KeyboardInterrupt | SystemExit):
                 raise
             if isinstance(error, asyncio.CancelledError) and not abortController.signal.aborted:
@@ -557,7 +551,6 @@ class Agent:
 
             case "message_end":
                 self._state.streamingMessage = None
-                # MISAKA fork: an LLM message given as a mapping enters the transcript as its message model.
                 self._state.messages.append(_normalizeStandardMessage(event.message))
 
             case "tool_execution_start":

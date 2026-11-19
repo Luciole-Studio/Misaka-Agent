@@ -905,10 +905,6 @@ class TestDurableCodeMode:
             [script("return (await Promise.all(Array.from({ length: 50 }, () => wait()))).length"), DONE]
         )
         storage = await openNodeSqliteStorage(sqlitePath())
-        # MISAKA fork: upstream's premise is that the VM acknowledges a group of delivered results within one storage
-        # commit. misaka's VM runs on a thread that shares the GIL and takes about 0.1 ms per result, against
-        # sub-millisecond SQLite commits, so the 49 acknowledgments would spread over more commits than upstream's; each
-        # commit here takes 5 ms more, so the VM catches up during one, as in upstream's runs.
         commit = storage.commit
 
         async def slowCommit(writes: Any, callContext: Any) -> Any:

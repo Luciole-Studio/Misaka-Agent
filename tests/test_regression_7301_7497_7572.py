@@ -188,8 +188,6 @@ def linkDirectory(target: Path, link: Path) -> None:
 def sessionsDir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = tmp_path / "agent" / "sessions"
     directory.mkdir(parents=True)
-    # MISAKA fork: the default sessions store is the home's (`get_sessions_dir`), where pi reads the agent directory
-    # from `PI_CODING_AGENT_DIR`.
     monkeypatch.setattr(session_manager, "get_sessions_dir", lambda: str(directory))
     return directory
 

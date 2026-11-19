@@ -23,7 +23,6 @@ from misaka.core.network import roster
 def test_backspace_erases_a_whole_chinese_character():
     import pty
 
-    # A child on a real terminal answers the prompt; pytest's capture would swallow a fork's.
     fd, tty = pty.openpty()
     child = subprocess.Popen(
         [sys.executable, "-c", ("from misaka.cli.setup_ui import prompt; "
@@ -40,7 +39,7 @@ def test_backspace_erases_a_whole_chinese_character():
                 continue
             try:
                 chunk = os.read(fd, 4096)
-            except OSError:  # the child closed the terminal
+            except OSError:
                 break
             if not chunk:
                 break
@@ -67,6 +66,5 @@ def test_a_new_sister_id_must_be_ascii(tmp_path):
 
 
 def test_an_existing_non_ascii_sister_still_resolves():
-    # Only creation is stricter: a Sister made before keeps working.
     assert roster._valid("红队") and not roster._valid_new("红队")
     assert roster._valid_new("10033")

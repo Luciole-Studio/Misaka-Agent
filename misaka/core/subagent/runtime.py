@@ -97,8 +97,6 @@ class RoleContext:
     profile_dir: str
     workspace: str
     mcp_role: str
-    # The parent session's effective decision, including session-only trust.
-    # Direct SDK construction stays trusted unless the host says otherwise.
     project_trusted: bool = True
     model_override: str | None = None
     allowed_agent_types: tuple[str, ...] = ()
@@ -111,8 +109,6 @@ class RoleContext:
     usage_claim_lock: str | None = None
     usage_token_cap: int | None = None
     tool_rule_layers: tuple[tuple[str, ...], ...] = ()
-    # Tool names inherited from the parent session.  ``None`` means no parent
-    # reported one, and the policy falls back to its built-in name tables.
     tool_vocabulary: tuple[str, ...] | None = None
     permission_mode: str | None = None
     permission_can_prompt: bool = False
@@ -168,8 +164,6 @@ class RoleContext:
                 decoded_vocabulary = json.loads(vocabulary_raw)
             except (TypeError, ValueError):
                 decoded_vocabulary = None
-            # A present but unreadable value is an empty vocabulary, never an
-            # absent one: a corrupted hand-off must not widen the child.
             vocabulary = (
                 tuple(str(item) for item in decoded_vocabulary if str(item).strip())
                 if isinstance(decoded_vocabulary, list)
@@ -205,7 +199,6 @@ class RoleContext:
             except (TypeError, ValueError):
                 cli_rules = ()
         elif tool_ceiling is not _TOOL_CEILING_UNSET and ceiling is not None:
-            # An explicit root binding corresponds to SDK/CLI --allowedTools.
             cli_rules = tuple(ceiling)
         else:
             cli_rules = ()
@@ -218,8 +211,6 @@ class RoleContext:
             project_trusted=(
                 True if project_trust_raw is None else project_trust_raw == "1"
             ),
-            # MISAKA's own variable first. The ported order let another product's
-            # environment decide which model MISAKA's subagents run on.
             model_override=os.environ.get("MISAKA_SUBAGENT_MODEL"),
             allowed_agent_types=allowed,
             parent_agent_id=os.environ.get("MISAKA_SUBAGENT_ID") or None,
@@ -331,7 +322,7 @@ def finalize_messages(
         "agentType": agent_type,
         "content": text_blocks,
         "totalDurationMs": max(0, end - start_time_ms),
-        "totalTokens": total_tokens,            # accumulated over every model call, not the last one
+        "totalTokens": total_tokens,
         "totalToolUseCount": tool_uses,
         "usage": usage,
     }
@@ -435,8 +426,6 @@ def format_sync_result(data: Mapping[str, Any]) -> str:
             f"\n<worktreePath>{escape(str(data['worktreePath']))}</worktreePath>"
             f"\n<worktreeBranch>{escape(str(data.get('worktreeBranch', '')))}</worktreeBranch>"
         )
-    # CCB ONE_SHOT_BUILTIN_AGENT_TYPES: prompt trailer only. Structured
-    # result metadata, continuation identity and billing are never discarded.
     one_shot = data.get("agentType") in ("Explore", "Plan") and not worktree
     identity = "" if one_shot else f"<agentId>{escape(str(data['agentId']))}</agentId>{worktree}\n"
     usage = "" if one_shot else (
@@ -482,9 +471,6 @@ def format_task_output(data: Mapping[str, Any]) -> str:
             maximum = 32_000
         if len(output) > maximum:
             header = "[Truncated. Read the task output file for the full transcript.]\n\n"
-            # max(1, ...): a maximum at or under the header's own length made the slice index
-            # -0, i.e. output[0:], which handed back the whole transcript -- the opposite of
-            # truncating. A tiny budget now yields the header plus one character.
             output = header + output[-max(1, maximum - len(header)) :]
         lines.append(f"<output>\n{x(output).rstrip()}\n</output>")
     if task.get("error"):
@@ -873,8 +859,6 @@ class AgentTask:
                 "trustSourceCwd": self.trust_source_cwd,
                 "trustFromParent": self.trust_from_parent,
             }
-            # Cancellation must not release the lock while the disk writer is
-            # still running: a rollback/new turn could otherwise be overwritten.
             _, cancelled = await settle_thread_call(_atomic_json, self.metadata_path, data)
             if cancelled is not None:
                 raise cancelled
@@ -943,9 +927,6 @@ class AgentTask:
             start_time_ms=int(data.get("startTimeMs") or 0),
             end_time_ms=int(data.get("endTimeMs") or 0),
             turn_count=int(data.get("turnCount") or 0),
-            # A metadata marker written before stdin delivery is not a durable
-            # acknowledgement.  Recover from the transcript (or a completed
-            # turn) so a header-only crash retries initialPrompt and skills.
             initial_prompt_sent=bool(
                 data.get("turnCount") or _transcript_has_user_message(transcript)
             ),
@@ -1085,10 +1066,8 @@ class SubagentManager:
     """Session-local task registry with persisted transcript side chains."""
 
     def __init__(self, session: Any, role_context: RoleContext | None = None) -> None:
-        # The session this manager serves; None until the part that owns it is attached.
         self.session = session
         self.role_context = role_context or RoleContext.capture()
-        # Applies what a child's permission dialog here saved (the session's own policy), if any.
         self.permission_updates: Any = None
         from misaka.config.product import setting
 
@@ -1211,7 +1190,6 @@ class SubagentManager:
             return
 
         specific = [spec for spec in definition.mcp_servers if isinstance(spec, str)]
-        # MISAKA fork: configured servers count, as before the MCP extension, as well as registered ones.
         available = [
             *agent_roster.configured_mcp_servers(self.role_context.profile_dir),
             *agent_roster.available_mcp_servers(self.session),
@@ -1228,10 +1206,6 @@ class SubagentManager:
             raise ValueError(
                 f"Agent '{definition.name}' requires MCP servers matching: {', '.join(missing_config)}"
             )
-        # The child validates that matching tools actually become ready.  This
-        # parent-side check only rejects definitions that cannot possibly start;
-        # waiting on the parent's MCP pool is wrong when an agent owns its own
-        # ``mcpServers``.
 
     async def _resolve_task_model(self, context: Any, call_model: str | None, definition_model: str | None) -> tuple[str, str]:
         registry = context.modelRegistry
@@ -1243,8 +1217,6 @@ class SubagentManager:
             if self.role_context.model_override
             else {}
         )
-        # Provider identity comes from the complete catalog, not the subset
-        # authenticated now: a missing login must not retarget the parent API.
         provider, model_id = resolve_model_spec(
             model_env, call_model, definition_model, context.model, list(models),
             permission_mode=self._current_permission_mode(),
@@ -1433,9 +1405,6 @@ class SubagentManager:
             else:
                 from misaka.core.session_manager import SessionManager
 
-                # CCB 77a7934e runAgent creates fresh sidechain state; only
-                # resumeAgent reads history. Our process host must persist the
-                # empty session before --session opens it. Send the prompt after ready.
                 writer = await run_in_thread(
                     SessionManager, task.cwd, str(task.transcript.parent), str(task.transcript)
                 )
@@ -1450,7 +1419,7 @@ class SubagentManager:
             return task
         except BaseException:
             if task.worktree is not None:
-                await self._cleanup_worktree(task)        # a task that never started leaves no branch behind
+                await self._cleanup_worktree(task)
             raise
 
     def run_background(self, task: AgentTask, prompt: str, *, notify: bool = True) -> None:
@@ -1498,8 +1467,6 @@ class SubagentManager:
                 try:
                     await task.send("background")
                 except (BrokenPipeError, ConnectionError, RuntimeError):
-                    # A failed control write is not a background transition.
-                    # Preserve a real ACK if it already arrived while draining.
                     acknowledged = task._backgrounded.is_set()
                     if not acknowledged:
                         task._background_requested = False
@@ -1605,9 +1572,6 @@ class SubagentManager:
             if task._stop_requested:
                 status, detail = "killed", str(error)
             elif task.result is not None and not task.background:
-                # Claude's synchronous Agent path returns collected assistant
-                # progress as a normal completed tool result after an iterator
-                # error.  Detached/background tasks remain failed.
                 status, detail = "completed", None
             else:
                 status, detail = "failed", str(error)
@@ -1682,7 +1646,7 @@ class SubagentManager:
         expected_turn_id: str | None,
     ) -> bool:
         if event.get("type") != "async_hook_request":
-            return True  # trusted in-process compatibility path
+            return True
         if event.get("schemaVersion") != 1:
             return False
         if event.get("agentId") != task.id:
@@ -1712,8 +1676,6 @@ class SubagentManager:
         if self._closed or task._stop_requested:
             self._discard_async_hook_sidecar(task, event)
             return
-        # Snapshot mutable launch state before child_turn_done can trigger
-        # worktree cleanup or rewrite task.cwd back to the parent repository.
         hook_cwd = str(task.cwd)
         hook_environ = dict(getattr(task, "hook_environ", None) or os.environ)
         hook_stop_epoch = int(getattr(task, "_stop_epoch", 0))
@@ -1732,8 +1694,6 @@ class SubagentManager:
 
         def finished(done: asyncio.Task[None]) -> None:
             if done.cancelled():
-                # Cancellation can win before the coroutine executes even one
-                # line, so its own sidecar finally block may never run.
                 self._discard_async_hook_sidecar(task, event)
             self._async_hook_jobs.discard(done)
             agent_jobs = self._async_hook_jobs_by_agent.get(task.id)
@@ -1836,8 +1796,6 @@ class SubagentManager:
         payload = request.get("payload")
         if not isinstance(hook, Mapping) or not isinstance(payload, Mapping):
             return
-        # Claude's async/asyncRewake fields are command-hook-only.  Execute the
-        # command here so the short-lived model child cannot cancel it on exit.
         if str(hook.get("type") or "command").casefold() != "command":
             return
         result, exit_code = await subagent_hooks.execute_async_command_hook(
@@ -1877,8 +1835,6 @@ class SubagentManager:
             "</async-hook-response>"
         )
         if hook.get("asyncRewake"):
-            # Reference behavior is exit-code based: JSON that says "deny"
-            # after a successful exit must not wake the model.
             if exit_code != 2:
                 return
             if (
@@ -1903,8 +1859,6 @@ class SubagentManager:
                     pass
             return
 
-        # Ordinary async hook output is attached to the next continuation but
-        # does not wake an idle agent by itself.
         async with task._state_lock:
             if self._closed or task._stop_requested:
                 return
@@ -1956,8 +1910,6 @@ class SubagentManager:
         if task.definition.memory and self._memory_enabled(task) and task._memory_lock is None:
             from misaka.core.subagent.memory import acquire_activity
 
-            # Keep ownership through child exit AND deferred async hook cleanup.
-            # Drain acquisition before propagating cancellation so no lease leaks.
             task._memory_lock, cancelled = await settle_thread_call(
                 acquire_activity, self._memory_directory(task))
             if cancelled is not None:
@@ -1971,12 +1923,10 @@ class SubagentManager:
             "MISAKA_SISTER_OWNER_GENERATION",
             "MISAKA_SISTER_OWNER_CLAIM_LOCK",
         )
-        # Only the named Sister root may attach itself as the durable board
-        # owner.  Generic descendants must not inherit and overwrite that PID.
         for key in durable_keys:
             env.pop(key, None)
         env.update(self._durable_child_environment(task))
-        await self._extension_environment(task, env)   # before the core's own keys, which take precedence
+        await self._extension_environment(task, env)
         env.update(
             {
                 "PYTHONUNBUFFERED": "1",
@@ -1995,7 +1945,6 @@ class SubagentManager:
             env["MISAKA_PROFILE_DIR"] = self.role_context.profile_dir
         else:
             env.pop("MISAKA_PROFILE_DIR", None)
-        # A session's own settings are named for one child (a Sister card's), never inherited.
         from misaka.core.session_overrides import ENV as SESSION_OVERRIDES_ENV
         env.pop(SESSION_OVERRIDES_ENV, None)
         env.update(self.child_env_extra(task))
@@ -2003,7 +1952,6 @@ class SubagentManager:
             env["MISAKA_FORK_CHILD"] = "1"
         else:
             env.pop("MISAKA_FORK_CHILD", None)
-        # Memory is a capability of this definition, not an inherited home grant.
         if task.definition.memory and self._memory_enabled(task):
             env["MISAKA_SUBAGENT_MEMORY_DIR"] = str(self._memory_directory(task))
         else:
@@ -2054,13 +2002,9 @@ class SubagentManager:
             env.pop("MISAKA_USAGE_GENERATION", None)
             env.pop("MISAKA_USAGE_CLAIM_LOCK", None)
             env.pop("MISAKA_USAGE_TOKEN_CAP", None)
-        # A worker's resolved pool is local to that worker.  It must not turn
-        # into a ceiling for agents launched recursively from that worker.
         env.pop("MISAKA_SUBAGENT_TOOL_CEILING", None)
         vocabulary = self._child_tool_vocabulary()
         if vocabulary is None:
-            # Drop the value this process inherited rather than pass a
-            # vocabulary that was never intersected with our own tools.
             env.pop("MISAKA_SUBAGENT_TOOL_VOCABULARY", None)
         else:
             env["MISAKA_SUBAGENT_TOOL_VOCABULARY"] = json.dumps(vocabulary)
@@ -2074,9 +2018,6 @@ class SubagentManager:
             env["MISAKA_SUBAGENT_PERMISSION_MODE"] = permission_mode
         else:
             env.pop("MISAKA_SUBAGENT_PERMISSION_MODE", None)
-        # Bubble is a launch-time request.  Parent acceptEdits/auto may win the
-        # effective mode, but the explicit bubble request still keeps the
-        # parent permission channel available for a background worker.
         can_prompt = self._child_can_prompt(task)
         if can_prompt:
             env["MISAKA_SUBAGENT_CAN_PROMPT"] = "1"
@@ -2167,9 +2108,6 @@ class SubagentManager:
         try:
             ready = False
             accepted = False
-            # The child prints nothing before child_ready, and it may first wait for required
-            # MCP servers (settings mcp.required_wait can exceed 30s), so the handshake window
-            # must grow with that setting.
             from misaka.config.product import setting
 
             handshake = max(30.0, setting("mcp", "required_wait", 30.0, float) + 15)
@@ -2180,7 +2118,7 @@ class SubagentManager:
                     try:
                         line = await asyncio.wait_for(process.stdout.readline(), handshake)
                     except TimeoutError:
-                        raise RuntimeError(   # An empty message would leave task.error blank; be explicit.
+                        raise RuntimeError(
                             f"sub-agent child produced no output within {int(handshake)}s handshake window"
                         ) from None
                 if not line:
@@ -2193,9 +2131,6 @@ class SubagentManager:
                 if event_type in {"child_error", "child_protocol_error"}:
                     raise RuntimeError(str(event.get("error") or "sub-agent child failed"))
                 if event_type == "child_tools_missing":
-                    # Names this definition asked for that the child's registry never
-                    # had.  The turn is still worth running with what it did get, so
-                    # this is a warning about the definition, not a failed spawn.
                     names = ", ".join(str(name) for name in event.get("tools") or [])
                     _log_warning(
                         f"agent {task.definition.name} requested unknown tools: {names}"
@@ -2219,15 +2154,10 @@ class SubagentManager:
                     )
                     async with task._state_lock:
                         task.prompt_accepted = True
-                        # A request may arrive after child_ready's queued-intent
-                        # check but before this ACK. Flush it at the handoff
-                        # boundary too; a live child must never miss the switch.
                         if task._background_requested and not task._backgrounded.is_set():
                             await task.send("background")
                         for pending in task.pending_messages:
                             pending_id = pending.get("requestId") or secrets.token_hex(8)
-                            # A durable entry restored into a new process has no
-                            # live waiter; give this delivery a fresh protocol id.
                             if pending_id not in task.steer_waiters:
                                 pending_id = secrets.token_hex(8)
                             pending["requestId"] = pending_id
@@ -2344,12 +2274,10 @@ class SubagentManager:
                 for waiter in task.steer_waiters.values():
                     if not waiter.done():
                         waiter.set_exception(RuntimeError("Agent turn completed before steering"))
-                        waiter.exception()  # Retrieve now in case the sender is gone, so an orphaned waiter does not log "never retrieved".
+                        waiter.exception()
                 task.steer_waiters.clear()
 
         if not turn_done:
-            # Cleanup has reaped the child and drained stderr. Preserve startup
-            # tracebacks in task.error (and its metadata), not just a generic EOF.
             stderr = "\n".join(task.stderr[-20:]).strip()
             if not ready:
                 reason = f"sub-agent child exited before becoming ready (exit code {process.returncode})"
@@ -2376,7 +2304,7 @@ class SubagentManager:
         status, failure, keep_result = turn_outcome(
             task._stop_requested, task.error, error_message, stop_reason, task.background)
         if not keep_result:
-            task.result = None                       # a detached agent's errored stream is not a result
+            task.result = None
         await self._finish(task, status, failure, notify)
 
     def _publish_progress(self, task: AgentTask, event: Mapping[str, Any]) -> None:
@@ -2434,14 +2362,10 @@ class SubagentManager:
                 str(event.get("toolName") or "tool"), event.get("toolInput"),
                 event.get("suggestionLabel") if suggestions else None)
             if choice is not None:
-                # CCB: what the parent's dialog saves is the parent's; the child reads it back
-                # through its next permission refresh.
                 if choice == "always" and callable(self.permission_updates):
                     self.permission_updates(suggestions)
                 return choice != "no"
 
-            # This manager may itself live in a headless child.  Relay through
-            # that child's JSONL broker until the request reaches the root UI.
             return await subagent_policy.request_permission(
                 {
                     "toolName": event.get("toolName"),
@@ -2519,8 +2443,6 @@ class SubagentManager:
                 del task.stderr[:100]
 
     async def _initial_message(self, task: AgentTask, prompt: str, *, roots=None) -> str:
-        # CCB runAgent preloads skills for every invocation, including resume, from
-        # where they live (Hermes build_preloaded_skills_prompt).
         if task.forked:
             from misaka.core.subagent.fork import child_message
             message = child_message(prompt)
@@ -2558,8 +2480,6 @@ class SubagentManager:
         system_prompt = task.definition.prompt
         if task.definition.source == "built-in" and task.definition.name in {"general", "general-purpose"}:
             profile = self.role_context.profile_dir
-            # An empty profile means no persona. Never substitute a SOUL.md found under cwd:
-            # that is a trust boundary (review 2026-08-20).
             if profile:
                 from misaka.config import identity
                 from misaka.config import profiles as _profiles
@@ -2569,10 +2489,6 @@ class SubagentManager:
                     for source in identity.base_prompt_sources(profile, _profiles.role_of(profile)))
         if task.definition.memory and self._memory_enabled(task):
             system_prompt += "\n\n" + self._memory_prompt(task)
-        # Temp file, chmod, rename -- the same shape as child._atomic_write_json and
-        # policy._persist_once. Writing in place and chmod'ing afterwards left the file at the
-        # umask default (0644 on most systems) for the length of the write, and for a
-        # general-purpose child this file is the SOUL plus the whole persona.
         tmp_path = prompt_dir / f".{task.id}.md.{secrets.token_hex(6)}.tmp"
         try:
             with tmp_path.open("x", encoding="utf-8", newline="\n") as handle:
@@ -2585,7 +2501,6 @@ class SubagentManager:
             except FileNotFoundError:
                 pass
 
-        # CCB runAgent disables thinking independently of the effort parameter.
         thinking = "off"
         flags = [
             "--provider",
@@ -2604,17 +2519,9 @@ class SubagentManager:
         ]
         if task.definition.omit_context_files:
             flags.append("--no-context-files")
-        # A missing/inherit allowlist means the child's complete dynamic pool,
-        # including MCP tools discovered during child startup.  Do not freeze
-        # that case into this bootstrap list with ``-t``.
         if task.definition.tools is not None:
-            # Preserve explicitly named child-only MCP tools.  The child CLI's
-            # allowed-name set will activate them when their server registers.
             tools = agent_roster.resolve_tools(task.definition)
         elif task.definition.disallowed_tools:
-            # A deny-only definition must keep the dynamic worker pool so
-            # child-specific/late MCP tools remain discoverable.  The child
-            # installs the deny predicate on every registry refresh.
             tools = None
         else:
             tools = None
@@ -2635,7 +2542,7 @@ class SubagentManager:
                 aliases.get(base.casefold(), base)
                 for tool in source
                 if (base := tool.split("(", 1)[0].strip())
-                if task.forked or base != "Agent"  # Exact forks bypass resolveAgentTools.
+                if task.forked or base != "Agent"
             ]
             denied = {
                 spec.split("(", 1)[0].strip().casefold()
@@ -2649,7 +2556,6 @@ class SubagentManager:
                 )
             tools = list(dict.fromkeys(normalized))
             flags.extend(["-t", ",".join(tools)])
-        # Explicitly requested skills are preloaded in the first user message.
         if task.definition.max_turns:
             flags.extend(["--subagent-max-turns", str(task.definition.max_turns)])
         return flags
@@ -2691,11 +2597,6 @@ class SubagentManager:
         try:
             own = [str(name) for name in self.session.getActiveToolNames()]
         except Exception:  # noqa: BLE001 - an unreadable tool list keeps the pre-inheritance behaviour
-            # Dropping the variable would tell the child it is a root, and a
-            # root intersects with nothing: one unreadable tool list would hand
-            # the grandchildren the child's whole pool.  Pass on what we
-            # inherited instead -- it is already a subset -- and only a real
-            # root falls back to the built-in tables.
             return None if inherited is None else sorted(
                 {name.casefold() for name in inherited if name.strip()}
             )
@@ -2745,7 +2646,7 @@ class SubagentManager:
         from misaka.core.skills import layers as skill_layers
         from misaka.core.skills.wiring.skills import build_skill_message
 
-        if roots is None:  # older protocol peers/direct callers do not report roots
+        if roots is None:
             roots = skill_layers.skill_roots(self.role_context.profile_dir or None, cwd=task.cwd)
         loaded: list[str] = []
         seen: set[Path] = set()
@@ -2759,7 +2660,6 @@ class SubagentManager:
                 continue
             seen.add(path)
             try:
-                # As Hermes preloads a child's skills: from where they live (build_preloaded_skills_prompt).
                 content = await run_in_thread(build_skill_message, entry, session_id=task.id,
                                               activation_note=f"Skill {entry['name']} (preloaded):", profile_dir=self.role_context.profile_dir)
             except OSError as error:
@@ -2798,8 +2698,6 @@ class SubagentManager:
         from misaka.core.subagent.configuration import settings_layers
         from misaka.core.subagent.memory import memory_enabled
 
-        # Source getInitialSettings includes project opt-out. Reuse the same
-        # independently trusted target/worktree settings as permissions/hooks.
         cwd = (task.trust_source_cwd or (task.worktree.repo if task.worktree else task.cwd)) if task is not None else None
         values = {}
         for layer in settings_layers(self.session, cwd=cwd, include_project=task.project_trusted if task is not None else True):
@@ -2811,10 +2709,9 @@ class SubagentManager:
 
         name = _safe_component(task.agent_type.replace(":", "-"))
         workspace = Path(task.worktree.repo if task.worktree is not None else task.cwd).expanduser().resolve()
-        # Keep MISAKA's home-based project buckets, including worktree continuations.
         from misaka.config.product import setting
 
-        remote = os.environ.get("MISAKA_REMOTE_MEMORY_DIR")            # a remote runner's hand-off
+        remote = os.environ.get("MISAKA_REMOTE_MEMORY_DIR")
         memory_home = Path(setting("subagents", "memory_home", None, str)
                            or (Path(remote) / "agent-memory" if remote else home.path("agent_memory"))).expanduser().resolve()
         if task.definition.memory == "user":
@@ -2851,8 +2748,6 @@ class SubagentManager:
                 _log_warning(f"New agent memory snapshot for {task.agent_type}; existing memory retained pending explicit update")
         memory_file = directory / "MEMORY.md"
         try:
-            # Bound the read itself, not just the eventual prompt. UTF-8 bytes
-            # give a real size cap, including Chinese and other multibyte text.
             with memory_file.open(encoding="utf-8") as handle:
                 prefix = handle.read(25_001)
         except (OSError, UnicodeError):
@@ -2898,24 +2793,17 @@ class SubagentManager:
                         waiter.set_exception(
                             RuntimeError(error or "Agent turn ended before consuming steering")
                         )
-                        waiter.exception()  # As above: avoid orphaned-waiter noise.
+                        waiter.exception()
                 task.steer_waiters.clear()
-            # Waiters observe an in-memory terminal state even if persistence
-            # fails.  ``_settled`` separately guards continuation until cleanup
-            # and notification have completed.
             task._done.set()
         try:
             try:
                 await task.persist()
             except asyncio.CancelledError:
-                # persist has finished its actual write. A published terminal
-                # state must still settle its budget before allowing resume.
                 pass
             except Exception:  # noqa: BLE001, S110 - the terminal state is already set; a failed persist is retried on the next transition
                 pass
             if task.id in self._async_hook_jobs_by_agent:
-                # An async hook may still need the isolated filesystem.  Its
-                # completion callback performs cleanup after this turn settles.
                 self._deferred_worktree_cleanup.add(task.id)
             else:
                 self._deferred_worktree_cleanup.discard(task.id)
@@ -2935,7 +2823,6 @@ class SubagentManager:
 
         async def persist_receipt() -> None:
             async with task._state_lock:
-                # A delayed receipt for a previous turn must not ACK its successor.
                 if task.notification_id != notification_id:
                     return
                 try:
@@ -2964,14 +2851,10 @@ class SubagentManager:
             }
             try:
                 if recovered:
-                    # Awaited, not scheduled: it must be queued before the session's first run
-                    # prepares its opening messages (``recover_notices``).
                     await self.session.sendCustomMessage(message, {"deliverAs": "nextTurn", **receipt})
                 else:
                     self.session.moments.send_message(message, {"deliverAs": "followUp", "triggerTurn": True, **receipt})
             except RuntimeError:
-                # Enqueueing is not delivery. Leave the receipt pending when
-                # the parent is gone, and let its durable delivery ID deduplicate retries.
                 return
 
     async def recover_notices(self, context: Any) -> int:
@@ -2996,7 +2879,7 @@ class SubagentManager:
         if not Path(subagent_session_dir(parent_id, owner.getSessionFile())).is_dir():
             return 0
         self._session_dir(context)
-        nobody = "\0"                                          # no agent's name or id: read them all
+        nobody = "\0"
         loaded = await asyncio.to_thread(self._scan_metadata, nobody, nobody)
         self._adopt_scanned(nobody, nobody, loaded)
         unreported = sorted((task for task in loaded if task.background and not task.notified
@@ -3050,8 +2933,6 @@ class SubagentManager:
                          background=background, on_data=on_data, notified=not background)
         if output is not None:
             task.output = output
-        # Allocate the output pointer before launch so even an instant result has
-        # one stable source TaskOutput/notification path. No process on disk failure.
         task.output.ensure_temp_file()
         self._shell_tasks[task.id] = task
         task.runner = asyncio.create_task(task.run())
@@ -3071,8 +2952,6 @@ class SubagentManager:
         task = shell_task if shell_task is not None else await self._find_task_async(task_id, context)
         if task is None:
             raise ValueError(f"No task found with ID: {task_id}")
-        # Readers observe the published result, not cleanup or a metadata write.
-        # Only send_message (continuation) waits for the _settled fence.
         if block and task.status not in TERMINAL_STATUSES and timeout_ms > 0:
             from misaka.utils._abort_signal import wait_for_abort
             from misaka.utils.values import signal_aborted
@@ -3128,10 +3007,6 @@ class SubagentManager:
                             )
                         )
                         if task.process is None or not accepted:
-                            # Not started yet (queued for a slot, or still booting):
-                            # the message is steered in when the child accepts its
-                            # prompt.  Nothing can consume it before then, so the
-                            # sender does not wait (CCB queuePendingMessage).
                             task.pending_messages.append(
                                 {"message": message, "requestId": ""}
                             )
@@ -3161,9 +3036,6 @@ class SubagentManager:
                         waiter = await route_running_message()
                     else:
                         async with state_lock:
-                            # A terminal turn may have settled while this sender
-                            # waited.  Re-enter the resume path instead of
-                            # queueing onto a dead process.
                             if task.status not in {"running", "pending"}:
                                 continue
                             waiter = await route_running_message()
@@ -3175,9 +3047,6 @@ class SubagentManager:
                         "recipient": ref,
                     }
                 except (BrokenPipeError, ConnectionError, RuntimeError):
-                    # The process may have completed between the state check and
-                    # stdin write.  Let its lifecycle settle, then continue the
-                    # same transcript rather than losing the message.
                     await task._done.wait()
                     settled = getattr(task, "_settled", None)
                     if settled is not None:
@@ -3188,9 +3057,6 @@ class SubagentManager:
             if settled is not None:
                 await settled.wait()
             async with task._state_lock:
-                # Single-flight terminal continuation: a concurrent sender that
-                # lost this lock observes the new running turn and steers/queues
-                # its message rather than spawning a second transcript writer.
                 if task.status in {"running", "pending"}:
                     continue
                 if self._closed:
@@ -3218,8 +3084,6 @@ class SubagentManager:
                         await task.persist()
                         self.run_background(task, message, notify=notify)
                     except BaseException:
-                        # Persistence and launch are one transition: either it has
-                        # a runner or all terminal state remains available for retry.
                         for name, value in previous.items():
                             setattr(task, name, value)
                         try:
@@ -3235,9 +3099,6 @@ class SubagentManager:
                         "outputFile": str(task.transcript),
                     }
                 finally:
-                    # Validation, MCP readiness, pending persistence and runner
-                    # handoff are one lease transaction. Failed starts retain the
-                    # old terminal result, not an abandoned worktree lease.
                     if (getattr(task, "_worktree_lock", None) is not previous_lease
                             and (task.runner is None or task.runner.done())):
                         from misaka.core.subagent.worktree import release_activity
@@ -3273,7 +3134,6 @@ class SubagentManager:
             task.worktree = None
             task.keep_worktree = False
         if task.worktree and os.path.isdir(task.worktree.path):
-            # Source resumeAgent.ts renews the worktree lease before GC checks.
             await asyncio.to_thread(os.utime, task.worktree.path, None)
         if not os.path.isdir(task.cwd):
             if not task.trust_from_parent:
@@ -3350,8 +3210,6 @@ class SubagentManager:
         if task.runner is not None:
             if task.status not in TERMINAL_STATUSES and not task.runner.done():
                 task.runner.cancel()
-            # Reaping the model process is not the end of its owned preload or
-            # cleanup work. Only the runner can release the continuation fence.
             _, cancelled = await settle(asyncio.gather(task.runner, return_exceptions=True))
             if cancelled is not None:
                 raise cancelled
@@ -3442,10 +3300,6 @@ class SubagentManager:
         if context is not None:
             self._session_dir(context)
         loaded = await asyncio.to_thread(self._scan_metadata, ref, agent_id)
-        # The await is a window of its own: `spawn` may have registered this very task while
-        # the thread was reading a terminal snapshot of an older one off disk. Re-resolve
-        # before adopting, or the fresh live task loses to the stale scan -- the same defect
-        # the guard above exists to kill, one await later.
         agent_id = self._names.get(ref, agent_id)
         live = self._tasks.get(agent_id)
         if live is not None:
@@ -3475,9 +3329,6 @@ class SubagentManager:
         for task in terminal[: max(1, total - MAX_TASKS_PER_SESSION + 1)]:
             self._tasks.pop(task.id, None)
             if task.name and self._names.get(task.name) == task.id:
-                # Only this task's own registration. An adopted snapshot may carry a name a
-                # newer task answers to (`_adopt_scanned` leaves it out of `_names`); popping
-                # by name alone unregistered the live task when the snapshot aged out.
                 self._names.pop(task.name, None)
 
     async def _create_worktree(self, task: AgentTask) -> Worktree:
@@ -3491,8 +3342,6 @@ class SubagentManager:
         }, task.cwd)
         if created:
             return Worktree(hook_path, "", task.cwd, "", hook_based=True)
-        # Native lazy startup: the first worktree caller owns/drains GC, rather
-        # than adding detached I/O to every Pi session's synchronous dispose.
         if not self._worktree_cleanup_checked:
             self._worktree_cleanup_checked = True
             await self.cleanup_stale_worktrees()
@@ -3585,16 +3434,12 @@ class SubagentManager:
         task.keep_worktree = bool(status_code or head_code or status.strip() or head.strip() != worktree.base_head)
         if not task.keep_worktree:
             code, _, error = await _run(["git", "-C", worktree.repo, "worktree", "remove", "--force", worktree.path])
-            # CCB removeAgentWorktree: a failed Git removal retains the tree.
-            # Keep metadata too, so resume and the operator still know its owner.
             if code:
                 task.keep_worktree = True
                 _log_warning(f"Could not remove agent worktree {worktree.path}: {error.strip()}")
                 await task.persist()
                 return
             await _run(["git", "-C", worktree.repo, "branch", "-D", worktree.branch])
-            # Resume mirrors Claude Code: cleared worktree metadata falls back
-            # to the parent repository instead of chdir-ing into a deleted path.
             task.cwd = worktree.repo
             task.worktree = None
         await task.persist()
@@ -3603,8 +3448,6 @@ class SubagentManager:
         from misaka.utils.async_lifecycle import settle
 
         caller = asyncio.current_task()
-        # The existing owner is draining these producers. A callback/runner
-        # joining its own drain would make a circular shutdown dependency.
         if (self._close_job is not None and not self._close_job.done()
                 and (caller in self._callback_jobs or caller in self._async_hook_jobs
                      or caller in self._async_cleanup_jobs or caller is self._close_job
@@ -3623,8 +3466,6 @@ class SubagentManager:
             self._closed = True
             reservations_done = self._reservations_done
         await reservations_done.wait()
-        # Shells share this owner's lifetime; TaskStop/close drain their real
-        # native process operations rather than cancelling only a waiter.
         for shell in self._shell_tasks.values():
             if shell.status == 'running':
                 shell.notified = True
@@ -3650,12 +3491,7 @@ class SubagentManager:
             elif task.process is not None:
                 await task.stop()
             else:
-                # Covers the race (resume vs. close) where the runner has finished but the task
-                # never reached a terminal state; otherwise its waiters hang forever.
                 await self._finish(task, "killed", "Sub-agent manager closed", False)
-        # A runner may already have published its terminal status while still
-        # committing usage, cleaning its worktree, or notifying its parent.
-        # Do not cancel that settling phase, but never let close() orphan it.
         live_runners.update(
             task.runner
             for task in active
@@ -3673,11 +3509,9 @@ class SubagentManager:
                     return
                 await asyncio.gather(*current, return_exceptions=True)
 
-        # Producers are fenced/stopped above.  Remaining hooks belong to
-        # already-terminal tasks and own bounded command timeouts.
         await drain(self._async_hook_jobs)
         await drain(self._async_cleanup_jobs)
-        await drain(self._callback_jobs)        # display callbacks still in flight finish before the manager is gone
+        await drain(self._callback_jobs)
 
 
 __all__ = [

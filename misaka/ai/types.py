@@ -21,8 +21,6 @@ from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TypeAlias
 
-# MISAKA fork: pi names the fields every catalog entry shares `BaseModel`; pydantic's own `BaseModel` is imported under
-# another name so that one keeps pi's.
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import (
     ConfigDict,
@@ -151,8 +149,6 @@ class _CompatObject(SchemaModel):
 class ThinkingBudgets(SchemaModel):
     """Token budgets for each thinking level (token-based providers only)"""
 
-    # MISAKA fork: a key besides these four (a settings file carrying "xhigh" or "off") is simply not read, as pi spreads
-    # the object and never looks it up; forbidding it failed every request.
     model_config = ConfigDict(extra="ignore")
 
     minimal: int | None = None
@@ -167,7 +163,6 @@ Transport: TypeAlias = Literal["sse", "websocket", "websocket-cached", "auto"]
 # Provider-scoped environment overrides. Values take precedence over process.env.
 ProviderEnv: TypeAlias = dict[str, str]
 ProviderHeaders: TypeAlias = dict[str, str | None]
-# MISAKA fork: no `FetchFunction`; the `fetch` option is not ported, requests go through httpx.
 
 
 class ProviderResponse(SchemaModel):
@@ -418,7 +413,6 @@ class ToolCall(SchemaModel):
     namespace: str | None = None
 
 
-# MISAKA fork: discriminated unions of the content blocks, as pydantic reads them.
 UserContentValue: TypeAlias = TextContent | ImageContent
 UserContent: TypeAlias = Annotated[UserContentValue, Field(discriminator="type")]
 AssistantContentValue: TypeAlias = TextContent | ThinkingContent | ToolCall
@@ -550,8 +544,6 @@ class NestedToolCallRecord(SchemaModel):
     id: str
     name: str
     # Omitted when over the size limits; `argumentsBytes` then gives their size.
-    # MISAKA fork: `Any`, not a JSON object: upstream never checks, `ctx.executeTool` takes any value, and a call with
-    # arguments that are not an object is still recorded (it fails in the tool pipeline).
     arguments: Any | None = None
     # UTF-8 size of the arguments as JSON, set when `arguments` is omitted.
     argumentsBytes: int | None = None
@@ -589,7 +581,6 @@ class ToolResultMessage(SchemaModel):
     _normalize_null_content = field_validator("content", mode="before")(_content_never_null)
 
 
-# MISAKA fork: `MessageValue` is the plain union; `Message` is the discriminated one pydantic validates.
 MessageValue: TypeAlias = SystemMessage | UserMessage | AssistantMessage | ToolResultMessage
 Message: TypeAlias = Annotated[MessageValue, Field(discriminator="role")]
 
@@ -698,27 +689,18 @@ GrammarVariants: TypeAlias = dict[GrammarFormat, str]
 class JsonSchemaConstrainedSamplingConfig(SchemaModel):
     """``{ type: "json_schema", strict: "prefer" | "require" }`` (one member of ``ConstrainedSamplingConfig``)."""
 
-    # MISAKA fork: `extra="ignore"`, overriding the record base. TypeScript erases object types, so a config carrying a
-    # field this port does not model reaches pi and is simply not read; forbidding it here turned a forward-compatible
-    # caller into a ValidationError raised from the middle of request construction.
     model_config = ConfigDict(extra="ignore")
 
     type: Literal["json_schema"] = "json_schema"
-    # MISAKA fork: optional, so a config that omits `strict` validates instead of raising; the resolver compares it
-    # against "require".
     strict: str | None = None
 
 
 class GrammarConstrainedSamplingConfig(SchemaModel):
     """``{ type: "grammar", variants: GrammarVariants }`` (one member of ``ConstrainedSamplingConfig``)."""
 
-    # MISAKA fork: `extra="ignore"`, as above.
     model_config = ConfigDict(extra="ignore")
 
     type: Literal["grammar"] = "grammar"
-    # MISAKA fork: `Any`, not `GrammarVariants`: the resolver re-tests each value at runtime and reads only the two keys
-    # it knows, so an unknown key is ignored and a non-string definition falls back to the other variant; typing it
-    # would reject both at validation time.
     variants: Any = Field(default_factory=dict)
 
 
@@ -741,7 +723,6 @@ def _is_json_schema_mapping(value: Any) -> bool:
 class Tool(RuntimeModel):
     name: str
     description: str
-    # MISAKA fork: a JSON schema mapping or a pydantic model class (TypeBox schemas upstream).
     parameters: Any
     # `False` is upstream's explicit opt-out and reads the same as an absent config.
     constrainedSampling: Literal[False] | ConstrainedSamplingConfig | None = None
@@ -791,7 +772,6 @@ class TranscriptContext(SchemaModel):
     messages: list[Message]
 
 
-# MISAKA fork: one class per event shape, so pydantic can validate the discriminated union below.
 class StartEvent(SchemaModel):
     type: Literal["start"] = "start"
     partial: AssistantMessage
@@ -1077,8 +1057,6 @@ class MistralConversationsCompat(SchemaModel):
     supportsMidConvoSystemMessages: bool | None = None
 
 
-# MISAKA fork: `Model.compat` depends on the API at the type level upstream; here it is the union of the five shapes,
-# and `Model` picks the member for its `api` (`_MODEL_COMPAT_BY_API`).
 ModelCompat: TypeAlias = (
     OpenAICompletionsCompat | OpenAIResponsesCompat | AnthropicMessagesCompat | BedrockCompat | MistralConversationsCompat
 )
@@ -1237,7 +1215,6 @@ class ModelInputLimits(SchemaModel):
     images: ModelImageInputLimits | None = None
 
 
-# MISAKA fork: the name callers used before upstream named it `ModelInputModality`.
 InputModality: TypeAlias = ModelInputModality
 
 
@@ -1286,11 +1263,7 @@ class Model(BaseModel):
     # Sampling parameter overrides selected by the effective pi thinking level.
     samplingParamsByThinkingLevel: SamplingParamsByThinkingLevel | None = None
     # Compatibility overrides for OpenAI-compatible APIs. If not set, auto-detected from baseUrl.
-    # MISAKA fork: serialized as the object it is, so the undeclared keys `_catalogCompat` keeps are written back.
     compat: SerializeAsAny[ModelCompat] | None = None
-    # MISAKA fork: the offline Radius catalog carries gateway metadata on its entries: the lab that made the model,
-    # whether the gateway offers it now, and the backends it routes to. Transcribed as shipped; only the Radius provider
-    # reads them.
     lab: str | None = None
     enabled: bool | None = None
     providers: list[RadiusModelProvider] | None = None
@@ -1328,8 +1301,6 @@ class ClassifierModel(BaseModel):
 
 
 # Model shape for each model type.
-# MISAKA fork: pi's `ModelTypeMap` is a type-level map; pydantic needs the class of each type to read one, so this is a
-# runtime table from type to model class.
 ModelTypeMap: dict[str, type[BaseModel]] = {"chat": Model, "image": ImageModel, "classifier": ClassifierModel}
 
 # What a catalog entry is for. Decides which `Models` operation accepts it.
@@ -1343,15 +1314,11 @@ def _anyModelType(value: Any) -> str:
 
 
 # Anything a provider can list. Narrow with `isModelType()`.
-# MISAKA fork: chat's `type` is optional, so the union is told apart by a callable discriminator rather than a field
-# one. A type this version does not know fails validation; callers reading stored or fetched data drop those first, as
-# pi's `withKnownModelTypes` does.
 AnyModel: TypeAlias = Annotated[
     Annotated[Model, Tag("chat")] | Annotated[ImageModel, Tag("image")] | Annotated[ClassifierModel, Tag("classifier")],
     Discriminator(_anyModelType),
 ]
 
-# MISAKA fork: runtime validation entry points.
 ANY_MODEL_ADAPTER: TypeAdapter[Model | ImageModel | ClassifierModel] = TypeAdapter(AnyModel)
 USER_CONTENT_ADAPTER = TypeAdapter(UserContent)
 MESSAGE_ADAPTER = TypeAdapter(Message)
@@ -1361,10 +1328,6 @@ def validate_user_content(value: Any) -> UserContentValue:
     return USER_CONTENT_ADAPTER.validate_python(value)
 
 
-# MISAKA fork: pi dropped ToolResultMessage.addedToolNames and, having no runtime validation, reads older transcripts
-# unchanged. The strict model here would refuse whole sessions carrying that key, at every validator entry: session
-# load, agent state, the LLM wire, the LCM's snapshot restore. The one retired key is dropped from a copy of the payload,
-# as pi effectively ignores it; any other unknown key still fails, so real shape bugs stay visible.
 _RETIRED_MESSAGE_KEYS: dict[str, tuple[str, ...]] = {"toolResult": ("addedToolNames",)}
 
 
@@ -1376,9 +1339,6 @@ def validate_message(value: Any) -> MessageValue:
     return MESSAGE_ADAPTER.validate_python(value)
 
 
-# MISAKA fork: upstream re-exports the stream class (`export type`); importing it at runtime would be a cycle
-# (utils.event_stream imports this module, and an import of utils.event_stream first would find it half made), so the
-# name resolves on first access.
 if TYPE_CHECKING:
     from misaka.ai.utils.event_stream import AssistantMessageEventStream
 

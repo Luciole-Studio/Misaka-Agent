@@ -78,7 +78,6 @@ def job() -> Any:
             handle = _kernel32.CreateJobObjectW(None, None)
             if handle:
                 limits = _ExtendedLimits()
-                # BREAKAWAY_OK | SILENT_BREAKAWAY_OK | DIE_ON_UNHANDLED_EXCEPTION | KILL_ON_JOB_CLOSE
                 limits.BasicLimitInformation.LimitFlags = 0x800 | 0x1000 | 0x400 | 0x2000
                 _kernel32.SetInformationJobObject(handle, 9, ctypes.byref(limits), ctypes.sizeof(limits))
             _job.append(handle or None)

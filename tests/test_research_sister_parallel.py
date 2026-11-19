@@ -160,7 +160,6 @@ class BatchObserved(Exception):
 @pytest.mark.parametrize("fork", [False, True])
 async def test_restored_root_and_fork_dispatch_saved_width(board, tmp_path, saved, expected, fork):
     run = runs.create(board, workspace=str(tmp_path), question="Dispatch", limits=saved)
-    # Exercise genuinely old JSON as well as explicitly configured new runs.
     board.execute("UPDATE research_runs SET limits_json=? WHERE id=?", (json.dumps(saved), run["id"]))
     root = runs.nodes(board, run["id"])[0]
     node = runs.create_node(board, run["id"], question="Child", parents=[root["id"]]) if fork else root
@@ -171,7 +170,6 @@ async def test_restored_root_and_fork_dispatch_saved_width(board, tmp_path, save
         board.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
         ids.append(tid)
     board.commit()
-    # A restarted driver/new node connection reads the persisted run, not its caller's cfg.
     with closing(tasks.connect(str(tmp_path / "board.db"))) as restored:
         batches = []
 
@@ -198,7 +196,6 @@ async def test_active_help_waiting_and_unsettled_cards_share_slots(board, tmp_pa
         board.execute("UPDATE tasks SET status=?,block_kind='needs_input' WHERE id=?", (status, tid))
         ids.append(tid)
     tasks.add_event(board, ids[2], "blocked", {"message_id": "help"}, generation=tasks.get(board, ids[2])["generation"])
-    # Some statuses and pending processes overlap: count their union, not their sum.
     async def pending(scope):
         return {ids[0], ids[3]}
 

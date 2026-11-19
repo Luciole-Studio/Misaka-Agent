@@ -49,7 +49,6 @@ class _Undefined:
     def __repr__(self) -> str:
         return "undefined"
 
-    # A copy, a deep copy or a pickle round trip is still the one instance, as `undefined` is.
     def __copy__(self) -> _Undefined:
         return self
 
@@ -62,16 +61,12 @@ class _Undefined:
 
 UNDEFINED: Final = _Undefined()
 
-# `String.prototype.trim()` strips ECMAScript WhiteSpace and LineTerminator, which is not the set
-# `str.strip()` strips (U+FEFF versus U+001C-U+001F and U+0085).
 _ECMASCRIPT_WHITESPACE: Final = (
     "\u0009\u000a\u000b\u000c\u000d   "
     "           "
     "    　﻿"
 )
-# The set for callers that test single characters (JavaScript's `\s`).
 ECMASCRIPT_WHITESPACE: Final = _ECMASCRIPT_WHITESPACE
-# JavaScript's `\s` as the inside of a character class, for patterns that must not use Python's `\s`.
 JS_WHITESPACE_CLASS: Final = re.escape(_ECMASCRIPT_WHITESPACE)
 _JS_WHITESPACE_RUN: Final = re.compile(f"[{JS_WHITESPACE_CLASS}]+")
 
@@ -145,7 +140,6 @@ def jsNumber(value: Any) -> int | float:
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int):
-        # `JSON.parse` already made an integer beyond the double range `Infinity`.
         try:
             float(value)
         except OverflowError:
@@ -366,7 +360,7 @@ def jsCall(function: Callable[..., Any], *args: Any) -> Any:
     """Call ``function`` as JavaScript calls a function: arguments it does not declare are dropped."""
     try:
         arity = _positionalArity(function)
-    except TypeError:  # an unhashable callable
+    except TypeError:
         arity = None
     return function(*(args if arity is None else args[:arity]))
 
@@ -475,7 +469,6 @@ class Utf8Decoder:
                     return position
                 continue
             if not self._lower <= byte <= self._upper:
-                # The byte is not part of the sequence: it is replaced, and read again as the start of the next one.
                 self._reset()
                 out.append("\ufffd")
                 return position
@@ -539,11 +532,8 @@ class StringDecoder:
         nread = len(data)
         offset = 0
         if self._missing > 0:
-            # If an incomplete character is found at a chunk boundary, use its remainder and decode it as is.
             for i in range(min(nread, self._missing)):
                 if (data[i] & 0xC0) != 0x80:
-                    # This byte is not a continuation byte even though it should have been one: stop decoding the
-                    # incomplete character here and assume that the byte starts a new one.
                     self._missing = 0
                     self._buffer += data[:i]
                     offset = i
@@ -561,19 +551,14 @@ class StringDecoder:
             return prepend if prepend is not None else ""
         buffered = 0
         if data[offset + nread - 1] & 0x80:
-            # The chunk ends on a non-ASCII byte: find where its character begins.
             i = offset + nread - 1
             while True:
                 buffered += 1
                 if (data[i] & 0xC0) == 0x80:
-                    # A trailing byte.
                     if buffered >= 4 or i == offset:
-                        # More than 4 trailing bytes, or the previous chunk was not entirely valid UTF-8: treat the
-                        # remaining bytes as complete.
                         buffered = 0
                         break
                 else:
-                    # The first byte of a character: its upper bits tell how long the character should be.
                     if (data[i] & 0xE0) == 0xC0:
                         self._missing = 2
                     elif (data[i] & 0xF0) == 0xE0:
@@ -581,11 +566,9 @@ class StringDecoder:
                     elif (data[i] & 0xF8) == 0xF0:
                         self._missing = 4
                     else:
-                        # A lead byte of a character outside the representable range.
                         buffered = 0
                         break
                     if buffered >= self._missing:
-                        # As many trailing bytes as the lead byte announced (valid data) or more (invalid anyway).
                         self._missing = 0
                         buffered = 0
                     self._missing -= buffered
@@ -699,7 +682,6 @@ def jsonStringify(value: Any, indent: int | str | None = None) -> str:
     numbers and ``undefined`` array items as ``null``, ``undefined`` properties left out, text kept as
     text, and lone surrogates escaped (well-formed ``JSON.stringify``). ``indent`` is a count of spaces
     or the indent string itself."""
-    # An indent of 0 or "" means no formatting; longer ones are capped at 10, as the spec says.
     gap = ""
     if isinstance(indent, int) and not isinstance(indent, bool):
         gap = " " * min(max(indent, 0), 10)
@@ -950,10 +932,7 @@ class AbortSignal:
         self.aborted = False
         self.reason: Any = None
         self._event = asyncio.Event()
-        # A listener's return value is ignored, as a DOM event listener's is.
         self._listeners: list[Callable[[], object]] = []
-        # Signals made by `AbortSignal.any` that follow this one; held weakly, as the DOM holds them, so a
-        # long-lived signal does not keep every derived signal alive.
         self._dependents: weakref.WeakSet[AbortSignal] = weakref.WeakSet()
 
     async def wait(self) -> None:
@@ -999,7 +978,6 @@ class AbortSignal:
             if dependents is not None:
                 dependents.add(combined)
             else:
-                # A signal of another kind, which has no listeners: watch it.
                 onAbort(source, partial(_abortFollower, combined, source))
         return combined
 

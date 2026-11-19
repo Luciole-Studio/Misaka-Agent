@@ -45,8 +45,6 @@ from misaka.utils import js_regexp
 from misaka.utils.js import liveKeys
 from misaka.utils.js_regexp import RegExp
 
-# MISAKA fork (D1): upstream's mouse event types and `dispatchMouseEvent`/`retargetMouseEvent` come first here.
-
 
 class Component(Protocol):
     """``handleInput(data)`` (keyboard input when the component has focus) and ``wantsKeyRelease`` (if true, the
@@ -74,9 +72,6 @@ class TuiInputListenerResultValue(TypedDict, total=False):
 
 type TuiInputListenerResult = TuiInputListenerResultValue | None
 type TuiInputListener = Callable[[str], TuiInputListenerResult]
-
-# MISAKA fork (D11): `PendingTerminalColorQuery`, `TERMINAL_PALETTE_SIZE`, `TERMINAL_COLOR_REPLY_COUNT`,
-# `TERMINAL_COLOR_QUERY` and `DEVICE_ATTRIBUTES_RESPONSE_PATTERN` (queryTerminalColors) follow here.
 
 
 class Focusable(Protocol):
@@ -253,8 +248,6 @@ class OverlayStackEntry:
     bounds: OverlayBounds | None = None
 
 
-# MISAKA fork (D1): upstream's `RenderedOverlayLayout` follows here.
-
 
 class OverlayRestoreOverlayResume(TypedDict):
     status: Literal["restore-overlay"]
@@ -319,8 +312,6 @@ class Container:
             if invalidate:
                 invalidate()
 
-    # MISAKA fork (D1): upstream's `handleMouse` follows here.
-
     def render(self, width: int) -> list[str]:
         lines: list[str] = []
         for child in self.children:
@@ -361,8 +352,6 @@ def compositeTuiLine(baseLine: str, overlayLine: str, startCol: int, overlayWidt
     return result if visibleWidth(result) <= totalWidth else sliceByColumn(result, 0, totalWidth, True)
 
 
-# MISAKA fork (D1): upstream's `TuiMode` follows here.
-
 
 class TuiStopOptions(TypedDict, total=False):
     # Leave renderer output in place for another TUI taking over the same terminal.
@@ -397,8 +386,6 @@ class TUI(Component, Protocol):
     def setTerminalColorSchemeNotifications(self, enabled: bool) -> None: ...
 
 
-# MISAKA fork (D1): upstream's `VIEWPORT_TUI`, `ViewportTUI` and `isViewportTUI` follow here.
-
 
 def performanceNow() -> float:
     """MISAKA fork: ``performance.now()``, in milliseconds."""
@@ -427,14 +414,12 @@ class TuiBase(Container):
         self.clearOnShrink = False
         self.fullRedrawCount = 0
         self.stopped = False
-        # MISAKA fork (D11): upstream's `pendingTerminalColorQueries` follows here; MISAKA's OSC 11 probe keeps these.
         self.pendingOsc11BackgroundReplies = 0
         self.pendingOsc11BackgroundQueries: list[dict[str, Any]] = []
         self.terminalColorSchemeListeners: dict[Callable[[TerminalColorScheme], None], None] = {}
         self.terminalColorSchemeNotificationsEnabled = False
         # Directory for debug/crash logs. When undefined, debug logging is disabled and crash dumps fall back to the OS
         # temp directory.
-        # MISAKA fork: without one the crash dump goes to MISAKA's home (`home.path("crash_log")`).
         self.logDirectory = logDirectory
 
         # Overlay stack for modal components rendered on top of base content
@@ -442,7 +427,6 @@ class TuiBase(Container):
         self.overlayStack: list[OverlayStackEntry] = []
         self.overlayFocusRestore: OverlayFocusRestoreState = {"status": "inactive"}
 
-        # MISAKA fork: the loop that owns rendering, and the last frame's cost (see `scheduleRender`).
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: int | None = None
         self._capture_loop()
@@ -730,7 +714,6 @@ class TuiBase(Container):
                 return None
             return {**entry.bounds}
 
-        # MISAKA fork: the object literal of closures is a namespace of them.
         return cast(
             OverlayHandle,
             SimpleNamespace(
@@ -768,9 +751,6 @@ class TuiBase(Container):
     def hasOverlay(self) -> bool:
         """Check if there are any visible overlays"""
         return any(self.isOverlayVisible(o) for o in self.overlayStack)
-
-    # MISAKA fork (D1): upstream's `isOverlayFocused`, `resolveMouseFocusTarget` and `dispatchMouseToOverlay` follow
-    # here.
 
     def isOverlayVisible(self, entry: OverlayStackEntry) -> bool:
         """Check if an overlay entry is currently visible"""
@@ -849,7 +829,6 @@ class TuiBase(Container):
     def stop(self, options: TuiStopOptions | None = None) -> None:
         if options is None:
             options = {}
-        # MISAKA fork: on the loop that owns rendering.
         if self._queue_to_owner(lambda: self.stop(options)):
             return
         self.stopped = True
@@ -862,7 +841,6 @@ class TuiBase(Container):
         self.afterTerminalStop(options)
 
     def renderNow(self, force: bool = False) -> None:
-        # MISAKA fork: on the loop that owns rendering.
         if self._queue_to_owner(lambda: self.renderNow(force)):
             return
         if force:
@@ -873,8 +851,6 @@ class TuiBase(Container):
         self.doRender()
 
     def requestRender(self, force: bool = False) -> None:
-        # MISAKA fork: requests from other threads go to the loop that owns rendering; once that loop has closed
-        # (shutdown), nothing can be scheduled on it any more.
         self._capture_loop()
         if self._loop is not None and self._loop.is_closed():
             return
@@ -919,18 +895,9 @@ class TuiBase(Container):
         if self.stopped or self.renderTimer or not self.renderRequested:
             return
         elapsed = performanceNow() - self.lastRenderAt
-        # MISAKA fork: pi waits MIN_RENDER_INTERVAL_MS from the start of the last frame, and in Node that is enough: a
-        # network chunk's promise continuations all run before the next timer. asyncio has no such priority; every
-        # await is a loop callback queued alongside the render timer. A frame slower than the interval (a long reply
-        # is laid out whole every frame) then made frames run back to back, a streaming reply advanced about one event
-        # per frame, fell minutes behind the provider and was cut off ("Connection error.", GitHub issue #6). So a
-        # frame also waits as long as the last one took: painting gets at most half the loop. `elapsed` runs from the
-        # frame's start, and the wait is counted from its end: a frame that took longer than its CPU (a write held
-        # up, threads contending for the GIL) still leaves the loop as long as its CPU took.
         delay = max(0.0, self.MIN_RENDER_INTERVAL_MS - elapsed, self.lastRenderWallMs + self.lastRenderCostMs - elapsed)
 
         def onTimeout() -> None:
-            # MISAKA fork: a thread timer cancelled after it fired still runs; only the current one may render.
             if self.renderTimer is not timer:
                 return
             self.renderTimer = None
@@ -955,7 +922,6 @@ class TuiBase(Container):
             timer.start()
 
     def handleTerminalInput(self, data: str) -> None:
-        # MISAKA fork (D11): upstream consumes queryTerminalColors' replies here; MISAKA's OSC 11 probe takes its.
         if self.consumeOsc11BackgroundResponse(data):
             return
         if self.consumeTerminalColorSchemeReport(data):
@@ -1017,9 +983,6 @@ class TuiBase(Container):
             # Keyboard input is latency-sensitive. Avoid the throttled timer path,
             # where even setTimeout(0) can take a full 16 ms tick on Windows.
             self.requestImmediateRender()
-
-    # MISAKA fork (D11): upstream's `consumeTerminalColorResponse`, `terminalColorQueryResult` and
-    # `completeTerminalColorQuery` follow here.
 
     def consumeTerminalColorSchemeReport(self, data: str) -> bool:
         scheme = parseTerminalColorSchemeReport(data)
@@ -1172,7 +1135,6 @@ class TuiBase(Container):
     def compositeOverlays(self, lines: list[str], termWidth: int, termHeight: int) -> list[str]:
         """Composite all overlays into content lines (sorted by focusOrder, higher = on top)."""
         if len(self.overlayStack) == 0:
-            # MISAKA fork (D1): upstream resets its rendered overlay layouts here.
             return lines
         result = [*lines]
 
@@ -1207,7 +1169,6 @@ class TuiBase(Container):
 
             rendered.append({"entry": entry, "overlayLines": overlayLines, "row": row, "col": col, "w": width})
             minLinesNeeded = max(minLinesNeeded, row + len(overlayLines))
-        # MISAKA fork (D1): upstream records the rendered overlay layouts (for mouse dispatch) here.
 
         # Pad to at least terminal height so overlays have screen-relative positions.
         # Excludes maxLinesRendered: the historical high-water mark caused self-reinforcing
@@ -1284,8 +1245,6 @@ class TuiBase(Container):
 
         return [resolve(line) for line in lines]
 
-    # --- MISAKA fork (D11): the background probe in place of `queryTerminalColors` ----------------------------------
-
     async def queryTerminalBackgroundColor(self, timeoutMs: int = 1000) -> RgbColor | None:
         """Ask the terminal for its background color (OSC 11): ``None`` on timeout or an unparseable reply. MISAKA's
         light/dark palette follows it."""
@@ -1323,8 +1282,6 @@ class TuiBase(Container):
             if not future.done():
                 future.set_result(reply["rgb"])
         return True
-
-    # --- MISAKA fork: the loop that owns rendering --------------------------------------------------------------------
 
     def _capture_loop(self) -> None:
         if self._loop is not None:

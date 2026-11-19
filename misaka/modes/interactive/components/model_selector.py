@@ -172,8 +172,6 @@ class ModelSelectorComponent(Container):
         else:
             self.updateList()
         self._request_render()
-        # MISAKA fork: a background refresh needs a running event loop; without one (a
-        # selector built outside the app) the snapshot is all there is.
         try:
             asyncio.get_running_loop().create_task(self.refreshModels())
         except RuntimeError:

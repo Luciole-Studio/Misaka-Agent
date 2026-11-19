@@ -47,7 +47,6 @@ def formatTokens(count: float) -> str:
     return f"{jsRound(count / 1000000)}M"
 
 
-# MISAKA: misaka/core/subagent imports this name, and that package is not edited.
 format_tokens = formatTokens
 
 

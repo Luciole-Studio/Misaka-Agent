@@ -105,7 +105,6 @@ def description(session, name: str) -> str:
     return next((tool.description for tool in session.agent.state.tools if tool.name == name), "")
 
 
-# MISAKA fork: `(.+\.png)` rather than `(\S+\.png)`, as a Windows temp path may hold spaces.
 TINY_PNG_LABEL = re.compile(r"^\[Image saved to (.+\.png) \(image/png, \d+B\)\]\Z")
 
 
@@ -370,8 +369,6 @@ async def test_formats_output_at_the_item_limit_in_linear_time(tmp_path):
         Path(result.details.get("fullOutputPath") or "").unlink(missing_ok=True)
         assert not result.isError
         assert "==> text 100000/100000 <==" in resultText(result)
-    # MISAKA fork: timed apart from the script. Crossing the Python bridge 100,000 times takes about 5 s here by
-    # itself (upstream's whole run, V8 bridge included, must stay under 5 s); the formatting is what was quadratic.
     startedAt = time.perf_counter()
     joinAdjacentText(formatOutput([{"type": "text", "text": ""}] * 100_000))
     assert time.perf_counter() - startedAt < 1

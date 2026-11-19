@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/anthropic.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "anthropic.json").read_text(encoding="utf-8"))
 
 ANTHROPIC_MODELS = flattenChatModelCatalog("anthropic", _values)

@@ -158,8 +158,6 @@ def getBranchSelection(
             return {"provider": read_field(entry, "provider"), "modelId": read_field(entry, "modelId")}
         if read_field(entry, "type") == "message":
             message = read_field(entry, "message")
-            # MISAKA fork: an MoA preset's responses name other models too, like a virtual model's,
-            # and a preset holds like a virtual model (`answersAsOtherModels` for both tests).
             if read_field(message, "role") == "assistant" and not answersAsOtherModels(message):
                 response = {"provider": read_field(message, "provider"), "modelId": read_field(message, "model")}
                 change = _findLastModelChange(branch, i)

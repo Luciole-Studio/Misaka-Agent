@@ -77,7 +77,7 @@ def _submissions(con, tid):
 async def _complete(con, tid, out, part):
     (out / "report.md").write_text("first version\n", encoding="utf-8")
     from misaka.core.network import worker
-    worker.declare_completion(con, tasks.get(con, tid), "delivered")   # what misaka_card_complete records
+    worker.declare_completion(con, tasks.get(con, tid), "delivered")
     await _end_turn(part, "delivered")
     assert tasks.get(con, tid)["status"] == "done"
     assert len(_submissions(con, tid)) == 1
@@ -145,7 +145,7 @@ async def test_findings_recorded_after_the_completion_are_declared_with_the_card
 async def test_a_session_that_no_longer_holds_the_card_still_cannot_record_evidence(card):
     con, tid, out, part = card
     await _complete(con, tid, out, part)
-    con.execute("UPDATE tasks SET generation=2 WHERE id=?", (tid,))    # a newer attempt owns the card
+    con.execute("UPDATE tasks SET generation=2 WHERE id=?", (tid,))
     with pytest.raises(ValueError, match="ownership changed"):
         await _note(part, findings=[{"text": "late", "claim_type": "fact"}])
 
@@ -166,8 +166,6 @@ async def test_a_red_team_revising_its_critique_after_completion_redeclares_it(c
     assert len(_submissions(con, tid)) == 2
     assert tasks.latest_payload(con, tid, "redeclare_failed", generation=1) is None
 
-
-# ── consultations (R40): a finished card's later turns are runs of the card, not attempts ──
 
 def _consultation(con, tid):
     return con.execute("SELECT * FROM task_runs WHERE task_id=? AND phase='consult' ORDER BY started_at DESC, "
@@ -220,7 +218,7 @@ async def test_her_session_closing_mid_answer_settles_the_consultation(card):
     con, tid, out, part = card
     await _complete(con, tid, out, part)
     await part.agent_start()
-    part._con = tasks.connect(os.path.join(tasks.get(con, tid)["workspace"], "board.db"))   # hers to close
+    part._con = tasks.connect(os.path.join(tasks.get(con, tid)["workspace"], "board.db"))
     await part.session_shutdown()
     assert _consultation(con, tid)["summary"] == "her session ended before she answered"
 

@@ -80,7 +80,6 @@ async def test_bulk_dispatch_checks_actual_targets_before_starting_anything(boar
         await board.call("misaka_dispatch", confirmed=True)
     board.runtime.launch.assert_not_called()
     assert sent == []
-    # Explicit ordinary work remains runnable beside Research; [] means no work.
     await board.call("misaka_dispatch", confirmed=True, task_ids=[])
     assert sent == []
     board.runtime.launch.assert_not_called()

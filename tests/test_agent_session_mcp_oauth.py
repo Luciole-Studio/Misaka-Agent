@@ -73,7 +73,6 @@ async def setup(stack: AsyncExitStack, browser: str, oauth: dict[str, Any] | Non
 
     async def location(url: str) -> str:
         response = await fetch(url, {"redirect": "manual"})
-        # MISAKA fork: the unread body is dropped, which releases its connection; Node collects it instead.
         if response.body is not None:
             await response.body.cancel()
         return response.headers.get("location") or ""
@@ -255,7 +254,6 @@ async def test_registers_with_the_configured_client_name(stack):
 
     fallbackHarness, fallbackServer, _notifications, _backend, _opened = await setup(stack, "follow")
     await prompt(fallbackHarness, "/mcp login issues")
-    # MISAKA fork: misaka registers as `misaka`, where pi registers as `pi`.
     assert [metadata["client_name"] for metadata in fallbackServer.registrations] == ["misaka"]
     # OpenID Connect servers reject the loopback redirect URI of a `web` client (#10493).
     assert [metadata["application_type"] for metadata in fallbackServer.registrations] == ["native"]

@@ -44,8 +44,6 @@ class SystemOneWireRequest(TypedDict):
 class SystemOneTransport:
     """Differences between services that serve System One models."""
 
-    # MISAKA fork: upstream's interface, as a dataclass of callables.
-    # Classifier API implemented by this transport.
     api: ClassifierApi
     # Service name used in error messages.
     label: str
@@ -118,7 +116,6 @@ def _parseAnswers(label: str, value: Any, context: ClassifierContext) -> dict[st
 def _wireRequest(context: ClassifierContext) -> SystemOneWireRequest:
     """Maps public `bool` questions to TypeSafe's wire-level `noul` type."""
 
-    # MISAKA fork: a question is a pydantic model; `model_dump` stands in for the object spread.
     def wire(question: Any) -> dict[str, Any]:
         return question.model_dump(exclude_none=True)
 
@@ -148,7 +145,6 @@ async def classifySystemOne(
     )
 
     try:
-        # MISAKA fork: a plain mapping context is read into ClassifierContext.
         context = context if isinstance(context, ClassifierContext) else ClassifierContext.model_validate(context)
         if model.api != transport.api:
             raise RuntimeError(f"Unsupported classifier API: {model.api}")

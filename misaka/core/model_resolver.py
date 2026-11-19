@@ -116,7 +116,6 @@ class ModelReferenceRequest:
     fuzzy: bool
 
 
-# MISAKA fork: the arms of upstream's `ModelReferenceResult` union are named dataclasses.
 @dataclass(slots=True)
 class ModelReferenceResolved:
     model: Model

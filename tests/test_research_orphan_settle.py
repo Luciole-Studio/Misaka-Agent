@@ -106,7 +106,7 @@ async def test_stop_settles_a_run_whose_driver_died(board, tmp_path, monkeypatch
     assert final["customType"] == "research-final"
     assert report in final["content"] and "The user requested a stop." in final["content"]
     assert Path(report).read_text(encoding="utf-8").startswith("# Incomplete research run")
-    assert "# Incomplete research run" not in final["content"]       # where the report is, not the report
+    assert "# Incomplete research run" not in final["content"]
 
 
 async def test_opening_the_conversation_settles_only_its_own_orphans(board, tmp_path, monkeypatch):
@@ -114,7 +114,7 @@ async def test_opening_the_conversation_settles_only_its_own_orphans(board, tmp_
     orphan = stuck(board, str(tmp_path))
     theirs = stuck(board, str(tmp_path), session="another")
     driven = stuck(board, str(tmp_path))
-    assert runs.acquire_driver(board, driven, live_lock())            # a live driver is stopping it
+    assert runs.acquire_driver(board, driven, live_lock())
     running = runs.create(board, workspace=str(tmp_path), question="Fixture question", origin_session="lo")["id"]
     try:
         await lo.part.session_start({"type": "session_start"}, lo.ctx)
@@ -153,7 +153,7 @@ async def test_close_takes_a_paused_run_out_of_its_conversation(board, tmp_path,
     finally:
         await lo.part._cleanup({}, lo.ctx)
     assert research.mode_notice(runs.for_session(board, "lo")) is None
-    assert runs.get(board, rid)["status"] == status                  # the run itself is as it was
+    assert runs.get(board, rid)["status"] == status
     assert lo.notices[-1][1] == "info" and "Research mode closed" in lo.notices[-1][0]
 
 
@@ -178,7 +178,7 @@ async def test_a_driver_started_from_a_window_binds_a_closed_run_to_it_again(boa
     assert (await workflow.run(board, {}, object(), run_id=rid))["reason"] == "stopped"
     assert runs.close(board, rid, "lo")
     assert runs.for_session(board, "lo") == []
-    await workflow.run(board, {}, object(), run_id=rid, origin_session="lo")     # what /research resume starts
+    await workflow.run(board, {}, object(), run_id=rid, origin_session="lo")
     assert [run["id"] for run in runs.for_session(board, "lo")] == [rid]
 
 

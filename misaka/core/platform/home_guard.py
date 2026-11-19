@@ -27,13 +27,9 @@ from misaka.config import home
 from misaka.core.wiring import KINDS
 from misaka.utils.values import read_field
 
-# Directories a session is handed through its environment, besides its workspace.
 _GRANTS = ("MISAKA_TASK_OUTPUT_DIR", "MISAKA_SUBAGENT_MEMORY_DIR")
 _SHELLS = frozenset({"bash", "powershell"})
-# Sisters' cards and the sub-agents they start: the sessions that work for Last Order, unattended.
 _WORKER_KINDS = frozenset({"card", "beast", "child"})
-# The sessions whose file tools are checked: every kind with a person or a card in it, and Last
-# Order's own one-shots (Sister one-shots and beast wrap-ups have no file tools to check).
 _PATH_KINDS = frozenset({"foreground", "dm", "card", "child"})
 
 SESSION_KINDS = KINDS
@@ -68,26 +64,23 @@ class HomeGuard:
     command left at the top of the home, once, on that command's result."""
 
     def __init__(self, kind="foreground", workspace=None, *, guard_paths=False, report_strays=True):
-        self.tools = []                     # a part without tools of its own
+        self.tools = []
         self._kind = kind
         self._workspace = workspace or os.getcwd()
         self._guard_paths = guard_paths
         self._report_strays = report_strays
-        self._seen = set(home.strays())     # what was already there is not this session's doing
+        self._seen = set(home.strays())
 
     def _refusal(self, path):
         """Why this session's file tool may not write ``path``, or None."""
         from misaka.core.platform import owners
         from misaka.core.tools.path_utils import resolveToCwd
 
-        # Resolved as write and edit resolve it (a leading @, file://, Unicode spaces): a target
-        # read any other way let `@PROJECT.md` past this check onto PROJECT.md.
         target = os.path.realpath(resolveToCwd(str(path or ""), self._workspace))
         if self._kind in _WORKER_KINDS and _is_context_file_above(target, self._workspace):
             return ("PROJECT.md, AGENTS.md and CLAUDE.md here are what every later session in this "
                     "project reads as its instructions; a Sister or sub-agent does not change them. "
                     "Tell Last Order what should change.")
-        # The card owners' rule too: what a workflow's run saved and froze is not the tools' to change (B126).
         return refusal(target, self._workspace, self._kind) or owners.frozen_refusal(target)
 
     async def tool_call(self, event, ctx=None):
@@ -101,7 +94,6 @@ class HomeGuard:
             from misaka.core.tools._office.paths import output_paths
             from misaka.core.tools.office import prepare_office_input
             parsed, path, ops = prepare_office_input(args, self._workspace)
-            # Pass the very ops we checked onward; re-reading @ops could change destinations.
             prepared = {"path": path, "ops": ops, "overwrite": parsed.overwrite}
             reason = next(filter(None, (self._refusal(target) for target in output_paths(path, ops))), None)
         elif tool in ("write", "edit"):
@@ -131,11 +123,10 @@ def part(spec):
     from misaka.config.profiles import is_last_order
     from misaka.core.wiring import role_key
 
-    # As parts_for counts it: Last Order's beast wrap-up is one of her one-shots.
     kind = "bare" if role_key(spec) == "last_order" and spec.kind == "beast" else spec.kind
     guard_paths = kind in _PATH_KINDS or (kind == "bare" and is_last_order(spec.profile_dir))
     if kind == "bare" and not guard_paths:
-        return None   # a Sister's one-shot or beast wrap-up: nothing to check
+        return None
     return HomeGuard(spec.kind, spec.workspace, guard_paths=guard_paths, report_strays=kind != "bare")
 
 

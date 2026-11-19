@@ -27,12 +27,8 @@ import json
 from misaka.core.messages import convertToLlm
 from misaka.utils.values import read_field
 
-# Placeholder for a content block that has no useful text: the durable store keeps the
-# turn's shape and its position without the payload.
 _OMITTED = "[{kind} omitted]"
 
-# Blocks that are not the message's content in upstream's shape: tool calls travel as
-# ``tool_calls``, and reasoning does not travel at all (see the module docstring).
 _NOT_CONTENT = frozenset({"toolCall", "thinking"})
 
 NOTICE = "notice"
@@ -163,8 +159,6 @@ def to_upstream(message) -> dict:
         ]
     converted = {"role": "tool" if role == "toolResult" else role, "content": content}
     if timestamp is not None:
-        # Unix seconds: upstream rejects anything it cannot read as an observation time,
-        # and misaka counts milliseconds.
         converted["timestamp"] = float(timestamp) / 1000
     if role == "assistant":
         converted["tool_calls"] = _tool_calls_of(read_field(message, "content")) or []
@@ -211,9 +205,6 @@ def source_messages(messages):
     return projected
 
 
-# Assistant rows the live context may lack while the archive keeps them: pi's retry loop
-# removes a failed or truncated tail before the next request, and an aborted turn leaves
-# an entry the live list does not always carry the same way (2026-09-18, B11).
 DROPPABLE_STOPS = frozenset({'error', 'length', 'aborted'})
 
 
@@ -275,12 +266,7 @@ def session_id(ctx) -> str:
         return ""
 
 
-# Private transport metadata. Never inferred from message text or written onto native
-# messages; it survives upstream's dict-copy cleanup so identical siblings stay distinct.
 SOURCE = '_misaka_replay_source'
-# Hermes' semantic flags live in checkpoint details, not provider message schemas.
-# The archive bookkeeping markers (_db_persisted/_compaction_tail) are not needed:
-# SessionManager already owns raw entry identity and checkpoint adoption.
 NATIVE_METADATA = frozenset({'_compressed_summary', '_compressed_summary_has_user_turn',
                              '_micro_compact_marker', '_inflight_replay_merged'})
 
@@ -337,7 +323,7 @@ class Replay:
         self.messages = []
         for message in messages:
             if not is_memory(message):
-                continue                    # the same rule as upstream_messages, or the source ordinals drift
+                continue
             for row in _rows(message):
                 index = len(self.originals)
                 self.originals.append(copy.deepcopy(message))
@@ -383,9 +369,6 @@ class Replay:
                 seen.add(source)
                 if replay.get('role') != before['role']:
                     raise ValueError('LCM changed the role of a source message')
-                # Empty fields have two spellings on this seam (upstream's sanitize writes
-                # ``""`` and omits ``tool_calls``, to_upstream writes ``[]``); neither is a
-                # change to the source row.
                 if all(_same_content(replay.get(key), before.get(key)) for key in
                        ('role', 'content', 'tool_calls', 'tool_call_id', 'tool_name')):
                     restored.append(copy.deepcopy(self.originals[source]))
@@ -399,7 +382,7 @@ class Replay:
             if read_field(original, 'role') in {'user', 'assistant', 'toolResult', 'custom'}:
                 if hasattr(original, 'model_dump'):
                     payload = original.model_dump(mode='json')
-                elif dataclasses.is_dataclass(original):     # a native CustomMessage is a slots dataclass
+                elif dataclasses.is_dataclass(original):
                     payload = dataclasses.asdict(original)
                 else:
                     payload = copy.deepcopy(original)
@@ -432,13 +415,9 @@ class Replay:
             elif role == 'tool':
                 payload.update(toolCallId=str(replay.get('tool_call_id') or ''),
                                toolName=str(replay.get('tool_name') or payload.get('toolName', '')))
-                payload.setdefault('isError', True)  # generated missing-result stub
-            # UserMessage supports strings: preserve the engine's wire shape.
-            # Wrapping a generated summary in a text-block list inflated request
-            # pressure after checkpoint restore and could shift later budget cuts.
+                payload.setdefault('isError', True)
             payload['content'] = content if role == 'user' and isinstance(content, str) else native_blocks
             if payload['role'] == 'custom':
-                # Custom-message metadata belongs to its native UI wrapper, not the wire.
                 convertToLlm([payload])
                 restored.append(payload)
             else:

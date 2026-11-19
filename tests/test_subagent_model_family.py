@@ -9,7 +9,6 @@ import pytest
 
 from misaka.core.subagent.model import resolve_model_spec
 
-# The provider of the 2026-10-25 run, as its models.json listed it.
 GATEWAY = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-5-5",
            "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5-20251101",
            "claude-sonnet-4-6", "claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001"]
@@ -39,12 +38,12 @@ def test_the_parent_family_keeps_the_parent_model():
 
 
 @pytest.mark.parametrize("ids, expected", [
-    (["claude-opus-4-9", "claude-opus-4-10"], "claude-opus-4-10"),                       # numbers, not text
-    (["claude-opus-4-5-20251101", "claude-opus-4-5"], "claude-opus-4-5"),               # undated first
+    (["claude-opus-4-9", "claude-opus-4-10"], "claude-opus-4-10"),
+    (["claude-opus-4-5-20251101", "claude-opus-4-5"], "claude-opus-4-5"),
     (["claude-opus-5", "claude-opus-5-5", "claude-opus-4-8"], "claude-opus-5-5"),
-    (["claude-3-opus-20240229", "claude-opus-4-1-20250805"], "claude-opus-4-1-20250805"),  # older naming
+    (["claude-3-opus-20240229", "claude-opus-4-1-20250805"], "claude-opus-4-1-20250805"),
     (["anthropic/claude-opus-5.5:batch", "anthropic/claude-opus-5.5", "anthropic/claude-opus-4.8"],
-     "anthropic/claude-opus-5.5"),                                                      # not a variant
+     "anthropic/claude-opus-5.5"),
 ])
 def test_newest_is_read_off_the_version(ids, expected):
     assert _resolve("opus", "claude-sonnet-5-5", ids) == ("gateway", expected)

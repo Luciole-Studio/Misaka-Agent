@@ -66,7 +66,7 @@ async def test_a_file_that_grows_past_the_limit_is_refused_not_truncated(tmp_pat
 
     def stat_then_grow(absolute_path, **kwargs):
         status = real_regular_file(absolute_path, **kwargs)
-        path.write_text("a" * 4096, encoding="utf-8")                  # another writer, between the stat and the read
+        path.write_text("a" * 4096, encoding="utf-8")
         return status
 
     monkeypatch.setattr(_common, "regular_file", stat_then_grow)

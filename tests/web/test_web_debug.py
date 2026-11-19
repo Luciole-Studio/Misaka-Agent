@@ -239,7 +239,6 @@ async def test_retry_attempt_ids_join_the_existing_ledger_once(tmp_path, monkeyp
     assert len(requests) == len(billed) == row["attempt_count"] == 2
     assert [b["web_attempt"] for b in billed] == [1, 2]
     assert all(b["web_trace_id"] == row["trace_id"] for b in billed)
-    # Context completion is not HTTP success: a 503 also completed its request.
     assert [e["outcome"] for e in row["events"] if e["kind"] == "attempt"] == ["completed", "completed"]
 
 
@@ -441,7 +440,7 @@ async def test_retention_permissions_and_bounded_events_preserve_unrelated_files
     files = [p for p in root.glob("web-debug-*.json") if not p.is_symlink()]
     assert len(files) == 3 and not old.exists()
     assert untouched.read_text(encoding="utf-8") == "keep" and target.read_text(encoding="utf-8") == "keep private"
-    posix = sys.platform != "win32"            # Windows has no owner-only mode bits; chmod sets read-only at most
+    posix = sys.platform != "win32"
     assert not posix or root.stat().st_mode & 0o777 == 0o700
     for path in files:
         assert path.stat().st_size <= 2048 and (not posix or path.stat().st_mode & 0o777 == 0o600)

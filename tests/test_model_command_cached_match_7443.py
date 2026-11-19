@@ -36,6 +36,5 @@ async def test_uses_a_caller_owned_deadline_only_after_a_cache_miss(monkeypatch)
         assert await InteractiveMode.findExactModelMatch(context, "not-cached") is None
 
         refresh.assert_called_once()
-        # MISAKA fork: the refresh gets an abort signal object (the coordinator's own controller, which is its signal).
         assert hasattr(refresh.call_args.args[0].signal, "aborted")
         context.showStatus.assert_called_with("Refreshing model catalogs…")

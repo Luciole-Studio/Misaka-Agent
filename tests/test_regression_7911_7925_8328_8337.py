@@ -154,9 +154,6 @@ async def test_does_not_compact_when_the_zero_usage_message_estimate_is_below_th
             assistant,
         ]
 
-        # MISAKA fork: `_runAutoCompaction` is always called and applies the threshold itself (after asking an
-        # installed context engine), where pi checks `shouldCompact` first and never calls it; so this checks that
-        # no compaction starts instead of spying on the call.
         assert await harness.session._checkCompaction(assistant) is False
         assert harness.eventsOfType("compaction_start") == []
 

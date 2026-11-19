@@ -14,11 +14,6 @@ from misaka.durable.session.session import SessionImpl, setDefaultDocumentRetent
 from misaka.durable.storage.memory import MemoryStorage
 from misaka.utils.js import jsNumber
 
-# MISAKA fork: pi's ``test/setup-document-retention.ts``, a vitest setup file loaded for every test file. misaka has no
-# durable conftest, so this runs when this helper is first imported (directly or through the chat, harness, and task
-# helpers), which pytest's collection does before any test runs: ``MISAKA_DURABLE_DOCUMENT_RETENTION_MS`` (upstream
-# ``PI_DURABLE_DOCUMENT_RETENTION_MS``) sets the document retention of every Session that keeps the default, so the
-# suite can run with each unattached document evicted right after use.
 _forcedRetention = os.environ.get("MISAKA_DURABLE_DOCUMENT_RETENTION_MS")
 if _forcedRetention is not None:
     setDefaultDocumentRetention(jsNumber(_forcedRetention))

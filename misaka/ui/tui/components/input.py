@@ -50,7 +50,6 @@ class Input(Component):
             options = InputOptions()
         self.value: str = ""
         self.cursor: int = 0  # Cursor position in the value
-        # MISAKA fork (D1): upstream's `renderedStartColumn` follows here.
         self.onSubmit: Callable[[str], None] | None = None
         self.onEscape: Callable[[], None] | None = None
 
@@ -219,8 +218,6 @@ class Input(Component):
         if not hasControlChars:
             self.insertCharacter(data)
 
-    # MISAKA fork (D1): upstream's `handleMouse` follows here.
-
     def insertCharacter(self, char: str) -> None:
         # Undo coalescing: consecutive word chars coalesce into one undo unit
         if isWhitespaceChar(char) or self.lastAction != "type-word":
@@ -369,8 +366,6 @@ class Input(Component):
 
         # Clean the pasted text - remove newlines and carriage returns
         cleanText = pastedText.replace("\r\n", "").replace("\r", "").replace("\n", "").replace("\t", "    ")
-        # MISAKA fork: control characters go too, as `handleInput` refuses them from the keyboard; upstream inserts
-        # them, and a pasted "\x1b[2J" then runs as a control sequence when `render` writes the value out.
         cleanText = "".join(
             char for char in cleanText if not (ord(char) < 32 or ord(char) == 0x7F or 0x80 <= ord(char) <= 0x9F)
         )

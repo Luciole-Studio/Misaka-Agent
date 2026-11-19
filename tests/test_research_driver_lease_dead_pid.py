@@ -41,9 +41,9 @@ def test_a_dead_driver_on_this_host_is_taken_over_at_once(run):
 
 
 @pytest.mark.parametrize("lock", [
-    f"driver:{socket.gethostname()}:{os.getpid()}:live",   # this very process
-    "driver:some-other-host:1:foreign",                      # never judged from here
-    "driver:junk",                                           # not a process at all
+    f"driver:{socket.gethostname()}:{os.getpid()}:live",
+    "driver:some-other-host:1:foreign",
+    "driver:junk",
 ])
 def test_a_live_foreign_or_unreadable_lease_still_waits_for_the_ttl(run, lock):
     con, row = run

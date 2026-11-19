@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/minimax.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "minimax.json").read_text(encoding="utf-8"))
 
 MINIMAX_MODELS = flattenChatModelCatalog("minimax", _values)

@@ -80,8 +80,6 @@ NON_PUBLIC = [
     ("unique-local-v6", "fc00::1"),
     ("multicast-v6", "ff02::1"),
     ("mapped-loopback", "::ffff:127.0.0.1"),
-    # CPython reports is_global True for these two: the predicate must not lean
-    # on is_global alone.
     ("site-local-v6", "fec0::1"),
     ("site-local-v6-top", "feff::1"),
 ]
@@ -202,15 +200,10 @@ async def test_the_socket_is_pinned_to_the_vetted_address(resolver):
         "https://public.example/a?q=1", transport=transport
     ) as response:
         assert response.status_code == 200
-        # The caller still sees the URL it asked for, not the pinned one.
         assert str(response.url) == "https://public.example/a?q=1"
     assert sent[0]["url"] == f"https://{PUBLIC}/a?q=1"
     assert sent[0]["headers"]["host"] == "public.example"
-    # Without this the TLS handshake would verify the certificate against the IP
-    # literal, so every pinned https fetch would fail -- or, worse, be made to
-    # pass by relaxing verification.
     assert sent[0]["extensions"]["sni_hostname"] == "public.example"
-    # One resolution only: nothing is left for a rebinding resolver to answer.
     assert resolver.asked == ["public.example"]
 
 
@@ -336,8 +329,6 @@ async def test_the_body_is_read_only_up_to_the_cap(resolver):
         body, truncated = await bounded.read_bounded(response, max_bytes=100)
     assert truncated
     assert body == b"x" * 100
-    # The point of the cap is that the rest is never transferred: 2 * 64 crosses
-    # 100, so the remaining eight chunks must stay on the wire.
     assert pulled == 2
 
 
@@ -422,7 +413,6 @@ async def test_a_dribbling_server_is_stopped_by_the_total_deadline(resolver):
     transport = httpx.MockTransport(lambda _r: httpx.Response(200, content=chunks()))
     async with bounded.open_checked_stream("https://public.example/", transport=transport) as response:
         with pytest.raises(httpx.ReadTimeout):
-            # A deadline already in the past: the first chunk is enough to trip it.
             await bounded.read_bounded(
                 response, max_bytes=100_000, deadline=time.monotonic() - 1
             )

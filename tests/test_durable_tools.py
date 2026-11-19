@@ -118,7 +118,6 @@ def fakeApi(env: Any) -> SimpleNamespace:
     async def agent(*_: Any) -> dict[str, Any]:
         return {}
 
-    # MISAKA fork: `outputWindow` is None here because an absent attribute does not read as `undefined` in Python.
     api = SimpleNamespace(
         taskId=1,
         conversationId=1,

@@ -80,8 +80,6 @@ def scope_for(profile, workspace):
     if scope is not None and scope.profile == profile and scope.workspace == workspace:
         return scope
     from .vendor.skill_provenance import get_current_write_origin
-    # Actor restrictions and cancellation still apply across an explicit retarget;
-    # role storage, pins, references and read approvals must be resolved anew.
     controls = {"origin": get_current_write_origin()}
     if scope is not None:
         controls.update(deadline=scope.deadline, stop=scope.stop)
@@ -100,7 +98,7 @@ def event_id():
     return _event.get()
 
 
-USAGE_EVENTS_KEY = "\0misaka.ledger"  # Not a legal Skill identifier; native readers skip list-valued metadata.
+USAGE_EVENTS_KEY = "\0misaka.ledger"
 
 
 def usage_events():
@@ -239,8 +237,6 @@ def reset_ledger_actor(token):
 
 def referenced_skill_names():
     scope = current_scope()
-    # Protect raw declarations AND all matching physical role identities. Ambiguous
-    # names are never guessed, and staged removal cannot erase its own references.
     result = set(scope.references.referenced_skill_names()) if scope.references is not None else set()
     project_dir = home.project_dir(scope.workspace)
     for root in (home.path("subagents", scope.profile),
@@ -267,8 +263,6 @@ def rewrite_skill_refs(*, consolidated, pruned):
     refs = current_scope().references
     if refs is not None:
         return refs.rewrite_skill_refs(consolidated=consolidated, pruned=pruned)
-    # No scheduler is fabricated. Referenced Skills are protected BEFORE removal;
-    # fixed card snapshots do not need their dispatch metadata rewritten.
     affected = referenced_skill_names() & (set(consolidated) | set(pruned))
     return {"rewrites": [], "jobs_updated": 0, "jobs_scanned": 0,
             **({"error": "Protected definition references remain: " + ", ".join(sorted(affected))} if affected else {})}
@@ -337,8 +331,6 @@ def manifest_names(names):
     for name in names:
         paths = matches.get(name, [])
         if len(paths) > 1:
-            # A basename registry cannot establish which same-name source it owns.
-            # All candidates stay protected until provenance is made explicit.
             result.update(paths)
         elif paths:
             result.add(paths[0])

@@ -13,16 +13,15 @@ from misaka.core.platform import home_guard
 
 def test_an_agent_owns_shared_and_what_its_session_was_handed_and_nothing_else_in_the_home(tmp_path):
     inside = home.path("tasks_root") / "t_1"
-    assert home.agent_may_write(tmp_path / "project" / "report.md")              # not the home's business
+    assert home.agent_may_write(tmp_path / "project" / "report.md")
     assert home.agent_may_write(home.path("shared") / "corpus" / "a.pdf")
     assert home.agent_may_write(inside / "out.md", (str(inside),))
-    assert not home.agent_may_write(inside / "out.md")                           # nobody handed it over
+    assert not home.agent_may_write(inside / "out.md")
     for name in ("settings", "auth", "db", "roles_root", "log"):
         assert not home.agent_may_write(home.path(name), (str(inside),)), name
-    assert not home.agent_may_write(home.home() / "skill-library" / "x")         # how the mess began
-    # A workspace that merely contains the home -- a DM turn runs in $HOME -- grants nothing in it.
+    assert not home.agent_may_write(home.home() / "skill-library" / "x")
     assert not home.agent_may_write(home.path("settings"), (str(home.home().parent), str(home.home())))
-    assert not home.agent_may_write(home.home() / "shared/../settings.json")     # resolved, not read as text
+    assert not home.agent_may_write(home.home() / "shared/../settings.json")
 
 
 @pytest.mark.parametrize("kind", ["card", "child", "dm"])
@@ -51,7 +50,7 @@ def test_the_path_guard_asks_the_homes_rule_for_write_edit_and_office(tmp_path):
     assert call("edit", path=str(home.path("settings")), oldText="a", newText="b")["block"]
     assert call("write", path=str(home.path("shared") / "x.md"), content="x") is None
     assert call("write", path=str(tmp_path / "report.md"), content="x") is None
-    assert call("bash", command=f"cat {home.path('settings')}") is None      # a read is never refused
+    assert call("bash", command=f"cat {home.path('settings')}") is None
 
 
 def test_a_shell_command_that_litters_the_home_is_told_so_once_on_its_own_result():
@@ -59,16 +58,16 @@ def test_a_shell_command_that_litters_the_home_is_told_so_once_on_its_own_result
     (home.home() / "left-by-an-earlier-session").mkdir()
     guard = home_guard.HomeGuard()
     result = {"toolName": "bash", "content": [{"type": "text", "text": "ok"}]}
-    assert asyncio.run(guard.tool_result(result)) is None                        # nothing new
+    assert asyncio.run(guard.tool_result(result)) is None
     (home.home() / "skill-library").mkdir()
     (home.path("shared")).mkdir()
     note = asyncio.run(guard.tool_result(result))
-    assert note["content"][0]["text"] == "ok"                                    # the output is kept
+    assert note["content"][0]["text"] == "ok"
     assert "skill-library" in note["content"][-1]["text"] and "left-by-an-earlier" not in note["content"][-1]["text"]
-    assert asyncio.run(guard.tool_result(result)) is None                        # said once
+    assert asyncio.run(guard.tool_result(result)) is None
     (home.home() / "another").mkdir()
-    assert asyncio.run(guard.tool_result({"toolName": "read", "content": []})) is None   # only shells are checked
-    for name in ("left-by-an-earlier-session", "skill-library", "another"):      # leave the home as the table has it
+    assert asyncio.run(guard.tool_result({"toolName": "read", "content": []})) is None
+    for name in ("left-by-an-earlier-session", "skill-library", "another"):
         (home.home() / name).rmdir()
 
 

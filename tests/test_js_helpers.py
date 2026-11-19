@@ -130,7 +130,6 @@ async def test_timers_follow_nodes_delay_rules():
     from misaka.utils.js import AbortSignal, RangeError, setTimeout
 
     fired: list[str] = []
-    # A delay past the 32-bit range, as one below 1 ms, runs after 1 ms.
     setTimeout(lambda: fired.append("overflow"), 2**31)
     await asyncio.sleep(0.05)
     assert fired == ["overflow"]

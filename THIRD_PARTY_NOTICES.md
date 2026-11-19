@@ -21,10 +21,10 @@ MISAKA 的部分文件移植自其它项目。移植代码所附带的许可证�
   `packages/mcp`）、`misaka/codemode/**`（Pi 的 `packages/codemode`；其中 `quickjs_wasi/` 见下面的 quickjs-wasi 条）、
   `misaka/extensions/{mcp,codemode,tool_search}/**`，`misaka/{chord,durable,env}/**`
   （Pi 的同名 packages；`chord/loader.py` 与 `chord/manager.py` 是 Python 分叉），以及 `misaka/core/` 的内核
-  部分；这些目录自 2026-10-21 起对照 Pi 1.3.0。`misaka/core/` 逐目录、逐文件的归属清单是 `misaka/core/PI_ORIGIN.md`。
+  部分；这些目录自 2026-10-21 起对照 Pi 1.3.0。
   仓库里另有一处 Pi 来源：`tests/` 中移植的上游测试（含 faux provider 与 suite 测试夹具）。
-- 说明：MISAKA 的内核是 Pi 的 Python 移植，是本仓库最大的单一上游来源。分叉处在代码里
-  以 `# MISAKA fork:` 注释标出并说明理由。Pi 树内自带第三方许可证头的文件另见下面各条：
+- 说明：MISAKA 的内核是 Pi 的 Python 移植，是本仓库最大的单一上游来源。
+  Pi 树内自带第三方许可证头的文件另见下面各条：
   `utils/ansi.ts`（ansi-regex）、`tui/src/stdin-buffer.ts`（OpenTUI）、`mcp/src/oauth/{types,discovery,flow}.ts`
   （MCP TypeScript SDK）、`tui/src/oklab.ts`（Oklab）、`core/export-html/vendor/*.min.js`（marked、highlight.js）。
 
@@ -183,7 +183,7 @@ MISAKA 的部分文件移植自其它项目。移植代码所附带的许可证�
 - pin：`8d1b1e6d3d63f5fc7b209e8d7ec1dc9b814f2e54`（1.0.0-rc.1），见
   `misaka/extensions/misaka_lcm/UPSTREAM_COMMIT`
 - 本地 fork 名为 **MISAKA LCM**；上游测试在 `vendor/tests/`，MISAKA 适配层在 `host/`。
-  固定源码与已登记的宿主接缝见 `PORT_NOTES.md`；本轮核心字节校验见 `CORE_INTEGRITY.json`。
+  本轮核心字节校验见 `CORE_INTEGRITY.json`。
 
 ## PageIndex
 
@@ -273,7 +273,7 @@ Pi（coding agent）的 Python 移植；`misaka/ui/panel/**` 是 herdr 的移植
 - Web 增量对照：`62e5f466565ee56351e4483ead8e62f9e782f8b3`。本批移植 provider 提取时限语义及五个 browser vault 工具；不表示整个 Hermes 产品已完整移植。
 - Web 能力选择修复：移植 `010a45097e49fff00c32db954f56a2f9d6d08f17`（#113017）的共享选择判断及回归场景；仅配置 search/extract 之一时，另一能力继续原有自动检测。MISAKA 无旧 `use_gateway` 配置，保留原生 `backend: nous`；不改上游的凭证优先级或追加能力过滤。
 - Vault：`misaka/core/web/browser/vault/`，来自该增量提交的 `agent/vault_store.py`、`agent/vault_login_classifier.py`、`agent/vault_backends/` 与 `tools/browser_vault_tool.py`。许可证为同目录 `LICENSE`；逐文件来源及 SHA256 见 `PROVENANCE.json`。宿主桥接、masked TUI、权限、资源清理及额外边界修复是 MISAKA 原生适配。
-- Web 回归：`tests/web/` 保留本地历史回归及选取的 Hermes vault 测试；`tests/web/fixtures/hermes_990473a/` 为固定基准源码夹具，保留原文及同目录 MIT 许可证，见 `tests/web/README.md`。
+- Web 回归：`tests/web/` 保留本地历史回归及选取的 Hermes vault 测试；`tests/web/fixtures/hermes_990473a/` 为固定基准源码夹具，保留原文及同目录 MIT 许可证。
 - Parallel `parallel-web==0.4.2`：重试协议适配，MIT，Copyright 2026 Parallel；文本：`misaka/core/web/LICENSE.parallel-web`。
 - Firecrawl `firecrawl-py==4.17.0`：重试、错误信封及 scrape 默认参数适配，MIT，Copyright (c) 2024 Sideguide Technologies Inc.；文本：`misaka/core/web/LICENSE.firecrawl-py`。
 - SDK wheel 仅用于离线源码/差分核查，未作为新增运行依赖或整包 vendoring；版本与 SHA 见 `docs/audits/web-tools-vs-hermes-2026-09-09/provider-parity-evidence/sdk-manifest.json`。

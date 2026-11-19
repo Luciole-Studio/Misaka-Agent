@@ -138,8 +138,6 @@ def isTermuxSession() -> bool:
     return bool(os.environ.get("TERMUX_VERSION"))
 
 
-# MISAKA fork (D1): upstream's `TuiMainScreenRenderState` follows here.
-
 
 def toISOString() -> str:
     """MISAKA fork: ``new Date().toISOString()``."""
@@ -151,7 +149,6 @@ class TuiMainScreen(TuiBase):
 
     def __init__(self, terminal: Any, showHardwareCursor: bool | None = None, logDirectory: str | None = None) -> None:
         super().__init__(terminal, showHardwareCursor, logDirectory)
-        # MISAKA fork (D1): upstream's `mode` follows here.
         self.previousLines: list[str] = []
         self.previousKittyImageIds: set[int] = set()
         self.previousWidth = 0
@@ -160,11 +157,8 @@ class TuiMainScreen(TuiBase):
         self.hardwareCursorRow = 0
         self.maxLinesRendered = 0
         self.previousViewportTop = 0
-        # MISAKA fork: the render lock and the resize fast path (see the module docstring).
         self._renderLock = threading.Lock()
         self._needs_full_rebuild = False
-
-    # MISAKA fork (D1): upstream's `captureRenderState` and `restoreRenderState` follow here.
 
     def resetRenderState(self) -> None:
         self.previousLines = []
@@ -247,7 +241,6 @@ class TuiMainScreen(TuiBase):
         return self.deleteKittyImages(ids)
 
     def doRender(self) -> None:
-        # MISAKA fork: on the loop that owns rendering, one frame at a time, its cost recorded.
         if self._queue_to_owner(self.doRender):
             return
         if self.stopped:
@@ -278,9 +271,6 @@ class TuiMainScreen(TuiBase):
         height = self.terminal.rows
         widthChanged = self.previousWidth != 0 and self.previousWidth != width
         heightChanged = self.previousHeight != 0 and self.previousHeight != height
-        # MISAKA fork: a resize paints the viewport from the transcript's tail (a few ms) instead of re-wrapping the
-        # whole transcript (hundreds of ms); the full buffer is rebuilt once the size settles. A height change on
-        # Termux (its software keyboard) keeps upstream's differential path, which never clears the scrollback.
         if (
             (widthChanged or (heightChanged and not isTermuxSession()))
             and self.previousLines
@@ -306,8 +296,6 @@ class TuiMainScreen(TuiBase):
         if self.hasOverlayEntries:
             newLines = self.compositeOverlays(newLines, width, height)
 
-        # MISAKA fork: a long transcript can take a second or more to lay out; a frame laid out for the old width
-        # written into the new one wraps every row. Nothing was written yet, so lay it out again for the size now.
         if (self.terminal.columns, self.terminal.rows) != (width, height):
             self.requestRender()
             return
@@ -374,8 +362,6 @@ class TuiMainScreen(TuiBase):
             with open(logPath, "a", encoding="utf-8", newline="") as handle:
                 handle.write(msg)
 
-        # MISAKA fork: after one or more fast viewport frames the size has settled; rebuild the whole buffer once, so
-        # the scrollback and the diff model are correct again.
         if self._needs_full_rebuild:
             self._needs_full_rebuild = False
             fullRender(True)
@@ -686,8 +672,6 @@ class TuiMainScreen(TuiBase):
         else:
             self.terminal.hideCursor()
 
-    # --- MISAKA fork: the crash log and the resize fast path ----------------------------------------------------------
-
     def _crashLogPath(self) -> str:
         """``path.join(this.logDirectory ?? os.tmpdir(), "pi-tui-crash.log")``, with MISAKA's home in place of the
         temp directory."""
@@ -732,8 +716,6 @@ class TuiMainScreen(TuiBase):
             return True
         if any(isImageLine(line) for line in tail):
             return False
-        # MISAKA fork: this frame bypasses `doRender`'s body, so it resolves the fake cursors itself, as that does
-        # before it looks for the cursor; otherwise the raw APC markers reach the terminal.
         tail = self.resolveFakeCursors(tail)
         cursorPos = self.extractCursorPosition(tail, height)
         tail = self.applyLineResets(tail)

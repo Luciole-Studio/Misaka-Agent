@@ -29,19 +29,13 @@ def web_home(monkeypatch, tmp_path):
     async def resolve(*_args):
         return ["93.184.216.34"]
     monkeypatch.setattr(bounded, "_resolve_host", resolve)
-    path = home.path("settings")           # the "web" section lives here now
-    # The cursor is random per process; pin it so the walk order is assertable.
+    path = home.path("settings")
     monkeypatch.setattr(keyless.current_scope(), "cursor", [0])
     return path
 
 
 def write_config(_path, **keys) -> None:
     write_web(keys)
-
-
-# ---------------------------------------------------------------------------
-# HTTP stubbing (the idiom of tests/test_web_providers.py, which owns the original)
-# ---------------------------------------------------------------------------
 
 
 class _FakeClient:
@@ -126,10 +120,6 @@ def failed(url, error):
         "metadata": {"sourceURL": url},
     }
 
-
-# ---------------------------------------------------------------------------
-# Parallel: the one batched member
-# ---------------------------------------------------------------------------
 
 URLS = ["https://a.test", "https://b.test"]
 
@@ -264,11 +254,6 @@ async def test_parallel_extract_reports_an_unreachable_endpoint(monkeypatch):
     assert "request failed" in out[0]["error"]
 
 
-# ---------------------------------------------------------------------------
-# Exa: one call per URL, because the reply is one undivided text
-# ---------------------------------------------------------------------------
-
-
 async def test_exa_extract_calls_once_per_url_and_scrapes_the_title(monkeypatch):
     bodies = {URLS[0]: "# Page A\nbody a", URLS[1]: "Title: Page B\nbody b"}
 
@@ -324,11 +309,6 @@ async def test_exa_extract_keeps_going_after_one_page_fails(monkeypatch):
     assert out[1]["title"] == "B"
 
 
-# ---------------------------------------------------------------------------
-# Firecrawl: anonymous POST to the public cloud
-# ---------------------------------------------------------------------------
-
-
 async def test_firecrawl_extract_posts_anonymously_to_v2_scrape(monkeypatch):
     body = {"data": {"markdown": "# md", "metadata": {"title": "T", "sourceURL": "https://example.org/final"}}}
     calls = stub_http(monkeypatch, lambda *_: response(json_body=body))
@@ -342,7 +322,6 @@ async def test_firecrawl_extract_posts_anonymously_to_v2_scrape(monkeypatch):
     assert_entries(out, [URLS[0]])
     assert out[0]["title"] == "T"
     assert out[0]["content"] == "# md"
-    # The entry names the URL that was asked for, not whatever the vendor echoed.
     assert out[0]["metadata"] == {"sourceURL": "https://example.org/final", "title": "T"}
 
 
@@ -381,11 +360,6 @@ async def test_firecrawl_extract_turns_a_throttle_into_a_rate_limitish_entry(mon
     assert_entries(out, [URLS[0]])
     assert "429" in out[0]["error"]
     assert keyless.is_rate_limitish(out[0]["error"])
-
-
-# ---------------------------------------------------------------------------
-# Keenable: GET the public fetch endpoint
-# ---------------------------------------------------------------------------
 
 
 async def test_keenable_extract_gets_the_public_endpoint(monkeypatch):
@@ -435,11 +409,6 @@ async def test_keenable_extract_survives_a_non_object_body(monkeypatch):
 
     assert_entries(out, [URLS[0]])
     assert "expected a JSON object" in out[0]["error"]
-
-
-# ---------------------------------------------------------------------------
-# The ring: same walk as search, different failover evidence
-# ---------------------------------------------------------------------------
 
 
 def stub_extractor(monkeypatch, vendor, results, seen=None):

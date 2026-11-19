@@ -14,12 +14,9 @@ from pathlib import Path
 
 import pytest
 
-# Module-level constants and import-time lookups land here rather than in the real home.
 _SESSION_HOME = tempfile.mkdtemp(prefix="mh-", dir="/tmp" if os.path.isdir("/tmp") else None)
 os.environ["MISAKA_HOME"] = _SESSION_HOME
 os.environ["MISAKA_OFFLINE"] = "1"
-# Every Python process `misaka` starts on Windows runs in UTF-8 mode (misaka/windows_bootstrap.py
-# sets it for them); the children a test starts get the same, not the ANSI code page of this one.
 if os.name == "nt":
     os.environ.setdefault("PYTHONUTF8", "1")
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
@@ -38,7 +35,7 @@ def misaka_home(monkeypatch):
     yield root
     from misaka.config import home
 
-    monkeypatch.setenv("MISAKA_HOME", root)          # a test may have pointed it elsewhere
+    monkeypatch.setenv("MISAKA_HOME", root)
     strays = home.strays()
     shutil.rmtree(root, ignore_errors=True)
     assert not strays, f"written into the home without a row in misaka.config.home.LAYOUT: {strays}"

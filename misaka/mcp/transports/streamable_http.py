@@ -260,8 +260,6 @@ class StreamableHttpTransport(TransportEvents):
         })
         self.url = URL(options["url"])
         fetch = options.get("fetch")
-        # MISAKA fork: without an injected fetch the transport keeps a connection pool of its own, as
-        # undici's dispatcher does for `globalThis.fetch`, and closes it in `close()`.
         self._client: httpx.AsyncClient | None = None if fetch is not None else _fetch.createClient()
         if fetch is None:
             client = self._client
@@ -277,9 +275,6 @@ class StreamableHttpTransport(TransportEvents):
 
             fetch = defaultFetch
         self._fetch: McpFetch = fetch
-        # MISAKA fork: the auth provider's refresh may still run after `close()` has shut the pool, so
-        # it gets a fetch that opens its own connection, as undici's global fetch is not tied to this
-        # transport. An injected fetch is shared as upstream shares it.
         self._authFetch: McpFetch = _fetch.fetch if options.get("fetch") is None else fetch
         self._controller = AbortController()
         self._started = False
@@ -289,9 +284,7 @@ class StreamableHttpTransport(TransportEvents):
         self._getStreamStarted = False
         # Access token of the latest request, which `close()` reuses instead of asking the auth provider.
         self._lastToken: str | None = None
-        # MISAKA fork: asyncio holds tasks weakly; the stream readers live here until they finish.
         self._tasks: set[asyncio.Task[Any]] = set()
-        # MISAKA fork: the rest of `close()`, which runs to its end even when its caller is cancelled.
         self._closing: asyncio.Task[None] | None = None
 
     @property
@@ -331,7 +324,6 @@ class StreamableHttpTransport(TransportEvents):
                 self._startGetStream()
             return
         if response.status == 202 or response.status == 204:
-            # MISAKA fork: the unread body is closed, so its connection returns to the pool.
             await discard(response)
             raise McpHttpError(response.status, f"MCP server accepted request {message['method']} without a response")
         type = contentType(response)
@@ -351,8 +343,6 @@ class StreamableHttpTransport(TransportEvents):
             return
         self._closed = True
         self._controller.abort()
-        # MISAKA fork: a promise runs to its end whoever stops waiting for it. Cancelling the caller stops only
-        # its wait here, so the close event is still emitted and the connection pool still closed.
         self._closing = asyncio.ensure_future(self._finishClose())
         await asyncio.shield(self._closing)
 
@@ -373,9 +363,6 @@ class StreamableHttpTransport(TransportEvents):
             except Exception:  # noqa: BLE001, S110 - upstream `catch {}`
                 pass
         self._emitClose()
-        # MISAKA fork: then the transport's connection pool closes, after its stream readers. Those the abort
-        # did not end (one waiting on the auth provider) are cancelled: closing never waits for a refresh, and
-        # a refresh is shielded inside the provider, so it still saves its tokens.
         for task in list(self._tasks):
             task.cancel()
         if self._tasks:
@@ -492,8 +479,6 @@ class StreamableHttpTransport(TransportEvents):
                 },
             )
         finally:
-            # MISAKA fork: an httpx body holds a pooled connection until it is closed, where a released
-            # web stream is left to the garbage collector.
             aclose = getattr(stream, "aclose", None)
             if aclose is not None:
                 await aclose()
@@ -624,7 +609,6 @@ class StreamableHttpTransport(TransportEvents):
         try:
             return min(initial * 2**attempt, self._maxDelay())
         except OverflowError:
-            # MISAKA fork: JavaScript's product is `Infinity` here, and the minimum the maximum delay.
             return self._maxDelay()
 
     def _maxDelay(self) -> float:
@@ -659,8 +643,6 @@ class StreamableHttpTransport(TransportEvents):
 
         # `setTimeout` runs a delay below 1 ms, or outside its 32-bit range, after 1 ms.
         timer = loop.call_later((ms if 1 <= ms <= 2_147_483_647 else 1) / 1000, onTimer)
-        # A reconnect wait alone does not keep the process alive. MISAKA fork: asyncio timers never keep
-        # the process alive, so there is no `unref`.
         removeAbortListener = addAbortListener(signal, onAbort)
         return settled
 

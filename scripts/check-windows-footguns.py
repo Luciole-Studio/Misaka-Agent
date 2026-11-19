@@ -90,14 +90,12 @@ EXCLUDED_DIRS = {
     "site-packages",
     "website/build",
     "optional-skills",  # external skills
-    # MISAKA: vendored trees, checked against their own upstream pins.
     "vendor",
     "assets",
     "native",
     "pageindex",
 }
 
-# MISAKA: the trees ported from Hermes, which follow Hermes's read policy (utf-8-sig).
 HERMES_DERIVED = (
     "misaka/cli/dm.py",
     "misaka/config/env.py",
@@ -107,7 +105,6 @@ HERMES_DERIVED = (
     "misaka/extensions/misaka_lcm/host/",
 )
 
-# MISAKA: calls named read_text/write_text that are not pathlib's and are UTF-8 already.
 _OWN_TEXT_HELPERS = re.compile(r"\b(?:atomic|runs|dist|term|self)\.(?:read_text|write_text)\s*\(")
 
 # File globs we never scan (beyond the dirs above).
@@ -162,7 +159,6 @@ class Footgun:
     # the regex can't fully distinguish (e.g. open() where mode may contain
     # "b" for binary, or the line may have `encoding=` elsewhere).
     post_filter: "callable | None" = None
-    # MISAKA: when set, the rule applies only under these repo-relative prefixes.
     path_only: tuple[str, ...] = ()
 
 

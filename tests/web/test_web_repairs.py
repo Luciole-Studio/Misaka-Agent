@@ -99,7 +99,6 @@ async def test_extract_keeps_restricted_original_and_redacted_evidence(scope, tm
         assert originals[0].parent.stat().st_mode & 0o777 == 0o700
 
 async def test_controller_uses_default_deadline_not_requested_operation(scope, tmp_path, monkeypatch):
-    # serve() forwards owner.run(call) without _tool_name, demonstrated separately in source.
     from misaka.core.web.runtime import WebRuntime
     from misaka.core.web.timeouts import WebOperationTimeout
     write_web({'operation_timeout': {'default': 0.01, 'browser_exec': 1}}, profile=tmp_path)
@@ -190,7 +189,7 @@ BrowserManager.perform = action
 asyncio.run(serve())
 ''', encoding='utf-8')
     cfg = {'controller_command': [sys.executable, str(fixture)]}
-    if os.name == 'nt':                 # a Windows Python needs these to start and find home (Hermes's minimal env)
+    if os.name == 'nt':
         scope.environment = {name: os.environ[name] for name in ('SYSTEMROOT', 'USERPROFILE')}
     write_web({'operation_timeout': {'default': .03, 'browser_exec': 2}, 'browser': cfg}, profile=tmp_path)
     controller = Controller(str(tmp_path), cfg)
@@ -200,7 +199,6 @@ asyncio.run(serve())
     finally:
         await controller.close()
         if controller.proc is not None:
-            # Windows reports the pipe's EOF after the exit status; let it land before the loop closes.
             await asyncio.wait_for(controller.proc.stdout.read(), 5)
 
 async def test_removed_oopif_leaves_frame_tree(scope):

@@ -33,8 +33,6 @@ def sources(built, transcript):
     cache_key = entry_identity(expected)
     cache = vars(built).setdefault('_misaka_carried_sources', {})
     if cache_key in cache:
-        # Operator cleanup can remove the raw rows while native archives and
-        # carried nodes survive. Do not keep returning retired numeric handles.
         ids = set(cache[cache_key].values())
         if all(built._store._conn.execute(
                 f"SELECT COUNT(*) FROM messages WHERE store_id IN ({','.join('?' for _ in batch)})",
@@ -66,12 +64,8 @@ def sources(built, transcript):
         source_ctx = SimpleNamespace(sessionManager=manager, cwd=manager.getCwd(),
                                      lcm_project=built._misaka_project, model=None)
         original = ce.snapshot(source_ctx)
-        # Private import runtime: never rebind or reset a live source session's
-        # engine/cursor. It only ingests original archive messages, no summaries.
         importer = type(built)(config=built._config, hermes_home='')
         try:
-            # An archive reader is not a live owner, in either registry or DB.
-            # Let the original lifecycle code operate on private in-memory state.
             importer._register_active_engine_binding = lambda: None
             importer._unregister_active_engine_binding = lambda: None
             importer._lifecycle.close()
@@ -121,7 +115,6 @@ def references(built, transcript, ids):
 
 
 def source_ids(built, node):
-    # A carried node's raw lineage is NOT bounded by the new session's row count.
     limit = built._store._conn.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
     return built._dag.source_message_ids(node.node_id, limit=limit)
 
@@ -168,24 +161,16 @@ def rollover(target, transcript, ctx):
         old.rollover_session(old_id, new_id, previous_messages=originals,
                              carry_over_context=True, platform=old._misaka_source)
     except BaseException as error:
-        # No native replacement has happened. Retire the partially rebound
-        # engine so the old owner reopens from its last published checkpoint.
         try:
-            # The target is still unpublished and has no writer. Restore any
-            # already-moved DAG ownership before abandoning that target.
             old._dag.reassign_session_nodes(new_id, old_id)
             if (target_bytes is not None and target_path is not None and not target_path.is_symlink()
                     and target_path.exists() and target_path.read_bytes() == target_bytes):
                 target_path.unlink()
         except Exception as rollback_error:  # noqa: BLE001 - preserve the initiating failure and recovery receipt
-            # Keep the durable receipt if rollback itself failed; dropping it
-            # would strand the only native reference to the moved summaries.
             error.add_note(f'Carry rollback failed; target receipt retained: {rollback_error}')
         finally:
             ce.close(ctx)
         raise
-    # The target has no other owner yet. Transfer the same engine rather than
-    # replaying reset/start on a second instance or retaining a dead registry key.
     with ce._REGISTRY_LOCK:
         ce._ENGINES.pop(ce._key(ctx))
         ce._ENGINES[(str(old._store.db_path), new_id)] = old

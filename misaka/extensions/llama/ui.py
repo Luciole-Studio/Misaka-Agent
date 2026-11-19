@@ -49,7 +49,6 @@ from .huggingface import HuggingFaceModel
 
 DOWNLOAD_VALUE = "\0download"
 
-# MISAKA fork: asyncio holds tasks weakly; `void this.runSearch(...)` keeps its task here until it settles.
 _background: set[asyncio.Task[Any]] = set()
 
 
@@ -571,8 +570,6 @@ async def runWithProgress(ui: LlamaUi, options: RunWithProgressOptions) -> Progr
         stop = asyncio.ensure_future(progress)
         await asyncio.wait({settled, stop}, return_when=asyncio.FIRST_COMPLETED)
         if settled.done():
-            # MISAKA fork: a task started here for the wait is cancelled; the view's own promise stays pending, as the
-            # losing promise of `Promise.race` does.
             if stop is not progress:
                 stop.cancel()
             break

@@ -49,7 +49,7 @@ async def test_every_match_is_listed_across_documents(tmp_path, find):
     ids = [_doc(tmp_path, f"doc{n}", n, [f"page {page} needle here" for page in range(6)]) for n in range(4)]
     text = await find(query="needle")
     assert len(_lines(text)) == 24
-    assert f"{ids[-1]} p6" in text        # the newest document is reached
+    assert f"{ids[-1]} p6" in text
     assert "limit reached" not in text
 
 
@@ -67,7 +67,7 @@ async def test_the_byte_guard_says_how_much_it_shows(tmp_path, find, monkeypatch
     shown = len(_lines(text))
     assert 0 < shown < 60
     assert f"limit reached: {shown} of 60 matching pages shown" in text and "doc_id" in text
-    assert text.index("END-UNTRUSTED-DATA") < text.index("limit reached")   # the notice is ours
+    assert text.index("END-UNTRUSTED-DATA") < text.index("limit reached")
 
 
 async def test_no_match_still_says_so(tmp_path, find):
@@ -87,7 +87,6 @@ def _doc_command(tmp_path, monkeypatch, capsys, *argv):
 
 
 def test_the_command_line_lists_every_page_too(tmp_path, monkeypatch, capsys):
-    # It stopped at ten and printed "10 match(es)": a book with the word on 27 pages read as ten.
     one = _doc(tmp_path, "one", 1, [f"page {page} needle here, and needle again" for page in range(27)])
     _doc(tmp_path, "other", 2, ["needle elsewhere"])
     out = _doc_command(tmp_path, monkeypatch, capsys, "find", "needle")
@@ -98,7 +97,6 @@ def test_the_command_line_lists_every_page_too(tmp_path, monkeypatch, capsys):
 
 
 def test_the_command_line_tree_lists_every_page(tmp_path, monkeypatch, capsys):
-    # A deck has no heading tree, so its outline is one line a slide: forty of 120 read as forty.
     deck = _doc(tmp_path, "deck", 1, [f"Slide {page} title\nbody" for page in range(1, 121)])
     out = _doc_command(tmp_path, monkeypatch, capsys, "tree", deck)
     heads = [line for line in out.splitlines() if re.match(r"  p\d+ +Slide \d+ title$", line)]

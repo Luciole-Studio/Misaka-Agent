@@ -78,13 +78,6 @@ class AgentDefinition:
     critical_system_reminder: str | None = None
     omit_context_files: bool = False
 
-    # Frontmatter key -> field name, for the keys `_agent_value` is actually asked for.
-    # It is not a general vocabulary table: `parse` reads the frontmatter directly and
-    # only in camelCase (`permissionMode`, `maxTurns`, `initialPrompt`,
-    # `requiredMcpServers`, `mcpServers`), and `name`/`description` have no accepted
-    # alias at all -- a file written with `agentType:`/`whenToUse:` is skipped. Eleven
-    # further entries once sat here for spellings no caller ever looks up; they were
-    # removed rather than left implying a tolerance the parser does not have.
     _ALIASES: ClassVar[dict[str, str]] = {
         "disallowed": "disallowed_tools",
         "disallowedTools": "disallowed_tools",
@@ -167,8 +160,6 @@ def _effort(value: Any) -> str | int | None:
 def _positive_int(value: Any) -> int | None:
     from misaka.core.subagent.model import _as_js_number, parse_decimal_prefix
 
-    # CCB parsePositiveIntFromFrontmatter: numeric fractions are invalid;
-    # unlike effort, only non-number inputs go through String/parseInt.
     parsed = _as_js_number(value) if type(value) in (int, float) else parse_decimal_prefix(value)
     return int(parsed) if parsed is not None and math.isfinite(parsed) and parsed.is_integer() and parsed > 0 else None
 
@@ -201,7 +192,6 @@ def parse(path: str | os.PathLike[str], *, source: str = "built-in", base_dir: s
     if split is None:
         if source != "plugin":
             return None
-        # Plugin Markdown may omit frontmatter; file stem is its default name.
         split = {}, raw.strip(_JS_SPACE)
     meta, prompt = split
     if source == "plugin":
@@ -293,7 +283,6 @@ def _plugin_string(value: Any, seen: set[int] | None = None) -> str:
         finally:
             seen.remove(id(value))
     if isinstance(value, Mapping) and "toString" in value:
-        # JSON cannot contain a callable own toString; JS String then throws.
         raise ValueError("Plugin value cannot be converted to a primitive string")
     return "[object Object]"
 
@@ -329,10 +318,6 @@ def _from_plugin_metadata(meta, prompt, file_path, base_dir, plugin, diagnostics
             def data_path(_match):
                 directory = Path(plugin["data_dir"])
                 if plugin.get("data_home"):
-                    # Native local extensions have no marketplace identity.
-                    # The catalog supplies a role/root-scoped path, never a
-                    # manifest-controlled path. Like source getPluginDataDir,
-                    # mkdir happens only when DATA actually occurs in prose.
                     data_home = Path(plugin["data_home"])
                     current = data_home
                     for part in directory.relative_to(data_home).parts:
@@ -344,8 +329,6 @@ def _from_plugin_metadata(meta, prompt, file_path, base_dir, plugin, diagnostics
 
             prompt = re.sub(r"\$\{(?:CLAUDE|MISAKA)_PLUGIN_DATA\}", data_path, prompt)
         schema = plugin.get("userConfig")
-        # Source only reads/substitutes options when the manifest declares a
-        # schema. Empty objects are truthy in JS and still enable substitution.
         if isinstance(schema, Mapping):
             options = plugin.get("options") or {}
 
@@ -420,8 +403,6 @@ def _from_metadata(meta: Mapping[str, Any], prompt: str, *, file_path: Path | No
         mcp_servers=_mcp_servers(meta.get("mcpServers")),
         hooks=meta.get("hooks") if isinstance(meta.get("hooks"), dict) else None,
         color=_choice(meta.get("color"), COLORS),
-        # Builtin metadata transports the source programmatic reminder field;
-        # user/project/plugin Markdown does not gain this private declaration.
         critical_system_reminder=_string(meta.get("criticalSystemReminder")) if source == "built-in" else None,
         omit_context_files=meta.get("omitContextFiles") is True,
     )
@@ -453,8 +434,6 @@ def _plugin_definitions(plugin: Mapping[str, Any], diagnostics: list[dict[str, s
         for candidate in sorted(path.rglob("*.md")) if path.is_dir() else [path]:
             try:
                 resolved = candidate.resolve()
-                # Package agent discovery inherits the enabled extension's trust;
-                # a manifest is not a grant to read arbitrary files outside it.
                 resolved.relative_to(root)
                 if resolved in loaded or not candidate.is_file() or candidate.suffix != ".md":
                     continue
@@ -496,9 +475,6 @@ def _package_agent_source(base: str, settings: Mapping[str, Any], diagnostics: l
     options = configured.get(name, {}) if isinstance(configured, Mapping) else {}
     data_home = home.path("plugins", getattr(context, "profile_dir", None)).expanduser().resolve()
     role = hashlib.sha256(str(getattr(context, "role", "") or "").encode()).hexdigest()[:16]
-    # Source storage identity is name@marketplace; the native enabled local
-    # extension identity is its canonical root. Hash it (not the display name)
-    # to avoid cross-project collisions, traversal and filesystem name limits.
     identity = hashlib.sha256(str(root).encode()).hexdigest()
     return {
         "root": str(root), "name": name, "paths": paths,
@@ -563,8 +539,6 @@ def discover_result(
     failed: list[dict[str, str]] = []
     all_agents = _definitions(builtin_root, "built-in", failed) if include_builtin else []
 
-    # Source VERIFICATION_AGENT + tengu_hive_evidence defaults off. The native
-    # opt-in replaces that product's compile/GrowthBook gate, not its algorithm.
     from misaka.config.product import setting
 
     if not setting("subagents", "verification_agent", False, bool):
@@ -695,7 +669,6 @@ def _validate_mcp_spec(value: Any) -> str | dict[str, Any]:
         }
         if not isinstance(kind, str) or kind not in required:
             raise ValueError(f"Unsupported MCP transport {kind!r}")
-        # Source z.object selects fields per union member and strips unknowns.
         optional = {
             "stdio": ("args", "env"), "sse": ("headers", "headersHelper", "oauth"),
             "http": ("headers", "headersHelper", "oauth"), "ws": ("headers", "headersHelper"),
@@ -737,7 +710,7 @@ def _validate_mcp_spec(value: Any) -> str | dict[str, Any]:
                 url = oauth["authServerMetadataUrl"]
                 if not isinstance(url, str) or not url.startswith("https://"):
                     raise ValueError(f"MCP {name}: oauth.authServerMetadataUrl must be an HTTPS URL")
-                AnyUrl(url)  # Validate without replacing the source string.
+                AnyUrl(url)
         normalized[name] = config
     return normalized
 
@@ -789,7 +762,6 @@ class _JsonAgentDefinition(BaseModel):
     @field_validator("effort", "maxTurns", mode="before")
     @classmethod
     def normalize_json_integer(cls, value):
-        # JavaScript has one number type: JSON 2.0 passes z.number().int().
         if type(value) in (int, float) and abs(value) > 9_007_199_254_740_991:
             raise ValueError("JSON integer exceeds the source safe-integer range")
         return int(value) if isinstance(value, float) and value.is_integer() else value
@@ -824,13 +796,9 @@ def parse_agents_json(value: Any, *, source: str = "flagSettings", diagnostics: 
     except (ValueError, TypeError) as error:
         _diagnostic(diagnostics, source, str(error))
         return []
-    # CCB parseAgentFromJson is NOT the tolerant Markdown parser. Preserve
-    # accepted JSON descriptions, names, skill names and initialPrompt verbatim.
-    # Memory tool/prompt injection stays at the native role-aware launch boundary.
     return [AgentDefinition(
         name=name, description=item.description, prompt=item.prompt, source=_source_name(source),
         tools=_tools(item.tools) if item.tools is not None else None,
-        # Keep MISAKA's explicit deny-* fence and inherit tool alias.
         disallowed_tools=_split_specs(item.disallowedTools) if item.disallowedTools is not None else None,
         model=item.model if item.model is not None else "inherit", effort=item.effort,
         permission_mode=item.permissionMode, max_turns=item.maxTurns,
@@ -886,9 +854,6 @@ def session_catalog(session: Any, context: Any, *, cwd: str, include_project: bo
         providers.extend(parse_agents_json(flag_agents, diagnostics=diagnostics))
     profile = getattr(context, "profile_dir", "")
 
-    # CCB getBuiltInAgents: SDK blank slate does not disable custom agents,
-    # and has no effect on interactive sessions. Use native run mode, not
-    # hasUI (a JSON/RPC client can supply an interactive prompt callback).
     mode = read_field(getattr(session, "extensionRunner", None), "mode", "print")
     from misaka.config.product import setting
 

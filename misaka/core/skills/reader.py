@@ -141,8 +141,6 @@ def load(entry, session_id=None, *, file_path=None, profile_dir=None, preprocess
         banner = f"[Bundle context: This skill is part of the '{namespace}' plugin." + (
             f"\nSibling skills: {', '.join(siblings)}.\nUse qualified form to invoke siblings "
             f"(e.g. {namespace}:{siblings[0]})." if siblings else "") + "]\n\n"
-        # Keep raw metadata at the start for commands' config parsing. The
-        # display banner is appended after the document, not before frontmatter.
         result["content"] = rendered + "\n\n" + banner.rstrip()
     if entry.get("org_header"):
         result["content"] += "\n\n" + entry["org_header"].rstrip()

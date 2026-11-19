@@ -43,8 +43,6 @@ TOOL_DESCRIPTIONS = {
 }
 
 
-# What research derives in a project and git should not record: the source bundles, rebuilt at
-# every settle as hard links of files kept elsewhere.
 GITIGNORE = """# research source bundles: rebuilt at every settle, hard links of files kept elsewhere
 nodes/**/SOURCES.md
 nodes/**/sources/
@@ -61,19 +59,16 @@ class ResearchOwner(owners.CardOwner):
     token_cap_setting = "research.token_cap"
     resume_command = "/research resume"
 
-    # --- its cards ------------------------------------------------------------------------------
-
     def card(self, con, task_id):
         context = runs.task_context(con, task_id)
         return {**context, "scope": context["run_id"]} if context else None
 
     def session_overrides(self, con, context):
-        # The run's own compaction threshold and output limit, when it chose them.
         return runs.session_overrides(runs.get(con, context["run_id"]))
 
     def card_deleted(self, con, task_id):
         if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_cards'").fetchone():
-            con.execute("DELETE FROM research_cards WHERE task_id=?", (task_id,))   # a link without its card is a trap for resume
+            con.execute("DELETE FROM research_cards WHERE task_id=?", (task_id,))
 
     def note_fields(self):
         from misaka.core.research.commands import Alternative, Issue
@@ -104,7 +99,6 @@ class ResearchOwner(owners.CardOwner):
     def submission(self, con, task, context, submission, attempt_payload):
         from misaka.core.network.worker import IncompleteSubmission
 
-        # Typed tool data, frozen with the card's completion. Never reopen a model-written JSON file.
         critique = attempt_payload("research_critique")
         if critique is not None:
             submission["issues"] = critique["issues"]
@@ -148,8 +142,6 @@ class ResearchOwner(owners.CardOwner):
         return {run_id, *(row[0] for row in con.execute(
             "SELECT task_id FROM research_cards WHERE run_id=?", (run_id,)))}
 
-    # --- who works where --------------------------------------------------------------------------
-
     def sender_scope(self, con, task_id, session_id):
         """The run and node the sender works on: her card's node, or the node whose Last Order
         conversation she is; a run's window outside its nodes has no node."""
@@ -159,7 +151,7 @@ class ResearchOwner(owners.CardOwner):
                 if row:
                     return row["run_id"], row["branch_id"]
             if session_id:
-                tail = f"%{session_id}.jsonl"   # stored session files end in their session id
+                tail = f"%{session_id}.jsonl"
                 row = con.execute("SELECT run_id, id FROM research_execution WHERE session_file LIKE ?",
                                   (tail,)).fetchone()
                 if row:
@@ -168,7 +160,7 @@ class ResearchOwner(owners.CardOwner):
                                   (session_id, tail)).fetchone()
                 if row:
                     return row["id"], None
-        except sqlite3.OperationalError:     # a board research has never touched has no such tables
+        except sqlite3.OperationalError:
             pass
         return None, None
 
@@ -201,8 +193,6 @@ class ResearchOwner(owners.CardOwner):
             content += "\nRed team: " + json.dumps(payload["red_team"], ensure_ascii=False)
         return "research-progress", content
 
-    # --- sessions -----------------------------------------------------------------------------------
-
     def system_context(self, session, tool_names, system_prompt, sister_id):
         from misaka.core.research.prompting import system_context
 
@@ -230,7 +220,7 @@ class ResearchOwner(owners.CardOwner):
     def owns_window(self):
         from misaka.core.research.wiring.node import node_identity
 
-        return node_identity() is not None   # a research node's window: the run's, not the user's desk
+        return node_identity() is not None
 
     def catalog(self, con):
         if not _has_runs(con):
@@ -259,13 +249,11 @@ class ResearchOwner(owners.CardOwner):
             return run, scope[5:], True
         return run, None, False
 
-    # --- the board's settings and files -------------------------------------------------------------
-
     def token_cap(self):
         """settings.json ``research.token_cap``: what one run may spend (0 = none)."""
         from misaka.config.product import setting
 
-        return max(0, setting("research", "token_cap", 0, int))      # a negative cap is none, as 0 is
+        return max(0, setting("research", "token_cap", 0, int))
 
     def beast_at(self):
         """settings.json ``research.beast_at``: the share of the cap where cards switch to beast mode."""
@@ -277,7 +265,6 @@ class ResearchOwner(owners.CardOwner):
         return frozenset({"misaka_research_view"})
 
     def owns_card_process(self, argv):
-        # The research worker wrapper and its durable Sister child may both own the attempt.
         module = next((argv[i + 1] for i in range(len(argv) - 1) if argv[i] == "-m"), None)
         return module == "misaka.cli.research_node" and "--run-card" in argv
 

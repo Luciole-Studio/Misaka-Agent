@@ -279,8 +279,6 @@ def test_quotes_arguments_like_libuv():
     assert quote_argument("a\\\\b c") == '"a\\\\b c"'
 
 
-# MISAKA: the Python daemon.
-
 
 def daemonSources() -> list[Path]:
     return sorted(DAEMON.rglob("*.py"))

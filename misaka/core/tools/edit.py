@@ -178,7 +178,6 @@ def createEditToolDefinition(
     ) -> AgentToolResult:
         path, edits = validateEditInput(EditToolInput.model_validate(input))
         absolutePath = resolveToCwd(path, read_field(ctx, "cwd") or cwd)
-        # MISAKA fork: Office packages go to the office tool.
         _refuse_office_package(absolutePath, "edit")
 
         async def mutate() -> AgentToolResult:
@@ -207,7 +206,6 @@ def createEditToolDefinition(
             try:
                 rawContent = buffer.decode("utf-8")
             except UnicodeDecodeError as error:
-                # MISAKA fork: refuse a file that is not UTF-8 rather than corrupt it.
                 raise RuntimeError(
                     f"Could not edit file: {path}. It is not valid UTF-8 text ({error}); "
                     "editing it as text would corrupt it. Use bash for binary files."

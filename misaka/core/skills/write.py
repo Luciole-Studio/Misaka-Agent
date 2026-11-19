@@ -45,8 +45,6 @@ def current_origin():
     return "agent" if agent_session() else "user"
 
 
-# Review ledger
-
 def _ledger_path():
     return home.path("skills_state") / ".ledger.jsonl"
 
@@ -76,17 +74,12 @@ def snapshot(root, *, store=True):
     if not root.is_dir():
         return []
     out = []
-    for f in sorted(root.rglob("*")):                     # rglob does not descend symlinked dirs
-        rel = f.relative_to(root).as_posix()     # the same key on every OS (Hermes #62310)
+    for f in sorted(root.rglob("*")):
+        rel = f.relative_to(root).as_posix()
         if f.is_symlink():
-            # Recorded rather than followed. A role's skill is often a link into a library
-            # (layers.py:84), so a snapshot that did not name the link left `restore` with
-            # nothing to put back after its cleanup pass unlinked it.
             out.append({"path": rel, "symlink": os.readlink(f)})
         elif f.is_file():
             sha = _store_blob(f) if store else hashlib.sha256(f.read_bytes()).hexdigest()
-            # The permission bits are content too: scripts/*.sh that came back without its
-            # executable bit is a rollback that did not roll back.
             out.append({"path": rel, "sha256": sha, "mode": f.stat().st_mode & 0o777})
     return out
 
@@ -97,7 +90,7 @@ def digest(root):
     return hashlib.sha256(json.dumps(snapshot(root, store=False), sort_keys=True).encode()).hexdigest()
 
 
-BLOB_LIMIT = 500        # beyond this, sweep what no ledger entry can restore
+BLOB_LIMIT = 500
 
 
 def _collect_blobs():
@@ -122,17 +115,17 @@ def _collect_blobs():
                               for side in ("before", "after")
                               for item in change.get(side, {}).get("files", []) if item.get("sha256"))
         except (OSError, ValueError, KeyError, TypeError):
-            return  # Fail closed: an unreadable journal may be the only reference.
+            return
     for pending in list_pending():
         if pending.get("_integrity_error"):
-            return  # Corrupt review may be the only remaining reference.
+            return
         payload = pending.get("payload") or {}
         for side in ("before", "after"):
             referenced.update(item["sha256"] for item in payload.get(side, {}).get("files", []) if item.get("sha256"))
     for name in blobs - referenced:
         try:
             (_blob_dir() / name).unlink()
-        except OSError:                    # one stubborn blob must not stop the sweep
+        except OSError:
             continue
 
 
@@ -140,7 +133,6 @@ def _safe_parents(path, *, create=False):
     """Reject mutable symlink ancestors, including a redirected managed root."""
     path = Path(os.path.abspath(path))
     for component in reversed((path, *path.parents)):
-        # macOS's OS-owned /var and /tmp aliases are not managed tree links.
         if str(component) in ("/var", "/tmp") and os.path.realpath(component) in ("/private/var", "/private/tmp"):
             continue
         try:
@@ -286,7 +278,6 @@ def restore(root, before, *, image=None):
 
 
 def _restore_prefix(root):
-    # Only a recovery for THIS root may clean its interrupted replace stages.
     identity = hashlib.sha256(str(Path(root).absolute()).encode()).hexdigest()[:16]
     return f"restore-{identity}-"
 
@@ -297,7 +288,7 @@ def mutation_lock():
     from filelock import FileLock
     path = home.path("skills_lock")
     path.parent.mkdir(parents=True, exist_ok=True)
-    return FileLock(str(path), is_singleton=True)  # Native reentrancy for nested metadata transactions.
+    return FileLock(str(path), is_singleton=True)
 
 
 def record(action, skill, *, before=None, after_root=None, evidence=None, changes=None, entry_id=None):
@@ -315,7 +306,7 @@ def record(action, skill, *, before=None, after_root=None, evidence=None, change
         "version": 2,
         "root": str(Path(after_root).absolute()) if after_root is not None else None,
         "changes": changes,
-        "rollbackable": action in MUTATING_ACTIONS or bool(changes),     # bookkeeping entries restore nothing
+        "rollbackable": action in MUTATING_ACTIONS or bool(changes),
     }
     path = _ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -359,8 +350,6 @@ def _save_journal(journal):
 
 
 def _recover(journal):
-    # The fsynced ledger entry is the commit point; a crash before updating the
-    # journal must not undo an already committed write on restart.
     committed = any(e.get("id") == journal["id"] for e in entries())
     for change in journal["changes"]:
         image = change["after"] if committed else change["before"]
@@ -416,8 +405,6 @@ def commit_transaction(journal, after):
     try:
         _save_journal(journal)
     except OSError:
-        # The fsynced ledger already committed. Recovery recognizes the ID and
-        # republishes this journal; do not report an applied write as unapplied.
         pass
     return journal["id"]
 
@@ -446,7 +433,6 @@ def rollback(entry_id, skill_root=None):
         if not changes:
             return False, f"Ledger entry {entry_id} records no file changes to restore."
         try:
-            # Validate before-images before creating the rollback journal.
             for change in changes:
                 _checked_snapshot(change["before"]["files"])
                 if tree_image(change["root"], store=False) != change.get("after"):
@@ -457,8 +443,6 @@ def rollback(entry_id, skill_root=None):
             return False, f"Skill rollback did not complete: {error}"
     return True, f"Rolled back {target['skill']}."
 
-
-# ── Write gate (after hermes write_approval.py) ─────────────────────────────
 
 def _pending_dir():
     return home.path("skills_pending")
@@ -589,8 +573,6 @@ def pending_diff(item):
                 bodies = []
                 for entry in (before.get(path, {}), after.get(path, {})):
                     data = (_blob_dir() / entry['sha256']).read_bytes() if entry.get('sha256') else b''
-                    # The full immutable hashes/modes/links are always listed above.
-                    # Bound terminal output for binary or very large content; never silently truncate.
                     try:
                         bodies.append(data.decode('utf-8') if b'\0' not in data and len(data) <= 512 * 1024 else None)
                     except UnicodeDecodeError:

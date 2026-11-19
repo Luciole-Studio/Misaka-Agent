@@ -73,11 +73,9 @@ def _documents():
 
 
 @pytest.mark.parametrize("chunk", [7, read_module._SCAN_CHUNK_CHARS])
-# Named by the document alone: an id spelled out of the bytes outgrows Windows' 32767-character
-# limit on the environment variable pytest keeps the current test in.
 @pytest.mark.parametrize("name,data", list(_documents()), ids=[name for name, _ in _documents()])
 async def test_paged_output_is_what_the_whole_file_algorithm_produced(tmp_path, monkeypatch, name, data, chunk):
-    monkeypatch.setattr(read_module, "_SCAN_CHUNK_CHARS", chunk)     # 7: every boundary lands mid-chunk
+    monkeypatch.setattr(read_module, "_SCAN_CHUNK_CHARS", chunk)
     path = tmp_path / "doc.txt"
     path.write_bytes(data)
     tool = createReadToolDefinition(str(tmp_path))
@@ -105,7 +103,7 @@ async def test_a_fifo_is_refused_at_once_and_leaves_no_thread_behind(tmp_path):
     with pytest.raises(RuntimeError, match="not a regular file"):
         await asyncio.wait_for(createReadToolDefinition(str(tmp_path)).execute("call", {"path": "pipe"}), 5)
     await asyncio.sleep(0.05)
-    assert threading.active_count() <= before + 1       # the default executor may keep one idle worker
+    assert threading.active_count() <= before + 1
 
 
 @pytest.mark.skipif(not os.path.exists("/dev/zero"), reason="needs /dev/zero")

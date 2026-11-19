@@ -106,7 +106,6 @@ async def test_two_roles_save_independent_full_model_identity(tmp_path, monkeypa
     global_before = shared_storage.global_value
     second_before = (second_role / "settings.json").read_bytes()
 
-    # A process-global environment value must not decide which live instance saves.
     monkeypatch.setenv("MISAKA_PROFILE_DIR", str(second_role))
     assert default_pair(first) == ("vendor-a", "shared")
     assert default_pair(second) == ("vendor-b", "shared")
@@ -192,9 +191,9 @@ def test_role_pin_takes_precedence_over_project_default(tmp_path, registry, shar
 
 
 @pytest.mark.parametrize("stored", [
-    {"defaultProvider": "vendor-missing", "defaultModel": "shared"},   # no such provider
-    {"defaultModel": "unique"},                                         # half a pin: no provider
-    {"defaultProvider": "vendor-a"},                                    # half a pin: no model
+    {"defaultProvider": "vendor-missing", "defaultModel": "shared"},
+    {"defaultModel": "unique"},
+    {"defaultProvider": "vendor-a"},
 ])
 def test_invalid_role_pin_does_not_silently_become_global_default(tmp_path, registry, shared_storage, stored):
     role = tmp_path / "10032"
@@ -204,7 +203,7 @@ def test_invalid_role_pin_does_not_silently_become_global_default(tmp_path, regi
     settings = bind(shared_storage, role, registry)
     with pytest.raises(ValueError):
         default_pair(settings)
-    assert (role / "settings.json").read_bytes() == before              # never rewritten behind the user's back
+    assert (role / "settings.json").read_bytes() == before
 
 
 @pytest.mark.parametrize("reference,provider,expected", [
@@ -358,7 +357,6 @@ def test_shared_enabled_models_do_not_override_role_pin_but_explicit_scope_can(t
     if explicit_scope:
         assert result.options["model"] is scoped
     else:
-        # Leaving model unset is also correct: the SDK then applies the role pin.
         assert result.options.get("model", pinned) is pinned
 
 
@@ -425,7 +423,6 @@ async def test_sdk_pin_missing_auth_reports_error_instead_of_using_another_provi
     sdk_host["modelProfile"] = str(role)
     registry.modelRuntime.configured = lambda provider: provider != "vendor-a"
     result = await createAgentSession(sdk_host)
-    # TUI can still open /login; the pin is never silently replaced by another endpoint.
     assert result["session"].model is registry.find("vendor-a", "unique")
     assert "vendor-a/unique" in result["modelFallbackMessage"]
 

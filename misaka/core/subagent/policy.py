@@ -34,16 +34,9 @@ PLAN_GIT_COMMANDS = frozenset(
     {"cat-file", "diff", "grep", "log", "ls-files", "ls-tree", "rev-parse", "show", "status"}
 )
 READ_ONLY_TOOLS = frozenset({"find", "grep", "glob", "ls", "read"})
-# Tools that carry their own per-action classification further down
-# ``_permission_action``.  Inheriting one of these names from the parent
-# session must never short-circuit that classification.
 CLASSIFIED_TOOLS = frozenset({"bash", "powershell", "edit", "write", "office", "browser_exec",
     "browser_click", "browser_type", "browser_press", "browser_console", "browser_cdp", "browser_dialog", "browser_navigate", "browser_back",
     "browser_vault_unlock", "browser_vault_fill", "browser_vault_save_login", "browser_vault_enter_code"})
-# The tools whose whole purpose is to put bytes at a path. They share plan-mode denial, the
-# workspace path guard and the acceptEdits allowance -- ``office`` writes a .docx exactly
-# the way ``write`` writes a .txt, and a guard that named only the older two would have let
-# a deliverable be written anywhere on disk.
 MUTATING_PATH_TOOLS = frozenset({"edit", "write", "office"})
 ACCEPT_EDITS_COMMANDS = frozenset({"cp", "mkdir", "mv", "rm", "rmdir", "sed", "touch"})
 SENSITIVE_DIRECTORIES = frozenset({".claude", ".git", ".idea", ".ssh", ".vscode"})
@@ -80,8 +73,6 @@ async def refresh_inherited_permissions() -> list[dict[str, Any]]:
 
     if _permission_settings_provider is not None:
         value = await _permission_settings_provider()
-        # Validate before replacing the last accepted snapshot. Malformed or lost
-        # parent replies stop the call, rather than silently using stale grants.
         mode = None
         if isinstance(value, dict):
             mode = validate_permission_mode(value.get("mode"))
@@ -168,8 +159,6 @@ def _pattern_matches(pattern: str, value: str) -> bool:
     pattern, value = pattern.strip(), value.strip()
     if not pattern:
         return False
-    # Claude permission rules commonly use ``command:*`` for a command plus
-    # arbitrary arguments.  Plain comma-separated entries remain exact.
     if pattern.endswith(":*"):
         prefix = pattern[:-2].rstrip()
         return value == prefix or value.startswith(prefix + " ")
@@ -201,8 +190,6 @@ def _rule_allows(
 def _has_shell_expansion(command: str) -> bool:
     """Detect active shell syntax while preserving quoted grep/sed patterns."""
 
-    # Shells erase a backslash-newline pair before tokenization.  Reject every
-    # multiline command up front so the path validator sees what is executed.
     if "\n" in command or "\r" in command:
         return True
 
@@ -239,8 +226,6 @@ def _plan_denial(tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
         return f"permissionMode=plan denied mutating tool {tool_name}"
     if name in MUTATING_PATH_TOOLS:
         return f"permissionMode=plan denied mutating tool {tool_name}"
-    # PowerShell has different tokenization, aliases and pipelines.  Until its
-    # own read-only classifier exists, plan mode cannot prove a command safe.
     if name == "powershell":
         return "permissionMode=plan denied an unclassified PowerShell command"
     if name != "bash":
@@ -316,9 +301,7 @@ def _path_rule_allows(
     values = [raw]
     resolved = _resolved_path(raw, workspace)
     if resolved is not None:
-        values += dict.fromkeys((str(resolved), resolved.as_posix()))  # Windows: rules use "/" too
-    # A bare ``Read`` grant is not an approval to cross the workspace
-    # boundary.  Only an argument-scoped path rule can do that.
+        values += dict.fromkeys((str(resolved), resolved.as_posix()))
     return any(
         body is not None
         and name == _tool_name(tool_name)
@@ -405,15 +388,11 @@ def _bash_read_paths(command: str) -> list[str] | None:
                 after_separator = True
                 continue
             if not after_separator and item.startswith("-"):
-                # Options with external programs, output files, or file-fed
-                # pathspecs are not a read-only fast path.
                 if item.startswith(
                     ("--output", "--ext-diff", "--textconv", "--pathspec-from-file")
                 ):
                     return None
                 if "=" in item:
-                    # Formatting and display values are harmless; unknown
-                    # attached values remain ambiguous and require approval.
                     key = item.split("=", 1)[0]
                     if key not in {
                         "--format", "--pretty", "--date", "--color", "--stat-width",
@@ -654,9 +633,6 @@ def _bash_path_problem(
             return "ambiguous", None
         if not argv:
             return None
-        # A recognized read command with syntax we could not prove safe must
-        # fail closed.  Other exact Bash grants may still run commands without
-        # path operands (for example ``pytest``).
         if argv[0] in PLAN_READ_COMMANDS or argv[0] == "git":
             return "ambiguous", None
         candidates: list[str] = []
@@ -722,8 +698,6 @@ def _safe_sed_script(script: str) -> bool:
                     return value[index + 1 :]
         return value
 
-    # Splitting a script with a literal semicolon inside a regex is
-    # intentionally conservative: uncertain scripts go through approval.
     for raw in script.split(";"):
         part = raw.strip().lstrip("{").rstrip("}").strip()
         if not part:
@@ -781,9 +755,6 @@ def _accept_edits_bash(command: str, workspace: str, additional_dirs: Sequence[s
             return False
         if not argv or argv[0] not in ACCEPT_EDITS_COMMANDS:
             return False
-        # Apply path constraints before the acceptEdits fast path.
-        # path.  Bare operands resolve inside cwd; explicit escaping operands
-        # must remain inside this worker's workspace.
         executable = argv[0]
         operands: list[str] = []
         sed_scripts: list[str] = []
@@ -908,8 +879,6 @@ def _permission_restriction(
     raw = tool_input.get("path") or tool_input.get("file_path")
     if _memory_path(name, tool_input, workspace, memory_dir) and not _sensitive_path(raw, workspace):
         return None
-    # An inherited tool reaches the same path guard as the built-in read
-    # tools: gaining a name must never gain a way out of the workspace.
     guarded = name in READ_ONLY_TOOLS or (
         name in vocabulary and name not in CLASSIFIED_TOOLS
     )
@@ -928,8 +897,6 @@ def _permission_restriction(
         if not _path_in_working_directories(raw, workspace, additional_dirs):
             return f"path is outside the agent workspace: {raw}"
     if name == "office":
-        # Like FrontierAgent's secondary-output guard: the outer path does not
-        # describe images read or PDFs written by an ops batch (including @files).
         from misaka.core.tools import _office
         from misaka.core.tools._office.paths import (
             input_paths,
@@ -991,8 +958,6 @@ def _permission_action(
         return "allow", None
 
     if name == "browser_exec":
-        # Terminal-capable Python gets the existing Bash argument/mode classification,
-        # not a blanket allow from inheriting a new tool name.
         command = "python -c " + shlex.quote(str(tool_input.get("code", "")))
         return _permission_action(mode, layers, "bash", {"command": command}, workspace, vocabulary, memory_dir, additional_dirs)
 
@@ -1000,9 +965,6 @@ def _permission_action(
         reason = _plan_denial(name, tool_input)
         if reason:
             return "deny", reason
-        # Plan's denial is decided before the workspace guard, which answers
-        # ``ask``.  A guarded tool must not turn a plan denial into something a
-        # parent can approve, so the worse the path the weaker the decision.
         if name not in READ_ONLY_TOOLS and name != "bash" and not _rule_allows(
             layers, name, tool_input
         ):
@@ -1021,10 +983,6 @@ def _permission_action(
         return "allow", None
     if _memory_path(name, tool_input, workspace, memory_dir) or _rule_allows(layers, name, tool_input):
         return "allow", None
-    # plan mode above keeps the strict built-in read-only table on purpose; an
-    # inherited name is not evidence that a tool only reads.  Under ``auto`` it
-    # is no evidence either: the transcript classifier is that mode's per-action
-    # check, and a name must not buy a way around it.
     if name in READ_ONLY_TOOLS or (
         effective != "auto"
         and name in vocabulary
@@ -1092,8 +1050,6 @@ class AgentPolicy:
         self.layers = tuple(tuple(layer) for layer in getattr(context, "tool_rule_layers", ()) or ())
         self.permission_mode = getattr(context, "permission_mode", None)
         self.memory_dir = getattr(context, "memory_dir", None)
-        # Names this child inherited from its parent session.  Absent means the
-        # parent could not report one, and the hard-coded tables decide alone.
         self.vocabulary = frozenset(
             _tool_name(str(item))
             for item in (getattr(context, "tool_vocabulary", None) or ())
@@ -1113,10 +1069,7 @@ class AgentPolicy:
 
         self.host_hooks = validate_hooks(self.host_hooks)
         self.session: Any = None
-        # A session no parent started (``SubagentPart`` sets it): it asks its own person.
         self.top_level = False
-        # CCB destination "session": what "Yes, and don't ask again" granted this session alone
-        # (allow rules and working directories); its sub-agents inherit them.
         self.session_rules: list[str] = []
         self.session_directories: list[str] = []
         try:
@@ -1132,10 +1085,6 @@ class AgentPolicy:
             Path(raw_once_path).expanduser() if raw_once_path else None
         )
         self.once: set[OnceKey] = self._load_once()
-        # A one-shot hook is reserved while its matched batch is running.  It
-        # is persisted only after successful execution/submission, matching
-        # Claude's onHookSuccess behavior without allowing concurrent batches
-        # to launch the same hook twice.
         self.once_inflight: set[OnceKey] = set()
         self.background_hooks: set[asyncio.Task[None]] = set()
         self.stop_hook_active = False
@@ -1233,8 +1182,6 @@ class AgentPolicy:
 
             global_hooks = configured_hooks(self.session)
             matchers = [*self.host_hooks.get(name, ()), *global_hooks.get(name, ())]
-            # CCB runs SubagentStart before registering frontmatter hooks;
-            # StopFailure is outside the agent-scoped hook registry at this pin.
             if not managed_only and event_name not in {"SubagentStart", "StopFailure"}:
                 matchers.extend(self.hooks.get(name, ()))
             for matcher_index, matcher in enumerate(matchers):
@@ -1310,10 +1257,6 @@ class AgentPolicy:
                     if inspect.isawaitable(submitted):
                         await submitted
                 except Exception as error:  # noqa: BLE001 - hooks fail open
-                    # Claude falls back to the already-defined synchronous
-                    # path when a process cannot be backgrounded.  This both
-                    # fails open on execution errors and preserves a real
-                    # blocking result from the hook itself.
                     _ = error
                     return await execute()
                 return (
@@ -1399,7 +1342,6 @@ class AgentPolicy:
             for key, hook in matched:
                 self._settle_once(key, hook, False)
             raise
-        # CCB hooks.ts: source-root + shell/body/if identity, last scope wins.
         unique: dict[tuple[str, ...], tuple[OnceKey, Mapping[str, Any]]] = {}
         for key, hook in matched:
             kind = str(hook.get("type") or "command")
@@ -1426,7 +1368,6 @@ class AgentPolicy:
             finally:
                 self._settle_once(key, hook, success)
 
-        # Claude runs every hook in a matched batch concurrently.
         return list(
             await asyncio.gather(
                 *(run(key, hook) for key, hook in matched)
@@ -1450,7 +1391,6 @@ class AgentPolicy:
         return {key: value for key, value in payload.items() if value is not None}
 
     async def before_agent(self, event: Any) -> Any:
-        # A custom message that opens a turn (moments.TURN) stands in for the prompt.
         if read_field(event, "messageType", "user") == "custom":
             prompt = contentText(read_field(read_field(event, "message"), "content") or [], "")
         else:
@@ -1469,8 +1409,6 @@ class AgentPolicy:
             return None
         now = int(time.time() * 1000)
         return {
-            # ExtensionRunner's public contract is singular ``message``; it
-            # aggregates those into the ``messages`` consumed by AgentSession.
             "message": {
                 "role": "custom",
                 "customType": "hook_additional_context",
@@ -1530,8 +1468,6 @@ class AgentPolicy:
         current_permissions = [*self.inherited_permissions, *permission_settings(self.session)]
         additional_dirs = tuple(dict.fromkeys(path for layer in current_permissions
                                              for path in layer.get("additionalDirectories", [])))
-        # A path-scoped Read rule granted from the dialog (or configured) reaches past the
-        # workspace, as CCB's Read rules do; a bare tool name still does not.
         vocabulary = self._vocabulary()
         layers = (*self.layers, tuple(
             rule for layer in current_permissions for rule in layer.get("allow", ()) or ()
@@ -1612,8 +1548,6 @@ class AgentPolicy:
                     )
                     if self._configured_permission(name, tool_input, current_permissions) == "deny":
                         return {"block": True, "reason": "Updated hook input is denied by the current permission settings"}
-                    # Rewrites are new actions: an approved read must not turn
-                    # into a plan-mode mutation or bypass a role/path ceiling.
                     rewritten_action, rewritten_reason = _permission_action(
                         self.permission_mode, layers, name, tool_input,
                         workspace, vocabulary, self.memory_dir, additional_dirs,
@@ -1633,8 +1567,6 @@ class AgentPolicy:
 
             can_prompt = bool(getattr(self.context, "permission_can_prompt", False))
             if action == "ask" and self.top_level:
-                # CCB's main session shows its permission dialog to the person at it; a headless one
-                # (here a card, a contact turn: nobody watches) is refused.
                 from misaka.core.subagent.permission_suggestions import ask_in_ui
                 try:
                     choice = await ask_in_ui(ctx, "Permission", name, dict(tool_input), always)
@@ -1662,7 +1594,6 @@ class AgentPolicy:
                             "toolCallId": read_field(event, "toolCallId"),
                             "mode": self.permission_mode or "default",
                             "reason": reason,
-                            # CCB's dialog in the parent offers what this ask would save there.
                             "suggestions": suggestions,
                             "suggestionLabel": always,
                         }
@@ -1699,15 +1630,13 @@ class AgentPolicy:
             command = str(tool_input.get("command") or "")
             problem = _bash_path_problem(command, workspace, layers, additional_dirs) if restriction else None
             if restriction and (problem is None or problem[0] != "outside"):
-                return [], None    # CCB: no suggestion that would save a dangerous command
+                return [], None
             updates = []
             if problem is not None:
                 program = command.split(maxsplit=1)[0]
                 operation = ("read" if program in PLAN_READ_COMMANDS
                              else "write" if program in ACCEPT_EDITS_COMMANDS else None)
                 updates += offers.path_suggestions(problem[1], operation)
-            # MISAKA checks every command's paths, CCB only its path commands': a command that is
-            # not read-only would still ask once its directory is granted, so its rule comes too.
             if problem is None or _plan_denial(name, tool_input) is not None:
                 updates += offers.suggestion_for_exact_command(command)
             return updates, offers.shell_suggestions_label(updates, workspace)
@@ -1819,8 +1748,6 @@ class AgentPolicy:
                             error_details=read_field(message, "errorMessage"),
                             last_assistant_message=text.strip() or None,
                         )
-                        # CCB executes these outside the agent registry. A failure
-                        # hook cannot restart a failed model turn or veto shutdown.
                         await self._execute_hooks("StopFailure", error, payload)
                     return None
                 break

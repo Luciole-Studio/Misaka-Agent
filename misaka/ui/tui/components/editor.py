@@ -158,10 +158,6 @@ def wordWrapLine(line: str, maxWidth: int, preSegmented: Sequence[SegmentData] |
     chunks: list[TextChunk] = []
     segments = preSegmented if preSegmented is not None else [*graphemeSegmenter.segment(line)]
 
-    # MISAKA fork: a line that is one grapheme wider than `maxWidth` (a wide character at width 1) cannot be split;
-    # upstream recurses on that same grapheme below until the stack overflows. Overflow the column by a cell instead.
-    # The base segmenter decides, so a line holding exactly one paste marker (one segment under the marker-aware
-    # segmenter, many graphemes under the base one) still re-wraps at grapheme granularity.
     if len(segments) <= 1 and len(graphemeSegmenter.segment(line)) <= 1:
         return [TextChunk(text=line, startIndex=0, endIndex=len(line))]
 
@@ -367,7 +363,6 @@ class Editor(Component):
 
         # Store last render geometry for cursor navigation and mouse hit-testing.
         self.lastWidth: int = 80
-        # MISAKA fork (D1): upstream's `renderedVisibleLineCount` and `renderedAutocompleteHeight` follow here.
 
         # Vertical scrolling support
         self.scrollOffset: int = 0
@@ -383,7 +378,6 @@ class Editor(Component):
         self.autocompleteMaxVisible: int = 5
         self.autocompleteAbort: AbortController | None = None
         self.autocompleteDebounceTimer: asyncio.TimerHandle | None = None
-        # MISAKA fork: upstream starts from `Promise.resolve()`; a future needs a running loop, so `None` stands in.
         self.autocompleteRequestTask: asyncio.Future[None] | None = None
         self.autocompleteStartToken: int = 0
         self.autocompleteRequestId: int = 0
@@ -400,7 +394,6 @@ class Editor(Component):
         self.history: list[str] = []
         self.historyIndex: int = -1  # -1 = not browsing, 0 = most recent, 1 = older, etc.
         self.historyDraft: EditorState | None = None
-        # MISAKA fork: prompt history persists across sessions when MISAKA_INPUT_HISTORY names a file.
         self.historyFile = os.environ.get("MISAKA_INPUT_HISTORY") or None
         if self.historyFile:
             self.history = self._readHistoryFile() or []
@@ -487,8 +480,6 @@ class Editor(Component):
         trimmed = jsTrim(text)
         if not trimmed:
             return
-        # MISAKA fork: several windows share one role's history file (a root Last Order and her fork nodes): start
-        # from what is on disk, or this window's copy from its own start overwrites what the others have added since.
         if self.historyFile and self.historyIndex == -1 and (latest := self._readHistoryFile()) is not None:
             self.history = latest
         # Don't add consecutive duplicates
@@ -498,7 +489,6 @@ class Editor(Component):
         # Limit history size
         if len(self.history) > 100:
             self.history.pop()
-        # MISAKA fork: written atomically; a failed history save must not block the submit.
         if self.historyFile:
             try:
                 os.makedirs(os.path.dirname(self.historyFile), exist_ok=True)
@@ -683,8 +673,6 @@ class Editor(Component):
                 result.append(f"{leftPadding}{line}{linePadding}{rightPadding}")
 
         return result
-
-    # MISAKA fork (D1): upstream's `handleMouse` follows here.
 
     def handleInput(self, data: str) -> None:
         kb = getKeybindings()
@@ -1301,10 +1289,6 @@ class Editor(Component):
 
                     return js_regexp.replace(text, PASTE_MARKER_REGEX, replacer)
 
-                # MISAKA fork: cut the marker out at the old coordinates and renumber both halves. Upstream renumbers
-                # every line first and then slices at the old cursor column; a renumbered marker left of the cursor
-                # ("[paste #10 ...]" becoming "[paste #9 ...]") is shorter by then, so the slice leaves part of the
-                # deleted marker behind.
                 before = renumber(line[: self.state.cursorCol - graphemeLength])
                 after = renumber(line[self.state.cursorCol :])
                 self.state.lines = [renumber(line) for line in self.state.lines]
@@ -2057,8 +2041,6 @@ class Editor(Component):
         layout = SLASH_COMMAND_SELECT_LIST_LAYOUT if prefix.startswith("/") else None
         # The autocomplete items go in as they are, as upstream passes them: they have a select item's fields.
         selectList = SelectList(cast("list[SelectItem]", list(items)), self.autocompleteMaxVisible, self.theme.selectList, layout)
-        # MISAKA fork (D1): upstream's `list.onSelect` follows here; the list calls it only on a mouse click (the
-        # editor handles confirm itself).
         return selectList
 
     def tryTriggerAutocomplete(self, explicitTab: bool = False) -> None:
@@ -2100,8 +2082,6 @@ class Editor(Component):
         self.autocompleteStartToken += 1
         startToken = self.autocompleteStartToken
 
-        # MISAKA fork: `setTimeout` and an async function's start need an asyncio loop; without one (an editor driven
-        # from synchronous code) nothing is requested.
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:

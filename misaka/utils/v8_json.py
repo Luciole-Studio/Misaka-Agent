@@ -19,7 +19,6 @@ _MAX_CONTEXT_CHARACTERS = 10
 _MIN_ORIGINAL_SOURCE_LENGTH_FOR_CONTEXT = _MAX_CONTEXT_CHARACTERS * 2 + 1
 _SPECIAL_STRINGS = frozenset(("[object Object]", "undefined", "Infinity", "NaN"))
 
-# Tokens, by the first character of what follows (V8's `one_char_json_tokens`).
 _EOS, _STRING, _NUMBER, _LBRACE, _RBRACE, _LBRACK, _RBRACK, _COLON, _COMMA, _LITERAL, _ILLEGAL = range(11)
 
 
@@ -129,7 +128,6 @@ class _Parser:
             if escape is None:
                 raise self.fail(_EOS)
             if escape >= 0x80:
-                # The escape table covers ASCII only; anything past it is an unexpected token.
                 raise self.fail(_ILLEGAL)
             if escape not in _ESCAPES:
                 raise self.fail(_token(escape), "Bad escaped character in JSON")
@@ -177,10 +175,8 @@ class _Parser:
             self.cursor += 1
 
     def parse(self) -> None:
-        # Open containers, innermost last: True for an object, False for an array.
         stack: list[bool] = []
         while True:
-            # A value.
             token = self.skipWhitespace()
             unit = self.peekUnit()
             if token == _STRING:
@@ -207,7 +203,6 @@ class _Parser:
                 self.scanLiteral({0x74: "true", 0x66: "false", 0x6E: "null"}[unit])
             else:
                 raise self.fail(token)
-            # Close containers the value completed.
             while stack:
                 following = self.skipWhitespace()
                 if stack[-1]:

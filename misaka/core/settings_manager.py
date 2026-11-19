@@ -77,8 +77,6 @@ type SettingsScope = Literal["global", "role", "project"]
 # its own scope; every other key is the user's, shared by every role, and stays global. This
 # table is what keeps Last Order's and a Sister's configuration apart -- not per-key special cases.
 ROLE_SETTING_KEYS = frozenset({"defaultProvider", "defaultModel", "defaultThinkingLevel", "web"})
-# MISAKA fork: the kinds of agent the `roles` section sets switches for. Last Order and the Sisters are told apart
-# by the role a session is bound to; a sub-agent is bound to none, and its runner asks for "subagents".
 type RoleType = Literal["lastOrder", "sisters", "subagents"]
 ROLE_TYPES: tuple[RoleType, ...] = ("lastOrder", "sisters", "subagents")
 CODEMODE_TOOL = "codemode"
@@ -104,7 +102,6 @@ def deepMergeObjects(base: dict[str, Any], overrides: dict[str, Any]) -> dict[st
 
 
 # Tools enabled at startup when `defaultTools` does not change them.
-# MISAKA fork: MISAKA's eight default tools, where pi has read/bash/edit/write.
 DEFAULT_TOOL_NAMES: tuple[str, ...] = ("read", "bash", "edit", "write", "office", "grep", "find", "ls")
 
 
@@ -937,8 +934,6 @@ class SettingsManager:
             DEFAULT_TOOL_NAMES if configured is None else configured, [f"{'+' if codemode else '-'}{CODEMODE_TOOL}"]
         )
 
-    # ── MISAKA fork: the kinds of agent (`roles`) ──────────────────────────────────────────
-
     def getRoleType(self) -> RoleType | None:
         """Which kind of agent this manager's bound role is -- Last Order or a Sister -- or None for a session
         without a role (a sub-agent, a bare engine)."""
@@ -1234,8 +1229,6 @@ class SettingsManager:
         # The setting answers "may this install be identified to a service". All that rides
         # on it is `core/provider_attribution.py` naming the client "misaka" to aggregator
         # gateways; nothing else is sent. Upstream defaults it on; MISAKA defaults it off
-        # (`# MISAKA fork:` in settings_defaults.py), so being named is something the user
-        # turns on rather than something they find.
         return self._nullish(self.settings.get("enableInstallTelemetry"), SETTINGS_DEFAULTS["enableInstallTelemetry"])
 
     def setEnableInstallTelemetry(self, enabled: bool) -> None:
@@ -1343,7 +1336,6 @@ class SettingsManager:
         terminal = self._settings_object("terminal")
         if terminal.get("clearOnShrink") is not None:
             return terminal["clearOnShrink"]
-        # MISAKA fork: `MISAKA_CLEAR_ON_SHRINK`, where upstream reads `PI_CLEAR_ON_SHRINK`.
         if os.environ.get("MISAKA_CLEAR_ON_SHRINK") == "1":
             return True
         return SETTINGS_DEFAULTS["terminal"]["clearOnShrink"]

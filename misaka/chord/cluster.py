@@ -132,9 +132,6 @@ async def runClusterReload(host: HostImpl, plugins: Sequence[PluginRef], options
         except GeneratorExit:
             raise
         except BaseException:
-            # MISAKA fork: the reload's own task was cancelled, which happens only when the loop shuts down (a caller
-            # that stops waiting cannot, see `HostImpl.reload`): the children abort, and this host's prepare, which runs
-            # on in its own task, is rolled back (it ends at its next step, as a coordinator's abort ends a child's).
             for connection in participants:
                 connection.votes.pop(id, None)
                 connection.send({"t": "abort", "reload": id})

@@ -39,8 +39,6 @@ class BuildSystemPromptOptions(TypedDict):
     contextFiles: NotRequired[list[dict[str, str]]]
 
 
-# MISAKA fork: `BuildSystemPromptOptions & { selectedTools: string[]; hiddenTools: string[]; ... }` is the same
-# mapping with every collection present.
 type NormalizedBuildSystemPromptOptions = dict[str, Any]
 
 type SystemPromptSections = dict[str, str]
@@ -53,8 +51,6 @@ def normalizeBuildSystemPromptOptions(
     return {
         "customPrompt": input.get("customPrompt"),
         "forceSystemPrompt": input.get("forceSystemPrompt"),
-        # MISAKA fork: MISAKA's default tools (`DEFAULT_TOOL_NAMES`), where pi lists read/bash/edit/write here.
-        # `??`, not `||`: an explicit empty list means no tools.
         "selectedTools": [*(DEFAULT_TOOL_NAMES if input.get("selectedTools") is None else input["selectedTools"])],
         "hiddenTools": [*(input.get("hiddenTools") or [])],
         "toolSnippets": {**(input.get("toolSnippets") or {})},
@@ -107,7 +103,6 @@ def _buildRules(selected_tools: list[str], tool_guidelines: dict[str, list[str]]
             add_rule(rule)
     for rule in prompt_guidelines:
         add_rule(rule)
-    # MISAKA fork: one more standing rule than pi's two.
     add_rule("Batch independent tool calls into one turn; serialize only when a call depends on an earlier result")
     add_rule("Be concise in your responses")
     add_rule("Show file paths clearly when working with files")
@@ -138,10 +133,6 @@ def buildSystemPromptSections(input: BuildSystemPromptOptions | dict[str, Any]) 
         if append_system_prompt:
             prompt_sections["addendum"] = append_system_prompt
     else:
-        # MISAKA fork: pi's preamble calls itself a coding assistant and is followed by the
-        # tools, rules and a pi docs section. Here the identity comes first and the role
-        # stack (shared soul, identity, charter -- the append slot) comes *before* the
-        # tools, so the model reads who it is before what it can do; there is no docs section.
         prompt_sections["preamble"] = (
             "You are an agent of MISAKA, a collaborative multi-agent research system for the humanities and social sciences. "
             "Last Order coordinates research and user requirements; Sisters are domain specialists who plan and execute their assignments."

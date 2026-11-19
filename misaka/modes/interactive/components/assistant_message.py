@@ -156,7 +156,6 @@ class AssistantMessageComponent(Container):
                 # This avoids a superfluous blank line before separately-rendered tool execution blocks.
                 hasVisibleContentAfter = any(_isVisible(after) for after in content[i + 1 :])
 
-                # MISAKA fork: D1, no per-run visibility override.
                 hidden = self.hideThinkingBlock
                 thinkingComponent = (
                     Text(theme.italic(theme.fg("thinkingText", self.hiddenThinkingLabel)), self.outputPad, 0)

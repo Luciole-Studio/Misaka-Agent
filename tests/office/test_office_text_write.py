@@ -146,7 +146,7 @@ def test_a_count_of_zero_means_zero_not_all(tmp_path):
                            {"find": "a", "replace": "b", "count": 0})
     assert path.read_text(encoding="utf-8") == "a a a"
     assert "0 replacements requested" in outcome["summary"]
-    assert outcome["warn"] is None            # it did exactly what it was told
+    assert outcome["warn"] is None
 
 
 def test_replace_text_with_no_match_warns(tmp_path):

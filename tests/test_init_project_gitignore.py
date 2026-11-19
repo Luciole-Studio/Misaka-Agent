@@ -26,7 +26,7 @@ def test_a_fresh_project_commits_the_ignore_file_with_the_skeleton(tmp_path, hom
     text = (folder / ".gitignore").read_text(encoding="utf-8")
     for line in (".misaka/", ".pageindex/", "downloads/", "__pycache__/", "*.pyc", "nodes/**/sources/", "final/*-SOURCES.md"):
         assert line in text.split("\n")
-    assert "sources/" not in text.split("\n")          # a person's own sources folder stays theirs
+    assert "sources/" not in text.split("\n")
     assert ".gitignore written" in actions
     assert ".gitignore" in _git(folder, "ls-files").split()
 
@@ -37,7 +37,7 @@ def test_an_existing_repository_gets_the_file_but_no_commit(tmp_path, home_db):
     subprocess.run(["git", "init", "-q"], cwd=folder, check=True)
     actions = cards.init_project(str(folder))
     assert (folder / ".gitignore").exists() and ".gitignore written" in actions
-    assert _git(folder, "rev-parse", "--verify", "HEAD").strip() == ""     # nothing committed
+    assert _git(folder, "rev-parse", "--verify", "HEAD").strip() == ""
 
 
 def test_a_project_with_its_own_ignore_file_keeps_it(tmp_path, home_db):

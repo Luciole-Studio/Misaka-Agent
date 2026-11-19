@@ -14,8 +14,6 @@ import pytest
 
 from misaka.chord._promise import promiseAll
 
-# ─── R6-N1: a reload whose caller gave up fails silently, as upstream's ──────
-
 
 def _reloadScenario() -> tuple[Any, Any, Any, Any]:
     from tests.test_chord_reload import Greeter, Latch, greeterFacet, quiet
@@ -50,7 +48,7 @@ async def test_n1_a_reload_that_fails_after_its_caller_gave_up_is_not_reported_a
         await asyncio.sleep(0)
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(host.reload([greeterFacet("hi", state={"version": 2})], {"gateDeadline": 100}), 0.02)
-    await asyncio.sleep(0.25)  # the gate deadline passes: the reload fails with nobody waiting any more
+    await asyncio.sleep(0.25)
     assert not host.reloading
     go.open()
     await root
@@ -84,9 +82,6 @@ async def test_n1_a_failing_reload_nobody_ever_awaits_is_still_reported_and_an_a
     await host.close()
 
 
-# ─── R6-N4: promiseAll is linear ─────────────────────────────────────────────
-
-
 async def test_n4_promise_all_settles_ten_thousand_inputs_in_linear_time():
     """Before: 8.5 s for 10,000 inputs settled one per turn (quadratic); `asyncio.gather` takes about 0.15 s."""
     loop = asyncio.get_running_loop()
@@ -108,12 +103,10 @@ async def test_n4_promise_all_settles_ten_thousand_inputs_in_linear_time():
 
 async def test_n4_promise_all_keeps_promise_all_semantics():
     loop = asyncio.get_running_loop()
-    # Order kept, plain values pass through.
     first, second = loop.create_future(), loop.create_future()
     loop.call_soon(second.set_result, "b")
     loop.call_later(0.01, first.set_result, "a")
     assert await promiseAll([first, "x", second]) == ["a", "x", "b"]
-    # The first failure to settle wins; the siblings are not cancelled and their later failures count as handled.
     slow, early, late = loop.create_future(), loop.create_future(), loop.create_future()
     loop.call_soon(early.set_exception, ValueError("early"))
     loop.call_later(0.01, late.set_exception, KeyError("late"))
@@ -122,7 +115,6 @@ async def test_n4_promise_all_keeps_promise_all_semantics():
     assert not slow.cancelled()
     await asyncio.sleep(0.02)
     assert late.done() and not slow.done()
-    # Failures already settled report in input order; a cancelled input is a rejection.
     one, two = loop.create_future(), loop.create_future()
     one.set_exception(ValueError("one"))
     two.set_exception(ValueError("two"))
@@ -132,7 +124,6 @@ async def test_n4_promise_all_keeps_promise_all_semantics():
     gone.cancel()
     with pytest.raises(asyncio.CancelledError):
         await promiseAll([gone])
-    # A waiter that gives up cancels only its wait.
     shared = loop.create_future()
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(promiseAll([shared]), 0.01)

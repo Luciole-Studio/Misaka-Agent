@@ -12,7 +12,6 @@ from misaka.core.platform import tasks
 
 
 @pytest.mark.parametrize("reason,kind", [
-    # Real provider wording that no retry can fix.
     ('401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}', "auth_or_quota"),
     ("Error code: 401 - {'error': {'message': 'Incorrect API key provided: sk-...', 'code': 'invalid_api_key'}}",
      "auth_or_quota"),
@@ -23,7 +22,6 @@ from misaka.core.platform import tasks
     ('No API key found for "anthropic"', "auth_or_quota"),
     ("Your credit balance is too low to access the Anthropic API", "auth_or_quota"),
     ("OpenAI Codex token refresh failed (401): expired", "auth_or_quota"),
-    # Retryable provider trouble.
     ("429 RESOURCE_EXHAUSTED. Resource has been exhausted (e.g. check quota).", "rate_limit"),
     ("Error code: 529 - overloaded_error", "server_error"),
     ("The model is at capacity, please retry", "server_error"),
@@ -31,11 +29,9 @@ from misaka.core.platform import tasks
     ("Our servers are currently busy, try again later", "server_error"),
     ("Authentication Fails, Your api key: ****abcd is invalid", "auth_or_quota"),
     ("invalid_token: the access token expired", "auth_or_quota"),
-    # Text that is not about a credential at all.
     ("PermissionError: [Errno 13] Permission denied: '/tmp/out.md'", "failure"),
     ('File "worker.py", line 401, in run\nValueError: bad row', "failure"),
     ("MCP protocol version mismatch: server speaks 2024-11-05", "failure"),
-    # Our own wording.
     (tasks.UNSETTLED_REASON, "protocol_violation"),
     ("supervisor: RuntimeError: boom", "crash"),
 ])
@@ -48,8 +44,6 @@ def test_every_quota_word_pi_will_not_retry_is_terminal_here():
         assert tasks.classify_failure(f"provider said: {word}") == "auth_or_quota", word
 
 
-# One sample per alternative of the classifier as it stood before 2026-09-26: each was a dead
-# credential or an exhausted allowance then, and none may quietly become retryable.
 PREVIOUSLY_TERMINAL = [
     "Authentication failed", "401 Unauthorized", "unauthorised", "permission_error", "permission error",
     "PermissionDeniedError: 403", "403 Forbidden", "invalid api key", "invalid_api_key", "invalid-token",

@@ -33,15 +33,9 @@ from misaka.core.system_prompt import (
 
 logger = logging.getLogger(__name__)
 
-# What a part may say about a custom message it sends, in the message's ``details`` -- the one
-# vocabulary a context engine (an extension that archives and summarises the conversation) reads,
-# so that neither side has to know the other's message types.
-MEMORY = "memory"   # False: a feed entry the model is never shown again (a status tick); an engine
-                    # keeps it out of what it archives and summarises.
-TURN = "turn"       # True: the message opens a turn the way a user prompt does (a work order); an
-                    # engine that keys its per-turn work on ingress counts it as one.
-SENDERS = "senders" # The addresses a message from other agents came from (mail); an engine keeps
-                    # who said it, and that a message like this is not the user speaking.
+MEMORY = "memory"
+TURN = "turn"
+SENDERS = "senders"
 
 _MISSING = object()
 
@@ -87,8 +81,6 @@ class CoreCommand:
     description: str
     handler: Callable[..., Any]
     argument_hint: str | None = None
-    # Return prompt text (or None for a handled/no-op command) to the owning
-    # submission, rather than starting a second turn from a command context.
     is_prompt: bool = False
 
 
@@ -105,8 +97,6 @@ class Moments:
 
     def _ctx(self) -> Any:
         return self.session.extensionRunner.createContext()
-
-    # -- what a part calls between moments (the runtime actions the runner binds, by direct call) --
 
     def send_message(self, message: Any, options: dict[str, Any] | None = None) -> None:
         """``sendCustomMessage`` scheduled the way the runner's ``sendMessage`` is: in order, off the caller."""
@@ -127,8 +117,6 @@ class Moments:
                 logger.warning("a core part's user message was not delivered", exc_info=True)
 
         self.session._spawnExtensionMessage(_run())
-
-    # -- commands --
 
     def commands(self) -> list[CoreCommand]:
         return [command for part in self.parts for command in getattr(part, "commands", ())]
@@ -186,8 +174,6 @@ class Moments:
             return None
 
     async def _notify(self, name: str, event: dict[str, Any]) -> None:
-        # A moment that lands after the session was replaced (a card's retry) has no live context to
-        # act on: the replacement session announces its own. Its parts would only trip the stale guard.
         if not self.parts or getattr(self.session.extensionRunner, "staleMessage", None):
             return
         ctx = self._ctx()
@@ -265,8 +251,6 @@ class Moments:
             message = _field(result, "message")
             if message is not None:
                 folded.messages.append(message)
-            # A native part can contribute independent catalog/hook messages.
-            # Keep the existing singular contract and message order unchanged.
             messages = _field(result, "messages")
             if isinstance(messages, (list, tuple)):
                 folded.messages.extend(messages)

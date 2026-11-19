@@ -68,7 +68,6 @@ WEBP = "UklGRgAAAABXRUJQ"
 
 
 async def test_prelude_parses_as_javascript():
-    # MISAKA fork: parsed by QuickJS itself (upstream uses Node's `vm.Script`); the prelude evaluates to a function.
     vm = quickjs_wasi.QuickJS.create(wasm=await loadQuickJSWasm())
     vm.evalCode(PRELUDE_SOURCE, "prelude.js").dispose()
 
@@ -604,8 +603,6 @@ async def test_fails_a_script_whose_output_passes_the_limits_even_if_it_catches_
         assert chars <= MAX_OUTPUT_CHARS
         assert chars > MAX_OUTPUT_CHARS - (2 << 20)
 
-    # MISAKA: 100,000 output items cross the worker one message each, about 5 s here (Node takes milliseconds); the
-    # 10 s default timed out first on a slower runner.
     empty = await sandbox.execute('for (;;) text("");', {"timeoutMs": 60_000})
     assertMatches(empty, {"ok": False, "error": {"name": "RangeError"}})
     assert len(empty["output"]) == MAX_OUTPUT_ITEMS
@@ -681,7 +678,6 @@ async def test_reports_a_failing_wasm_module_as_a_sandbox_error(sandboxes):
     ],
 )
 async def test_reports_a_broken_bridge_as_a_sandbox_error(sandboxes, monkeypatch, message, reason):
-    # MISAKA fork: there is no `workerUrl` option; the fixture replaces the worker class.
     monkeypatch.setattr(codemode_host, "Worker", RawWorker)
     sandbox = createSandbox(sandboxes)
     result = await sandbox.execute(json.dumps(message))

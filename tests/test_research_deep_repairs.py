@@ -241,7 +241,7 @@ async def test_node_session_restores_environment_on_disposal_cancellation(
             await asyncio.sleep(0.01)
             assert (
                 not owner.done()
-            )  # Cleanup still owns the environment until disposal ends.
+            )
         release.set()
         await asyncio.gather(owner, return_exceptions=True)
         assert {k: os.environ.get(k) for k in keys} == {k: "before" for k in keys}

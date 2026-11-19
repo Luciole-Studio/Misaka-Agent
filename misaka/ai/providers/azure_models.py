@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/azure.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "azure.json").read_text(encoding="utf-8"))
 
 AZURE_MODELS = flattenChatModelCatalog("azure", _values)

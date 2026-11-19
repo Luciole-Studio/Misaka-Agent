@@ -19,7 +19,6 @@ from .tokenizer import _Tokenizer
 from .tokens import JSObject, spread
 
 _TOKENIZER_METHODS = {
-    # MISAKA fork: an override named after upstream's `def`/`del` reaches `def_`/`del_`.
     "def": "def_",
     "del": "del_",
 }
@@ -86,7 +85,6 @@ class Marked:
                     if not ext.name:
                         raise ValueError("extension name required")
                     if "renderer" in ext:  # Renderer extensions
-                        # MISAKA fork: no renderer is ported.
                         raise ValueError("renderer extensions are not supported")
                     if "tokenizer" in ext:  # Tokenizer Extensions
                         if not ext.level or (ext.level != "block" and ext.level != "inline"):
@@ -113,7 +111,6 @@ class Marked:
 
             # ==-- Parse "overwrite" extensions --== #
             if pack.renderer:
-                # MISAKA fork: no renderer is ported.
                 raise ValueError("renderer overrides are not supported")
             if pack.tokenizer:
                 tokenizer = self.defaults.tokenizer or _Tokenizer(self.defaults)

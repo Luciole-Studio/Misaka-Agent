@@ -42,12 +42,9 @@ from . import (
 
 logger = logging.getLogger(__name__)
 
-# Upstream's summary labels, used for lineage fencing, not as proof of compaction.
 _SUMMARY_BLOCK = re.compile(r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]")
 _SHOWN_HINT = re.compile(r"\[Expand for details: ([^\n]*)\]\s*$")
 
-# Per-session locks serialize engine work; the registry serializes admission and
-# retirement. Weak locks disappear after their last owner/waiter releases them.
 _ENGINES: dict[tuple[str, str], object] = {}
 _REGISTRY_LOCK = threading.RLock()
 _LOCKS = WeakValueDictionary()
@@ -89,8 +86,6 @@ def engine(ctx=None):
             class NativeLCMEngine(LCMEngine):
                 def _bind_storage(self, *args, **kwargs):
                     super()._bind_storage(*args, **kwargs)
-                    # Upstream discards the ids of the rows it writes; keep each one's entry
-                    # (entry_rows). On the class, so a private import runtime (carry) records too.
                     store, write = self._store, self._store._append_protected_batch
 
                     def append_protected_batch(session_id, messages, *args, **kwargs):
@@ -109,8 +104,6 @@ def engine(ctx=None):
                         return super()._assemble_context(*args, **kwargs)
 
                 def _build_proactive_recall_message(self, *args, **kwargs):
-                    # MISAKA calls the original builder from its ephemeral
-                    # request hook, not from a durable compaction checkpoint.
                     return None
 
                 def _state_db_path(self, kwargs=None):
@@ -127,8 +120,6 @@ def engine(ctx=None):
                     return super()._session_end_prefix_compare_content(images.without(message), session_id=session_id)
 
                 def _ingest_messages(self, messages):
-                    # Cached sanitized rows retain current input provenance, not the
-                    # source ordinals from an earlier view or a different branch.
                     return ingest.preserve_sources(messages, super()._ingest_messages(messages))
 
                 def _get_host_fallback_compressor(self):
@@ -256,8 +247,6 @@ def close(ctx=None) -> None:
 
 
 def _shutdown(built, timeout=25):
-    # These workers open their own SQLite connections. Settle them before the
-    # last project lease permits deleting the database and externalized payloads.
     deadline = time.monotonic() + timeout
     def remaining():
         return max(0, deadline - time.monotonic())
@@ -275,7 +264,7 @@ def _shutdown(built, timeout=25):
         if thread.is_alive():
             raise TimeoutError("MISAKA LCM FTS workers are still active; retaining the cache")
     built.shutdown()
-    entry_rows.forget(built._store)               # reopened on next use; the cache directory may go now
+    entry_rows.forget(built._store)
 
 
 def release_project(ctx=None):
@@ -306,14 +295,12 @@ atexit.register(close_all)
 
 def update_model(ctx) -> None:
     model = read_field(ctx, "model")
-    # A virtual selection has no window of its own: the model each request goes to is bound when the request is
-    # prepared (session_context_prepare), and stays bound between hooks.
     if model is None or isVirtualModel(model):
         return
     built = engine(ctx)
     api = str(read_field(model, 'api', '') or '')
     if api in {'openai-responses', 'openai-codex-responses', 'azure-openai-responses'}:
-        api = 'codex_responses'  # Hermes' name for Responses reasoning-sidecar semantics.
+        api = 'codex_responses'
     values = (str(read_field(model, "id", "")), int(read_field(model, "contextWindow", 0)),
               str(read_field(model, "baseUrl", "") or ""), str(read_field(model, "provider", "")),
               api)
@@ -421,8 +408,6 @@ def freeze_context(ctx, transcript):
         model=copy.deepcopy(read_field(ctx, "model")), modelRegistry=read_field(ctx, "modelRegistry"))
 
 
-# Entries that open no ingest: a tool result, an edit, a usage receipt or a non-message custom
-# entry is appended with no model request, run start or compaction in between.
 _NO_INGEST = frozenset({'context_edit', 'usage', 'custom', 'label', 'session_info'})
 
 
@@ -469,13 +454,9 @@ def _archive_map(built, transcript, *, through=None):
         transcript = Transcript(transcript.entries[:end], transcript.branch, transcript.session_id,
                                 transcript.session_file, transcript.project)
     projected = _session_originals(transcript)
-    # Each entry's rows by the binding recorded when they were written (entry_rows), not by
-    # content; only entries no row is bound to are matched by content, among unbound rows.
     rows = [row[0] for row in built._store._conn.execute(
         "SELECT store_id FROM messages WHERE session_id = ?", (built._session_id,))]
     bound, taken = entry_rows.bound(built._store, rows)
-    # Only the positions the archive still projects: a reply a retry dropped after agent_end
-    # stored it stays as unowned as content matching left it.
     result = {entry: [positions[index] for index in range(len(projected[entry])) if index in positions]
               for entry, positions in bound.items() if projected.get(entry)}
     unbound = [entry for entry in projected if entry not in result]
@@ -526,12 +507,8 @@ def _checkpoint_nodes(built, entry, transcript):
     from ..vendor.dag import SummaryNode
     from ..vendor.tokens import count_tokens
 
-    # Later, not-yet-ingested duplicates must not make upstream's surplus-skip
-    # matcher reassign a published checkpoint's older source to the new occurrence.
     projected, stored = _archive_map(built, transcript, through=entry['id'])
     branch_ids = {item['id'] for item in transcript.branch}
-    # Checkpoints written before 2026-10-26 name attempts a retry had already dropped: the empty
-    # reply of a 503. Such an entry has no row and no content, so the summary loses nothing by it.
     dropped = {item.get('targetId') for item in transcript.branch
                if item['type'] == 'context_edit' and item.get('replacement') is None}
     foreign = carry.sources(built, transcript)
@@ -613,9 +590,6 @@ def turn_key(transcript):
 def _messages(transcript, built):
     from misaka.core.session_manager import buildSessionProjection
 
-    # buildSessionContext's messages, entry by entry, each row carrying the entry it came from
-    # (entry_rows). A compaction's own rows -- its summary scaffold and the copies it retains --
-    # are no entry's source and carry none.
     messages = [row for item in buildSessionProjection(transcript.branch).entries
                 for row in (ingest.upstream_messages(item.messages) if item.sourceEntry["type"] == "compaction"
                             else entry_rows.tag(item.sourceEntry["id"], ingest.upstream_messages(item.messages)))]
@@ -625,8 +599,6 @@ def _messages(transcript, built):
     native_import = entry is not None and entry['type'] == 'compaction' and entry.get('contextMessages') is None and not any(
         node.expand_hint == f"MISAKA session compaction {entry['id']} node 0"
         for node in built._dag.get_session_nodes(built.current_session_id, limit=-1))
-    # A rebind reconciles the append-only archive in append order, not a branch
-    # shaped subsequence that the linear upstream cursor would count twice.
     if built._ingest_cursor_needs_reconcile or native_import:
         originals = [message for group in _session_originals(transcript).values() for message in group]
         held = _rows_held(built, originals)
@@ -740,10 +712,8 @@ def start(ctx) -> str:
         from . import carry
         carried = carry.receipt(snapshot(ctx)) if read_field(ctx.sessionManager, 'getEntries') else None
         continuity = ({'conversation_id': carried['details']['lcm']['carry']['conversation']} if carried else {})
-        # Upstream's "which platform" is, for one project cache shared by Last Order and her
-        # Sisters, "which agent": it is what every row of this session stores as its `source`.
         built.on_session_start(session_id, platform=storage.source(ctx), **continuity)
-        built._ingest_cursor_needs_reconcile = True  # a fresh DB may still open an existing tree
+        built._ingest_cursor_needs_reconcile = True
         built._misaka_preflight_turn = None
         built._misaka_preanswer = None
         branch = read_field(ctx.sessionManager, 'getBranch')
@@ -753,9 +723,6 @@ def start(ctx) -> str:
             from ..native.usage_anchor import capture_usage_anchor
             entries = list(branch())
             messages = buildSessionContext(entries).messages
-            # Retained tail usage priced the pre-compaction request, not this
-            # checkpoint's shorter prefix. Only a subsequent real response can
-            # anchor the replacement view; otherwise use the original estimator.
             cut = next((i + 1 for i in range(len(entries) - 1, -1, -1)
                         if entries[i]['type'] == 'compaction'), 0)
             first_priced = len(messages) - len(buildSessionContext(entries[cut:]).messages) if cut else 0
@@ -783,7 +750,6 @@ def end(ctx, *, transcript=None, reset=False) -> None:
     if not session_id:
         return
     try:
-        # Exactly one upstream final flush, including branches not currently selected.
         originals = [message for group in _session_originals(transcript or snapshot(ctx)).values() for message in group]
         built._ingest_cursor = 0
         built._schedule_ingest_cursor_reconciliation()
@@ -836,7 +802,7 @@ class Prepared:
     focus: str | None
     compress: bool
     replay_changed: bool
-    scaffolds: frozenset = frozenset()      # the replay rows the checkpoint named as its own summaries
+    scaffolds: frozenset = frozenset()
 
 
 def _aligned(native, original_native):
@@ -881,8 +847,6 @@ def prepare(event, ctx, *, transcript=None):
     native, positions = _aligned(native, original_native)
     built = bound_engine(ctx)
     messages = _messages(transcript, built)
-    # Establish the new branch rows before selecting its source scope. Ingest
-    # inside that scope would exclude new IDs and misbind identical sibling text.
     built.ingest(messages)
     replay_changed = len(positions) != len(messages)
     replay = ingest.Replay(native)
@@ -892,8 +856,6 @@ def prepare(event, ctx, *, transcript=None):
         metadata = ((checkpoint.get('details') or {}).get('lcm') or {}).get('nativeMetadata', {})
         if not isinstance(metadata, dict):
             raise ValueError('Invalid native compression checkpoint metadata')
-        # Metadata belongs to this complete checkpoint's prefix, not a same-text
-        # row elsewhere in the archive. New turns have no inherited marker.
         active_positions = {source: index for index, source in enumerate(positions)}
         for index, values in metadata.items():
             index = int(index)
@@ -905,13 +867,6 @@ def prepare(event, ctx, *, transcript=None):
                 replay.messages[active_positions[index]].update(values)
         scaffolds = frozenset(active_positions[index] for index in checkpoint.get('contextSummaries') or ()
                               if index in active_positions)
-    # Checkpoint rebinding changes generated content only. Keep the live source's
-    # timestamp/tool metadata -- except a custom message's timestamp, which takes the
-    # transcript's: persistence stamps a custom entry with its own receipt time, and a
-    # message that opened a turn or was steered in keeps its creation time live. The
-    # engine compares this list with the replay it cached from the transcript rows, and
-    # a difference there is a "replay changed" that compacts a leaf at every turn start,
-    # whatever the threshold (2026-10-29, R64).
     if replay_changed:
         if built._consecutive_ingest_failures:
             raise RuntimeError('LCM retry checkpoint originals were not persisted')
@@ -923,10 +878,6 @@ def prepare(event, ctx, *, transcript=None):
                     if _custom(replay.originals[original[ingest.SOURCE]]) and 'timestamp' in messages[source] else {})}
                 for original, source in zip(replay.messages, positions)]
     if replay_changed and cleaned is not None:
-        # Hermes' cursor belongs to the current list, not the longer native archive.
-        # Every retained row was just ingested. Rebase that proven cursor and its
-        # cleanup cache by source position, not upstream's contiguous-tail matcher.
-        # The full-context checkpoint makes sync/reopen adopt the same shorter view.
         projected = [{**cleaned[source], **{key: row[key] for key in ingest.NATIVE_METADATA if key in row}}
                      for row, source in zip(messages, positions)]
         built._ingest_cursor = len(messages)
@@ -939,8 +890,6 @@ def prepare(event, ctx, *, transcript=None):
     reason = read_field(event, 'reason', 'manual')
     with _summary_scope(built, transcript=transcript):
         if not read_field(event, 'allowCompression', True):
-            # Disabling automatic summarization does not disable ingest's replay
-            # protection. This is the original cleanup, with no summarizer call.
             messages = built._ingest_messages(messages)
             wants = False
         else:
@@ -951,8 +900,6 @@ def prepare(event, ctx, *, transcript=None):
                 if key != getattr(built, '_misaka_preflight_turn', None):
                     wants = built.should_compress_preflight(messages)
                 else:
-                    # Per-API pressure still runs, but low-pressure maintenance is
-                    # not another summarizer pass after every parallel tool batch.
                     messages = built._ingest_messages(messages)
             built._misaka_preflight_turn = key
     if not wants and replay.unchanged(messages) and not replay_changed:
@@ -970,11 +917,6 @@ def compact(prepared):
         from ..native.support import AuxiliaryExplicitCancellation
         from . import carry
         if not prepared.replay_changed:
-            # The check below, before the engine commits anything: a frontier the archive cannot
-            # account for skips this round and the context goes out uncompacted. Raising instead
-            # failed the turn, and its session_compact_failed rebind re-ingests the whole archive
-            # as duplicate rows. After compress() the engine has published nodes and moved its
-            # cursor, so a refusal there still raises.
             source_entries, foreign = _archive_sources(built, prepared.transcript)
             if any(source not in source_entries and source not in foreign
                    for node in built._summary_frontier_nodes() for source in carry.source_ids(built, node)):
@@ -1007,8 +949,6 @@ def compact(prepared):
             metadata = {key: message[key] for key in ingest.NATIVE_METADATA if key in message}
             if metadata:
                 native_metadata[str(index)] = metadata
-            # A summary the engine wrote this round has no source; one a checkpoint only carries
-            # over has, and was named by the checkpoint before it.
             if ingest.SOURCE not in message or message[ingest.SOURCE] in prepared.scaffolds:
                 scaffolds.append(index)
             if message.get('_compressed_summary'):
@@ -1026,11 +966,6 @@ def compact(prepared):
         flags_before = [{key: row[key] for key in ingest.NATIVE_METADATA if key in row} for row in prepared.replay.messages]
         flags_after = [{key: row[key] for key in ingest.NATIVE_METADATA if key in row} for row in guarded]
         if not prepared.replay_changed and flags_after == flags_before and prepared.replay.same_view(messages):
-            # The engine re-emitted the context it was given (a scaffold without its source
-            # ordinal, an empty assistant row spelled differently): the previous checkpoint
-            # already says all of this, and writing it again every round is what turned a
-            # card's transcript into hundreds of megabytes (2026-09-23). A new native
-            # compression flag is a change the checkpoint must carry, so it still writes.
             return None
         details = {'lcm': {'nodes': records, 'scaffolds': scaffolds}}
         if native_metadata:

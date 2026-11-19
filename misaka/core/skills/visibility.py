@@ -15,8 +15,6 @@ from .vendor.metadata import (
 )
 from .vendor.visibility import _skill_should_show
 
-# Only capabilities with an actual host implementation are translated. In
-# particular, bash is NOT process_manage, and grep alone is NOT search_files.
 _TOOL_ALIASES = {
     "terminal": ({"bash"}, {"powershell"}),
     "read_file": ({"read"},),
@@ -37,16 +35,12 @@ def capabilities(active):
         return None, None
     tools = set(active)
     tools.update(alias for alias, choices in _TOOL_ALIASES.items() if any(c <= tools for c in choices))
-    # Hermes derives toolsets from present member tools, not the configured
-    # names of disabled toolsets. Do not import or initialize its registry.
     return tools, {group for group, members in _TOOLSET_MEMBERS.items() if members & tools}
 
 
 def environment_detector(*, kind=None, active=None):
     def detect(tag):
         if tag == "kanban":
-            # A Board card owns its task. Ordinary delegates must not inherit
-            # that verdict merely by inheriting a parent's process environment.
             return kind == "card" or (kind != "child" and "misaka_board" in (active or ()))
         if tag == "docker":
             return _detect_container()
@@ -60,8 +54,7 @@ def offered(frontmatter, *, tools=None, toolsets=None, platform=None, detect=Non
     if not skill_matches_environment(frontmatter, detect or environment_detector(active=tools)):
         return False
     if not conditions:
-        return True  # Hermes list/slash only filter environment and hard compatibility.
+        return True
     raw = extract_skill_conditions(frontmatter)
-    # A malformed null/scalar declaration must not break every Skill's prompt.
     normalized = {key: parse_config_string_list(value) for key, value in raw.items()}
     return _skill_should_show(normalized, tools, toolsets, platform)

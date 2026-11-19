@@ -36,7 +36,6 @@ from misaka.utils.json import stripJsonComments
 from misaka.utils.paths import normalizePath
 
 type _SamplingParamsSchema = dict[str, Any]
-# MISAKA fork: `ModelInputModalitySchema` as a field, in its declared order (`TypeBoxLiteralUnion`).
 _ModelInputModalityField = TypeBoxLiteralUnion(*MODEL_INPUT_MODALITIES)
 
 
@@ -59,8 +58,6 @@ def _keepAsWritten(value: Any, handler: ValidatorFunctionWrapHandler) -> Any:
     return value
 
 
-# `compat: Type.Optional(ProviderCompatSchema)`. MISAKA fork: the block is checked against the schema and kept as
-# written, a mapping with its custom keys; the composer builds the runtime compat model from it.
 _CompatBlock = Annotated[ProviderCompatSchema | None, WrapValidator(_keepAsWritten)]  # type: ignore[valid-type]
 
 

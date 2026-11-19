@@ -159,7 +159,6 @@ async def test_forces_gist_sharing_without_checking_radius_authentication(monkey
     assert len(spawned) == 1
     assert spawned[0][:4] == ("gh", "gist", "create", "--public=false")
     assert errors == []
-    # MISAKA fork: the gist URL itself, no pi.dev viewer link.
     assert "https://gist.github.com/test/forced-gist" in statuses[0]
     assert "pi.dev" not in statuses[0]
 
@@ -190,7 +189,6 @@ async def test_reports_missing_radius_authentication_when_radius_is_forced(monke
 async def test_reports_missing_radius_authentication_when_the_forced_radius_sign_in_has_no_token(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    # MISAKA: a Radius provider whose stored sign-in yields no credential is the same "not configured" case.
     async def getAuth(_providerId: str, _overrides: Any = None) -> Any:
         return None
 

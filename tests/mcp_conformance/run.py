@@ -1,7 +1,6 @@
 """Runs the official MCP client conformance suite against misaka (``client.py``) and compares every check
 with the committed baseline (``baseline.json``). Fails when a check that passed in the baseline no longer
 passes, or when a check fails that the baseline does not list. Known failures stay visible in the output.
-See README.md.
 
 Translated from pi's ``coding-agent/test/mcp-conformance/run.ts``. Not part of the test gate: it fetches the
 pinned suite with ``npx`` (network, Node.js) and needs a POSIX shell.

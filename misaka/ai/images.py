@@ -29,7 +29,6 @@ async def generateImages(
     `Models.generateImages()`, which resolves provider auth.
     """
     provider = _resolveImagesApiProvider(model.api)
-    # MISAKA fork: a plain mapping context is read into ImagesContext.
     resolvedContext = context if isinstance(context, ImagesContext) else ImagesContext.model_validate(context)
     return await provider.generateImages(model, resolvedContext, options)
 

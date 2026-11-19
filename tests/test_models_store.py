@@ -186,7 +186,6 @@ async def test_a_stored_model_this_version_cannot_read_is_dropped_not_fatal(tmp_
 
 
 async def test_a_stored_model_with_a_non_string_type_is_dropped_not_fatal(tmp_path):
-    # MISAKA: `Object.hasOwn` coerces any key; a list or object type must not raise here.
     path = tmp_path / "models-store.json"
     path.write_text(json.dumps({
         "one": {"models": [{**_raw("one", "bad"), "type": ["chat"]}, _raw("one", "good")], "checkedAt": 1},

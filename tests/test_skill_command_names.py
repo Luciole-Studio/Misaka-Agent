@@ -14,7 +14,6 @@ from misaka.core.skills.wiring.skills import SkillsPart, _slash_entries
 from misaka.modes.interactive.interactive_mode import InteractiveMode
 
 NAME = '<inline:misaka_lcm>:misaka_lcm'
-# A bundled extension loads as `builtin:<name>`, and its skills are named by that path the same way.
 SOURCES = [('extension:inline:misaka_lcm', NAME, 'inlinemisaka-lcmmisaka-lcm'),
            ('extension:builtin:misaka_lcm', 'builtin:misaka_lcm:misaka_lcm', 'builtinmisaka-lcm:misaka-lcm')]
 
@@ -93,4 +92,4 @@ def test_qualified_commands_do_not_collide_with_flattened_names(tmp_path):
                {'name': 'Git_Helper'}, {'name': 'git-helper'}]
     commands = {c.name for c in _part(entries).commands}
     assert commands == {NAME, 'inlinemisaka-lcmmisaka-lcm', 'provider:skill_name', 'git-helper'}
-    assert len(_slash_entries(entries)) == 4  # ordinary Hermes slug collision remains first-wins
+    assert len(_slash_entries(entries)) == 4

@@ -90,7 +90,6 @@ EXCLUDED_SKILL_DIRS = frozenset((
     "site-packages", "__pycache__", ".tox", ".nox", ".pytest_cache",
     ".mypy_cache", ".ruff_cache",
 ))
-# Support directories belong to their parent skill and are not standalone skills.
 SKILL_SUPPORT_DIRS = frozenset(("references", "templates", "assets", "scripts"))
 
 
@@ -142,28 +141,12 @@ def is_quarantined_project_skill(skill_md):
     try:
         from misaka.core.skills import guard
 
-        # A project skill comes out of a repository the user merely cd'd into, so
-        # the party that writes `.skillignore` is the party being scanned. On this
-        # path the ignore file is not consulted at all: `honor_ignore=False`.
-        #
-        # That costs a false positive — a legitimate skill vendoring a `.dylib`
-        # quarantines on `binary_file`, and its author cannot ignore it away. The
-        # alternative costs a silent bypass: honoring the file lets a one-line
-        # `.skillignore` of `*` hide `scripts/*.sh` from the content scan, and a
-        # payload there loads with no warning at all. Fail-closed on untrusted
-        # input is the right side of that trade: quarantine is an inconvenience
-        # the user can override deliberately, a bypass is not something they can
-        # see. `skill_manage` keeps `honor_ignore=True` for skills the user owns.
         result = guard.scan_skill(skill_dir, source=_PROJECT_SCAN_SOURCE, honor_ignore=False)
         verdict, summary = result.verdict, result.summary
     except Exception:
         logger.warning("Project skill scan failed; quarantining: %s", skill_dir, exc_info=True)
         return True
     if verdict in ("safe", "caution"):
-        # `skill_inline_shell` is medium, so on its own it leaves the verdict at safe, and
-        # that is right for a project skill too: `preprocess_skill_content` expands `!`cmd``
-        # only in the user's own layers, so here the snippet is inert text whatever
-        # the skills settings say, and quarantining inert text would only cost the user a skill.
         return False
     logger.warning("Project skill quarantined: %s - %s", skill_dir, summary)
     return True
@@ -241,7 +224,7 @@ def shared_skills_dir():
     return str(home.path("shared_skills"))
 
 
-PERSONAL_LAYERS = frozenset(("role", "shared"))   # the layers the user edits: snapshotted (hermes "local")
+PERSONAL_LAYERS = frozenset(("role", "shared"))
 
 
 def skill_roots(profile_dir, cwd=None, *, extension_paths=()):
@@ -301,7 +284,7 @@ def extension_roots(resources):
         if label.startswith("inline:"):
             namespace = f"<{label}>"
         elif label.startswith(BUILTIN_PATH_PREFIX):
-            namespace = label  # a built-in extension's path, `builtin:<name>`, as the loader prints it
+            namespace = label
         else:
             if label.endswith((".py", ".js", ".ts")):
                 label = label.rsplit(".", 1)[0]

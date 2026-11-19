@@ -52,7 +52,6 @@ async def test_default_stale_is_ten_seconds(tmp_path: Path) -> None:
     held = await lock(target, {"update": 1000000})
     try:
         directory = os.path.realpath(target) + ".lock"
-        # Five seconds old: stale at the 2000 ms minimum, held at the 10000 ms default.
         _age(directory, 5)
         with pytest.raises(LockError) as caught:
             await lock(target)
@@ -105,7 +104,6 @@ async def test_retries_acquire_once_the_holder_releases(tmp_path: Path) -> None:
     target = _target(tmp_path)
     holder = await lock(target)
     asyncio.get_running_loop().call_later(0.05, lambda: asyncio.ensure_future(holder()))
-    # maxRetryTime 0 means no limit.
     release = await lock(target, {"retries": {"retries": 3, "minTimeout": 100, "maxTimeout": 100, "maxRetryTime": 0}})
     await release()
 
@@ -114,7 +112,6 @@ async def test_empty_retries_object_keeps_the_defaults(tmp_path: Path) -> None:
     target = _target(tmp_path)
     holder = await lock(target)
     asyncio.get_running_loop().call_later(0.05, lambda: asyncio.ensure_future(holder()))
-    # One second to the first retry (the default minTimeout).
     release = await lock(target, {"retries": {}})
     await release()
 
@@ -151,7 +148,6 @@ async def test_min_timeout_above_max_timeout_is_rejected(tmp_path: Path) -> None
 def test_timeouts_follow_retry() -> None:
     assert lockfile._timeouts({"retries": 4, "minTimeout": 100, "factor": 2}) == [100, 200, 400, 800]
     assert lockfile._timeouts({"retries": 4, "minTimeout": 100, "factor": 2, "maxTimeout": 300}) == [100, 200, 300, 300]
-    # Math.round: halves go up.
     assert lockfile._timeouts({"retries": 1, "minTimeout": 0.5}) == [1]
     assert lockfile._timeouts({"retries": 0, "forever": True, "minTimeout": 100}) == [100]
     assert lockfile._timeouts([5, 10]) == [5, 10]

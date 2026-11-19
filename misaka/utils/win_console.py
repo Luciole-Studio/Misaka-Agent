@@ -21,7 +21,6 @@ from ctypes import wintypes
 
 _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
-# wincon.h console modes
 ENABLE_PROCESSED_INPUT = 0x0001
 ENABLE_LINE_INPUT = 0x0002
 ENABLE_ECHO_INPUT = 0x0004
@@ -38,7 +37,7 @@ VK_MENU = 0x12
 CP_UTF8 = 65001
 WAIT_OBJECT_0 = 0
 WAIT_TIMEOUT = 0x102
-POLL_MS = 50          # how long the reader waits before it looks at its stop flag again
+POLL_MS = 50
 
 
 class _Coord(ctypes.Structure):
@@ -46,7 +45,6 @@ class _Coord(ctypes.Structure):
 
 
 class _KeyEventRecord(ctypes.Structure):
-    # uChar is read as a WORD: a lone surrogate must reach us as a code unit, not a str.
     _fields_ = [("bKeyDown", wintypes.BOOL), ("wRepeatCount", wintypes.WORD),
                 ("wVirtualKeyCode", wintypes.WORD), ("wVirtualScanCode", wintypes.WORD),
                 ("uChar", wintypes.WORD), ("dwControlKeyState", wintypes.DWORD)]

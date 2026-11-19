@@ -32,15 +32,9 @@ from misaka.core import graph
 from misaka.core.platform import tasks as task_store
 from misaka.utils import atomic
 
-# Cards that review rather than research: a critique records issues, a divergence review records
-# alternatives. Neither feeds the evidence ledger.
 CRITIQUE_KINDS = frozenset({"red_team", "final_review"})
 REVIEW_KINDS = CRITIQUE_KINDS | {"divergence"}
 
-# The run's graph (``misaka.core.graph``) holds its structure: the nodes and what forked them, the
-# decisions, options, review issues and relations, and the journal of Last Order's commands. These
-# tables hold the rest: the run itself, how each node is being executed, the cards, and the files and
-# findings the run registered.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS research_runs (
   id              TEXT PRIMARY KEY,
@@ -128,29 +122,18 @@ CREATE INDEX IF NOT EXISTS research_claims_finding ON research_claims(finding_id
 """
 
 ACTIVE = ("active", "waiting_input", "stopping")
-# closed = the node's own work is done. Its options wait for the level's reconciliation and its
-# children run on their own: neither is the node's status.
 NODE_TERMINAL = ("closed", "failed", "parked")
 DEFAULT_LIMITS = {"max_depth": 3, "parallel": 4, "sister_parallel": 4, "max_followups": 2,
                   "max_revisions": 2, "max_nodes": 30}
 MAX_NODES_CEILING = 500
-# A run's own compaction threshold, as a share of the context window: below a tenth a session would
-# compact on nearly every turn, above 0.95 there is no room left to compact into.
 MIN_CONTEXT_THRESHOLD, MAX_CONTEXT_THRESHOLD = 0.1, 0.95
-# v19: the structure moved into the run's graph (v18 is migrated, _migrate_from_18). v20: an option left unopened
-# points at what answers it, and an option can answer a path declined before (_migrate_from_19).
 RESEARCH_SCHEMA_VERSION = 20
 DRIVER_TTL_SECONDS = 300
 RESEARCH_TABLES = (
     "research_claims", "research_findings", "research_artifacts", "research_cards", "research_execution",
     "research_runs",
 )
-# What Last Order may answer a red-team issue with; one she took to her decision ends as ``branch``
-# (``option_id`` = the option that takes it up) or, not opened, as ``covered`` (``covered_by``, or the
-# ``option_id`` of an option waiting to be opened) or ``decline``.
 CRITIQUE_DISPOSITIONS = ("revise", "correct", "rebut", "concede", "covered", "park", "branch")
-# What becomes of a divergence proposal at the node's decision. A gap is not a proposal: the
-# divergence review's gaps are filled or answered in its own rounds, before the node forks.
 PROPOSAL_DISPOSITIONS = ("branch", "covered", "decline")
 RELATION_KINDS = ("converge", "diverge", "resonates", "appropriates", "displaces")
 
@@ -233,18 +216,14 @@ def init(con):
     has_runs, current = _schema_state(con)
     if has_runs and current:
         _validate_current_schema(con)
-        return                               # the normal read path takes no SQLite write lock
-    # DDL is transactional in SQLite, but ``executescript`` commits implicitly. Keep the new
-    # tables, indexes and the version marker under one explicit transaction.
+        return
     with task_store.write_txn(con), _savepoint(con):
-        # Another process may have created the schema while this one waited for BEGIN IMMEDIATE.
         has_runs, current = _schema_state(con)
         if has_runs and current:
             _validate_current_schema(con)
             return
         recorded = con.execute("SELECT MAX(version) FROM schema_migrations WHERE component='research'").fetchone()[0]
         if recorded in (18, 19):
-            # A v18 board's graphs are made with the current schema; a v19 board's are given it.
             if recorded == 18:
                 _migrate_from_18(con)
             else:
@@ -257,8 +236,6 @@ def init(con):
             _execute_script(con, INDEXES)
 
 
-# --- the run's graph ---------------------------------------------------------------------
-
 def graph_schema(chosen):
     """What a run's graph may hold, under the run's limits ``chosen``: its node count and depth are
     the graph's own bounds, so no writer can pass them."""
@@ -266,7 +243,6 @@ def graph_schema(chosen):
         "nodes": {"inquiry": {"max": chosen["max_nodes"], "frozen": ["depth"]},
                   "decision": {}, "option": {}, "issue": {}, "relation": {}},
         "edges": {
-            # parent -> child: the node a decision of the parent opened, or a join of several
             "fork": {"from": ["inquiry"], "to": ["inquiry"], "acyclic": True, "frozen": True,
                      "max_depth": chosen["max_depth"]},
             "decides": {"from": ["inquiry"], "to": ["decision"], "max_in": 1},
@@ -274,13 +250,7 @@ def graph_schema(chosen):
             "opens": {"from": ["option"], "to": ["inquiry"], "max_out": 1},
             "raised_on": {"from": ["issue"], "to": ["inquiry"], "max_out": 1},
             "becomes": {"from": ["issue"], "to": ["option"], "max_out": 1},
-            # What answers a possibility that was not opened as a node of its own: an issue's covering node,
-            # or, for an option left unopened, the node that pursues it or the option opened for it. Each
-            # possibility has one such pointer, set by whoever judged it; following them -- with
-            # ``becomes`` and ``opens`` -- ends at a node or at a record left unopened (views.where).
             "covered_by": {"from": ["issue", "option"], "to": ["inquiry", "option"], "max_out": 1, "acyclic": True},
-            # A cross-reference, not a pointer: an option that brings back a path declined or left unopened,
-            # and answers the reason recorded for it. The path stays where it was.
             "answers": {"from": ["option"], "to": ["issue", "option"], "unique": True},
             "member": {"from": ["relation"], "to": ["inquiry"], "unique": True},
         },
@@ -319,7 +289,7 @@ def _migrate_from_18(con):
     for index in ("research_tasks_run", "research_tasks_local"):
         con.execute(f"DROP INDEX IF EXISTS {index}")
     con.execute("ALTER TABLE research_run_tasks RENAME TO research_cards")
-    _execute_script(con, SCHEMA)                 # research_execution; the other tables are there already
+    _execute_script(con, SCHEMA)
     now = int(time.time())
     for run in con.execute("SELECT * FROM research_runs ORDER BY created_at,rowid").fetchall():
         rid = run["id"]
@@ -433,8 +403,6 @@ def acquire_driver(con, run_id, lock, ttl_seconds=DRIVER_TTL_SECONDS):
     with task_store.write_txn(con):
         lease = graph.acquire(con, run_id, lock, ttl=int(ttl_seconds), stale=_lease_holder_is_dead)
         if lease.acquired and lease.previous != lock:
-            # Invalidate delayed child spawns in the same transaction as takeover.
-            # Keep PID/identity for the successor's existing orphan-reaping path.
             con.execute("UPDATE research_execution SET runner_key=NULL WHERE run_id=?", (run_id,))
     return lease.acquired
 
@@ -460,10 +428,6 @@ def holds_driver(con, run_id, lock):
     return found is not None and found.lease_token == lock
 
 
-# Cards past these statuses keep their dependency history as it is: the DAG must not be rewritten
-# under a moving card, and a finished one (whose execution already finished) has
-# nothing left to wait for. Read by ``workflow._submit_tasks``, which replays a plan's edges
-# onto cards that may already have run.
 SETTLED_TASK_STATUSES = frozenset({"running", "review", "done", "failed", "stopped", "archived"})
 
 
@@ -516,21 +480,14 @@ def normalize_limits(raw=None):
         concurrency[key] = value
     result = {
         "max_depth": depth, **concurrency,
-        # How many more times a node may send its Sisters out after its first cards are back, over
-        # its whole life (before its first conclusion and while revising one). Conversation with
-        # the user is never counted.
         "max_followups": _bounded_int(raw, "max_followups", 0, 6),
-        # How many times a node may revise its conclusion after a red-team review; each revision
-        # is reviewed again. 0 = the first conclusion is final and every issue is answered otherwise.
         "max_revisions": _bounded_int(raw, "max_revisions", 0, 6),
-        # How many nodes the whole graph may hold, the root included; checked when options open.
         "max_nodes": _bounded_int(raw, "max_nodes", 1, MAX_NODES_CEILING),
     }
     if "plan_approval" in raw:
         if not isinstance(raw["plan_approval"], bool):
             raise ValueError("plan_approval must be a boolean")
         result["plan_approval"] = raw["plan_approval"]
-    # The run's own session settings; absent, its sessions follow the global ones.
     if raw.get("context_threshold") is not None:
         threshold = raw["context_threshold"]
         if (isinstance(threshold, bool) or not isinstance(threshold, (int, float))
@@ -607,12 +564,6 @@ def claim_runner(con, table, row_id, key):
         return False
     pid = os.getpid()
     identity = _own_identity(pid)
-    # The parent recorded this process's identity from its own psutil, whose start times can
-    # sit a whole second from what this process reads (processes.IDENTITY_TOLERANCE_SECONDS),
-    # so the fence compares in Python and the row then carries this process's own reading.
-    # The write is conditional on the PID that was read: the parent's record, or a duplicate's
-    # claim, can land between the two, and is then read and judged again. The parent writes only
-    # over NULL, so it lands once at most.
     for _attempt in range(3):
         row = con.execute(f'SELECT runner_pid, runner_identity FROM "{table}" WHERE id=? AND runner_key=?',
                           (row_id, key)).fetchone()
@@ -788,9 +739,6 @@ def create(con, *, workspace, question, limits=None, token_start=0, origin_sessi
     now = int(time.time())
     run_id = "r_" + secrets.token_hex(5)
     spec = normalize_limits(limits)
-    # One unit: a run row without its root node is a run ``workflow.run`` would walk straight to
-    # finalize as "every node closed", handing back a final report with no research behind it.
-    # An interrupted create must leave no row at all.
     with task_store.write_txn(con):
         con.execute(
             "INSERT INTO research_runs "
@@ -854,9 +802,6 @@ def limits(run):
         return dict(DEFAULT_LIMITS)
 
 
-# What `/research limits` and `misaka research --limits` may change on a running run, and when each
-# change is first read. The workflow reads them from the database at those points (current_limits),
-# not from the run row it started with.
 ADJUSTABLE_LIMITS = {
     "sister_parallel": "at once",
     "parallel": "from the next level of nodes",
@@ -979,8 +924,6 @@ def _resume(con, run_id, *, driver_lock, clarification):
         if previous and previous["payload"].get("status") == "clarify":
             delete_action(con, run_id, branch["id"], plan_key(round))
     reopen_cards(con, run_id)
-    # A failed node replans: every phase of ``_expand`` is idempotent over what it already
-    # produced (saved plans, cards and project-local artifacts), so it picks up its own work.
     con.execute(
         "UPDATE research_execution SET status='planning',updated_at=? "
         "WHERE run_id=? AND status IN ('waiting_input','awaiting_approval','failed')", (int(time.time()), run_id),
@@ -1046,7 +989,7 @@ def reopen_cards(con, run_id, node_id=None):
             )
 
 
-RETRY_LIMIT = 3     # ponytail: a fixed cap; a node that fails a fourth time needs a person, not a loop
+RETRY_LIMIT = 3
 
 
 def retry_node(con, run, node_id, *, session_file, tool_call_id):
@@ -1103,7 +1046,6 @@ def link_task(con, run_id, task_id, *, kind, node, local_id=None, dependencies=(
     task = task_store.get(con, task_id)
     if task is None or os.path.realpath(task["workspace"]) != run["workspace"]:
         raise ValueError("Research cards must execute in the run's project folder.")
-    # The card lives inside its node's folder: nodes/<node>/cards/<card>.
     output_dir = Path(run["workspace"], node_dir(node["id"]), "cards", task_id)
     output_dir.resolve().relative_to(Path(run["workspace"]).resolve())
     dependencies = list(dependencies)
@@ -1116,9 +1058,6 @@ def link_task(con, run_id, task_id, *, kind, node, local_id=None, dependencies=(
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     con.execute("UPDATE tasks SET output_dir=? WHERE id=?", (str(output_dir), task_id))
-    # ``cards.create(after_row=...)`` calls this before the child card file exists;
-    # create publishes the complete needs list in its first file. Direct callers link
-    # already-created cards here as before.
     task = task_store.get(con, task_id)
     if task is not None:
         from misaka.core.platform import cards as card_files
@@ -1159,8 +1098,6 @@ def tasks(con, run_id, *, kind=None, node_id=None, round=None):
         args.append(int(round))
     return con.execute(q + " ORDER BY rt.created_at", args).fetchall()
 
-
-# --- nodes: the research graph --------------------------------------------------------
 
 def create_node(con, run_id, *, question, parents):
     """A node and its fork edges, in the caller's transaction. Its depth is one more than its deepest
@@ -1286,8 +1223,6 @@ def set_fork_entry(con, node_id, entry):
                 (entry, int(time.time()), node_id))
 
 
-# --- issues: what review cards raised, and what Last Order did with each ------------------
-
 def add_issue(con, run_id, *, node, task_id, round, origin, kind, question, rationale, priority=0):
     """One issue a review card raised: a red-team issue (``origin='critique'``) or a divergence
     proposal (``origin='divergence'``). Only an exact repeat inside the same card's same round,
@@ -1391,8 +1326,6 @@ def errata(con, run_id):
     return [{"raised_by": entry.scope, **graph.thaw(entry.payload)}
             for entry in graph.entries(con, run_id, key_prefix="erratum:", status=_LIVE)]
 
-
-# --- decisions and options -------------------------------------------------------------
 
 def _derived_id(prefix, *parts):
     """An id fixed by where the record came from, so recording it again changes nothing."""
@@ -1523,8 +1456,6 @@ def _set_option(change, option_id, node_id, reason, covered_by=None):
         change.add_edge("covered_by", option_id, covered_by)
 
 
-# --- relations: what links nodes without scheduling anything ------------------------------
-
 def relations(con, run_id):
     if graph.get(con, run_id) is None:
         return []
@@ -1564,8 +1495,6 @@ def add_relations(con, run, items):
                     lambda change: [_add_relation(change, *item, now) for item in fresh] and None)
         return len(fresh)
 
-
-# --- reconciliation: the level barrier's run-level command -------------------------------
 
 def _reconcile_key(round):
     return f"reconcile:{int(round)}"
@@ -1650,7 +1579,6 @@ def apply_reconcile(con, run, round, resolved, *, considered):
         def open_level(change, _entry):
             now = int(time.time())
             opened = {"nodes": [], "joins": []}
-            # Coverage claims first: a reopened proposal becomes an option here, which the outcomes below name.
             as_option = _review_coverage(change, round, resolved.get("coverage") or (), now)
             for item in resolved["nodes"]:
                 child = _open_node(con, change, run, item["question"], item["parents"])
@@ -1715,7 +1643,6 @@ def _review_coverage(change, round, verdicts, now):
 
 
 _LIVE = (graph.PROPOSED, graph.APPROVED, graph.APPLIED)
-# Who approves a reconciliation: the user, through the root Last Order's command.
 _APPROVER = {"by": "user"}
 
 
@@ -1808,7 +1735,6 @@ def replace_action(con, run, branch, key, payload, *, session_file, tool_call_id
 
 SKIP_KEY = "skip"
 DECIDE_KEY = "decide"
-# The user's decision on a dissolution of the research question, recorded on the root node.
 CONSENT_KEY = "consent:dissolution"
 
 
@@ -1931,8 +1857,6 @@ def reframe(con, run_id, node, question):
                         (question, int(time.time()), run_id))
 
 
-# --- artifacts -------------------------------------------------------------------------
-
 def write_text(con, run_id, kind, title, relative_path, content, *,
                branch_id=None, task_id=None, metadata=None):
     run = get(con, run_id)
@@ -1948,8 +1872,6 @@ def write_text(con, run_id, kind, title, relative_path, content, *,
 
     content = str(content)
     sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    # Recover a previous process before entering our own transaction. An in-flight
-    # journal of this connection belongs to its outer transaction, not a dead writer.
     if not con.in_transaction:
         publication.recover(con, path)
     try:
@@ -1959,12 +1881,8 @@ def write_text(con, run_id, kind, title, relative_path, content, *,
                 (run_id, str(path), task_id),
             ).fetchone()
             aid = old["id"] if old else "a_" + secrets.token_hex(5)
-            # Register before touching files: an unmanaged outer raw-SQL transaction
-            # has no completion hook; its caller should use task_store.write_txn.
             task_store.on_transaction_end(con, lambda: publication.recover(con, path))
             checkpoint = publication.prepare(con, path, aid, sha)
-            # Savepoint also restores metadata if a caller catches our I/O error in
-            # a larger transaction and decides to commit its other work.
             try:
                 with _savepoint(con):
                     if old:
@@ -2039,13 +1957,11 @@ def frozen_refusal(target):
     except (OSError, sqlite3.Error):
         return None
     try:
-        # Compared as the file system compares names (home.fold): a case variant, or on macOS a
-        # decomposed Unicode spelling, is the same file there and edited it past this check.
         wanted = home.fold(str(Path(target).resolve()))
         row = next((found for found in con.execute(
             "SELECT a.kind, a.run_id, a.path FROM research_artifacts a JOIN research_runs r ON r.id=a.run_id "
             "WHERE a.task_id IS NULL AND r.status!='done'") if home.fold(found["path"]) == wanted), None)
-    except sqlite3.OperationalError:     # a board research has never touched has no such tables
+    except sqlite3.OperationalError:
         return None
     finally:
         con.close()
@@ -2090,7 +2006,6 @@ def recover_publications(con, run):
 
     root = Path(run["workspace"])
     paths = {Path(row["path"]) for row in artifacts(con, run["id"])}
-    # Include an interrupted first write whose registration rolled back completely.
     for branch in nodes(con, run["id"]):
         for journal in (root / node_dir(branch["id"])).glob(".*.research-publish.json"):
             paths.add(journal.with_name(journal.name[1:-len(".research-publish.json")]))

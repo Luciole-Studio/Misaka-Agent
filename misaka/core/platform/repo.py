@@ -42,7 +42,6 @@ def _serialized(operation):
         if common.returncode:
             raise OSError(common.stderr.strip())
         directory = os.path.realpath(os.path.join(workspace, common.stdout.strip()))
-        # Git's index.lock protects one command, not an add/commit sequence.
         with open(os.path.join(directory, "misaka-git.lock"), "a", encoding="utf-8") as lock:
             file_lock.lock_fd(lock.fileno())
             return operation(workspace, *args, **kwargs)

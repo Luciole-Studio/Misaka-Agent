@@ -118,7 +118,6 @@ async def test_streaming_mail_is_not_acknowledged_before_persistence(tmp_path):
         assert Path(session.sessionManager.sessionFile).read_bytes() == transcript_before
         row = con.execute('SELECT delivered_at FROM messages WHERE id=?', (mid,)).fetchone()
         assert row['delivered_at'] is None, 'mail ACKed with only an in-memory follow-up; a crash loses it'
-        # The real transcript append fires the receipt, then the inbox may ACK.
         queued = session.agent._steeringQueue.drain()
         for message in queued:
             session._appendCustomMessage(message)
@@ -225,7 +224,6 @@ async def test_extension_exec_timeout_reaps_owned_descendants(tmp_path):
         assert not alive, f'owned child {pid} survived timeout of its parent'
     finally:
         if pidfile.exists():
-            # Only the test-created child, never a user process or shared process group.
             with contextlib.suppress(psutil.NoSuchProcess):
                 child = psutil.Process(int(pidfile.read_text(encoding='utf-8')))
                 child.kill()
@@ -347,7 +345,6 @@ async def test_mail_shutdown_or_cancel_keeps_unpersisted_rows_retryable(tmp_path
             await asyncio.wait_for(job, 5)
         row = con.execute('SELECT delivered_at,lease_token FROM messages WHERE id=?', (mid,)).fetchone()
         assert tuple(row) == (None, None)
-        # A late persistence callback does not use the already-closed connection.
         con.close()
         for message in session.agent._steeringQueue.drain():
             session._appendCustomMessage(message)
@@ -381,7 +378,6 @@ async def test_mail_retry_after_ack_failure_deduplicates_each_row(tmp_path, monk
         with pytest.raises(sqlite3.OperationalError, match='ACK failure'):
             await asyncio.wait_for(job, 5)
         assert con.execute('SELECT delivered_at FROM messages WHERE id=?', (first,)).fetchone()[0] is None
-        # Change batch membership. The first delivery ID must still deduplicate.
         second = messages.send(con, 'last-order', 'second fixture', sender='10032')
         monkeypatch.setattr(messages, 'ack', original_ack)
         job = asyncio.create_task(inbox._deliver_once(con))
@@ -536,7 +532,6 @@ async def test_extension_exec_cleans_detached_sigterm_resistant_child(tmp_path, 
         async with asyncio.timeout(5):
             while not pidfile.exists():
                 await asyncio.sleep(0.01)
-        # Let the child install its handler before teardown.
         await asyncio.sleep(0.1)
         if trigger == 'abort':
             abort.set()
@@ -566,7 +561,6 @@ async def test_extension_exec_keeps_output_and_normal_exit_status(tmp_path):
     from misaka.core.exec import execCommand
 
     result = await execCommand(sys.executable, ['-c', 'import sys;print("out");print("err",file=sys.stderr);sys.exit(7)'], str(tmp_path))
-    # A Windows child writes its text-mode newlines as CRLF, and the output is kept as written.
     stdout, stderr = (text.replace('\r\n', '\n') for text in (result.stdout, result.stderr))
     assert (stdout, stderr, result.code, result.killed) == ('out\n', 'err\n', 7, False)
 
@@ -615,7 +609,6 @@ def test_atomic_private_write_is_private_before_first_byte(tmp_path, monkeypatch
         os.umask(mask)
 
 
-# '?' cannot be in a Windows file name; the rest of the URI-special name still round-trips there.
 @pytest.mark.parametrize('dirname,authority', [('checkout with spaces', ''), ('日本語#%' if os.name == 'nt' else '日本語#?%', ''),
                                                ('local checkout', 'localhost')])
 def test_update_uri_roundtrip(tmp_path, monkeypatch, dirname, authority):
@@ -679,7 +672,7 @@ async def test_mail_cancelled_batch_reattaches_receipts_without_duplicating_queu
             messages.send(con, 'last-order', body, sender='10032')
         job = asyncio.create_task(inbox._deliver_once(con))
         await _wait_for_queue(session)
-        assert len(session.agent._steeringQueue._messages) == 1  # one batch, one wake-up
+        assert len(session.agent._steeringQueue._messages) == 1
         assert session.agent._steeringQueue._messages[0]['details']['count'] == 2
         job.cancel()
         with pytest.raises(asyncio.CancelledError):

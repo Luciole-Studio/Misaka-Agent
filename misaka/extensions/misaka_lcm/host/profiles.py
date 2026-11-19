@@ -54,8 +54,6 @@ def nous_portal_tags(session_id=None):
 
 
 def open_credentialed_url(*args, **kwargs):
-    # Profiles' catalogue helpers are not used for native model discovery. Keep
-    # their explicit HTTP helper redirect-safe if invoked by an operator.
     from ..native.urllib_security import open_credentialed_url as open_url
     return open_url(*args, **kwargs)
 

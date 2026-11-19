@@ -25,7 +25,6 @@ from misaka.utils.values import signal_aborted
 def _abortReason(signal: Any) -> BaseException:
     reason = getattr(signal, "reason", None)
     if reason is not None:
-        # MISAKA fork: only an exception can be raised; another reason value is carried by a DOMException.
         return reason if isinstance(reason, BaseException) else DOMException(str(reason), "AbortError")
     error = DOMException("The operation was aborted", "AbortError")
     return error
@@ -85,7 +84,6 @@ def raceWithAbortSignal[T](operation: Awaitable[T], signal: Any) -> asyncio.Futu
     task.add_done_callback(onSettled)
 
     def onCallerDone(future: asyncio.Future[T]) -> None:
-        # MISAKA fork: the caller stopped waiting (it was cancelled); cancel the operation it started.
         if future.cancelled() and not task.done():
             task.cancel()
             _observe(task)

@@ -59,8 +59,6 @@ class OAuthCredentials(BaseModel):
     @field_validator("expires", mode="before")
     @classmethod
     def _wholeMilliseconds(cls, value: Any) -> Any:
-        # MISAKA fork: a JavaScript number may carry a fraction (`Date.now() + expires_in * 1000`); the stored
-        # expiry is whole milliseconds.
         if isinstance(value, float) and math.isfinite(value):
             return math.floor(value)
         return value

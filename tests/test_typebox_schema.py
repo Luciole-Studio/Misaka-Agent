@@ -35,7 +35,6 @@ MODELS = {
 def test_built_in_tool_schemas_serialize_as_typebox_does(name):
     schema = typeboxSchema(MODELS[name])
     if name == "read":
-        # MISAKA fork: read's spreadsheet range.
         del schema["properties"]["cell_range"]
     assert jsonStringify(schema) == SCHEMAS[name]
 

@@ -127,8 +127,6 @@ def createDefaultTransport(entry: McpServerEntry, cwd: str, authProvider: AuthPr
         "command": expandHome(config["command"]),  # type: ignore[typeddict-item]
         **({"args": [expandHome(arg) for arg in args]} if args is not None else {}),
         "cwd": node_path.resolve(cwd, expandHome(configCwd if configCwd is not None else ".")),
-        # MISAKA fork: a stdio server inherits only the names it needs from MISAKA's environment,
-        # which holds API keys (issue #10; see .environment); what else it needs is named in its env.
         "env": {**processEnv(inheritedEnvironment()), **env},
         "inheritEnv": False,
         "stderr": "pipe",
@@ -207,7 +205,6 @@ class McpServerConnection:
         self._onTools = options["onTools"]
         self._onChange = options.get("onChange")
         self._log = options.get("log")
-        # MISAKA fork: asyncio holds tasks weakly; refreshes and the opening connect live here.
         self._tasks: set[asyncio.Task[Any]] = set()
         url = self.oauthUrl
         provider = (self.entry["config"].get("auth") or {}).get("provider") if "url" in self.entry["config"] else None  # type: ignore[typeddict-item]
@@ -289,7 +286,6 @@ class McpServerConnection:
 
             opening.add_done_callback(clear)
             self._opening = opening
-        # MISAKA fork: shielded, so one caller giving up does not cancel the connect the others share.
         return asyncio.shield(self._opening)
 
     def callTool(self, name: str, args: dict[str, Any], options: McpRequestOptions) -> asyncio.Future[CallToolResult]:
@@ -393,8 +389,6 @@ class McpServerConnection:
                 delay = retries[attempt] if attempt < len(retries) else None
                 if self._closed or delay is None or not isTransientError(error):
                     raise self._connectFailed(error)
-                # MISAKA fork: `sleep(delay, undefined, { signal })` from node:timers/promises, whose
-                # rejection on abort is ignored.
                 with contextlib.suppress(Exception):
                     await raceAbort(asyncio.sleep(delay / 1000), self._shutdown.signal)
                 if self._closed:
@@ -403,7 +397,6 @@ class McpServerConnection:
 
     async def _connectOnce(self) -> McpClient:
         client = McpClient({
-            # MISAKA fork: misaka's own name and version, where pi sends `pi`.
             "name": "misaka",
             "version": VERSION,
             "requestTimeoutMs": self.timeoutMs,
@@ -498,7 +491,6 @@ class McpServerConnection:
         self._client = None
         await asyncio.gather(
             _closeQuietly(client) if client is not None else _resolved(None),
-            # MISAKA fork: shielded, as every waiter of the shared connect is.
             _settleQuietly(asyncio.shield(self._opening)) if self._opening is not None else _resolved(None),
         )
         # A refresh the server already answered may have rotated the refresh token; exiting before the

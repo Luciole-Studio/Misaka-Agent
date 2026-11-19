@@ -15,11 +15,7 @@ import sqlite3
 import time
 from contextlib import contextmanager, nullcontext
 
-# How long a lease outlives its last renewal. A request renews it while it streams; a process that
-# died mid-request leaves it to expire, and it is then charged in full.
 LEASE_TTL_SECONDS = 900
-# Said when a request does not fit under the cap. Every supervisor matches this text to stop work
-# as "reached the cap" (resumable) rather than failed, and the retry classifier never matches it.
 EXHAUSTED_MESSAGE = "token_cap reached"
 
 
@@ -68,7 +64,6 @@ def spent(con, *, task_ids=None):
     Task deletion and transaction rollback can remove already-seen rows, including writes
     from other connections. An append-only connection cache is therefore not authoritative.
     """
-    # ponytail: recount usage rows; add transaction-aware storage only if this is measured hot.
     total = 0
     scope = None if task_ids is None else set(task_ids)
     for task_id, kind, payload in con.execute(
@@ -152,9 +147,6 @@ def reserved(con, *, task_id=None):
 
     now = int(time.time())
     with _locked(con):
-        # The in_transaction read has to be inside the lock too: outside it, the answer is
-        # already stale by the time BEGIN runs, and the "nested" branch is precisely the case
-        # this function used to create for everyone else.
         nested = bool(getattr(con, "in_transaction", False))
         try:
             if nested:
@@ -316,10 +308,6 @@ def renew_request(con, lease, ttl_seconds=LEASE_TTL_SECONDS):
                            (int(time.time()) + max(60, int(ttl_seconds)), lease)).rowcount == 1
 
 
-# Characters of the sha256 kept for the URL or query one external call was made
-# against. Same 16 as the repo's other privacy digests (the task fingerprints in
-# platform/tasks.py): enough that two different pages never collide in
-# one run's ledger, short enough that the row stays readable.
 _SUBJECT_DIGEST_CHARS = 16
 
 
@@ -395,10 +383,6 @@ def record_external_call(service, *, subject="", **facts):
 
         con = tasks.connect(path)
         try:
-            # Written straight rather than through ``tasks.add_event``, for the same
-            # reason ``settle_request`` is: that helper drops any event whose
-            # ``task_id`` has no row in ``tasks``, and a workflow's run charges its usage
-            # to a run id that lives in another database.
             con.execute(
                 "INSERT INTO events (task_id,kind,payload,generation,created_at) "
                 "VALUES (?,?,?,?,?)",

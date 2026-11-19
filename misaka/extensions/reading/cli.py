@@ -15,8 +15,8 @@ import threading
 from . import engine, store
 from .store import ReadingError
 
-ENV_RUN = "MISAKA_READING_RUN"     # a headless leader session binds to this reading when it starts
-ENV_MODEL = "MISAKA_READING_MODEL"  # the study readers' model without --model (PR #12's name for it)
+ENV_RUN = "MISAKA_READING_RUN"
+ENV_MODEL = "MISAKA_READING_MODEL"
 OPERATIONS = ("act", "fork", "compare", "reread")
 STOP_WORDS = ("/stop", "/quit", "/exit")
 
@@ -96,9 +96,6 @@ def parse(argv, prog="misaka read"):
     if args.command == "compare" and len(args.nodes) < 2:
         raise ReadingError("compare needs at least two nodes.")
     return args
-
-
-# -- running a command ------------------------------------------------------------------------
 
 
 def graph_result(run):
@@ -181,9 +178,6 @@ class TerminalProgress(engine.Progress):
             self.out.write(f"\n(graph updated: {run_id} {', '.join(node_ids)})\n")
             self.out.flush()
         self.speaker = None
-
-
-# -- chat --------------------------------------------------------------------------------------
 
 
 def leader_in_use(path):
@@ -275,7 +269,7 @@ async def chat(args):
     run = engine.find(args.run)
     flags, assembly, env = role_session_setup(engine.lo_profile(), run.workspace, model=args.model)
     leader = run.info.get("leader")
-    if leader and leader_in_use(leader):       # a live window, whether or not it has written its file yet
+    if leader and leader_in_use(leader):
         raise ReadingError(f"The conversation that leads {run.id} is open in a window: talk to Last Order "
                            f"there, or attach to it with misaka chat --attach --session {leader}")
     if leader and os.path.exists(leader):
@@ -297,8 +291,6 @@ async def chat(args):
             runtime, session, error = await open_session(flags, run.workspace, assembly)
             if error:
                 raise ReadingError(error)
-            # Input may be a pipe nobody watches: the guards every headless Last Order runs under
-            # (research's nodes, run_session) stop a turn that repeats itself or spins.
             from misaka.agent.guards import install_guards
             from misaka.core.platform import metering
             from misaka.core.platform.vocabulary import NO_PROGRESS_VOCABULARY
@@ -317,13 +309,13 @@ async def chat(args):
                 try:
                     await _turn(session, line)
                     finished = True
-                except BaseException as failure:  # whatever ends a turn, its line says it did not finish
+                except BaseException as failure:
                     error = str(failure) or type(failure).__name__
                     raise
                 finally:
                     progress.speaker = None
                     print(file=progress.out, flush=True)
-                    if args.json:             # with --json, stdout has one result per turn
+                    if args.json:
                         print(json.dumps({"runId": run.id, "reply": _reply(session) if finished else "",
                                           "ok": finished, **({"error": error} if error else {})},
                                          ensure_ascii=False), flush=True)
@@ -375,8 +367,6 @@ def main(argv):
         print(f"misaka read: {error}", file=sys.stderr)
         return 1
     if args.command in OPERATIONS and not args.model:
-        # The study readers' model only: Last Order's in `chat` is her conversation's, kept in it,
-        # and a variable left in the environment must not change it.
         args.model = os.environ.get(ENV_MODEL, "").strip() or None
     try:
         if args.command == "chat":

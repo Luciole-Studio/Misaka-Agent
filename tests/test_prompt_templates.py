@@ -625,5 +625,4 @@ def test_reports_invalid_yaml_frontmatter_and_keeps_valid_siblings(tmp_path: Pat
     diagnostic = result.diagnostics[0]
     assert diagnostic.type == "warning"
     assert diagnostic.path == str(invalidPromptPath)
-    # MISAKA fork: the YAML parser is ruamel's, whose messages are not the `yaml` package's ("line 1, column 14").
     assert diagnostic.message

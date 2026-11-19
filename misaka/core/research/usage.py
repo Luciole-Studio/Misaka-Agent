@@ -30,7 +30,7 @@ def _add(into, usage):
     if cost:
         into["cost"] += float(cost)
     elif usage.get("totalTokens"):
-        into["unpriced"] += 1          # a model with no price in the catalogue costs nothing here
+        into["unpriced"] += 1
 
 
 def _entry_ms(entry, message):
@@ -108,11 +108,6 @@ def run_usage(con, run):
     models, parts = {}, []
     since = int(run["created_at"]) * 1000
     root = run["root_session"]
-    # The window goes on after its run: once the run has ended (done, stopped, failed) count it up
-    # to the run's last change, and never past the next run started from the same window. 0.18.7
-    # bounded a done run only, so a stopped run was charged for every later run in its window. A
-    # run still going (waiting for the user, stopping, or resumed) is counted to now; one resumed
-    # in a window that started another run meanwhile counts that run's turns there too.
     until = None
     if run["status"] not in runs.ACTIVE:
         until = int(run["updated_at"]) * 1000 + 60_000
@@ -124,7 +119,6 @@ def run_usage(con, run):
     folders = sorted(research.glob(f"{run['id']}--*")) if research.is_dir() else []
     window = root and not any(Path(root).is_relative_to(folder) for folder in folders)
     if window:
-        # The root's Last Order is the user's window: only what she said once the run had begun.
         parts.append(("root Last Order", session_usage([root], since_ms=since, until_ms=until, by_model=models)))
     for folder in folders:
         scope = folder.name.split("--", 1)[1]

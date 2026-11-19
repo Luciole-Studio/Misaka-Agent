@@ -30,7 +30,7 @@ def requeue(tmp_path):
     collector = ToolCollector()
     network._install(collector, SimpleNamespace())
     tool = next(t for t in collector.tools if t.name == "misaka_card_requeue")
-    ctx = SimpleNamespace(cwd=str(tmp_path))          # the tool is scoped to this project
+    ctx = SimpleNamespace(cwd=str(tmp_path))
     async def call(**args):
         return await tool.execute("fixture", args, None, None, ctx)
     call.definition = tool
@@ -41,7 +41,7 @@ def _card(con, tmp_path, status="stopped", title="T4 crossover"):
     task_id = cards.create(con, str(tmp_path), title, BODY, "10032")
     if status != "ready":
         con.execute("UPDATE tasks SET status=? WHERE id=?", (status, task_id))
-        tasks._mirror_status(con, task_id)      # the card file is the contract, so it says so too
+        tasks._mirror_status(con, task_id)
         con.commit()
     return task_id
 
@@ -59,7 +59,6 @@ async def test_a_stopped_card_comes_back_as_a_fresh_attempt(board, tmp_path, req
     assert row["generation"] == before + 1
     assert row["claim_lock"] is None and row["worker_pid"] is None
     assert task_id in result and "ready" in result
-    # Nothing polls for ready cards, so the reply must not imply the work restarts by itself.
     assert "not running yet" in result and "misaka_dispatch" in result
     kinds = [r["kind"] for r in board.execute("SELECT kind FROM events WHERE task_id=?", (task_id,))]
     assert "reopened" in kinds

@@ -29,7 +29,6 @@ WIDGET = "reading"
 TOOLS = ("reading_act", "reading_fork", "reading_compare", "reading_reread")
 LEADER_ACTIONS = ("overview", "reconstruct", "presuppose", "transform", "translate", "generate")
 TAIL_CHARS, TAIL_LINES = 2400, 6
-# The window shows ten lines of a widget: the usage fits in them; a subcommand's --help is a notice.
 USAGE = ("/read open SOURCE... --question Q [--intent T]   open a reading; this window leads it",
          "/read act RUN_ID ACTION --node N [--lens L] [--focus F] [--context MODE] [--question Q]",
          "/read fork RUN_ID --node N --lens A --lens B [--action ACTION] [--question Q]",
@@ -38,7 +37,7 @@ USAGE = ("/read open SOURCE... --question Q [--intent T]   open a reading; this 
          "/read graph RUN_ID      /read chat RUN_ID [--here]   lead an existing reading from this window",
          "/read close             leave reading mode         /read stop   stop the running operation",
          "Actions: overview reconstruct presuppose transform compare translate reread generate",
-         "/read SUBCOMMAND --help for details; the guide is docs/guide/reading.md")
+         "/read SUBCOMMAND --help for details")
 
 
 def split(text):
@@ -90,9 +89,6 @@ class Tail(engine.Progress):
 
 
 def register(harn):
-    # ``here``: this conversation's file; ``tasks``: the reading operations running for this window,
-    # each marked as started by /read or by Last Order's tools, so /read stop reaches both;
-    # ``closing``: the window is going, so they end quietly.
     state = {"run": None, "open": None, "here": None, "tasks": {}, "closing": False}
 
     def leading():
@@ -123,7 +119,6 @@ def register(harn):
             raise ReadingError("This window keeps no conversation (it was started without a session), so it "
                                "cannot lead a reading.")
         previous = bound()
-        # The new reading is taken first: one busy elsewhere leaves this window as it was.
         if run_id:
             engine.write(engine.find(run_id), "lead", {"session": here},
                          lambda change: change.update("run", {"leader": here}))
@@ -132,7 +127,7 @@ def register(harn):
                 engine.write(previous, "lead", {"session": None},
                              lambda change: change.update("run", {"leader": None}))
             except ReadingError:
-                pass      # busy elsewhere: it names this conversation still, which no longer leads it (bound)
+                pass
         state.update(run=run_id, here=here)
         harn.appendEntry(BIND, {"run": run_id})
         activate_tools(bound() is not None)
@@ -152,14 +147,12 @@ def register(harn):
     async def session_start(event, ctx):
         state["closing"] = False
         restore(ctx)
-        # ``misaka read chat`` names its reading once, for this session alone: taken, not inherited
-        # by whatever this session runs.
         wanted = os.environ.pop(cli.ENV_RUN, None)
         if wanted and (bound() is None or bound().id != wanted):
             try:
                 bind(wanted, ctx)
             except ReadingError:
-                pass                          # misaka read chat sees it did not take the reading up, and says so
+                pass
         activate_tools(bound() is not None)
 
     async def session_tree(event, ctx):
@@ -192,7 +185,7 @@ def register(harn):
         last = said[-1] if said else {}
         if run is None:
             if state["run"] and set(TOOLS) & set(harn.getActiveTools()):
-                activate_tools(False)         # bound here, led elsewhere: another conversation took it up
+                activate_tools(False)
             if last.get("run") and not last.get("ended"):
                 return _notice(prompts.leader_left(last["run"]), run=last["run"], ended=True)
             return None
@@ -208,7 +201,7 @@ def register(harn):
             if not held:
                 content = prompts.leader_mode(run)
                 if last.get("run") not in (None, run.id) and not last.get("ended"):
-                    content = f"{prompts.leader_left(last['run'])}\n\n{content}"     # the one it led until now
+                    content = f"{prompts.leader_left(last['run'])}\n\n{content}"
                 return _notice(content, run=run.id, map=current, whole=True)
             if last.get("map") != current:
                 return _notice(prompts.leader_map_update(run), run=run.id, map=current)
@@ -228,9 +221,6 @@ def register(harn):
     _register_tools(harn, bound, track)
     harn.registerCommand("read", {"description": "Co-read materials with a question (/read --help)",
                                   "handler": lambda args, ctx: _command(args, ctx, state, bind, track)})
-
-
-# -- the leader's tools ------------------------------------------------------------------------
 
 
 def _register_tools(harn, bound, track):
@@ -292,8 +282,6 @@ def _register_tools(harn, bound, track):
             try:
                 node_ids = await task
             except asyncio.CancelledError:
-                # Escape or /read stop cancelled the operation alone: say so. A cancellation of this
-                # call itself (its turn torn down, a timeout around it) goes on up, as any tool's must.
                 current = asyncio.current_task()
                 if task.cancelled() and not (current and current.cancelling()):
                     return STOPPED
@@ -303,10 +291,6 @@ def _register_tools(harn, bound, track):
             text = _written(run, node_ids) + "".join(f"\nNote: {line}" for line in notes)
             return {"content": [{"type": "text", "text": text}], "details": {}}
 
-        # One reading operation at a time: two in one message would race for the reading's lease.
-        # Active only while this conversation leads a reading (`activate_tools`). Registered active, a
-        # resumed chat would turn them on as tools new to its branch, and turning them off at
-        # `session_start` would then drop the tools it restored that are still waiting to register.
         harn.registerTool(ToolDefinition(name=name, label=label, description=prompts.TOOLS[name],
                                          parameters=typeboxSchema(params), execute=execute,
                                          executionMode="sequential", defaultActive=False))
@@ -361,9 +345,6 @@ def _written(run, node_ids):
     return "\n\n".join(parts)
 
 
-# -- /read ---------------------------------------------------------------------------------------
-
-
 async def _command(text, ctx, state, bind, track):
     if ctx.mode != "tui":
         ctx.ui.notify("/read is available in interactive mode.", "warning")
@@ -380,7 +361,7 @@ async def _command(text, ctx, state, bind, track):
         for task in list(state["tasks"]):
             task.cancel()
         if started_by_her:
-            ctx.abort()                       # her turn stops with it, as Escape would stop it
+            ctx.abort()
         return
     if head == "close":
         if state["run"] is None:
@@ -397,7 +378,7 @@ async def _command(text, ctx, state, bind, track):
         return ctx.ui.notify(shown.args[0].rstrip(), "info")
     except ReadingError as error:
         return ctx.ui.notify(f"/read: {error}", "error")
-    if args.command == "graph":                # a look, so it does not wait for a running operation
+    if args.command == "graph":
         try:
             lines = cli.describe(cli.graph_result(engine.find(args.run)))
         except ReadingError as error:
@@ -406,7 +387,6 @@ async def _command(text, ctx, state, bind, track):
     if state["tasks"]:
         return ctx.ui.notify("This window is reading; wait for it to finish, or /read stop.", "warning")
     if args.command == "open":
-        # The window's project, not the process's folder: a relative path is the window's too.
         args.workspace = args.workspace or ctx.cwd
         args.sources = [source if materials.is_url(source) else os.path.join(ctx.cwd, os.path.expanduser(source))
                         for source in args.sources]

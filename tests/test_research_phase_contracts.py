@@ -112,7 +112,6 @@ def test_dispositions_cover_every_issue_once_and_respect_the_node_s_limits(node_
         check(1, root, rebut)
     with pytest.raises(ValueError, match="No revision is left"):
         check(0, root, {"issue_id": a, "disposition": "revise", "reason": "fix"}, rebut)
-    # A plain error is corrected when no revision is left -- appended, not left standing (2026-09-28).
     check(0, root, {"issue_id": a, "disposition": "correct", "reason": "1707, not 1701"}, rebut)
     with pytest.raises(ValueError, match="a correction is a revise"):
         check(1, root, {"issue_id": a, "disposition": "correct", "reason": "1707"}, rebut)
@@ -220,7 +219,7 @@ def test_deliberation_is_the_node_s_own_turns_on_the_current_branch(tmp_path):
     boundary = manager.getLeafId()
     _say(manager, "ABANDONED line")
     abandoned = manager.getLeafId()
-    manager.branch(boundary)                     # the conversation left that line
+    manager.branch(boundary)
     _say(manager, "OWN thinking about A")
     text = planner.deliberation_text(manager.getSessionFile(), boundary)
     assert "OWN thinking about A" in text
@@ -459,7 +458,6 @@ async def test_a_review_is_checked_against_its_own_file_before_it_is_submitted(t
         with pytest.raises(ValueError, match=r"(?s)check the file you wrote.*- \[gap\] G1: who read the governed"):
             await complete.execute("c", {"summary": "done"}, None, None, None)
         assert worker.declared_completion(con, tasks.get(con, tid)) is None
-        # She records the complete list, and completes.
         await note.execute("c", {"text": "proposals", "alternatives": [
             gap, {**gap, "proposal": "G2: what the clerks wrote"}]}, None, None, None)
         await complete.execute("c", {"summary": "done"}, None, None, None)

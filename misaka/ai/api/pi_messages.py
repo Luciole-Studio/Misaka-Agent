@@ -105,7 +105,6 @@ class PiMessagesOptions(TypedDict, total=False):
     toolChoice: Literal["auto", "none", "required"] | dict[str, Any]
     # Ask the backend for debug metadata (e.g. routing response headers).
     debug: bool
-    # MISAKA fork: the stand-in for upstream's `fetch` injection, handed to the httpx client.
     httpTransport: httpx.AsyncBaseTransport
 
 
@@ -127,7 +126,6 @@ class PiMessagesRewriteImpact(TypedDict):
 # Serialized assistant-message event as sent by a pi-messages backend: `{type: "start"}`,
 # `text_start|text_delta|text_end`, `thinking_start|thinking_delta|thinking_end`,
 # `toolcall_start|toolcall_delta|toolcall_end`, and the terminal `done`/`error` (with `usage`, `responseId?`,
-# `providerThinkingLevel?`, `rewrite?`). MISAKA fork: the parsed JSON object as it arrives.
 type PiMessagesEvent = dict[str, Any]
 
 type _PiMessagesErrorBody = dict[str, Any]
@@ -243,8 +241,6 @@ def _createEventConverter(model: Model) -> Callable[[PiMessagesEvent], Assistant
         stopReason="pending",
         timestamp=time.time_ns() // 1_000_000,
     )
-    # MISAKA fork: StreamingArgs rather than re-parsing the whole text on every delta; the final parse records a
-    # malformed object as `argumentsError`.
     toolJson: dict[int, StreamingArgs] = {}
 
     def checkIndex(index: Any) -> int:
@@ -274,7 +270,6 @@ def _createEventConverter(model: Model) -> Callable[[PiMessagesEvent], Assistant
     def convertEvent(event: PiMessagesEvent) -> AssistantMessageEvent | None:
         match event.get("type"):
             case "done":
-                # MISAKA fork: buffers a backend never closed get their exact parse before dispatch.
                 for index, args in toolJson.items():
                     if args.raw:
                         args.finish_into(contentAt(index))
@@ -330,17 +325,13 @@ def _createEventConverter(model: Model) -> Callable[[PiMessagesEvent], Assistant
                 return ToolCallDeltaEvent(contentIndex=event["contentIndex"], delta=event["delta"], partial=partial)
             case "toolcall_end":
                 block = contentAt(event["contentIndex"])
-                # MISAKA fork: `Object.assign` copies every own property; the strict model takes the ones it declares.
                 for key, value in dict(event["toolCall"]).items():
                     if key in ToolCall.model_fields:
                         setattr(block, key, value)
                 args = toolJson.pop(event["contentIndex"], None)
-                # MISAKA fork: the backend's final arguments win; only an empty object is checked against the
-                # streamed text, so a malformed stream still surfaces as `argumentsError`.
                 if args is not None and args.raw and block.argumentsError is None and not block.arguments:
                     args.finish_into(block)
                 return ToolCallEndEvent(contentIndex=event["contentIndex"], toolCall=block, partial=partial)
-        # MISAKA fork: upstream forwards an unknown event type as is; the typed stream cannot carry it.
         return None
 
     return convertEvent
@@ -361,8 +352,6 @@ async def _readPiMessagesEvents(stream: httpx.Response, signal: Any = None) -> A
     buffer = ""
 
     async def handOver() -> None:
-        # MISAKA fork: JavaScript's `for await` hands control to the consumer at every event, so it sees the
-        # partial as each event left it; a chunk's events would otherwise all be applied before it runs.
         await asyncio.sleep(0)
 
     def drain() -> list[PiMessagesEvent]:
@@ -401,7 +390,6 @@ def _parsePiMessagesEvent(raw: str) -> PiMessagesEvent | None:
     if not data or data == "[DONE]":
         return None
     parsed = jsonParse(data)
-    # MISAKA fork: anything but an object is no event.
     return parsed if isinstance(parsed, dict) else None
 
 
@@ -484,7 +472,6 @@ def stream(
             url = f"{re.sub(r'/+$', '', model.baseUrl)}/messages"
             params = {"debug": "1"} if _option(options, "debug") else None
 
-            # MISAKA fork: `JSON.stringify` drops undefined options; the None ones are left out here.
             requestOptions = {
                 "temperature": _option(options, "temperature"),
                 "maxTokens": _option(options, "maxTokens"),
@@ -503,9 +490,6 @@ def stream(
             if nextPayload is not None:
                 payload = nextPayload
 
-            # MISAKA fork: upstream's fetch takes its idle timeout from the global undici dispatcher; here the client
-            # takes it from `timeoutMs`, which the SDK fills from the same HTTP idle setting. A transport handed in
-            # stands for `options.fetch` and is not closed with the client.
             httpTransport = _option(options, "httpTransport")
             client = httpx.AsyncClient(
                 transport=httpTransport, timeout=createHttpxIdleTimeout(_option(options, "timeoutMs")), follow_redirects=True
@@ -526,7 +510,6 @@ def stream(
                 try:
                     response = await _await_with_signal(client.send(request, stream=True), signal)
                 except httpx.ReadTimeout as error:
-                    # MISAKA fork: undici's headers timeout rejects the fetch with "fetch failed".
                     raise RuntimeError("fetch failed") from error
                 try:
                     onResponse = _option(options, "onResponse")
@@ -559,7 +542,6 @@ def stream(
         except Exception as error:  # noqa: BLE001 - every failure leaves as an error event
             eventStream.push(_createErrorEvent(model, error, signal_aborted(signal)), cause=error)
         finally:
-            # MISAKA fork: release a consumer still waiting (the terminal event already settled the result).
             eventStream.end()
 
     spawn_stream_task(run(), stream=eventStream)

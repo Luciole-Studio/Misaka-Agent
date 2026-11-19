@@ -87,7 +87,6 @@ async def createSession(tmp_path: Any, noTools: str | None = None, tools: list[s
 async def test_keeps_extension_tools_active_when_built_in_defaults_are_disabled(tmp_path):
     session = await createSession(tmp_path, noTools="builtin")
     try:
-        # MISAKA fork: `office` is one of MISAKA's built-in tools.
         assert sorted(tool.name for tool in session.getAllTools()) == [
             "bash",
             "dynamic_tool",

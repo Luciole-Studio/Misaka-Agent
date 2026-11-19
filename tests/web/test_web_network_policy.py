@@ -154,7 +154,6 @@ def test_new_network_route_does_not_inherit_another_routes_ban():
     ({'HTTP_PROXY': 'http://wrong.invalid', 'http_proxy': 'http://proxy.invalid:3128'}, 'http://page.invalid/', True),
     ({'HTTP_PROXY': 'http://proxy.invalid:3128', 'http_proxy': ''}, 'http://page.invalid/', False),
     ({'HTTP_PROXY': 'http://proxy.invalid:3128', 'REQUEST_METHOD': 'GET'}, 'http://page.invalid/', False),
-    # Windows names are case-insensitive: a CGI Proxy header is http_proxy there too, and urllib drops it.
     ({'http_proxy': 'http://proxy.invalid:3128', 'REQUEST_METHOD': 'GET'}, 'http://page.invalid/', os.name != 'nt'),
 ])
 def test_proxy_selection_matches_httpx_not_any_proxy_variable(env, url, selected, monkeypatch):
@@ -165,12 +164,8 @@ def test_proxy_selection_matches_httpx_not_any_proxy_variable(env, url, selected
     write(proxy_dns=True)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
-    # MISAKA reads proxy variables only, never the OS proxy (Windows registry, macOS network settings),
-    # so keep urllib's platform fallback from leaking the machine's own proxy into the oracle.
     for fallback in ('getproxies_registry', 'getproxies_macosx_sysconf'):
         monkeypatch.setattr(urllib.request, fallback, dict, raising=False)
-    # The official installed implementation is the route oracle, not a duplicate
-    # hand-built expected matcher. An explicit proxy prevents platform fallback.
     mounts = sorted((URLPattern(key), value) for key, value in get_environment_proxies().items())
     upstream = next((value for pattern, value in mounts if pattern.matches(httpx.URL(url))), None)
     actual = proxy_for_url(url)
@@ -295,8 +290,6 @@ async def test_no_proxy_uses_direct_pinned_route_and_proxy_failure_never_falls_b
     assert not proxied and len(direct) == 1
     assert direct[0].startswith('GET /report HTTP/1.1') and f'Host: page.invalid:{target}' in direct[0]
     monkeypatch.delenv('NO_PROXY')
-    # The just-closed local port fails connect. Two vetted target addresses must
-    # not cause two proxy attempts or a direct fallback.
     resolve(monkeypatch, ['93.184.216.34', '23.192.228.80'])
     monkeypatch.setattr(bounded, 'pin_to_address', lambda *_: pytest.fail('proxy fell back to direct'))
     with pytest.raises(httpx.HTTPError):

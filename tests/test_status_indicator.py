@@ -134,8 +134,6 @@ def test_embeds_compaction_summary_and_retry_labels_within_the_border_width(fake
 
 
 def test_colors_an_embedded_compaction_indicator_like_the_editor_border(fakeTimers):
-    # MISAKA: #10809. A compaction indicator given the border color draws spinner and label in it; without one it
-    # keeps accent and muted.
     initTheme("dark")
     tui = _tui()
     editor = CustomEditor(

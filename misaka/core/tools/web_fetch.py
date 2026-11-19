@@ -45,8 +45,6 @@ from misaka.core.web.bounded import (
     read_bounded,
 )
 from misaka.core.web.config import redact_secrets, redact_values, web_config
-
-# The evidence writer is shared with web_extract; parsing and saving run off-loop.
 from misaka.core.web.evidence import citable_url
 from misaka.core.web.evidence import save_page as _save_page
 from misaka.core.web.negative_cache import (
@@ -64,39 +62,17 @@ from misaka.utils.values import signal_aborted
 
 TIMEOUT_SECONDS = 30.0
 
-# Whole-operation defaults live in core.web.timeouts. WebPart's deadline covers
-# DNS, redirects, body reading and material work, not just gaps between chunks.
-
-# Characters of extracted page text that enter the model's context. The byte cap
-# upstream bounds the *transfer*; this bounds the *context*, and 2 MiB of HTML can
-# still render to far more prose than a turn should carry. Roughly 10k tokens.
-# Upgrade path: W4's auxiliary-LLM condenser replaces the tail-drop with a summary.
 _MAX_TEXT_CHARS = 40_000
 
-# A Content-Type is a remote header quoted back at the model in this tool's own voice,
-# outside any fence. Same reasoning as the title, tighter bound: no real media type is
-# anywhere near this long.
 _MAX_TYPE_CHARS = 100
 
-# The URL a redirect chain landed on is chosen by the remote, and it is quoted back in
-# this tool's own voice outside the untrusted() fence. Without a bound,
-# `Location: https://<15KB of a>.example/` buys 15KB of the model's context in a
-# position the model reads as ours -- the same reasoning as _MAX_TYPE_CHARS above and as
-# _web/academic.py's _MAX_HOST_CHARS. Generous enough for a real redirect target
-# (253-byte host plus a long path); `details["final_url"]` keeps the full value.
 _MAX_URL_CHARS = 300
 
-# Sent to every site fetched. The compatible-token form is what unblocks origins that
-# reject an unfamiliar agent outright; the name is the project, never an account.
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; MISAKA/1.0; research agent)",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-# A page that came back without its content is worth remembering as 422 -- the negative
-# cache's own name for "paywall, empty, or unparseable" -- and it bans only on the
-# second consecutive one, which is what keeps a late-hydrating page from being written
-# off on a single unlucky fetch.
 _NO_CONTENT_STATUS = 422
 
 
@@ -106,26 +82,11 @@ class WebFetchToolInput(BaseModel):
     url: str = Field(description="Full http(s) URL of the page to read")
 
 
-# --- HTML -> text the model can navigate -------------------------------------------
-#
-# The extractor itself lives in misaka/core/documents/htmltext.py: the corpus reads .html files
-# and EPUB chapters with the same parser, and a page fetched here has to render the same way
-# as the same page saved to disk and indexed.
-
-
 def _is_markup(content_type: str | None, text: str) -> bool:
     bare = (content_type or "").split(";", 1)[0].strip().lower()
     if bare:
         return bare in {"text/html", "application/xhtml+xml"} or bare.endswith("+html")
-    # No declared type: is_text_content_type already let this through as text, so the
-    # only question left is whether it is markup.
     return text.lstrip().lstrip("\ufeff").lstrip().startswith("<")
-
-
-# --- what to fetch -------------------------------------------------------------------
-#
-# Where the evidence lands is _web/evidence.py: web_extract writes its pages through the
-# same writer, so one saved page is one workspace file whatever tool reached it.
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,9 +112,6 @@ class _Target:
             if self.url != self.requested:
                 out["routed_url"] = self.url
         return out
-
-
-# --- fetch -------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,24 +150,14 @@ def _extract(
     if not content.strip():
         return _Extracted()
 
-    # The title is page-written, so it goes inside the fence with the rest of the page,
-    # never into this tool's own sentence: a <title> carrying the fence's own closing
-    # marker would otherwise end the block early and let the page speak as the tool.
     full = f"Title: {title}\n\n{content}" if title else content
 
-    # Record response and full extracted-text identities, not just the rendered prefix.
     body_sha = hashlib.sha256(body).hexdigest()
     text_sha = hashlib.sha256(full.encode()).hexdigest()
-    # fetched_at is reported by the caller and deliberately not written: it is the one
-    # value here that changes between two fetches of the same page, and the file's bytes
-    # are what git and research_artifacts.sha256 have to agree on.
     saved = _save_page(
         cwd,
         {
             "source_url": target.requested,
-            # Query-stripped, for the reason download_file has always stripped it: the
-            # end of a redirect chain is chosen by the server and commonly presigned, and
-            # this header is written to disk and registered as an artifact.
             "final_url": citable_url(final_url),
             "sha256": body_sha,
             "text_sha256": text_sha,
@@ -250,7 +198,6 @@ def _status_advice(status: int) -> str:
     if status == 401:
         return "The page needs credentials this fetcher does not have. Find an open version."
     if status == 403:
-        # Only the statuses the negative cache actually tracks may promise a skip.
         return (
             "The site refused this fetcher. Further fetches of this URL are skipped for a "
             "while — find an open version of the content instead of retrying."
@@ -279,15 +226,9 @@ async def _fetch(target: _Target, cwd: str | None = None, signal: Any | None = N
     """
     url = target.url
     base = target.provenance()
-    # Keep the low-level reader's bound for standalone helper callers. In sessions,
-    # WebPart's earlier deadline also interrupts DNS/headers and owns all cleanup.
     deadline = time.monotonic() + operation_seconds("web_fetch")
 
     def failed(text: str, **details: Any) -> _Outcome:
-        # The routing note rides on failures, not only on the header the blueprint names:
-        # several of those notes exist precisely to say what to try when the *rewritten*
-        # URL is the thing that 404s, and a model that never asked for that URL cannot
-        # work that out alone.
         return _Outcome(f"{text} {target.note}" if target.note else text, {**base, **details}, is_error=True)
 
     try:
@@ -304,8 +245,6 @@ async def _fetch(target: _Target, cwd: str | None = None, signal: Any | None = N
                     status=status,
                 )
             if not is_text_content_type(content_type):
-                # Deliberately before read_bounded: leaving the body unread closes the
-                # connection instead of buffering a megabyte of a file nobody can read.
                 return failed(
                     f"{url} is not a web page: the server returned binary content "
                     f"({_clip(' '.join((content_type or 'no type').split()), _MAX_TYPE_CHARS)}). "
@@ -342,11 +281,8 @@ async def _fetch(target: _Target, cwd: str | None = None, signal: Any | None = N
             refused=type(error).__name__,
         )
 
-    # One hop off the loop for the whole CPU-and-disk stage; the decisions it feeds are
-    # taken back here, because every one of them writes state the loop owns alone.
     got = await run_in_thread(_extract, target, final_url, content_type, body, text, cwd)
     if not got.has_text:
-        # Actual empty extraction, not a keyword/length guess about the material.
         record_failure(url, _NO_CONTENT_STATUS)
         return failed(
             f"{url} has no extractable text — its content is probably in a frame, an "
@@ -354,9 +290,6 @@ async def _fetch(target: _Target, cwd: str | None = None, signal: Any | None = N
             status=status,
             render="empty",
         )
-    # Only now is the fetch known to have produced something: recording success any
-    # earlier clears the failure the branch above is about to record, so that ban could
-    # never reach its second strike no matter how often the page came back unreadable.
     record_success(url)
 
     saved = got.saved
@@ -437,24 +370,13 @@ def create_web_fetch_tool_definition(
         if not url:
             return _result(_Outcome("web_fetch needs a URL. Call it again with the page to read.", is_error=True))
         if "://" not in url:
-            # A bare host from a search snippet is the common shape; assuming https is
-            # what the browser does, and vet_public_url still judges the result.
             url = f"https://{url}"
 
-        # Credential and policy screening comes before everything else, routing included:
-        # a refusal must not cost a DNS lookup, and the academic table must rewrite the
-        # normalised address rather than whatever IRI the model typed. `screening.url` is
-        # the one dialled from here on.
         screened = screen_url(url)
         if not screened.allowed:
             return _result(_Outcome(screened.refusal, {"url": url, "refused": True}, is_error=True))
         url = screened.url
 
-        # Routing comes first, before the negative cache and before single flight, so
-        # that all three agree on one address. A publisher landing page, a PubMed record
-        # and an arXiv /pdf/ URL each have a better entry point than the one the model
-        # typed; keying the cache or the flight on the URL that is never dialled would
-        # ban a URL nothing requests and coalesce fetches that are not the same fetch.
         route = route_academic(url)
         target = _Target(requested=url, url=route.url, kind=route.kind, note=route.note)
 
@@ -464,20 +386,12 @@ def create_web_fetch_tool_definition(
         skip = skip_reason(target.url)
         if skip:
             debug.event("cache_hit", cache="negative_fetch", subject=target.url)
-            # Same shape as `failed` inside _fetch, and for the same reason: the ban is
-            # against the address the routing table dialled, which the model never typed.
-            # Naming only that one hands a Sister who asked for /pdf/ a sentence about a
-            # /abs/ URL she has never seen, with nothing to explain the swap.
             if target.url != target.requested:
                 skip = f"{target.requested} is fetched as {target.url}. {skip}"
             if target.note:
                 skip = f"{skip} {target.note}"
             return _result(_Outcome(skip, {**target.provenance(), "skipped": True}, is_error=True))
 
-        # The shared outcome contains a caller URL and a workspace-relative artifact.
-        # Only callers with the same inputs may share that complete outcome.
-        # The complete outcome includes policy-checked redirects. A caller with different
-        # rules must run its own hop checks, not inherit another profile's accepted page.
         key = json.dumps(("web-fetch", cache_namespace(), web_config().get("website_blocklist"),
                           policy_key(), os.path.realpath(cwd) if cwd else None,
                           target.requested, target.url), sort_keys=True)

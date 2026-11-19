@@ -15,7 +15,7 @@ def main(argv=None):
     try:
         return _run(argv)
     except BrokenPipeError:
-        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())  # let the interpreter's final flush succeed
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return 141
 
 

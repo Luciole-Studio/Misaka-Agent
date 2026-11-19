@@ -36,14 +36,11 @@ def settings_layers(session: Any, *, cwd: str | None = None, include_project: bo
     layers = [value for name in names if callable(getter := getattr(manager, name, None))
               and isinstance(value := getter(), Mapping)]
     if cwd is not None and include_project and not same_project:
-        # Parent trust never grants another directory. Caller supplies the
-        # independently resolved target trust bit.
         layers.insert(1, project_settings(cwd))
     return layers
 
 
 def denied_agent_types(session: Any, *, cwd: str | None = None, include_project: bool = True) -> set[str]:
-    # CCB filterDeniedAgents: exact Agent(type) rule content, not a glob match.
     from misaka.core.subagent.policy import split_rule
 
     denied = set()
@@ -81,9 +78,6 @@ def configured_hooks(session: Any, *, cwd: str | None = None, include_project: b
         getter = getattr(manager, "getManagedSettings", None)
         layers = [getter()] if callable(getter) else []
         if inherited_managed_only:
-            # Only the parent's filtered managed snapshot crosses this fence.
-            # Re-reading ordinary user/project hooks here would undo the policy,
-            # including for VCS lifecycle hooks and recursively launched children.
             inherited = json.loads(os.environ.get("MISAKA_SUBAGENT_HOST_HOOKS", "{}"))
             layers.insert(0, {"hooks": inherited})
     merged: dict[str, list[Any]] = {}
@@ -116,7 +110,6 @@ def permission_settings(session: Any, *, cwd: str | None = None, include_project
             getter = getattr(part, "get_permission_settings", None)
             if callable(getter) and (grant := getter()):
                 result.append(grant)
-    # CCB destination "session": what this session's dialog granted, for it and its sub-agents.
     for part in getattr(getattr(session, "moments", None), "parts", ()):
         getter = getattr(part, "get_session_permissions", None)
         if callable(getter) and (grant := getter()):
@@ -154,8 +147,6 @@ def permission_decision(
         raw = tool_input.get("path") or tool_input.get("file_path")
         candidate = _resolved_path(raw, workspace) if isinstance(raw, str) and raw.strip() else None
         if candidate is not None:
-            # A configured deny/ask applies to either spelling of the same file, and on Windows
-            # to either separator: rules are written with "/", resolved paths carry "\".
             spellings = [candidate]
             root = Path(workspace).resolve()
             if candidate.is_relative_to(root):
@@ -171,8 +162,6 @@ def permission_decision(
                 for rule in entries
             ):
                 return behavior
-    # Card output grants use resolved paths, not globs over raw model arguments:
-    # ../ and symlinks must not turn a subtree grant into a whole-project grant.
     if candidate is not None and any(
         candidate.is_relative_to(Path(directory))
         for layer in permissions for directory in layer.get("writeDirectories", {}).get(name, ())
@@ -200,7 +189,7 @@ def initial_permission_mode(session):
     A mode passed over falls back to default, as in CCB; no mode at all is bypassPermissions, where
     CCB's is default, because a pi session never asked (user ruling, 2026-10-24)."""
     settings: dict[str, Any] = {}
-    for layer in settings_layers(session):      # user, project, managed: the later one wins, as CCB merges
+    for layer in settings_layers(session):
         permissions = layer.get("permissions")
         if isinstance(permissions, Mapping):
             settings.update({key: permissions[key] for key in ("defaultMode", "disableBypassPermissionsMode")
@@ -213,7 +202,6 @@ def initial_permission_mode(session):
     return mode if mode in usable else "default"
 
 
-# Modes a top-level session can be in: CCB's external modes, less auto (no classifier here; see above).
 TOP_LEVEL_PERMISSION_MODES = frozenset({"default", "plan", "acceptEdits", "bypassPermissions", "dontAsk"})
 
 

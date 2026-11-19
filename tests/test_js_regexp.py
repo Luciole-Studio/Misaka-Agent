@@ -58,8 +58,6 @@ RECORDED: list[tuple[str, str, str, Any]] = [
     ('(?<n>a)\\1', '', 'aa', {'m': ['aa', 'a'], 'index': 0}),
     ('(?<n>a)\\k<n>', 'i', 'aA', {'m': ['aA', 'a'], 'index': 0}),
     ('(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)\\10', '', 'abcdefghijj', {'m': ['abcdefghijj', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'], 'index': 0}),
-    # DecimalDigits are ASCII: a superscript or Arabic-Indic digit after `\` is an identity escape, never a
-    # backreference, an octal escape or a quantifier bound (VERIFY2 R5-N3).
     ('\\²', '', '²', {'m': ['²'], 'index': 0}),
     ('\\٣', '', '٣', {'m': ['٣'], 'index': 0}),
     ('(a)(b)(c)\\٣', '', 'abc٣', {'m': ['abc٣', 'a', 'b', 'c'], 'index': 0}),
@@ -101,7 +99,6 @@ def test_marked_s_backreferences_keep_their_meaning():
 
 
 def test_a_dollar_before_a_non_ascii_digit_is_literal_in_a_replacement():
-    # Node 26: "abc".replace(/(a)(b)(c)/, "[$٣][$3]") === "[$٣][c]"
     from misaka.utils.js_regexp import replace
 
     assert replace("abc", RegExp("(a)(b)(c)"), "[$٣][$3]") == "[$٣][c]"

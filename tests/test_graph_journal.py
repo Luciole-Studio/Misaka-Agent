@@ -49,9 +49,6 @@ def _grow_root(con, graph_id, question="Why?"):
     return graph.commit(con, graph_id, "grow", {"question": question}, token="driver", handlers=HANDLERS)["node"]
 
 
-# --- tables and graphs ----------------------------------------------------------------------------------
-
-
 def test_init_makes_the_tables_once_and_marks_their_version(board):
     graph.init(board)
     marker = board.execute("SELECT version FROM schema_migrations WHERE component='graph'").fetchall()
@@ -74,9 +71,6 @@ def test_create_refuses_bad_names_ids_and_schemas(board):
             attempt()
     with pytest.raises(graph.GraphError):
         graph.snapshot(board, "nowhere")
-
-
-# --- applying -------------------------------------------------------------------------------------------
 
 
 def test_only_the_lease_holder_applies(board):
@@ -206,9 +200,6 @@ def test_ops_need_a_handler_and_edits_must_be_known(held):
         graph.commit(con, graph_id, "changes", [{"op": "update", "id": "ghost", "attrs": {}}], token="driver")
 
 
-# --- the journal ----------------------------------------------------------------------------------------
-
-
 def test_proposing_again_is_safe_and_a_different_payload_needs_supersede(held):
     con, graph_id = held
     first = graph.propose(con, graph_id, "plan", {"cards": 2}, key="plan:1", scope="b1", idem="call-1")
@@ -286,9 +277,6 @@ def test_entries_list_every_version_narrowed_as_asked(held):
     standing = graph.entries(con, graph_id, scope="b1", key_prefix="plan:", status=[graph.PROPOSED, graph.APPROVED])
     assert [entry.key for entry in standing] == ["plan:1", "plan:2"]
     assert [entry.scope for entry in graph.entries(con, graph_id, op="skip")] == ["b1"]
-
-
-# --- snapshots and the lease -------------------------------------------------------------------------------
 
 
 def test_a_snapshot_is_reused_until_the_graph_moves_and_its_values_cannot_change(held):

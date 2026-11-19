@@ -128,7 +128,6 @@ def test_matches_azure_peak_load_capacity_errors():
     assert isRetryableAssistantError(_failed(azurePeakLoadError)) is True
 
 
-# MISAKA addition: pi 1.1.0 adds these capacity words to the retry pattern without a test of its own.
 @pytest.mark.parametrize(
     "errorMessage",
     ["The model is at capacity, please retry", "server_busy", "Our servers are currently busy, try again later"],

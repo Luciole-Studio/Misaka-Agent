@@ -47,7 +47,6 @@ class _Lock:
         self.options = options
         self.lastUpdate = _now()
         self.updateTimeout: asyncio.TimerHandle | None = None
-        # MISAKA fork: asyncio keeps only weak references to tasks, so the running refresh is held here.
         self.updateTask: asyncio.Task[None] | None = None
         self.updateDelay: float | None = None
         self.released = False
@@ -143,7 +142,6 @@ def _updateLock(file: str, options: dict[str, Any]) -> None:
             # Stat the directory to check that its time is still ours.
             mtime = await asyncio.to_thread(_statMtime, lock.lockfilePath)
         except OSError as error:
-            # MISAKA fork: a release that removed the directory while this stat ran is not a compromise.
             if lock.released:
                 return
             isOverThreshold = lock.lastUpdate + options["stale"] < _now()

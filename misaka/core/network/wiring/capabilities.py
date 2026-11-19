@@ -7,7 +7,6 @@ from misaka.core.platform import owners, prompt_guard
 from misaka.core.platform.vocabulary import DRIVER_OWNED_TOOLS
 from misaka.utils.values import read_field
 
-# The session entry recording which board tools a workflow took off, as pi's plan mode keeps its own.
 WORKFLOW_TOOLS_ENTRY = "workflow-tools"
 
 
@@ -46,8 +45,6 @@ class SisterCapabilitiesPart:
                     self.session.sessionManager.appendCustomEntry(WORKFLOW_TOOLS_ENTRY, {"tools": [*taken, *found]})
         elif taken:
             self.session.setActiveToolsByName([*active, *taken])
-            # The record goes only for what came back and is in the transcript: a session opened with
-            # `--tools` cannot take them, and one killed before a running turn ends has not declared them.
             left = [name for name in taken if name not in self.session.getActiveToolNames()]
             if left != taken and self.session.recordLoadout():
                 self.session.sessionManager.appendCustomEntry(WORKFLOW_TOOLS_ENTRY, {"tools": left})
@@ -80,9 +77,6 @@ class SisterCapabilitiesPart:
                 self._settle_tools()
 
     async def before_agent_start(self, event, ctx):
-        # Sections of the run's prompt, as pi's extensions add theirs: the workflow's context while one
-        # runs, and the routing catalog. Returning a whole prompt instead would force it, and the
-        # sections the extensions add after the parts (MCP's `mcp_servers`) would never reach the model.
         sections = event["systemPromptOptions"]["sections"]
         context = []
         if self.workflow_context:

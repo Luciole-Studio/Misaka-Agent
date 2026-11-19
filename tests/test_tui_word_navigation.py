@@ -42,8 +42,6 @@ def test_backward_path_path_to_file():
     assert findWordBackward(text, 4) == 0
 
 
-# MISAKA fork: ICU groups `你好` and `世界` as words with its CJK dictionary; the Unicode default word boundaries the
-# `regex` module offers break between every ideograph, so a word step over a Han run moves one character.
 @pytest.mark.xfail(strict=True, reason="no ICU dictionary segmentation for Han (each ideograph is a word)")
 def test_backward_cjk_mixed():
     text = "你好世界 test"

@@ -16,9 +16,6 @@ from pathlib import Path
 
 from misaka.config.product import CFG
 
-# Per target file. Past this the oldest go: the archive is for reconstructing how the file
-# in front of you came to be, and a document rewritten two hundred times has a longer story
-# than anyone will read.
 MAX_PER_PATH = 200
 
 
@@ -45,7 +42,6 @@ def archive(path, ops, *, workspace=None):
         numbered.sort()
         sequence = 1 + max((number for number, _name in numbered), default=0)
         first = next(iter(ops[0]), "ops") if ops and isinstance(ops[0], dict) else "ops"
-        # Op names are untrusted; they must never become directory components.
         first = "".join(char if char.isalnum() or char in "_-" else "_" for char in str(first))[:80]
         target = os.path.join(directory, f"{sequence:03d}_{first}.json")
         record = {"seq": sequence, "path": os.path.realpath(str(path)), "ops": ops}

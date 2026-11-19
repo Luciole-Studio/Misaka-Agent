@@ -18,8 +18,6 @@ from misaka.core.platform.prompt_guard import untrusted
 from misaka.core.research import ledger, runs, views
 from misaka.core.tools.truncate import TruncationOptions, formatSize, truncateHead
 
-# One tool result is one prompt turn for the smallest window in play (272k); the whole index of a
-# mature project renders to megabytes (2026-09-24: 1.85 MB, 25k lines, a Sister at 1.19M tokens).
 WORKSPACE_VIEW_MAX_BYTES = 200 * 1024
 
 
@@ -45,8 +43,6 @@ def register(harn):
         path = Path(db).expanduser().resolve()
         if not path.is_file():
             return _text("No research run exists.")
-        # Own the reader in this thread. Inspection neither creates/migrates a board nor
-        # shares the driver's writer; closing also releases the short WAL read snapshot.
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as con:
             con.row_factory = task_store.Row
             con.execute("PRAGMA query_only=ON")
@@ -58,10 +54,6 @@ def register(harn):
     def read_view(con, params, workspace):
         run = (runs.get(con, params.run_id) if params.run_id
                else runs.latest(con, workspace=workspace))
-        # The board is one file for the whole machine, so a run_id handed in by the caller is not
-        # by itself proof the run belongs here: without this an id seen in another project reads
-        # out that project's question, issues, and findings. Same answer as "no such run", so the
-        # tool does not confirm the id exists elsewhere either.
         if run and os.path.realpath(run["workspace"]) != workspace:
             run = None
         if not run:
@@ -95,7 +87,6 @@ def register(harn):
                 + f": {r['question']} — {r['rationale']}" + (f" | Last Order: {r['reason']}" if r["reason"] else "")
                 for r in rows) or "(empty)"))
         rows = ledger.findings(con, run["id"], limit=params.limit + 1, offset=params.offset)
-        # A finding is a Sister's words about her sources: data, fenced as the other views are.
         listed = "\n".join(f"{r['id']} [{r['claim_type']}] {r['text']}" for r in rows[:params.limit])
         result = _text(untrusted("research-findings", listed) if listed else "(empty)")
         next_offset = params.offset + params.limit if len(rows) > params.limit else None

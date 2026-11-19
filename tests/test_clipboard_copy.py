@@ -85,7 +85,6 @@ async def test_waits_for_the_native_write_before_emitting_remote_osc52(mocks, mo
 @pytest.mark.parametrize(("platform", "display"), [("darwin", None), ("win32", None), ("linux", ":99")])
 async def test_misaka_clipboard_osc52_emits_osc52_after_a_successful_copy(mocks, monkeypatch, platform, display):
     # Regression test for #10826, #10835, #10114: remote clients without SSH markers.
-    # MISAKA fork: the variable is `MISAKA_CLIPBOARD_OSC52` (pi: `PI_CLIPBOARD_OSC52`).
     mocks.platform = platform
     if display:
         monkeypatch.setenv("DISPLAY", display)

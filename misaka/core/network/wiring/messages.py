@@ -14,7 +14,5 @@ def part(spec):
     return messages.MessagesPart(
         sender=sender_address(spec), route=route, receive=spec.receive_messages,
         card_task=spec.task_id,
-        # The role's contact session (`misaka dm`) reads the mail no live session of the role
-        # was found for; every other session reads only what is pinned to it.
         contact=spec.kind == "dm",
     )

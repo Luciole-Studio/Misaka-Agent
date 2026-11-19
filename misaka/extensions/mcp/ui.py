@@ -94,7 +94,6 @@ class McpManagerView:
         self.inputHandler: Callable[[str], None] | None = None
         self.inputTarget: Focusable | None = None
         self._focused = False
-        # MISAKA fork: asyncio holds tasks weakly; the running `void link.copy()` calls live here.
         self._tasks: set[asyncio.Task[Any]] = set()
 
     @property
@@ -287,7 +286,6 @@ class McpManagerView:
 
 async def showMcpManager(ctx: ExtensionCommandContext, manage: Callable[[McpUi], Awaitable[None]]) -> None:
     """Run ``manage`` in the manager view until it returns."""
-    # MISAKA fork: asyncio holds tasks weakly; the running `manage` is held until it finishes.
     tasks: set[asyncio.Future[None]] = set()
 
     def factory(tui: TUI, theme: Theme, keybindings: KeybindingsManager, done: Callable[..., None]) -> McpManagerView:

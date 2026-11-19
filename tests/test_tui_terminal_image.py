@@ -479,7 +479,6 @@ def test_detects_truecolor_from_direct_color_term_values(withEnv):
     withEnv({"TERM": "xterm-direct"}, lambda: _assertTrue(detectCapabilities(lambda: False).trueColor))
 
 
-# MISAKA fork: a pane of MISAKA's panel shows neither images nor hyperlinks, whatever the host's variables say.
 def test_disables_images_and_hyperlinks_in_a_panel_pane(withEnv):
     assert withEnv(
         {"TERM_PROGRAM": "misaka", "COLORTERM": "truecolor", "GHOSTTY_RESOURCES_DIR": "/x", "KITTY_WINDOW_ID": "1"},
@@ -700,8 +699,6 @@ def test_keeps_iterm2s_ceiling_based_reserved_lines_and_cursor_offset(iterm2):
 
 # --- imageFallback --------------------------------------------------------------------------------
 
-# MISAKA fork: the expected display path uses the platform's separator (upstream writes `~/...`, which only holds on
-# POSIX; Node shortens `C:\Users\x\.pi\...` to `~\.pi\...` as well).
 shortenedShot = os.path.join("~", ".pi", "agent", "shot.png")
 
 

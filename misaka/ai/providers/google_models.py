@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/google.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "google.json").read_text(encoding="utf-8"))
 
 GOOGLE_MODELS = flattenChatModelCatalog("google", _values)

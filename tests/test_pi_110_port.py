@@ -102,7 +102,6 @@ def _inactive_and_active_tools(pi) -> None:
 
 
 async def test_applies_name_tool_options_to_the_default_selection(tmp_path):
-    # MISAKA fork: the default selection is misaka's eight tools (`DEFAULT_TOOL_NAMES`), where pi has four.
     async with session_with(
         tmp_path, [_inactive_and_active_tools], settings={"defaultTools": ["+grep"]}, tools=["+inactive_tool", "-write"]
     ) as session:

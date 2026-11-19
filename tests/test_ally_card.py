@@ -118,10 +118,8 @@ async def test_a_turn_that_declares_completion_submits_the_card_like_a_sisters(m
     assert submitted["summary"] == "The report is written."
     assert "out/report.md" in submitted["artifacts"] and submitted["artifact_digests"]["out/report.md"]
     assert "outline settled" in "\n".join(cards.read_log(str(ally.project), ally.tid))
-    # The card's tools, lent through the bridge, are the Sister's definitions.
     assert {"misaka_card_complete", "misaka_card_note", "misaka_todo", "misaka_my_card", "SendMessage",
             "misaka_research_view", "doc_list", "doc_read"} <= set(ally.logged("tools")[0]["names"])
-    # The ACP session is recorded on the card, the turns as a pi transcript beside a Sister's.
     assert row["agent_id"] == ally.logged("new")[0]["session"]
     roles = [m["role"] for m in _messages(attempt.transcript.path)]
     assert roles[0] == "user" and "toolResult" in roles and roles[-1] == "assistant"
@@ -137,10 +135,10 @@ async def test_a_turn_that_ends_without_the_call_is_told_once_and_the_card_keeps
     await ally.claim().run()
 
     first_call = ally.logged("tool")[0]
-    assert first_call["error"] and "report.md" in first_call["output"]      # the deliverable is not there yet
+    assert first_call["error"] and "report.md" in first_call["output"]
     prompts = ally.prompts()
     assert len(prompts) == 2 and prompts[1].startswith("[Card still running]") and "report.md" in prompts[1]
-    assert ally.row["status"] == "running"        # in process, the dispatcher settles what is left
+    assert ally.row["status"] == "running"
 
 
 async def test_a_permission_request_is_answered_by_kind_not_by_id(make):
@@ -193,12 +191,12 @@ async def test_mail_waits_for_the_running_turn_and_mail_to_an_idle_ally_starts_o
 
     await _until(lambda: ally.prompts())
     mail("First note.")
-    await _until(lambda: len(ally.prompts()) >= 3)          # the mail, then the one reminder
+    await _until(lambda: len(ally.prompts()) >= 3)
     first, second = ally.logged("prompt")[:2]
-    assert "First note." in second["text"] and second["at"] - first["at"] >= 2.9   # after the turn, not in it
+    assert "First note." in second["text"] and second["at"] - first["at"] >= 2.9
     assert ally.prompts()[2].startswith("[Card still running]")
     await _until(lambda: attempt.busy is False and len(ally.logged("prompt")) == 3 and not attempt.transcript.calls_open)
-    mail("Second note.")                                    # the ally is idle: it starts a turn
+    mail("Second note.")
     await asyncio.wait_for(running, 60)
     assert "Second note." in ally.prompts()[3] and ally.row["status"] == "done"
 
@@ -215,7 +213,7 @@ async def test_a_line_typed_during_a_turn_waits_and_ctrl_c_cancels_the_turn(make
     attempt.interrupt()
     await asyncio.wait_for(running, 60)
     assert ally.logged("cancel") and ally.logged("cancelled")
-    assert ally.prompts()[1] == "please hurry"            # the typed line, as the next turn
+    assert ally.prompts()[1] == "please hurry"
     assert {"role": "user", "text": "please hurry"} in [
         {"role": m["role"], "text": m["content"][0]["text"]} for m in _messages(attempt.transcript.path)
         if m["role"] == "user"]
@@ -235,8 +233,8 @@ async def test_continuing_a_card_loads_the_allys_session_and_drops_its_replay(ma
     await second.run(say="Add a summary.")
 
     assert ally.logged("load")[-1]["session"] == session
-    assert ally.prompts()[-1] == "Add a summary."             # the session has the card: the message alone
-    assert second.transcript.path == first.transcript.path   # the card's one transcript goes on
+    assert ally.prompts()[-1] == "Add a summary."
+    assert second.transcript.path == first.transcript.path
     text = Path(second.transcript.path).read_text(encoding="utf-8")
     assert "First pass." in text and "Second pass." in text and "OLD HISTORY" not in text
     assert ally.row["status"] == "done" and ally.payload("submitted")["summary"] == "Second pass."
@@ -244,7 +242,7 @@ async def test_continuing_a_card_loads_the_allys_session_and_drops_its_replay(ma
 
 async def test_a_session_the_agent_cannot_load_is_pointed_at_the_transcript(make):
     ally = make()
-    ally.play(ally.finish("First pass."))                     # no loadSession
+    ally.play(ally.finish("First pass."))
     first = ally.claim()
     await first.run()
     assert tasks.claim_resume(ally.con, ally.tid, "lock2", os.getpid(), expected_generation=1)
@@ -263,7 +261,7 @@ async def test_leaving_cancels_the_running_turn_before_the_agent_goes(make):
     attempt.leave()
     await asyncio.wait_for(running, 30)
     assert ally.logged("cancel")
-    assert ally.row["status"] == "running"              # the host settles an attempt that left
+    assert ally.row["status"] == "running"
 
 
 async def test_the_ally_sends_as_itself_from_its_card_and_space(make, monkeypatch):
@@ -290,10 +288,10 @@ async def test_a_red_team_card_given_to_an_ally_records_its_issues_through_the_b
     write, complete, say = ally.finish()
     ally.play([{"call": ["misaka_research_view", {"view": "run"}]},
                {"call": ["misaka_card_note", {"text": "one gap", "issues": [issue]}]},
-               write, complete, complete, say])      # a review is checked against its record first (B117)
+               write, complete, complete, say])
     await ally.claim().run()
-    assert ally.prompts()[0].startswith("[Research card]")      # ACP has no system prompt
-    assert sum(bool(call["error"]) for call in ally.logged("tool")) == 1   # the first completion
+    assert ally.prompts()[0].startswith("[Research card]")
+    assert sum(bool(call["error"]) for call in ally.logged("tool")) == 1
     assert json.loads(tasks.latest_payload(ally.con, ally.tid, "review_record_checked"))["items"] == 1
     assert ally.row["status"] == "done"
     assert ally.payload("submitted")["issues"][0]["question"] == "Does it follow?"

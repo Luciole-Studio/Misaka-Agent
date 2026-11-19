@@ -108,7 +108,6 @@ def _asRecord(value: Any) -> dict[str, Any] | None:
 
 
 def _githubCopilotCatalogIds() -> dict[str, Any]:
-    # MISAKA fork: `GITHUB_COPILOT_MODELS` is the generated catalog's github-copilot table.
     from misaka.ai.models_generated import MODELS
 
     return MODELS.get("github-copilot", {})
@@ -459,7 +458,6 @@ async def _enableGitHubCopilotModels(
 
 
 async def _loginGitHubCopilot(interaction: ProviderAuthInteraction, options: LoginOptions | None = None) -> OAuthCredential:
-    # MISAKA fork: `options` is accepted because every login is called with it.
     input = await interaction.prompt(
         TextPrompt(
             type="text",

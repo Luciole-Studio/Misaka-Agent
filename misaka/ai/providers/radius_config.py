@@ -26,8 +26,6 @@ DEFAULT_RADIUS_GATEWAY = "https://radius.pi.dev"
 
 
 class RadiusGatewayModel(BaseModel):
-    # MISAKA fork: `allow` so a `Model` field this type does not declare (`headers`, `compat`, `samplingParams`)
-    # survives into the catalog the way upstream's spread carries it; keys are narrowed to `Model`'s own first.
     model_config = ConfigDict(extra="allow")
 
     id: str
@@ -50,8 +48,6 @@ class RadiusGatewayConfig(BaseModel):
 # `OAuthCredential & { gatewayConfig?: RadiusGatewayConfig }`; OAuthCredential keeps extra fields.
 RadiusOAuthCredential = OAuthCredential
 
-# MISAKA fork: what a gateway model may carry through to `Model`. `api`, `provider` and `baseUrl` are supplied by
-# `getRadiusModelsFromConfig`, so a catalog that names a `provider` cannot claim models for someone else.
 _PASSTHROUGH_FIELDS = set(Model.model_fields) - {"api", "provider", "baseUrl"}
 
 

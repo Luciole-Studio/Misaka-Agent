@@ -71,7 +71,7 @@ def _hits(store, query, *, session_id, limit, source, conversation_id, role, tim
     """The newest rows with a tool call matching ``query``, shaped as the store shapes a hit."""
     terms = _terms(query)
     if not terms or limit <= 0 or role not in (None, "assistant") or store._is_memory_database:
-        return []       # only an assistant row holds calls
+        return []
     where, args = ["tool_calls IS NOT NULL", "role = 'assistant'"], []
     for clause, values in (vendor_store._source_filter_clause("source", source),
                            vendor_store._conversation_filter_clause("conversation_id", conversation_id)):
@@ -83,8 +83,6 @@ def _hits(store, query, *, session_id, limit, source, conversation_id, role, tim
             where.append(clause)
             args.append(value)
     hits = []
-    # A connection of its own: tools run in parallel, and two threads stepping one connection raise
-    # "bad parameter or other API misuse". Rows come newest first, so the scan ends as soon as it can.
     with contextlib.closing(sqlite3.connect(f"{store.db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0)) as conn:
         for row in conn.execute(f"SELECT {vendor_store._MESSAGE_SELECT_COLUMNS} FROM messages "
                                 f"WHERE {' AND '.join(where)} ORDER BY store_id DESC", args):
@@ -108,7 +106,7 @@ def install() -> None:
         found = original(self, query, session_id=session_id, limit=limit, sort=sort, source=source,
                          conversation_id=conversation_id, role=role, time_from=time_from, time_to=time_to,
                          allow_operators=allow_operators)
-        if allow_operators:         # a query the caller composed as FTS5 syntax, not one an agent wrote
+        if allow_operators:
             return found
         try:
             calls = _hits(self, query, session_id=session_id, limit=limit, source=source,

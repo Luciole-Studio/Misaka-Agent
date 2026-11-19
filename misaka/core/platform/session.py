@@ -11,8 +11,6 @@ from misaka.core.platform.vocabulary import NO_PROGRESS_VOCABULARY
 from misaka.utils import loop_watchdog
 from misaka.utils.async_lifecycle import settle
 
-# Hermes ``gateway/run.py``: how often ``_watch_gateway_turn_inactivity`` looks, and what it
-# calls a turn it stopped.
 IDLE_POLL_SECONDS = 5.0
 IDLE_TIMEOUT_REASON = "Execution timed out (inactivity)"
 
@@ -52,7 +50,6 @@ def run_coro(coro):
             def _run():
                 token = _ENV_REENTRY_OWNER.set(owner)
                 try:
-                    # The caller's loop waits on this one meanwhile: this loop keeps the watch.
                     return asyncio.run(loop_watchdog.watched(coro))
                 finally:
                     _ENV_REENTRY_OWNER.reset(token)
@@ -77,8 +74,6 @@ async def open_session(flags, cwd, assembly=None):
     from misaka.core.http_dispatcher import applyHttpProxySettings
     from misaka.core.settings_manager import SettingsManager
 
-    # A headless session is how its process enters the engine, so it applies the global HTTP proxy first, as pi's
-    # main.ts and harness setups do at startup.
     applyHttpProxySettings(
         SettingsManager.create(cwd, get_agent_dir(), {"projectTrusted": False}).getGlobalSettings().get("httpProxy")
     )
@@ -86,8 +81,6 @@ async def open_session(flags, cwd, assembly=None):
     from misaka.core.session_manager import SessionManager
     from misaka.utils.paths import normalizePath
 
-    # Every headless MISAKA session runs with the engine's own skill loading off: the skills
-    # extension (misaka.core.skills.index) is the one place that decides what a session sees.
     parsed = parseArgs(list(flags))
     errs = [d.message for d in parsed.diagnostics if d.type == "error"]
     if errs:
@@ -104,7 +97,6 @@ async def open_session(flags, cwd, assembly=None):
     else:
         sm = SessionManager.create(cwd, session_dir)
     if parsed.name is not None:
-        # ``--name`` names the session it opens, as pi's main.ts and ``cli.engine`` do.
         from misaka.cli.args import normalizeSessionName
 
         name = normalizeSessionName(parsed.name)
@@ -112,7 +104,7 @@ async def open_session(flags, cwd, assembly=None):
             return None, None, "--name requires a non-empty value"
         try:
             sm.appendSessionInfo(name)
-        except ValueError as refusal:   # a role's canonical Bot Chat keeps its name
+        except ValueError as refusal:
             return None, None, str(refusal)
     runtime = await createAgentSessionRuntime(
         createRuntimeFactory(
@@ -137,8 +129,6 @@ async def open_session(flags, cwd, assembly=None):
         model = runtime.session.model
         return runtime, None, f"No configured authentication for {model.provider}/{model.id}; use misaka setup."
     try:
-        # Both one-shot sessions and persisted subagent children need the same
-        # startup hooks (inbox, subagent registry and dynamic extension tools).
         await runtime.session.bindExtensions({"mode": "json" if parsed.mode == "json" else "print"})
     except Exception as error:  # noqa: BLE001 - the caller owns runtime disposal
         return runtime, None, f"{type(error).__name__}: {error}"
@@ -278,9 +268,6 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
             session_file = session.sessionManager.getSessionFile()
         if err:
             return {"text": None, "timed_out": False, "error": err, "session_file": session_file}
-        # Headless sessions have nobody watching them repeat themselves into their
-        # whole budget, or spend it entirely on their own to-do list; the guards are
-        # that reader. Every model request is metered where it is sent (metering).
         from misaka.core.platform import metering
         install_guards(session, metering.allowance, wall_seconds=timeout,
                        no_progress_vocabulary=NO_PROGRESS_VOCABULARY)
@@ -309,9 +296,6 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
         if role == "assistant":
             stop = last.get("stopReason") if isinstance(last, dict) else getattr(last, "stopReason", None)
             if stop in ("error", "aborted", "length") and not timed_out:
-                # A reply cut at the output cap never reached its tool call; callers that
-                # extract JSON would fail on the truncated text anyway, and a workflow's
-                # driver needs the cause by name to nudge one more turn.
                 from misaka.ai.utils._output_limit import output_limit_error
                 err = (last.get("errorMessage") if isinstance(last, dict)
                        else getattr(last, "errorMessage", None)) or (

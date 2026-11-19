@@ -846,7 +846,6 @@ async def test_does_not_trigger_threshold_compaction_for_error_messages_when_no_
             errorAssistant,
         ]
 
-        # MISAKA fork: see the module docstring.
         assert await harness.session._checkCompaction(errorAssistant) is False
         assert harness.eventsOfType("compaction_start") == []
 
@@ -898,7 +897,6 @@ async def test_does_not_trigger_threshold_compaction_below_the_threshold_or_when
     ):
         disabledCalls = spyOnRunAutoCompaction(monkeypatch, disabledHarness.session)
 
-        # MISAKA fork: see the module docstring; the below-threshold check runs the real `_runAutoCompaction`.
         assert (
             await belowThresholdHarness.session._checkCompaction(
                 createAssistant(belowThresholdHarness, stopReason="stop", totalTokens=1_000, timestamp=nowMs())

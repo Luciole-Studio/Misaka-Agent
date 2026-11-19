@@ -46,13 +46,13 @@ TIMEOUT = 10
 class Install:
     """Where this install's code comes from, and what would update it."""
 
-    kind: str                 # "checkout" | "git" | "wheel" | "bundle" (a release archive)
+    kind: str
     editable: bool
-    installer: str            # "uv tool" | "pipx" | "uv" (uv pip) | "pip" | "Homebrew" | "winget" | ""
-    path: Path | None         # the checkout, when there is one
-    commit: str | None        # the commit a git install pinned
+    installer: str
+    path: Path | None
+    commit: str | None
     version: str
-    revision: str | None = None   # what a git install was asked for (PEP 610 ``requested_revision``): a branch, a tag
+    revision: str | None = None
 
     @property
     def follows(self) -> str:
@@ -78,13 +78,10 @@ def _manager(installer: str) -> str:
     return installer
 
 
-# What a release archive's installer is run with; a new one is the way to update it.
 INSTALL_SH = f"curl -fsSL https://raw.githubusercontent.com/{REPO}/main/scripts/install.sh | sh"
 INSTALL_PS1 = f"irm https://raw.githubusercontent.com/{REPO}/main/scripts/install.ps1 | iex"
 
 
-# A release archive Homebrew or winget put in place is theirs to replace (the installer script
-# would add a second copy beside it).
 PACKAGE_UPGRADE = {"Homebrew": "brew upgrade misaka", "winget": "winget upgrade Luciole-Studio.Misaka"}
 
 
@@ -95,7 +92,6 @@ def describe() -> Install:
     from misaka.config.engine import bundle_installer, bundle_root
     bundle = bundle_root()
     if bundle is not None:
-        # pip and git have nothing to do with an archive: a new archive is how it is updated.
         return Install("bundle", False, bundle_installer(bundle), bundle, None, VERSION)
     try:
         dist = distribution("misaka")
@@ -176,8 +172,6 @@ def active_runs() -> list[str]:
             active = con.execute(f"SELECT id, workspace FROM research_runs WHERE status IN ({','.join('?' * len(ACTIVE))})",
                                  ACTIVE).fetchall()
             now, rows = int(time.time()), []
-            # A run is driven while its graph's lease is held; a board research has not opened since
-            # an upgrade keeps the lease on the run row still (schema v18, migrated on that open).
             before_migration = "driver_lock" in {row[1] for row in con.execute('PRAGMA table_info("research_runs")')}
             for run_id, workspace in active:
                 if before_migration:
@@ -283,8 +277,6 @@ def _api(path: str) -> tuple[dict | None, str | None]:
             return json.load(response), None
     except urllib.error.HTTPError as error:
         if error.code == 404:
-            # GitHub answers 404 for a repository it will not show and for a commit it does
-            # not have, without saying which; the message has to hold either way.
             return None, ("the repository is private or gone, and no token was found"
                           if not token else "the repository or that commit is not visible to this token")
         if error.code in (401, 403):
@@ -294,8 +286,6 @@ def _api(path: str) -> tuple[dict | None, str | None]:
             return None, f"GitHub refused the request ({error.code})"
         return None, f"GitHub answered {error.code}"
     except (urllib.error.URLError, OSError, ValueError, TimeoutError):
-        # Offline or the host is unreachable. An update check is never a reason to fail the
-        # command that asked for it.
         return None, "the network is unreachable"
 
 
@@ -317,7 +307,6 @@ def _bundle_update(install: Install) -> int:
         ui.print_success(f"v{install.version} is the latest release.")
         return 0
     elif order(tag) < order(install.version):
-        # A pre-release is not "latest" on GitHub until it is published.
         ui.print_success(f"v{install.version} is newer than the latest release (v{tag}).")
         return 0
     else:
@@ -376,7 +365,6 @@ def _checkout_state(install: Install) -> dict:
     if remote == state["head"]:
         state["behind"] = 0
         return state
-    # `--ff-only` is the whole safety model: it is a fast-forward or it is nothing.
     try:
         _git(path, "fetch", "origin", follows, "--quiet")
         can_ff = subprocess.run(["git", "-C", str(path), "merge-base", "--is-ancestor", "HEAD", remote],
@@ -416,7 +404,6 @@ def _install_commands(install: Install) -> list[list[str]] | None:
         return [[sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-deps", f"misaka @ {install.source}"],
                 [sys.executable, "-m", "pip", "install", source]]
     if install.kind == "checkout" and install.path is not None:
-        # Dependencies move with the code; the pull alone leaves the environment behind.
         if install.installer == "uv":
             if (install.path / "uv.lock").exists() and Path(sys.prefix) == install.path / ".venv":
                 return [["uv", "sync", *[f"--extra={extra}" for extra in extras]]]
@@ -432,7 +419,7 @@ def adding_extras(install: Install, adding: list[str]) -> list[str] | None:
     if install.kind == "checkout" and install.path is not None:
         target = ["-e", f"{install.path}[{extras}]"]
     elif install.kind == "git":
-        target = [f"misaka[{extras}] @ {install.source}"]      # the revision it follows, not main
+        target = [f"misaka[{extras}] @ {install.source}"]
     else:
         return None
     return {"uv tool": ["uv", "tool", "install", "--force", *target],
@@ -551,12 +538,11 @@ def _report(install: Install, state: dict | None, behind: int | None, follows: s
     if state and state.get("head"):
         ui.print_check(True, "checkout head", state["head"][:12] + ("   (uncommitted changes)" if state.get("dirty") else ""))
     if install.kind != "checkout":
-        # Only the API path needs one; a checkout asks git, which brings its own credentials.
         _token, source = github_token()
         ui.print_check(bool(_token) or None, "github token",
                        f"from {source}" if source else "none found; only a public repository can be checked")
     if install.kind == "bundle":
-        return                              # a release, compared with releases (_bundle_update)
+        return
     if behind is None:
         ui.print_check(None, follows, "could not be compared" + (f": {state['reason']}" if state and state.get("reason") else ""))
     elif behind == 0:
@@ -632,7 +618,7 @@ def run(*, apply: bool = False) -> int:
     from misaka.cli import backup
     try:
         ui.print_success(f"Saved settings, credentials and the boards to {ui.tilde(str(backup.snapshot('update')))}")
-    except (OSError, sqlite3.Error) as error:      # best-effort, as Hermes's is: warned, never fatal
+    except (OSError, sqlite3.Error) as error:
         ui.print_warning(f"Could not save a copy of the home first ({error}); updating anyway.")
     if not open_panes:
         stop_daemon()

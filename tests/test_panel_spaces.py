@@ -78,7 +78,7 @@ def test_new_spaces_get_ids_that_outlive_the_daemon(daemon, tmp_path):
     assert re.fullmatch(r"w[0-9a-f]{8}", first["id"]) and first["id"] != second["id"]
     assert _registry()[first["id"]] == {"folder": os.path.realpath(tmp_path), "name": None}
     renamed = [{**space, "name": "renamed"} if space is first else space for space in daemon.spaces]
-    daemon.apply_layout(renamed, daemon.layout_revision)          # a rename is remembered
+    daemon.apply_layout(renamed, daemon.layout_revision)
     _record(first["id"])
     successor = d.Daemon(str(tmp_path / "net2.sock"), str(tmp_path / "net2.json"))
     successor._load_spaces()
@@ -94,7 +94,7 @@ async def _read_when_written(path, tries=200):
 
 
 async def test_a_pane_program_is_told_its_space(daemon, tmp_path, monkeypatch):
-    monkeypatch.setenv("MISAKA_NET_SPACE", "wstale000")          # the daemon's own is never passed on
+    monkeypatch.setenv("MISAKA_NET_SPACE", "wstale000")
     out = tmp_path / "space.txt"
     probe = [sys.executable, "-c",
              f"import os; open({str(out)!r}, 'w').write(os.environ.get('MISAKA_NET_SPACE', '-'))"]
@@ -110,7 +110,7 @@ async def test_a_pane_program_is_told_its_space(daemon, tmp_path, monkeypatch):
         seats = [space["id"] for space in daemon.spaces]
         with pytest.raises(OSError):
             daemon.create([str(tmp_path / "no-such-program")], str(tmp_path), title="broken", place={"space": True})
-        assert [space["id"] for space in daemon.spaces] == seats    # a pane that never started is unseated
+        assert [space["id"] for space in daemon.spaces] == seats
     finally:
         for pane in panes:
             daemon.close(pane.id)

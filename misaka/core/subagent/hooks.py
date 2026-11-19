@@ -32,13 +32,8 @@ _ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}|\$([A-Z_][A-Z0-9_]*)")
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _FORBIDDEN_HEADERS = frozenset({"host", "content-length", "transfer-encoding"})
 
-# A hook's output goes straight into the model's context, so it is bounded the way every
-# other agent-facing output in this project is bounded. Without a cap a single hook can
-# spend the whole context window -- and the caller has no way to tell that it did.
 HOOK_MAX_OUTPUT_CHARS = 32_000
 
-# One default per hook type, read by both the runtime and the config validator; they used
-# to disagree (the validator assumed 60 for everything).
 HOOK_DEFAULT_TIMEOUTS = {"command": 600.0, "agent": 60.0}
 HOOK_DEFAULT_TIMEOUT = 30.0
 
@@ -216,8 +211,6 @@ def _timeout(hook: Mapping[str, Any]) -> float:
 
 async def _kill_hook_process(process: asyncio.subprocess.Process) -> None:
     if os.name != "nt":
-        # The shell leader may already have exited while descendants still own
-        # the process group, so POSIX cleanup must not key only on returncode.
         try:
             os.killpg(process.pid, signal.SIGKILL)  # windows-footgun: ok - POSIX branch
         except (OSError, ProcessLookupError):
@@ -283,7 +276,6 @@ async def _command_hook_with_status(
         return _result(reason=f"command hook failed: {error}"), None
 
     out = stdout.decode("utf-8", errors="replace")
-    # VCS lifecycle hooks return a path on stdout, not the model-hook schema.
     if payload.get("hook_event_name") in {"WorktreeCreate", "WorktreeRemove"}:
         result = _result()
         result["output"] = clamp_hook_output(out)
@@ -432,8 +424,6 @@ async def _evaluate_hook(
         )
         if inspect.isawaitable(value):
             value = await asyncio.wait_for(value, _timeout(hook))
-        # Model hooks have a different schema from command/HTTP hooks. In
-        # particular {"ok":"false"} is a model error, not a blocking verdict.
         if isinstance(value, str):
             value = json.loads(value)
         if not isinstance(value, Mapping) or not isinstance(value.get("ok"), bool):
@@ -485,7 +475,6 @@ __all__ = [
 ]
 
 
-# CCB src/entrypoints/sdk/coreSchemas.ts HOOK_EVENTS (same pin as agents.py).
 HOOK_EVENTS = frozenset({
     'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Notification',
     'UserPromptSubmit', 'SessionStart', 'SessionEnd', 'Stop', 'StopFailure',
@@ -544,8 +533,6 @@ def validate_hooks(hooks: Mapping[str, Any]) -> dict[str, Any]:
                         raise ValueError(f"Hook {key} must be a boolean")
                 if "timeout" in hook:
                     timeout = hook["timeout"]
-                    # JSON's JS-number domain is finite doubles, not arbitrary
-                    # Python integers; oversized integer input must be a schema error.
                     if type(timeout) not in (int, float) or not 0 < timeout <= sys.float_info.max:
                         raise ValueError(f"Agent hooks.{event} timeout must be positive")
                 if "shell" in hook and hook["shell"] not in ("bash", "powershell"):

@@ -31,8 +31,6 @@ def isRemoteSession(env: Mapping[str, str]) -> bool:
     """Remote sessions also emit OSC 52 so the client terminal receives the copy. MISAKA_CLIPBOARD_OSC52=1
     covers remote clients that leave no SSH markers, such as multiplexer attaches (#10114, #10835)
     or IDE daemons (#10826)."""
-    # MISAKA fork: `MISAKA_CLIPBOARD_OSC52`, where upstream reads `PI_CLIPBOARD_OSC52` (the `MISAKA_` prefix, as
-    # `MISAKA_OFFLINE`).
     return bool(
         env.get("SSH_CONNECTION")
         or env.get("SSH_CLIENT")
@@ -46,8 +44,6 @@ def emitOsc52(text: str) -> bool:
     if len(encoded) > MAX_OSC52_ENCODED_LENGTH:
         return False
     sys.stdout.write(f"\x1b]52;c;{encoded}\x07")
-    # MISAKA fork: Node writes a TTY synchronously; Python's line-buffered stdout would hold the sequence, which
-    # carries no newline, until something else writes one.
     try:
         sys.stdout.flush()
     except (OSError, ValueError):

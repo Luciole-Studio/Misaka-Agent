@@ -10,7 +10,6 @@ from misaka.ai.model_catalog import (
     flattenImageModelCatalog,
 )
 
-# MISAKA fork: `import values from "./data/xiaomi.json"` reads the JSON.
 _values = json.loads((Path(__file__).parent / "data" / "xiaomi.json").read_text(encoding="utf-8"))
 
 XIAOMI_MODELS = flattenChatModelCatalog("xiaomi", _values)

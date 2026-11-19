@@ -452,8 +452,6 @@ def ownKeys(node: _OverlayNode) -> list[str]:
                 continue
             keys.append(key)
             seen.add(key)
-    # MISAKA fork: a dict keeps insertion order for every key. JavaScript lists array-index keys first, in
-    # ascending order, which neither a Python dict nor the value the batch builds does.
     return keys
 
 
@@ -946,7 +944,6 @@ def mutatorNode(receiver: DraftArray) -> _OverlayNode:
     return node
 
 
-# MISAKA fork: `comparator(left, right)` may answer anything `Number()` accepts; NaN counts as 0.
 def _compareResult(value: Any) -> int:
     number = jsNumber(value)
     if isinstance(number, float) and math.isnan(number):
@@ -964,7 +961,6 @@ def _defaultSortString(value: Any) -> str:
     return jsString(value)
 
 
-# MISAKA fork: the body of upstream's array mutator `sort`, as a function `DraftArray.sort` calls.
 def arraySort(node: _OverlayNode, comparator: Callable[[Any, Any], Any] | None) -> DraftArray:
     if comparator is not None and not callable(comparator):
         raise TypeError("Comparator must be a function")
@@ -1409,8 +1405,6 @@ def emitSimpleObjectOperations(context: _OverlayContext) -> list[Op] | None:
     return operations
 
 
-# MISAKA fork: upstream answers through two module-level variables (`locatedDenseArray`, `locatedDenseIndex`)
-# it clears when a context is released; the pair is returned instead, so nothing retains a context.
 def locateDenseArrayPosition(node: _OverlayNode) -> tuple[_OverlayNode, int] | None:
     child = node
     parent = nodeParent(child)

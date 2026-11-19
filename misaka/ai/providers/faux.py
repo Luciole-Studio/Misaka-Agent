@@ -85,7 +85,6 @@ _DEFAULT_USAGE = Usage(
 
 
 def _defaultUsage() -> Usage:
-    # MISAKA fork: a copy of `_DEFAULT_USAGE` per use (see the module docstring).
     return _DEFAULT_USAGE.model_copy(deep=True)
 
 
@@ -270,7 +269,6 @@ def _commonPromptPrefixLength(previous: list[str], current: list[str]) -> int:
 
 
 def _commonPrefixLength(a: str, b: str) -> int:
-    # MISAKA fork: compared in UTF-16 code units, as JavaScript indexes strings.
     a, b = toUtf16Units(a), toUtf16Units(b)
     length = min(len(a), len(b))
     index = 0
