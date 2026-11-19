@@ -65,6 +65,18 @@ def test_a_run_is_added_up_by_conversation_and_model(spent_run):
     assert usage.money(spent["total"]) == "$3.25 (+1 calls with no known price)"
 
 
+def test_a_card_whose_session_folder_was_never_stored_is_still_counted(spent_run):
+    """A run started from the command line stores no folder on its cards, and the report left them
+    out: one such run showed $0.91 of the $2.52 its session files add up to (2026-11-19)."""
+    con, run, _child, tid = spent_run
+    con.execute("UPDATE tasks SET session_dir=NULL WHERE id=?", (tid,))
+
+    spent = usage.run_usage(con, run)
+
+    assert dict(spent["parts"])[f"card {tid} (Sister 10032)"]["calls"] == 2
+    assert spent["total"]["cost"] == 3.25
+
+
 def test_misaka_usage_prints_the_run_and_the_list(spent_run, monkeypatch, capsys):
     from misaka.cli import app
     con, run, _child, tid = spent_run

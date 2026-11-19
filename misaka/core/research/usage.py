@@ -125,7 +125,7 @@ def run_usage(con, run):
         label = "root Last Order" if scope == "root-lo" else scope.replace("-", " ", 1)
         parts.append((label, session_usage(_sessions(folder), by_model=models)))
     for task in runs.tasks(con, run["id"]):
-        files = _sessions(task["session_dir"]) or [path for path in [task["session_file"]] if path]
+        files = _sessions(sessions.card_session_dir(task)) or [path for path in [task["session_file"]] if path]
         parts.append((f"card {task['id']} (Sister {task['assignee']})", session_usage(files, by_model=models)))
     total = _blank()
     for _label, usage in parts:
