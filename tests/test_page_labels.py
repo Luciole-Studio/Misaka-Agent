@@ -42,6 +42,20 @@ def test_a_footnote_number_or_a_year_does_not_pass_for_a_folio():
     assert corpus._inferred_labels(pages) == {}
 
 
+def test_the_digits_of_a_number_printed_apart_are_not_folios():
+    """A law journal prints both its page numbers with the digits apart, "(83-3-) 1 8 8 4 5 4" on
+    one page and "(83-3-) 4 5 5 1 8 9" on the next. The last digit of each foot passed for a folio
+    and 25 of the paper's 32 pages were given printed numbers such as 1, 3 and 5 (2026-11-19)."""
+    def foot(n):
+        issue, volume = " ".join(str(185 + n)), " ".join(str(451 + n))
+        return f"(Law Review 83-3-) {issue} {volume}" if n % 2 else f"(83-3-) {volume} {issue}"
+
+    pages = [f"{PROSE} ({n}).\nMore text on the page.\n{foot(n)}\n" for n in range(1, 33)]
+
+    assert corpus._folios(pages[2]) == set()
+    assert corpus._inferred_labels(pages) == {}
+
+
 def test_an_unnumbered_chapter_opening_between_two_numbered_pages_takes_its_number():
     labels = corpus._inferred_labels(_book(first_printed=100, pages=30, unnumbered={15}))
     assert labels[15] == "114"

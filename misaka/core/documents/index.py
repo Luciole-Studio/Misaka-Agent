@@ -19,7 +19,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 import zipfile
 
-from misaka.core.documents import htmltext, mineru, outline
+from misaka.core.documents import htmltext, mineru, outline, vertical_text
 from misaka.utils import atomic
 
 DOC_ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -113,7 +113,7 @@ def _pdf_text_layer(p):
         out = subprocess.run(["pdftotext", "-layout", p, "-"], capture_output=True,
                              text=True, encoding="utf-8", errors="replace", timeout=300, check=False)
         if out.returncode == 0 and out.stdout.strip():
-            return _form_feed_pages(out.stdout)
+            return _columns_read_down(p, _form_feed_pages(out.stdout))
     except (OSError, subprocess.SubprocessError):
         pass
     try:
@@ -126,6 +126,29 @@ def _pdf_text_layer(p):
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
     return []
+
+
+def _columns_read_down(p, pages):
+    """``pages`` with each page of vertical text put back in reading order (``vertical_text``).
+
+    The second read is made only for a file with a page that looks cut across, 14 of 238 real PDFs.
+    A page under ``SPARSE_TEXT`` is left as it is: ``_route`` weighs such a page by its length, and
+    joined columns are shorter than the same characters spread over rows.
+    """
+    cut = [at for at, text in enumerate(pages) if vertical_text.cut_across(text, SPARSE_TEXT)]
+    if not cut:
+        return pages
+    try:
+        out = subprocess.run(["pdftotext", "-raw", p, "-"], capture_output=True,
+                             text=True, encoding="utf-8", errors="replace", timeout=300, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return pages
+    raw = _form_feed_pages(out.stdout) if out.returncode == 0 else []
+    if len(raw) != len(pages):
+        return pages
+    for at in cut:
+        pages[at] = vertical_text.in_reading_order(raw[at]) or pages[at]
+    return pages
 
 
 _PDFIUM_TEXT_CHILD = """
@@ -537,14 +560,22 @@ def _folios(text):
     """The numbers a page prints at its top or bottom: alone on one of its first or last two
     lines ("338", "- 338 -", "第338页"), at either end of a head ("338  East Jin", "East Jin
     338"), or at the end of a foot. A foot line that *starts* with a number is a footnote
-    ("87 Zhuravsky, ..."): its numbers climb a page at a time often enough to pass for folios."""
+    ("87 Zhuravsky, ..."): its numbers climb a page at a time often enough to pass for folios.
+    So do the last digits of a number printed with its digits apart ("4 5 4"), a page at a time
+    and round again after nine: a paper's 32 pages were given 25 printed numbers that way."""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     found = set()
     for line, head in [(line, True) for line in lines[:2]] + [(line, False) for line in lines[-2:]]:
-        match = _FOLIO_ALONE.match(line) or _FOLIO_ENDS.search(line) or (head and _FOLIO_LEADS.match(line))
+        ends = None if _ends_in_digits_apart(line) else _FOLIO_ENDS.search(line)
+        match = _FOLIO_ALONE.match(line) or ends or (head and _FOLIO_LEADS.match(line))
         if match:
             found.add(int(match.group(1)))
     return found
+
+
+def _ends_in_digits_apart(line):
+    tokens = line.split()
+    return len(tokens) >= 2 and all(len(token) == 1 and token.isdigit() for token in tokens[-2:])
 
 
 def _inferred_labels(pages):
