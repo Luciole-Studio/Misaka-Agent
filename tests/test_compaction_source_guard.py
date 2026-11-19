@@ -33,14 +33,27 @@ def _session(manager=None):
     session.settingsManager = SimpleNamespace(getCompactionSettings=lambda model=None: settings)
     session._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({"cwd": "/tmp", "customPrompt": "fixture"})
     session._runSystemPromptOptions = None
-    session._extensionRunner = SimpleNamespace(hasHandlers=lambda _: False, emit=AsyncMock())
-    session.moments = SimpleNamespace(session_context_prepare=AsyncMock(),
-                                      session_compact=AsyncMock(),
-                                      session_compact_failed=AsyncMock())
+    session._extensionRunner = _Runner()
     session.abort = AsyncMock()
     session.events = []
     session._emit = session.events.append
     return session
+
+
+class _Runner:
+    """The runner as the compaction path uses it: one answer per event type, and what was emitted."""
+
+    def __init__(self):
+        self.answers = {"session_compact_failed": None}
+        self.emitted = []
+
+    def hasHandlers(self, event_type):
+        return event_type in self.answers
+
+    async def emit(self, event):
+        self.emitted.append(event["type"])
+        answer = self.answers.get(event["type"])
+        return await answer(event) if answer is not None else None
 
 
 def _result(session, engine=False):
@@ -180,7 +193,7 @@ async def test_both_await_boundaries_use_the_same_guard(mode, stage, metadata):
             mutate()
         return {"execute": execute}
 
-    session.moments.session_context_prepare.side_effect = prepare
+    session._extensionRunner.answers["session_context_prepare"] = prepare
     if mode == "manual":
         if metadata:
             assert await session.compact() is result
@@ -194,12 +207,12 @@ async def test_both_await_boundaries_use_the_same_guard(mode, stage, metadata):
     compacted = [entry for entry in entries if entry["type"] == "compaction"]
     assert bool(compacted) is metadata
     if metadata:
-        session.moments.session_compact.assert_awaited_once()
-        session.moments.session_compact_failed.assert_not_awaited()
+        assert session._extensionRunner.emitted.count("session_compact") == 1
+        assert "session_compact_failed" not in session._extensionRunner.emitted
         assert session.messages == result.contextMessages
     else:
-        session.moments.session_compact.assert_not_awaited()
-        session.moments.session_compact_failed.assert_awaited_once()
+        assert "session_compact" not in session._extensionRunner.emitted
+        assert session._extensionRunner.emitted.count("session_compact_failed") == 1
         assert entries[-1]["message"]["content"] == "must not be lost"
 
 
@@ -208,7 +221,6 @@ async def test_both_await_boundaries_use_the_same_guard(mode, stage, metadata):
 async def test_native_preparation_and_summary_hooks_tolerate_bookkeeping(monkeypatch, mode, from_hook):
     session = _session()
     result = _result(session)
-    session.moments.session_context_prepare.return_value = None
     session._getSummarizationRequestAuth = AsyncMock(return_value={"model": session.model, "thinkingLevel": "off"})
     session.agent.streamFunction = None
     session._summarizationRetryPolicy = lambda: None
@@ -222,7 +234,7 @@ async def test_native_preparation_and_summary_hooks_tolerate_bookkeeping(monkeyp
         session.sessionManager.appendCustomEntry("native-progress", {"phase": "summary"})
         return result
 
-    session.moments.session_before_compact = AsyncMock(side_effect=hook)
+    session._extensionRunner.answers["session_before_compact"] = hook
     summary = AsyncMock(side_effect=summarize)
     monkeypatch.setattr("misaka.core.agent_session.compact", summary)
     if mode == "manual":
@@ -234,7 +246,7 @@ async def test_native_preparation_and_summary_hooks_tolerate_bookkeeping(monkeyp
     assert entry["type"] == "compaction"
     assert entry["fromHook"] is from_hook
     assert summary.await_count == (0 if from_hook else 1)
-    session.moments.session_compact_failed.assert_not_awaited()
+    assert "session_compact_failed" not in session._extensionRunner.emitted
 
 
 def test_failed_write_keeps_the_metadata_and_old_live_view(monkeypatch):

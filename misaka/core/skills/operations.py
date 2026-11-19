@@ -188,6 +188,7 @@ def run_llm_review(prompt):
 
 async def _run_review_session(scope, prompt):
     from misaka.agent.guards import finish_turn_from_stop_predicate
+    from misaka.core.extensions.runner import emitSessionShutdownEvent
     from misaka.core.platform import metering
     from misaka.core.platform.session import (
         install_guards,
@@ -275,7 +276,8 @@ async def _run_review_session(scope, prompt):
                 await session.abort()
             finally:
                 try:
-                    await session.moments.session_shutdown({"type": "session_shutdown", "reason": "quit"})
+                    await emitSessionShutdownEvent(
+                        session.extensionRunner, {"type": "session_shutdown", "reason": "quit"})
                 finally:
                     session.dispose()
         await settle(asyncio.create_task(cleanup()))

@@ -658,7 +658,7 @@ async def test_a_window_gives_back_all_it_took_when_it_had_to_take_one_again(pro
     before = session.getActiveToolNames()
     owner = WindowLO(session, lambda: None, describe=dict)
     session.setActiveToolsByName([*session.getActiveToolNames(), "misaka_card"])
-    await session.moments.session_tree({"type": "session_tree"})
+    await session.extensionRunner.emit({"type": "session_tree"})
     assert not DRIVER_OWNED_TOOLS.intersection(session.getActiveToolNames())
     await owner.close()
     active = session.getActiveToolNames()

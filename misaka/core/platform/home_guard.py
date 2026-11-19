@@ -121,9 +121,9 @@ class HomeGuard:
 
 def part(spec):
     from misaka.config.profiles import is_last_order
-    from misaka.core.wiring import role_key
+    from misaka.core.wiring import effective_kind
 
-    kind = "bare" if role_key(spec) == "last_order" and spec.kind == "beast" else spec.kind
+    kind = effective_kind(spec)
     guard_paths = kind in _PATH_KINDS or (kind == "bare" and is_last_order(spec.profile_dir))
     if kind == "bare" and not guard_paths:
         return None

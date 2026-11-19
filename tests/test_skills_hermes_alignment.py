@@ -188,6 +188,8 @@ def test_no_part_of_a_session_refuses_a_skill_script_run_the_skill_md_way(monkey
     """The whole session stack, as parts_for assembles it, lets the command a SKILL.md documents through."""
     from misaka.config import profiles
     from misaka.core import wiring
+    from misaka.core.extensions.loader import createExtensionRuntime
+    from misaka.core.extensions.runner import ExtensionRunner
     from misaka.core.moments import Moments
 
     monkeypatch.setattr(profiles, "is_last_order", lambda _profile: kind == "foreground")
@@ -195,15 +197,16 @@ def test_no_part_of_a_session_refuses_a_skill_script_run_the_skill_md_way(monkey
     for key in [key for key in os.environ if key.startswith("MISAKA_SUBAGENT_")]:
         monkeypatch.delenv(key)
     spec = wiring.SessionSpec(profile_dir="/tmp/profiles/sisters/x", role="x", workspace="/tmp/ws", kind=kind)
-    session = SimpleNamespace(extensionRunner=SimpleNamespace(createContext=lambda: SimpleNamespace()))
-    moments = Moments(session, [])   # the runner's dispatch over the parts, without a live session to attach
+    moments = Moments(None, [])   # the runner's dispatch over the parts, without a live session to attach
     moments.parts = wiring.parts_for(spec)
+    runner = ExtensionRunner(extensions=moments.extensions(), runtime=createExtensionRuntime(), cwd="/tmp/ws",
+                             sessionManager=None, modelRegistry=None)
     from misaka.config import home
 
     # The home's own skills folder and a `$NAME` expansion: the two things the old guard refused.
     command = f'SKILLS={home.path("shared_skills")}; python3 -B "$SKILLS/cnki/scripts/run.py" search "$Q"'
     try:
-        assert asyncio.run(moments.tool_call({"toolName": "bash", "input": {"command": command}})) is None
+        assert asyncio.run(runner.emitToolCall({"toolName": "bash", "input": {"command": command}})) is None
     finally:
         for part in moments.parts:
             shutdown = getattr(part, "session_shutdown", None)

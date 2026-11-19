@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import sys
 import traceback
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, MutableMapping
 from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, TypedDict
@@ -619,7 +619,6 @@ class ExtensionRunner:
     commandDiagnostics: list[ResourceDiagnostic] = field(default_factory=list)
     staleMessage: str | None = None
     uiPromptDepth: int = field(default=0, init=False, repr=False)
-    moments: Any = field(default=None, init=False, repr=False)
     activeUIPrompt: tuple[UIPromptKind, str | None] | None = field(
         default=None, init=False, repr=False
     )
@@ -846,14 +845,7 @@ class ExtensionRunner:
         }
         if title:
             event["title"] = title
-        moments = self.moments
-
-        async def dispatch() -> None:
-            if moments is not None:
-                await getattr(moments, event_type)(dict(event))
-            await self.emit(event)
-
-        task = asyncio.create_task(dispatch())
+        task = asyncio.create_task(self.emit(event))
         task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
 
     def getUIContext(self) -> Any:
@@ -1165,6 +1157,8 @@ class ExtensionRunner:
         ctx = self.createContext()
         current_event = _clone_with(event)
         modified = False
+        # MISAKA fork: a handler may end the run from a result; pi's tool_result has no `terminate`.
+        terminate: Any = _MISSING
         for extension, handlers in snapshotEventHandlers(self.extensions, "tool_result"):
             for handler in handlers:
                 try:
@@ -1173,6 +1167,13 @@ class ExtensionRunner:
                         handler_result = await handler_result
                     if handler_result is None:
                         continue
+                    if _result_flag(handler_result, "terminate", _MISSING) is not _MISSING:
+                        terminate = _result_flag(handler_result, "terminate")
+                        if isinstance(current_event, MutableMapping):
+                            current_event["terminate"] = terminate
+                        else:
+                            current_event.terminate = terminate
+                        modified = True
                     for field_name in ("content", "details", "structuredContent", "isError", "usage"):
                         value = _result_flag(handler_result, field_name, _MISSING)
                         if value is not _MISSING:
@@ -1201,11 +1202,15 @@ class ExtensionRunner:
             "structuredContent": _event_field(current_event, "structuredContent"),
             "isError": _event_field(current_event, "isError"),
             "usage": _event_field(current_event, "usage"),
+            **({} if terminate is _MISSING else {"terminate": terminate}),
         }
 
     async def emitToolCall(self, event: Any) -> Any:
         ctx = self.createContext()
         result: Any = None
+        # MISAKA fork: a handler may rewrite the call's input with `updatedInput`; the handlers
+        # after it see the rewritten input, and the last rewrite is returned with the last answer.
+        updated_input: Any = None
         for extension, handlers in snapshotEventHandlers(self.extensions, "tool_call"):
             for handler in handlers:
                 try:
@@ -1221,8 +1226,22 @@ class ExtensionRunner:
                     raise
                 if handler_result:
                     result = handler_result
+                    rewritten = _result_flag(handler_result, "updatedInput")
+                    if rewritten is not None:
+                        updated_input = rewritten
+                        if isinstance(event, MutableMapping):
+                            event["input"] = rewritten
+                        else:
+                            event.input = rewritten
                     if _result_flag(result, "block", False):
                         return result
+        if updated_input is not None:
+            return {
+                "block": False,
+                "reason": _result_flag(result, "reason"),
+                "terminate": _result_flag(result, "terminate"),
+                "updatedInput": updated_input,
+            }
         return result
 
     async def emitUserBash(self, event: Any) -> Any:
@@ -1385,6 +1404,10 @@ class ExtensionRunner:
                     message = _result_flag(handler_result, "message")
                     if message is not None:
                         messages.append(message)
+                    # MISAKA fork: a handler may contribute several messages; pi takes one.
+                    several = _result_flag(handler_result, "messages")
+                    if isinstance(several, (list, tuple)):
+                        messages.extend(several)
                     if _result_flag(handler_result, "systemPrompt") is not None:
                         current_options["forceSystemPrompt"] = _result_flag(handler_result, "systemPrompt")
                 except Exception as error:  # noqa: BLE001 - extension code: the failure is reported through emit_extension_exception

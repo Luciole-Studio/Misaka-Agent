@@ -1,7 +1,7 @@
 """Translated from pi's ``packages/coding-agent/src/core/sdk.ts`` (v1.1.0).
 
-MISAKA forks (marked where they act): the home's credential and session layout, role-bound settings and a role's pinned model and thinking level, the context engine and core
-parts in the context transform, and a session catalog for sessions without a product assembly.
+MISAKA forks (marked where they act): the home's credential and session layout, role-bound settings and a role's pinned model and thinking level, the context engine in
+the context transform, and a session catalog for sessions without a product assembly.
 """
 
 from __future__ import annotations
@@ -435,7 +435,6 @@ async def createAgentSession(options: CreateAgentSessionOptions | None = None) -
         session = extensionRunnerRef.get("session")
         if session is not None:
             messages = await session.prepareContextMessages(messages, signal)
-            messages = await session.moments.context(messages)
         runner = extensionRunnerRef.get("current")
         if runner is None:
             return messages

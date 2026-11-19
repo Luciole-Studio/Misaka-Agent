@@ -235,21 +235,17 @@ async def test_a_tool_result_handler_that_replaces_content_drops_structured_cont
 
 
 async def test_parts_that_replace_content_drop_structured_content_too():
+    from misaka.core.extensions.loader import createExtensionRuntime
+    from misaka.core.extensions.runner import ExtensionRunner
     from misaka.core.moments import Moments
 
     class Redact:
         def tool_result(self, event, _ctx):
             return {"content": [{"type": "text", "text": "[redacted]"}]}
 
-    class _Runner:
-        def createContext(self):
-            return None
-
-    class _Session:
-        extensionRunner = _Runner()
-
-    moments = Moments(_Session(), [Redact()])
-    folded = await moments.tool_result({
+    runner = ExtensionRunner(extensions=Moments(None, [Redact()]).extensions(), runtime=createExtensionRuntime(),
+                             cwd=".", sessionManager=None, modelRegistry=None)
+    folded = await runner.emitToolResult({
         "type": "tool_result", "content": [], "structuredContent": {"value": "secret"}, "details": {}, "isError": False,
     })
     assert folded["structuredContent"] is None

@@ -352,6 +352,8 @@ async def test_product_runtime_disposal_awaits_web_part_before_session_invalidat
     from types import SimpleNamespace
 
     from misaka.core.agent_session_runtime import AgentSessionRuntime
+    from misaka.core.extensions.loader import createExtensionRuntime
+    from misaka.core.extensions.runner import ExtensionRunner
     from misaka.core.moments import Moments
 
     clients = http_fixture(monkeypatch, lambda r: httpx.Response(200, json={"results": []}))
@@ -362,12 +364,13 @@ async def test_product_runtime_disposal_awaits_web_part_before_session_invalidat
         assert clients[0].is_closed
         stages.append('session')
 
-    session = SimpleNamespace(extensionRunner=SimpleNamespace(
-        createContext=lambda: None, hasHandlers=lambda _name: False,
-    ), dispose=invalidate)
+    session = SimpleNamespace(dispose=invalidate)
     session.moments = Moments(session, [owner])
+    session.extensionRunner = ExtensionRunner(
+        extensions=session.moments.extensions(), runtime=createExtensionRuntime(), cwd=str(tmp_path),
+        sessionManager=None, modelRegistry=None)
     runtime = AgentSessionRuntime(session, None, None)
-    await session.moments.session_start({'reason': 'startup'})
+    await session.extensionRunner.emit({'type': 'session_start', 'reason': 'startup'})
     await search(owner)
     await runtime.dispose()
     assert stages == ['session'] and owner.runtime.closed

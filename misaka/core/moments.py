@@ -1,35 +1,28 @@
-"""The kernel's direct calls into MISAKA's own subsystems, at the moments Pi's kernel marks.
+"""MISAKA's own subsystems inside a session: its *parts*.
 
-Pi's kernel does its own work at those moments by direct call -- ``_checkCompaction`` is
-the pattern -- and offers everything else the extension runner. MISAKA's subsystems used
-to sit on the runner as extensions. Now they are *parts* of the session: assembled by the
-process entry (``core.wiring.assemble``), handed in through ``AgentSessionConfig.parts``,
-and called from here, ahead of the runner, with the same event payload and the same
-folding the runner applies -- so an extension still sees the session as core left it.
+A part is an object with a ``tools`` list, a ``commands`` list (``CoreCommand``), and any of
+the methods named in ``EVENTS``, each ``(event, ctx) -> dict | None``. The process entry
+assembles the parts (``core.wiring.assemble``) and hands them in through
+``AgentSessionConfig.parts``.
 
-A part is an object with a ``tools`` list, a ``commands`` list (``CoreCommand``), and
-any of the methods named below, each ``async (event, ctx) -> dict | None``. A method a
-part does not define is skipped. A raising part is logged and skipped, as the runner
-does for a raising extension: a subsystem failing at a moment is a bug to fix, not a
-reason to end the user's turn (``tool_call`` is the one fail-closed exception, as in
-the runner). A part that defines ``attach(session)`` is handed the session when the
-session is built; between moments it calls the session directly -- ``sendCustomMessage``
-through ``Moments.send_message``, ``getActiveToolNames``, ``registerCustomTools``.
+A part's event methods run on the session's extension runner, ahead of every extension
+(``Moments.extensions``): one dispatcher folds the answers of parts and extensions alike, so
+an extension sees an event as the parts left it. What differs for a part is written here and
+nowhere else. A part that raises is logged and skipped, where an extension's error is reported
+to the user; ``tool_call`` and ``session_context_prepare`` stay fail-closed for both. An
+announcement raised on a replaced runner is not delivered to a part.
+
+A part that defines ``attach(session)`` is handed the session when the session is built;
+between events it calls the session directly -- ``sendCustomMessage`` through
+``Moments.send_message``, ``getActiveToolNames``, ``registerCustomTools``.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
-
-from misaka.ai.utils.transcript import getCurrentSystemMessage
-from misaka.core.system_prompt import (
-    buildSystemPrompt,
-    normalizeBuildSystemPromptOptions,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +30,39 @@ MEMORY = "memory"
 TURN = "turn"
 SENDERS = "senders"
 
-_MISSING = object()
+EVENTS: tuple[str, ...] = (
+    "session_start",
+    "session_tree",
+    "session_shutdown",
+    "session_compact",
+    "session_compact_failed",
+    "agent_start",
+    "agent_settled",
+    "ui_prompt_start",
+    "ui_prompt_end",
+    "session_before_fork",
+    "before_agent_start",
+    "agent_end",
+    "session_context_prepare",
+    "session_before_compact",
+    "tool_call",
+    "tool_result",
+    "input",
+    "context",
+    "context_with_system",
+)
+_ANNOUNCEMENTS = frozenset({
+    "session_start",
+    "session_tree",
+    "session_shutdown",
+    "session_compact",
+    "session_compact_failed",
+    "agent_start",
+    "agent_settled",
+    "ui_prompt_start",
+    "ui_prompt_end",
+})
+_FAIL_CLOSED = frozenset({"tool_call", "session_context_prepare"})
 
 
 def opens_turn(event: Any) -> bool:
@@ -57,22 +82,6 @@ def _field(result: Any, name: str, default: Any = None) -> Any:
     return getattr(result, name, default)
 
 
-@dataclass(slots=True)
-class BeforeAgentStart:
-    """What the parts did with a turn about to start, folded the way the runner folds it.
-
-    `system_prompt_options` is the mutable, normalized options object every part saw; a part
-    that returned `systemPrompt` set `forceSystemPrompt` on it, as an extension would. A part adds
-    to the prompt through its ``sections`` instead, as pi's extensions do: a forced prompt is fixed
-    here, before the extensions run, and the sections they add (MCP's ``mcp_servers``) would never
-    reach the model."""
-
-    system_prompt_options: dict[str, Any]
-    messages: list[Any] = field(default_factory=list)
-    block: bool = False
-    reason: str | None = None
-
-
 @dataclass(slots=True, frozen=True)
 class CoreCommand:
     """A part's slash command; prompt handlers return text, other handlers execute actions."""
@@ -85,7 +94,7 @@ class CoreCommand:
 
 
 class Moments:
-    """One session's parts, and the kernel's way of calling them."""
+    """One session's parts: what the kernel asks of them directly, and their seat on the runner."""
 
     def __init__(self, session: Any, parts: list[Any]) -> None:
         self.session = session
@@ -160,31 +169,43 @@ class Moments:
             definitions[position:position] = part.tools
         return definitions
 
-    async def _call(self, part: Any, name: str, event: dict[str, Any], ctx: Any) -> Any:
-        method = getattr(part, name, None)
-        if method is None or not callable(method):
-            return None
-        try:
-            result = method(event, ctx)
-            if hasattr(result, "__await__"):
-                result = await result
-            return result
-        except Exception:
-            logger.warning("core part %s failed at %s", type(part).__name__, name, exc_info=True)
-            return None
+    def extensions(self) -> list[Any]:
+        """The parts as hidden extensions, one handler table each, for the head of the runner's list."""
+        from misaka.core.extensions.types import Extension
+        from misaka.core.source_info import createSyntheticSourceInfo
 
-    async def _notify(self, name: str, event: dict[str, Any]) -> None:
-        if not self.parts or getattr(self.session.extensionRunner, "staleMessage", None):
-            return
-        ctx = self._ctx()
+        seats: list[Any] = []
         for part in self.parts:
-            await self._call(part, name, event, ctx)
+            handlers = {
+                event: [self._handler(part, event)] for event in EVENTS if callable(getattr(part, event, None))
+            }
+            if handlers:
+                path = f"<core:{type(part).__name__}>"
+                seats.append(Extension(
+                    path=path,
+                    resolvedPath=path,
+                    sourceInfo=createSyntheticSourceInfo(path, {"source": "sdk"}),
+                    handlers=handlers,
+                    hidden=True,
+                ))
+        return seats
 
-    async def session_start(self, event: dict[str, Any]) -> None:
-        await self._notify("session_start", event)
+    def _handler(self, part: Any, name: str) -> Callable[..., Any]:
+        async def handler(event: Any, ctx: Any) -> Any:
+            if name in _ANNOUNCEMENTS and getattr(self.session.extensionRunner, "staleMessage", None):
+                return None
+            try:
+                result = getattr(part, name)(event, ctx)
+                if hasattr(result, "__await__"):
+                    result = await result
+                return result
+            except Exception:
+                if name in _FAIL_CLOSED:
+                    raise
+                logger.warning("core part %s failed at %s", type(part).__name__, name, exc_info=True)
+                return None
 
-    async def session_tree(self, event: dict[str, Any]) -> None:
-        await self._notify("session_tree", event)
+        return handler
 
     async def resources_ready(self, event: dict[str, Any]) -> None:
         """Required resource barrier: failure stops startup, unlike notifications."""
@@ -193,224 +214,5 @@ class Moments:
             if method is not None:
                 await method(event, self._ctx())
 
-    async def session_shutdown(self, event: dict[str, Any]) -> None:
-        await self._notify("session_shutdown", event)
 
-    async def session_compact(self, event: dict[str, Any]) -> None:
-        await self._notify("session_compact", event)
-
-    async def session_compact_failed(self, event: dict[str, Any]) -> None:
-        await self._notify("session_compact_failed", event)
-
-    async def agent_start(self, event: dict[str, Any]) -> None:
-        await self._notify("agent_start", event)
-
-    async def agent_settled(self, event: dict[str, Any]) -> None:
-        await self._notify("agent_settled", event)
-
-    async def ui_prompt_start(self, event: dict[str, Any]) -> None:
-        await self._notify("ui_prompt_start", event)
-
-    async def ui_prompt_end(self, event: dict[str, Any]) -> None:
-        await self._notify("ui_prompt_end", event)
-
-    async def session_before_fork(self, event: dict[str, Any]) -> Any:
-        """Runner ``emit`` for this type: the first part to cancel wins."""
-        if not self.parts:
-            return None
-        ctx = self._ctx()
-        for part in self.parts:
-            result = await self._call(part, "session_before_fork", event, ctx)
-            if _field(result, "cancel", False):
-                return result
-        return None
-
-    async def before_agent_start(self, trigger: Any, options: Any) -> BeforeAgentStart:
-        """Runner ``emit_before_agent_start``: each part sees the prompt options as the previous
-        one left them, and ``systemPrompt`` renders them on every read. The event carries the
-        run's trigger as the runner's does: ``messageType`` ``"user"`` with ``prompt``/``images``,
-        or ``"custom"`` with the custom ``message`` that starts the run (see ``opens_turn``)."""
-        current_options = normalizeBuildSystemPromptOptions(options)
-        folded = BeforeAgentStart(system_prompt_options=current_options)
-        if not self.parts:
-            return folded
-        ctx = self._ctx()
-        for part in self.parts:
-            result = await self._call(part, "before_agent_start", {
-                **trigger,
-                "type": "before_agent_start",
-                "systemPrompt": buildSystemPrompt(current_options),
-                "systemPromptOptions": current_options,
-            }, ctx)
-            if result is None:
-                continue
-            if _field(result, "block", False):
-                folded.block = True
-                folded.reason = _field(result, "reason")
-                return folded
-            message = _field(result, "message")
-            if message is not None:
-                folded.messages.append(message)
-            messages = _field(result, "messages")
-            if isinstance(messages, (list, tuple)):
-                folded.messages.extend(messages)
-            replaced = _field(result, "systemPrompt")
-            if replaced is not None:
-                current_options["forceSystemPrompt"] = str(replaced)
-        return folded
-
-    async def agent_end(self, event: dict[str, Any]) -> Any:
-        """Runner ``emit_agent_end``: the first part to block wins."""
-        if not self.parts:
-            return None
-        ctx = self._ctx()
-        for part in self.parts:
-            result = await self._call(part, "agent_end", event, ctx)
-            if _field(result, "block", False):
-                return result
-        return None
-
-    async def session_context_prepare(self, event: dict[str, Any]) -> Any:
-        """First context owner wins; a failed owner is not a request for Pi fallback."""
-        for part in self.parts:
-            method = getattr(part, "session_context_prepare", None)
-            if method is not None:
-                result = method(event, self._ctx())
-                if hasattr(result, "__await__"):
-                    result = await result
-                if result is not None:
-                    return result
-        return None
-
-    async def session_before_compact(self, event: dict[str, Any]) -> Any:
-        """Runner ``emit`` for this type: the first part to answer -- cancel or a compaction -- wins."""
-        if not self.parts:
-            return None
-        ctx = self._ctx()
-        for part in self.parts:
-            result = await self._call(part, "session_before_compact", event, ctx)
-            if result:
-                return result
-        return None
-
-    async def tool_call(self, event: dict[str, Any]) -> Any:
-        """Runner ``emitToolCall``: the last answer stands, a block returns at once, a crash is fatal."""
-        if not self.parts:
-            return None
-        ctx = self._ctx()
-        result: Any = None
-        updated_input = None
-        for part in self.parts:
-            method = getattr(part, "tool_call", None)
-            if method is None:
-                continue
-            answer = method(event, ctx)
-            if hasattr(answer, "__await__"):
-                answer = await answer
-            if answer:
-                result = answer
-                changed = _field(answer, "updatedInput", None)
-                if changed is not None:
-                    updated_input = changed
-                    event["input"] = changed
-                if _field(result, "block", False):
-                    return result
-        if updated_input is not None:
-            return {"block": _field(result, "block", False),
-                    "reason": _field(result, "reason", None),
-                    "terminate": _field(result, "terminate", None),
-                    "updatedInput": updated_input}
-        return result
-
-    async def tool_result(self, event: dict[str, Any]) -> Any:
-        """Runner ``emitToolResult``: parts may replace content, details, structuredContent,
-        isError, usage. Replacing content without returning structuredContent drops it, as the
-        runner does: a part that redacts content must not leave the raw structured result behind."""
-        if not self.parts:
-            return None
-        ctx = self._ctx()
-        current = dict(event)
-        modified = False
-        for part in self.parts:
-            result = await self._call(part, "tool_result", current, ctx)
-            if result is None:
-                continue
-            for name in ("content", "details", "structuredContent", "isError", "usage", "terminate"):
-                value = _field(result, name, _MISSING)
-                if value is not _MISSING:
-                    current[name] = value
-                    modified = True
-                    if name == "content" and _field(result, "structuredContent", _MISSING) is _MISSING:
-                        current.pop("structuredContent", None)
-        if not modified:
-            return None
-        folded = {name: current.get(name) for name in ("content", "details", "structuredContent", "isError", "usage")}
-        if "terminate" in current:
-            folded["terminate"] = current["terminate"]
-        return folded
-
-    async def input(self, text: str, images: Any, source: Any, streaming_behavior: Any) -> dict[str, Any]:
-        """Runner ``emitInput``: the first part to handle the input wins; transforms chain."""
-        current_text, current_images = text, images
-        if self.parts:
-            ctx = self._ctx()
-            for part in self.parts:
-                result = await self._call(part, "input", {
-                    "type": "input",
-                    "text": current_text,
-                    "images": current_images,
-                    "source": source,
-                    "streamingBehavior": streaming_behavior,
-                }, ctx)
-                action = _field(result, "action")
-                if action == "handled":
-                    return result
-                if action == "transform":
-                    current_text = _field(result, "text", current_text)
-                    replaced = _field(result, "images", _MISSING)
-                    if replaced is not _MISSING and replaced is not None:
-                        current_images = replaced
-        if current_text != text or current_images != images:
-            return {"action": "transform", "text": current_text, "images": current_images}
-        return {"action": "continue"}
-
-    async def context(self, messages: list[Any]) -> list[Any]:
-        """Runner ``emitContext``: each part rewrites the list the previous one produced.
-
-        As for extensions, a part's `context` sees the conversation only; the system messages
-        are re-attached after it (an unchanged list keeps them in place, a changed one gets
-        the replayed head). A part's `context_with_system` then sees the full transcript."""
-        if not self.parts:
-            return messages
-        ctx = self._ctx()
-        current = deepcopy(messages)
-        for part in self.parts:
-            visible = [m for m in current if _field(m, "role") != "system"]
-            visible_snapshot = list(visible)
-            result = await self._call(part, "context", {"type": "context", "messages": visible}, ctx)
-            replaced = _field(result, "messages")
-            if replaced is None:
-                replaced = None if _same_messages(visible, visible_snapshot) else visible
-            if replaced is None:
-                continue
-            current = _restore_system_messages(current, visible_snapshot, replaced)
-        for part in self.parts:
-            result = await self._call(part, "context_with_system", {"type": "context_with_system", "messages": current}, ctx)
-            replaced = _field(result, "messages")
-            if replaced is not None:
-                current = replaced
-        return current
-
-
-def _same_messages(left: list[Any], right: list[Any]) -> bool:
-    return len(left) == len(right) and all(message is right[index] for index, message in enumerate(left))
-
-
-def _restore_system_messages(current: list[Any], visible: list[Any], returned: list[Any]) -> list[Any]:
-    if _same_messages(returned, visible):
-        return current
-    head = getCurrentSystemMessage(current)
-    return [head, *returned] if head else returned
-
-
-__all__ = ["BeforeAgentStart", "CoreCommand", "Moments", "opens_turn"]
+__all__ = ["EVENTS", "CoreCommand", "Moments", "opens_turn"]

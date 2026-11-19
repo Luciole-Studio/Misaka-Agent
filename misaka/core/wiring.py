@@ -31,7 +31,7 @@ model sees changes with the mechanism.
 from __future__ import annotations
 
 import importlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -127,15 +127,24 @@ def _qualifies(mod: Any, role: str, kind: str) -> bool:
     return role in getattr(mod, "ROLES", ROLE_KEYS) and kind in getattr(mod, "SESSION_KINDS", DEFAULT_KINDS)
 
 
+def effective_kind(spec: SessionSpec) -> SessionKind:
+    """The kind a session is assembled as: a budget-less Last Order (``beast``) runs tool-less."""
+    return "bare" if spec.kind == "beast" and role_key(spec) == "last_order" else spec.kind
+
+
+def qualifying(spec: SessionSpec, modules: Iterable[Any]) -> Iterator[Any]:
+    """The modules that take part in this session, one at a time: each names its ``ROLES``
+    (default both) and its ``SESSION_KINDS`` (default every kind but ``bare``)."""
+    role, kind = role_key(spec), effective_kind(spec)
+    for mod in modules:
+        if _qualifies(mod, role, kind):
+            yield mod
+
+
 def tools_for(spec: SessionSpec) -> list[ToolDefinition]:
     """The core tools a session gets through Pi's ``customTools`` door, in ``TOOL_MODULES`` order."""
-    role = role_key(spec)
-    kind = "bare" if role == "last_order" and spec.kind == "beast" else spec.kind
     collector = ToolCollector()
-    for path in TOOL_MODULES:
-        mod = importlib.import_module(path)
-        if not _qualifies(mod, role, kind):
-            continue
+    for mod in qualifying(spec, map(importlib.import_module, TOOL_MODULES)):
         register = mod.activate(spec)
         if register is not None:
             register(collector)
@@ -144,13 +153,8 @@ def tools_for(spec: SessionSpec) -> list[ToolDefinition]:
 
 def parts_for(spec: SessionSpec) -> list[Any]:
     """The parts a session gets, in ``PART_MODULES`` order."""
-    role = role_key(spec)
-    kind = "bare" if role == "last_order" and spec.kind == "beast" else spec.kind
     parts: list[Any] = []
-    for path in PART_MODULES:
-        mod = importlib.import_module(path)
-        if not _qualifies(mod, role, kind):
-            continue
+    for mod in qualifying(spec, map(importlib.import_module, PART_MODULES)):
         part = mod.part(spec)
         if part is not None:
             parts.append(part)
@@ -300,8 +304,8 @@ bundled: Callable[[SessionSpec], list[dict[str, Any]]] = _no_bundled
 def build_extensions(spec: SessionSpec) -> list[dict[str, Any]]:
     """The inline extensions for one session: the bundled ones the process entry installed.
 
-    Core contributes none: its tools take ``customTools`` and its moments are called by the
-    kernel (``PART_MODULES``), the way pi's core never sits on its own extension runner.
+    Core contributes none: its tools take ``customTools`` and its parts (``PART_MODULES``) are
+    seated on the runner by the session itself (``core.moments``), ahead of these.
     """
     return list(bundled(spec))
 
@@ -322,8 +326,10 @@ __all__ = [
     "bundled",
     "core_providers",
     "delegates",
+    "effective_kind",
     "inline",
     "parts_for",
+    "qualifying",
     "role_key",
     "tools_for",
 ]

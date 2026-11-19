@@ -23,7 +23,7 @@ import importlib
 import pkgutil
 from typing import Any
 
-from misaka.core.wiring import DEFAULT_KINDS, ROLE_KEYS, inline, role_key
+from misaka.core.wiring import inline, qualifying
 
 # pi's `builtInExtensions`, in its order; misaka's own bundled extensions follow, by name.
 _PI_BUILTINS = ("llama", "codemode", "tool_search", "mcp")
@@ -41,14 +41,10 @@ def _modules():
 
 def discover(spec) -> list[dict[str, Any]]:
     """Return the inline extensions for one session, by role and session kind."""
-    role = role_key(spec)
-    kind = "bare" if role == "last_order" and spec.kind == "beast" else spec.kind  # a budget-less Last Order runs tool-less
     out: list[dict[str, Any]] = []
-    for mod in _modules():
+    for mod in qualifying(spec, _modules()):
         activate = getattr(mod, "activate", None)
-        if activate is None or kind not in getattr(mod, "SESSION_KINDS", DEFAULT_KINDS):
-            continue
-        if role not in getattr(mod, "ROLES", ROLE_KEYS):
+        if activate is None:
             continue
         register = activate(spec)
         if register is not None:

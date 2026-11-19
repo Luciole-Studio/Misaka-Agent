@@ -77,7 +77,6 @@ async def _opened(home, session_manager):
     finally:
         event = {"type": "session_shutdown", "reason": "test"}
         try:
-            await session.moments.session_shutdown(event)
             await emitSessionShutdownEvent(session.extensionRunner, event)
         finally:
             session.dispose()

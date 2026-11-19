@@ -53,6 +53,10 @@ async def host(tmp_path, monkeypatch):
     bundles.mkdir()
     (bundles / 'combo.yaml').write_text('name: combo\ndescription: Fixture bundle.\nskills:\n  - agent-reach\n  - second\n', encoding='utf-8')
     part = SkillsPart([('role', str(root))], str(profile), str(tmp_path), kind='bare')
+    calls, errors, inputs = [], [], []
+    async def observe_input(event, _ctx):
+        inputs.append(event)
+    part.input = observe_input
     loader = DefaultResourceLoader({'cwd': str(tmp_path), 'agentDir': str(tmp_path / 'agent'),
         'noExtensions': True, 'noPromptTemplates': True, 'noThemes': True})
     await loader.reload()
@@ -65,11 +69,7 @@ async def host(tmp_path, monkeypatch):
         'sessionManager': SessionManager.create(str(tmp_path), str(tmp_path / 'sessions')),
         'parts': [part], 'tools': []})
     session = result['session']
-    calls, errors, inputs = [], [], []
     session.extensionRunner.onError(lambda error: errors.append(error.error))
-    async def observe_input(event, _ctx):
-        inputs.append(event)
-    part.input = observe_input
 
     def stream(model, context, options=None):
         assert not part._read_lock.locked(), 'The model started while the skill read lock was held'

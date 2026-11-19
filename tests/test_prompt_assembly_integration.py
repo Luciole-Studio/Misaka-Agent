@@ -109,7 +109,6 @@ async def assembled(home, role, kind, *, research=False, custom=False, prompt_fl
     finally:
         event = {"type": "session_shutdown", "reason": "test"}
         try:
-            await session.moments.session_shutdown(event)
             await emitSessionShutdownEvent(session.extensionRunner, event)
         finally:
             session.dispose()

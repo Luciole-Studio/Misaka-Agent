@@ -927,20 +927,14 @@ class AgentSession:
     async def _emitBeforeAgentStart(self, trigger: BeforeAgentStartTrigger):
         """The before_agent_start hooks: the messages they contribute and the run's prompt options."""
         selected_tools_before = list(self._baseSystemPromptOptions["selectedTools"])
-        core = await self.moments.before_agent_start(trigger, self._baseSystemPromptOptions)
-        if core.block:
-            _raiseRunBlocked(trigger, core.reason or "a core part blocked the turn")
-        contributed: list[Any] = list(core.messages)
-        options = core.system_prompt_options
-        if self._extensionRunner.hasHandlers("before_agent_start"):
-            before_result = await self._extensionRunner.emitBeforeAgentStart(trigger, options)
-            if before_result and _event_field(before_result, "block", False):
-                _raiseRunBlocked(
-                    trigger,
-                    str(_event_field(before_result, "reason", "before_agent_start hook blocked the turn")),
-                )
-            contributed.extend(_event_field(before_result, "messages") or [])
-            options = _event_field(before_result, "systemPromptOptions", options)
+        before_result = await self._extensionRunner.emitBeforeAgentStart(trigger, self._baseSystemPromptOptions)
+        if _event_field(before_result, "block", False):
+            _raiseRunBlocked(
+                trigger,
+                str(_event_field(before_result, "reason", "before_agent_start hook blocked the turn")),
+            )
+        contributed: list[Any] = list(_event_field(before_result, "messages") or [])
+        options = _event_field(before_result, "systemPromptOptions")
         # Handlers may edit event.systemPromptOptions.selectedTools or call setActiveTools(),
         # which updates the live loadout instead. An explicit edit wins; otherwise the live
         # loadout is authoritative, so a setActiveTools() call is not undone here.
@@ -956,17 +950,7 @@ class AgentSession:
         source: Any,
         streaming_behavior: Any,
     ) -> tuple[str, list[ImageContent] | None] | None:
-        """Parts first, then extensions (MISAKA fork: pi has only the runner). None when a
-        handler took the input."""
-        input_result = await self.moments.input(text, images, source, streaming_behavior)
-        action = _event_field(input_result, "action", "continue")
-        if action == "handled":
-            return None
-        if action == "transform":
-            text = _event_field(input_result, "text", text)
-            transformed_images = _event_field(input_result, "images", None)
-            if transformed_images is not None:
-                images = list(transformed_images)
+        """None when a handler took the input."""
         if not self._extensionRunner.hasHandlers("input"):
             return text, images
         input_result = await self._extensionRunner.emitInput(text, images, source, streaming_behavior)
@@ -1640,7 +1624,6 @@ class AgentSession:
         if resolved.onError is not None:
             self._extensionErrorListener = resolved.onError
         self._applyExtensionBindings(self._extensionRunner)
-        await self.moments.session_start(dict(self._sessionStartEvent))
         await self._extensionRunner.emit(dict(self._sessionStartEvent))
         self._extensionRunner.reportUnhandledMcpServers()
         await self.extendResourcesFromExtensions(
@@ -1650,7 +1633,6 @@ class AgentSession:
 
     async def reload(self, options: dict[str, Any] | None = None) -> None:
         previous_flag_values = self._extensionRunner.getFlagValues()
-        await self.moments.session_shutdown({"type": "session_shutdown", "reason": "reload"})
         await emitSessionShutdownEvent(self._extensionRunner, {"type": "session_shutdown", "reason": "reload"})
         # The old runner must unsubscribe from the shared event bus, or every
         # /reload leaks one more layer of handlers (pi #7656/6ca423447).
@@ -1697,12 +1679,11 @@ class AgentSession:
                 result = before_session_start()
                 if inspect.isawaitable(result):
                     await result
-        # Native parts were shut down above even for a bound headless session.
+        # The handlers were shut down above even for a bound headless session.
         # Their lifecycle does not depend on UI/error/command bindings.
         if has_bindings or self._extensionBindings is not None:
-            await self.moments.session_start({"type": "session_start", "reason": "reload"})
-        if has_bindings:
             await self._extensionRunner.emit({"type": "session_start", "reason": "reload"})
+        if has_bindings:
             self._extensionRunner.reportUnhandledMcpServers()
         # A started headless session can have no UI/command/error bindings. Refresh
         # its resources too, but do not start discovery on a never-bound session.
@@ -2044,8 +2025,8 @@ class AgentSession:
                            for tool in self.agent.state.tools],
                  "allowCompression": reason == "manual" or bool(self.settingsManager.getCompactionSettings(self.model).get("enabled")),
                  "model": self._compactionLimitsModel(preflight)}
-        decision = await self.moments.session_context_prepare(event)
-        if decision is None and self._extensionRunner.hasHandlers("session_context_prepare"):
+        decision = None
+        if self._extensionRunner.hasHandlers("session_context_prepare"):
             decision = await self._extensionRunner.emit(event)
         if decision is not None:
             operation = _event_field(decision, "execute")
@@ -2093,8 +2074,8 @@ class AgentSession:
                      "branchEntries": branch_entries, "customInstructions": custom_instructions,
                      "reason": reason, "willRetry": will_retry,
                      "signal": signal}
-            provided = await self.moments.session_before_compact(event)
-            if provided is None and self._extensionRunner.hasHandlers("session_before_compact"):
+            provided = None
+            if self._extensionRunner.hasHandlers("session_before_compact"):
                 provided = await self._extensionRunner.emit(event)
             if _result_flag(provided, "cancel", False):
                 raise _CompactionCancelledByExtension("Compaction cancelled")
@@ -2159,10 +2140,6 @@ class AgentSession:
             saved_entry = self._publishCompaction(result, from_hook, source)
             published_result = result
             if saved_entry is not None:
-                await self.moments.session_compact({
-                    "type": "session_compact", "compactionEntry": saved_entry, "fromExtension": from_hook,
-                    "reason": "manual", "willRetry": False,
-                })
                 await self._extensionRunner.emit(
                     {
                         "type": "session_compact",
@@ -2236,7 +2213,6 @@ class AgentSession:
             "willRetry": will_retry,
             "fromExtension": from_extension,
         }
-        await self.moments.session_compact_failed(failed_event)
         if not self._extensionRunner.hasHandlers("session_compact_failed"):
             return
         await self._extensionRunner.emit(failed_event)
@@ -2401,7 +2377,6 @@ class AgentSession:
             self._refreshFinalizedContext()
             self._restoreToolsFromTranscript()
 
-            await self.moments.session_tree({"type": "session_tree"})
             await self._extensionRunner.emit(
                 {
                     "type": "session_tree",
@@ -2776,16 +2751,13 @@ class AgentSession:
         event_type = _event_type(event)
         if event_type == "agent_start":
             self._turnIndex = 0
-            await self.moments.agent_start({"type": "agent_start"})
             await self._extensionRunner.emit({"type": "agent_start"})
         elif event_type == "agent_end":
             agent_end_event = {
                 "type": "agent_end",
                 "messages": list(_event_field(event, "messages", []) or []),
             }
-            hook_result = await self.moments.agent_end(agent_end_event)
-            if not _event_field(hook_result, "block", False):
-                hook_result = await self._extensionRunner.emitAgentEnd(agent_end_event)
+            hook_result = await self._extensionRunner.emitAgentEnd(agent_end_event)
             if _event_field(hook_result, "block", False):
                 reason = str(
                     _event_field(
@@ -2973,7 +2945,8 @@ class AgentSession:
             for name, value in flag_values.items():
                 extensions_result.runtime.flagValues[name] = value
         runner = ExtensionRunner(
-            extensions=list(extensions_result.extensions),
+            # MISAKA fork: the session's parts answer each event ahead of the extensions.
+            extensions=[*self.moments.extensions(), *extensions_result.extensions],
             runtime=extensions_result.runtime,
             cwd=self._cwd,
             sessionManager=self.sessionManager,
@@ -2983,7 +2956,6 @@ class AgentSession:
         if self._extensionRunnerRef is not None:
             self._extensionRunnerRef["current"] = runner
             self._extensionRunnerRef["session"] = self
-            runner.moments = self.moments
         return runner
 
     def _registerProvider(self, name: str, config: dict[str, Any]) -> None:
@@ -3427,7 +3399,7 @@ class AgentSession:
             if name not in reachable:
                 return {"block": True, "reason": f"Tool {name!r} is outside the current tool scope."}
         runner = self._extensionRunner
-        if not self.moments.parts and not runner.hasHandlers("tool_call"):
+        if not runner.hasHandlers("tool_call"):
             return None
         tool_call = _event_field(payload, "toolCall")
         args = _event_field(payload, "args")
@@ -3438,16 +3410,7 @@ class AgentSession:
             **({"parentToolCallId": parent_tool_call_id} if parent_tool_call_id else {}),
             "input": args,
         }
-        result = await self.moments.tool_call(event)
-        if _event_field(result, "block", False) or not runner.hasHandlers("tool_call"):
-            return result
-        extension_result = await runner.emitToolCall(event)  # type: ignore[attr-defined]
-        if extension_result and _event_field(result, "updatedInput") is not None:
-            return {"block": _event_field(extension_result, "block", False),
-                    "reason": _event_field(extension_result, "reason"),
-                    "terminate": _event_field(extension_result, "terminate"),
-                    "updatedInput": _event_field(result, "updatedInput")}
-        return extension_result if extension_result else result
+        return await runner.emitToolCall(event)
 
     async def _afterToolCall(self, payload: Any, parent_tool_call_id: str | None = None) -> Any:
         """``tool_result`` handlers and image normalization. ``parent_tool_call_id`` is set for
@@ -3457,7 +3420,7 @@ class AgentSession:
         tool_call = _event_field(payload, "toolCall")
         structured_content = _event_field(result, "structuredContent")
         hook_result = None
-        if self.moments.parts or runner.hasHandlers("tool_result"):
+        if runner.hasHandlers("tool_result"):
             event = {
                 "type": "tool_result",
                 "toolName": read_field(tool_call, "name"),
@@ -3470,15 +3433,7 @@ class AgentSession:
                 "isError": bool(_event_field(payload, "isError")),
                 "usage": _event_field(result, "usage"),
             }
-            hook_result = await self.moments.tool_result(event)
-            if hook_result is not None:
-                event.update(hook_result)
-                if event.get("structuredContent") is None:
-                    event.pop("structuredContent", None)
-            if runner.hasHandlers("tool_result"):
-                extension_result = await runner.emitToolResult(event)  # type: ignore[attr-defined]
-                if extension_result is not None:
-                    hook_result = extension_result
+            hook_result = await runner.emitToolResult(event)
 
         result_content = _event_field(result, "content")
         content = (
@@ -3605,9 +3560,7 @@ class AgentSession:
 
     def _hasContextEngine(self) -> bool:
         runner = getattr(self, "_extensionRunner", None)
-        return bool(runner is not None and runner.hasHandlers("session_context_prepare")) or any(
-            callable(getattr(part, "session_context_prepare", None))
-            for part in getattr(getattr(self, "moments", None), "parts", ()))
+        return bool(runner is not None and runner.hasHandlers("session_context_prepare"))
 
     async def prepareContextMessages(self, messages, signal=None):
         """Engine preflight before EVERY provider request, before transient context hooks.
@@ -4152,8 +4105,6 @@ class AgentSession:
         try:
             aborted = self._agentRunAbortRequested
             await self._extensionRunner.emit({"type": "agent_settled", "aborted": aborted})
-            if not self._isAgentRunActive:
-                await self.moments.agent_settled({"type": "agent_settled", "aborted": aborted})
             self._emit({"type": "agent_settled", "aborted": aborted})
         finally:
             self._isEmittingAgentSettled = False
@@ -4637,10 +4588,6 @@ class AgentSession:
             saved_entry = self._publishCompaction(result, from_hook, source)
             published_result = result
             if saved_entry is not None:
-                await self.moments.session_compact({
-                    "type": "session_compact", "compactionEntry": saved_entry, "fromExtension": from_hook,
-                    "reason": reason, "willRetry": will_retry,
-                })
                 await self._extensionRunner.emit(
                     {
                         "type": "session_compact",
