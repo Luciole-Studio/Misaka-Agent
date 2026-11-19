@@ -6,9 +6,9 @@ import math
 import re
 
 from .pdf_objects import (
+    _PDF_WHITESPACE_BYTES,
     _PDF_DELIMITER_BYTES,
     _PDF_STRING_ESCAPE_BYTES,
-    _PDF_WHITESPACE_BYTES,
 )
 from .text_normalize import _WHITESPACE_CODEPOINTS
 
@@ -136,6 +136,8 @@ def _parse_tounicode_cmap(data: bytes) -> dict[int, str]:
             index_value += 2 if (index_value + 1 < count_item and data[index_value + 1] == 0x3E) else 1
         elif candidate_item in b"[]":
             tokens.append(("delim", chr(candidate_item)))
+            index_value += 1
+        elif candidate_item in b"){}":  # stray delimiter
             index_value += 1
         elif candidate_item == 0x2F:  # /name
             state_item = index_value + 1

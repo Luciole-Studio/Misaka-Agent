@@ -464,7 +464,7 @@ class Wizard:
                       "  misaka skills pending / approve <id>        the review step each install goes through")
 
     def documents(self) -> None:
-        from misaka.core.documents.pageindex import available as pageindex_available
+        from misaka.core.documents.pdf_outline import available as pageindex_available
         ui.print_header("Documents")
         office = self._importable("docx", "openpyxl", "pptx")
         ui.print_check(office, "office documents", "python-docx / openpyxl / python-pptx" if office else
@@ -627,7 +627,7 @@ class Wizard:
         """`misaka doc add` is step two of the quickstart and the whole point of the document
         stack; the wizard used to check that the libraries imported and stop there."""
         ui.print_info("", "Research reads an indexed corpus: PDFs, Office files and text you have already",
-                      "collected. Indexing extracts their text (and, with the PageIndex extra, an outline)",
+                      "collected. Indexing extracts their text (and an outline, where a document has one)",
                       "so a Sister can cite a page instead of guessing.")
         if not prompt_yes_no("Index a folder of sources into this project now?", False):
             ui.print_info(f"Later: cd {folder} && misaka doc scan <folder>")

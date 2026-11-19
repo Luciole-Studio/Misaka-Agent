@@ -1,8 +1,8 @@
 """The outline of a plain-text or Markdown document, read from its own headings.
 
 PageIndex (``documents/pageindex/flash``) reads structure out of a PDF's layout and is
-vendored under a resync contract; this module is MISAKA's own and reads the structure a
-text file states in words. A Gutenberg or Archive transcription numbers its parts
+upstream's code, unchanged; this module is MISAKA's own and reads the structure a text file
+states in words. A Gutenberg or Archive transcription numbers its parts
 (``CHAPTER XII.``, ``LIVRE III``, ``BOOK IV``) and sets a title in capitals on a line of its
 own; Markdown marks its levels with ``#``. The result has the shape PageIndex writes -- a
 nested list of ``{title, node_id, start_index, end_index, nodes}`` over the corpus' own page
@@ -12,7 +12,7 @@ Conservative on purpose. A heading must stand on its own line between blank line
 running head that repeats page after page is dropped; a capital-letter line is a heading
 only when the document is not shouting everywhere; and a document that yields fewer than
 three headings, or more headings than it plausibly has sections, gets no tree at all --
-the same settled ``none_found`` the PDF extractor gives.
+the same settled "none" the PDF reader gives (``outline.NONE``).
 """
 from __future__ import annotations
 

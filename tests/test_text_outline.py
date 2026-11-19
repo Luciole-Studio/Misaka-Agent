@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from misaka.core.documents import index as corpus
-from misaka.core.documents import text_outline
+from misaka.core.documents import outline, text_outline
 
 PROSE = ("The morning of the seventh found the column still short of the river, the wagons a full "
          "day behind and the bread three days old. ") * 4
@@ -77,9 +77,11 @@ def test_ingest_builds_a_tree_for_a_long_text_and_the_tools_read_it(tmp_path):
     book = workspace / "history.txt"
     book.write_text("A HISTORY\n" + _book(12), encoding="utf-8")
     doc_id, count = corpus.ingest(str(book), workspace=str(workspace))
-    assert count >= corpus.TREE_MIN_PAGES
-    outline = corpus.tree_outline(doc_id, workspace=str(workspace))
-    assert outline and "CHAPTER XII" in outline
+    assert count >= outline.MIN_PAGES
+    shown = corpus.tree_outline(doc_id, workspace=str(workspace))
+    assert shown and "CHAPTER XII" in shown
+    assert corpus.outline_note(doc_id, workspace=str(workspace)) == (
+        "outline from the headings the text states on lines of their own")
     start, end = corpus.node_pages(doc_id, "0001", workspace=str(workspace))     # the title line is not a section; 0000 is CHAPTER I
     assert 1 <= start <= end <= count
     assert "CHAPTER II." in str(corpus.read_pages(doc_id, start, end, workspace=str(workspace)))
@@ -103,7 +105,7 @@ def test_a_long_text_without_headings_is_settled_as_none_found(tmp_path):
     plain = workspace / "plain.txt"
     plain.write_text(("\n\n".join([PROSE] * 160)), encoding="utf-8")
     doc_id, count = corpus.ingest(str(plain), workspace=str(workspace))
-    assert count >= corpus.TREE_MIN_PAGES
+    assert count >= outline.MIN_PAGES
     assert corpus.tree_outline(doc_id, workspace=str(workspace)) is None
     meta = json.loads(Path(corpus.resolve_doc(doc_id, workspace=str(workspace)), "meta.json").read_text(encoding="utf-8"))
-    assert meta["tree_attempted_version"] == corpus.TREE_ATTEMPT_VERSION
+    assert meta["outline"] == {"status": "none", "version": outline.VERSION}

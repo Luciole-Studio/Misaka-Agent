@@ -5,37 +5,32 @@ from __future__ import annotations
 import math
 
 from ..model import (
-    Block,
     _trim_unicode_ws,
-    alignment_code,
-    block_text,
-    center_aligned,
-    deaccented_text,
-    dominant_style_of,
-    heading_score,
     left_aligned,
-    letter_count,
     right_aligned,
+    center_aligned,
+    Rect,
+    last_span,
+    heading_score,
+    Line,
+    last_line_of,
+    first_span_of,
+    deaccented_text,
+    letter_count,
+    dominant_style_of,
+    info_weight,
+    is_upper_dominant,
+    alignment_code,
+    Block,
 )
-from ..stats import (
-    ScriptHistogram,
-    dominant_script_family,
-    tally_scripts,
-)
-from ..tokens import (
-    _de_norm,
-    clamp_value,
-    enumerate_tokens,
-    is_superscript_adjacent,
-    is_word_token,
-    jenkins_hash,
-    tokenize_block,
-    trie_prefix_match,
-)
+from ..stats import DocStats, column_index_of
+from ..tokens import is_superscript_adjacent, clamp_value, enumerate_tokens, jenkins_hash, trie_prefix_match, set_case_fold, TrieConfig, build_trie, tokenize_block, _de_norm, BuiltTrie, is_word_token
+
 from .dicts import (
     INSTITUTION_WORDS,
     TITLE_LABEL_TRIE,
 )
+
 
 # --------------------------------------------------------------------------- #
 # Title candidate state container #
@@ -45,7 +40,7 @@ from .dicts import (
 class TitleCandidate:
     """Best title candidate so far: page, contributing blocks, and score."""
 
-    __slots__ = ("output_slot", "page", "score")
+    __slots__ = ("page", "output_slot", "score")
 
     def __init__(self, page, blocks: list[Block], score_value: float):
         self.page = page
@@ -251,17 +246,10 @@ def score_title_candidate(zp_state, page, index: int) -> None:
     # Email penalty
     email = 1.0 / ((1 + email_count) ** 2)
 
-    # Script-family match: build a script histogram over the candidate group's text and
-    # compare the candidate script family against the document script family.
-    script_acc = ScriptHistogram()
-    for result_value in group:
-        tally_scripts(script_acc, block_text(result_value))
-    script = 1.0 if dominant_script_family(script_acc) == doc_state.secondary_slot.tertiary_slot else 0.5
-
     score = (
         max_heading_score * len_value * width_ratio_sq * right_pen * bracket_factor * page_pos
         * density_factor * top * factor * recurrence_factor * institution * label
-        * email * script
+        * email
     )
 
     if zp_state.secondary_slot is None or score > zp_state.secondary_slot.score:

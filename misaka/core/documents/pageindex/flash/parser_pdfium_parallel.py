@@ -30,17 +30,18 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
+from typing import Union
 
-import PyPDF2 as _pypdf2  # declared dependency (also imported by pageindex.utils/client)
 import pypdfium2 as pdfium
+import PyPDF2 as _pypdf2  # declared dependency (also imported by pageindex.utils/client)
 
 from .model import Span
 from .parser_pdfium_charlevel import (
+    parse_charlevel_meta,
+    _PdfDoc,
     _page_pass1,
     _page_pass2,
     _page_spans,
-    _PdfDoc,
-    parse_charlevel_meta,
 )
 
 _MIN_PARALLEL_PAGES = 64
@@ -70,7 +71,7 @@ def _anonymous_main():
     everything by module name and never need __main__. Depth-counted so
     overlapping windows restore the true originals, not a mid-window snapshot.
 
-    ponytail: window covers the whole map; a concurrent pool spawned from
+    The window covers the whole map; a concurrent pool spawned from
     another thread whose tasks live in __main__ would break during it."""
     global _window_depth, _window_saved
     main = sys.modules.get("__main__")
@@ -104,14 +105,13 @@ def _init_worker(kind: str, payload) -> None:
     else:
         _worker_pdf = pdfium.PdfDocument(BytesIO(payload))
     _worker_pdf_doc = None
-    if _pypdf2 is not None:
-        try:
-            if kind == "path":
-                _worker_pdf_doc = _PdfDoc(_pypdf2.PdfReader(payload))
-            else:
-                _worker_pdf_doc = _PdfDoc(_pypdf2.PdfReader(BytesIO(payload)))
-        except Exception:
-            _worker_pdf_doc = None
+    try:
+        if kind == "path":
+            _worker_pdf_doc = _PdfDoc(_pypdf2.PdfReader(payload))
+        else:
+            _worker_pdf_doc = _PdfDoc(_pypdf2.PdfReader(BytesIO(payload)))
+    except Exception:
+        _worker_pdf_doc = None
     _worker_font_maps = {}
 
 
@@ -130,7 +130,7 @@ def _run_page(page_idx: int):
 
 
 def parse_charlevel_meta_parallel(
-    doc_handle: str | Path | BytesIO,
+    doc_handle: Union[str, Path, BytesIO],
     workers: int | None = None,
     min_pages: int = _MIN_PARALLEL_PAGES,
 ) -> tuple[list[list[Span]], list]:

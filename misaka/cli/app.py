@@ -224,7 +224,7 @@ def _parser(extension_commands=None):
                                            "query (find), quote (verify), or document ID (tree)")
     dc.add_argument("--doc", help="Restrict to one document ID")
     dc.add_argument("--page", type=int, help="verify: the page the quotation is cited on")
-    dc.add_argument("--no-tree", action="store_true", help="Skip PageIndex structure extraction")
+    dc.add_argument("--no-tree", action="store_true", help="Index the pages only, without an outline")
 
 
     cr = sub.add_parser("create", help="Create a new Sister")
@@ -812,6 +812,9 @@ def _doc_notes(did, since):
                      + (f" (and {len(reasons) - 1} other reason(s))" if len(reasons) > 1 else ""))
     if textless := len(listed) - len(unread):
         notes.append(f"{textless} page(s) hold no text OCR could read (blank pages, pictures, maps)")
+    attempt = meta.get("outline") if isinstance(meta.get("outline"), dict) else {}
+    if attempt.get("status") == "failed":
+        notes.append(f"the outline reader failed on it: {attempt.get('reason')}")
     reread = meta.get("reread")
     if isinstance(reread, dict) and int(reread.get("at") or 0) >= since:
         notes.append(f"re-read by the current extractor: {len(reread.get('pages') or [])} page(s) changed "
@@ -825,10 +828,8 @@ def _cmd_doc(args):
             sys.exit("Usage: misaka doc add <file> [--no-tree]")
         since = int(time.time())
         did, n = corpus.ingest(args.arg, with_tree=not args.no_tree, workspace=db.canonical_workspace())
-        doc = corpus.resolve_doc(did, workspace=db.canonical_workspace())
-        has = doc and os.path.exists(os.path.join(doc, "tree.json"))
-        structure = "with PageIndex structure" if has else "page navigation only"
-        print(f"Added {os.path.basename(args.arg)} as {did}: {n} pages, {structure}.")
+        outlined = corpus.outline_note(did, workspace=db.canonical_workspace()) or "with an outline"
+        print(f"Added {os.path.basename(args.arg)} as {did}: {n} pages, {outlined}.")
         for note in _doc_notes(did, since):
             print(f"  {note}")
     elif args.action == "scan":

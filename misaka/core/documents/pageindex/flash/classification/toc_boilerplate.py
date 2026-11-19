@@ -3,34 +3,73 @@
 from __future__ import annotations
 
 import math
+from typing import Optional
 
 from ..model import (
-    Block,
-    heading_score,
-    info_weight,
-    letter_count,
-    text_of_line,
+    _UNICODE_WHITESPACE_CLASS,
+    _strip_diacritics,
+    _round_half_up_to_int,
+    magnitude_ratio,
+    intervals_overlap,
+    y_overlaps,
+    center_aligned,
     to_number,
+    last_span,
+    heading_score,
+    text_of_line,
+    Line,
+    last_line_of,
+    first_span_of,
+    is_word_category,
+    block_text,
+    deaccented_text,
+    letter_count,
+    dominant_style_of,
+    punct_count,
+    info_weight,
+    is_upper_dominant,
+    is_caps_heavy,
+    alignment_code,
+    Block,
 )
 from ..tokens import (
+    is_trimmable_token,
+    token_numeric_value,
+    Token,
+    TokenView,
+    wrap_tokens,
+    enumerate_tokens,
+    jenkins_hash,
+    trie_prefix_match,
+    strip_trie_match,
+    strip_leading_if_in,
+    COMMA_CHARS,
+    strip_trailing_comma,
+    trim_trailing_punct,
+    set_case_fold,
     TrieConfig,
     build_trie,
-    set_case_fold,
+    LineTokenizer,
     tokenize_block,
+    BuiltTrie,
     trie_full_match,
-    trie_prefix_match,
+    is_char_token,
+    is_word_token,
+)
+
+from .keyword_tables import (
+    _DICTS,
+    _dict_trie,
+    TOC_TITLES_TRIE,
+    DOT_LEADER_ROW_RE,
+    _search_trie,
+    _normalize_text_key,
 )
 from .body_text import (
     is_body_paragraph,
     normalized_block_text,
 )
-from .keyword_tables import (
-    _DICTS,
-    DOT_LEADER_ROW_RE,
-    TOC_TITLES_TRIE,
-    _dict_trie,
-    _search_trie,
-)
+
 
 # --------------------------------------------------------------------------- #
 # Side-rail watermark detector #
@@ -105,7 +144,7 @@ def is_boilerplate_block(block: Block) -> bool:
 class NumberColumnCluster:
     """numeric-leading-token cluster."""
 
-    __slots__ = ("anchor_x", "length", "primary_slot", "secondary_slot", "tertiary_slot", "width")
+    __slots__ = ("anchor_x", "width", "secondary_slot", "primary_slot", "length", "tertiary_slot")
 
     def __init__(self, anchor_x_value: float, width: float, reference_number: int, next_number: int, length: int, limit_flag: bool):
         self.anchor_x = anchor_x_value        # anchor x-position
@@ -116,7 +155,7 @@ class NumberColumnCluster:
         self.tertiary_slot = limit_flag          # is increasing
 
 
-def extract_number_column(block) -> NumberColumnCluster | None:
+def extract_number_column(block) -> Optional[NumberColumnCluster]:
     """Extract a numeric-leading cluster if block lines form an increasing page-number sequence."""
     column = 0
     last_number = 0
@@ -134,7 +173,7 @@ def extract_number_column(block) -> NumberColumnCluster | None:
     return NumberColumnCluster(block.center_x(), block.bbox_width(), column, last_number, sequence_length, True)
 
 
-def pick_nearer_cluster(cluster: NumberColumnCluster, other_cluster: NumberColumnCluster | None, other: NumberColumnCluster | None) -> NumberColumnCluster | None:
+def pick_nearer_cluster(cluster: NumberColumnCluster, other_cluster: Optional[NumberColumnCluster], other: Optional[NumberColumnCluster]) -> Optional[NumberColumnCluster]:
     """Pick the closer neighbor cluster within the current cluster width."""
     distance = (cluster.anchor_x - other_cluster.anchor_x) if other_cluster is not None else math.inf
     candidate_distance = (other.anchor_x - cluster.anchor_x) if other is not None else math.inf
@@ -143,8 +182,8 @@ def pick_nearer_cluster(cluster: NumberColumnCluster, other_cluster: NumberColum
     return other_cluster if distance < candidate_distance else other
 
 
-def detect_toc_range(doc, page, index) -> dict | None:
-    """Detect a TOC-like block range within ``page``. The detector combines dot-leader rows, blocks ending in dot-leader page numbers, contents-like titles, and same-x-range numeric clusters. Returns a ``{start_index, end_index}`` range or ``None``."""
+def detect_toc_range(doc, page, index, links) -> Optional[dict]:
+    """Detect a TOC-like block range within ``page``. The detector combines dot-leader rows, blocks ending in dot-leader page numbers, contents-like titles, and same-x-range numeric clusters. A running-header title whose text is in ``links`` (see ``running_contents_links``) is not a contents title. Returns a ``{start_index, end_index}`` range or ``None``."""
     blocks = page.output_slot
     lines = 0
     dot_leader_blocks = 0
@@ -167,14 +206,14 @@ def detect_toc_range(doc, page, index) -> dict | None:
             return
         clusters.insert(insert_index, cluster)
 
-    def _next_number_column_cluster(cluster: NumberColumnCluster) -> NumberColumnCluster | None:
+    def _next_number_column_cluster(cluster: NumberColumnCluster) -> Optional[NumberColumnCluster]:
         # Non-strict successor: an equal anchor_x entry is returned.
         import bisect
         keys = [column.anchor_x for column in clusters]
         cluster_index = bisect.bisect_left(keys, cluster.anchor_x)
         return clusters[cluster_index] if cluster_index < len(clusters) else None
 
-    def _prev_number_column_cluster(cluster: NumberColumnCluster) -> NumberColumnCluster | None:
+    def _prev_number_column_cluster(cluster: NumberColumnCluster) -> Optional[NumberColumnCluster]:
         # Non-strict predecessor: an equal anchor_x entry is returned.
         import bisect
         keys = [column.anchor_x for column in clusters]
@@ -220,7 +259,8 @@ def detect_toc_range(doc, page, index) -> dict | None:
         if block.line_count() > 1 and not is_toc:
             last_multiline = codepoint
         # "Contents"-like title must consume the whole block, not just a prefix.
-        if contents < 0 and block.line_count() <= 1 and trie_full_match(TOC_TITLES_TRIE, tokenize_block(block)):
+        if (contents < 0 and block.line_count() <= 1 and trie_full_match(TOC_TITLES_TRIE, tokenize_block(block))
+                and (block.type == 0 or normalized_block_text(block) not in links)):
             contents = codepoint
             pre_contents = last_multiline
             if not seen_body and block.top_edge() > 3 * page.bounds.bbox_height() / 4:
@@ -265,9 +305,48 @@ def detect_toc_range(doc, page, index) -> dict | None:
 # --------------------------------------------------------------------------- #
 
 
+def running_contents_links(doc) -> set[str]:
+    """Texts of contents titles marked as running headers or footers where
+    most pages they run on are prose (more body-paragraph text than not):
+    navigation links (SEC filings print a "Table of Contents" link on every
+    page), not the title of the contents pages a repeated title runs on."""
+    pages: dict[str, list[int]] = {}   # title text -> [prose pages, pages]
+    for page in doc.primary_slot:
+        titles = {normalized_block_text(block) for block in page.output_slot
+                  if block.type != 0 and block.line_count() <= 1
+                  and trie_full_match(TOC_TITLES_TRIE, tokenize_block(block))}
+        if titles:
+            text = [block for block in page.output_slot if block.type == 0]
+            body = sum(block.char_count() for block in text if is_body_paragraph(doc.secondary_slot, page, block))
+            prose = 2 * body > sum(block.char_count() for block in text)
+            for title in titles:
+                seen = pages.setdefault(title, [0, 0])
+                seen[0] += prose
+                seen[1] += 1
+    return {title for title, (prose_pages, total) in pages.items() if 2 * prose_pages > total}
+
+
+def mark_build_steps(doc) -> None:
+    """A page on which all the words of the previous page's text blocks appear in order (a slide
+    built up step by step, or the same page printed again) continues that page: each block it
+    repeats gets ``repeat_of``, its copy on that page. Numbers (page numbers) are left out."""
+    content = [[block for block in page.output_slot if block.type == 0 and letter_count(block.char_stats) > 0]
+               for page in doc.primary_slot]
+    words = [[key for block in blocks for token in tokenize_block(block)
+              if token.type != 1 and (key := _normalize_text_key(token.str.lower()))]
+             for blocks in content]
+    for index in range(1, len(content)):
+        later = iter(words[index])
+        if words[index - 1] and all(word in later for word in words[index - 1]):
+            copies = {normalized_block_text(block): block for block in content[index - 1]}
+            for block in content[index]:
+                block.repeat_of = copies.get(normalized_block_text(block))
+
+
 def mark_toc_and_boilerplate(doc) -> None:
     """Mark TOC blocks as type=9 and captions/boilerplate as type=12."""
     previous_toc_page = -math.inf
+    links = running_contents_links(doc)
     for page in doc.primary_slot:
         if (
             page.page_index - 1 >= len(doc.primary_slot) / 2
@@ -296,7 +375,7 @@ def mark_toc_and_boilerplate(doc) -> None:
                 for block in page.output_slot:
                     block.type = 12
                 continue
-        toc = detect_toc_range(doc, page, previous_toc_page)
+        toc = detect_toc_range(doc, page, previous_toc_page, links)
         if toc is None:
             continue
         previous_toc_page = page.page_index

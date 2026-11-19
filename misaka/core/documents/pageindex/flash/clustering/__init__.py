@@ -18,37 +18,38 @@ from sortedcontainers import SortedKeyList
 
 from ..model import (
     _UNICODE_WHITESPACE_CLASS,
-    Line,
-    Span,
-    append_span,
-    avg_char_width,
     avg_char_width2,
-    is_upper_dominant,
-    last_span,
-    left_edge_key,
-    letter_count,
+    Span,
     magnitude_ratio,
-    numbering_kind,
-    raw_text_of_line,
-    reading_order_key,
     same_x_extent,
     same_y_extent,
+    append_span,
+    last_span,
+    avg_char_width,
+    raw_text_of_line,
     text_of_line,
+    reading_order_key,
+    left_edge_key,
+    numbering_kind,
+    Line,
+    letter_count,
+    is_upper_dominant,
 )
-from .build import (
-    LinesContainer,
-    _is_label_stack,
-    _set_add,
-    _skip_mark_only,
-    build_initial_lines,
-    cluster_lines,
-)
+
 from .merge_rules import (
     TRAILING_DOT_LEADER_RE,
-    pick_closer_neighbor,
-    should_merge_lines,
     span_continues_line,
     vertical_distance_in_line_heights,
+    pick_closer_neighbor,
+    should_merge_lines,
+)
+from .build import (
+    _skip_mark_only,
+    build_initial_lines,
+    _is_label_stack,
+    LinesContainer,
+    _set_add,
+    cluster_lines,
 )
 
 # --------------------------------------------------------------------------- #
@@ -57,11 +58,11 @@ from .merge_rules import (
 
 
 __all__ = [
-    "TRAILING_DOT_LEADER_RE",
-    "build_initial_lines",
-    "cluster_lines",
-    "pick_closer_neighbor",
-    "should_merge_lines",
     "span_continues_line",
     "vertical_distance_in_line_heights",
+    "pick_closer_neighbor",
+    "should_merge_lines",
+    "build_initial_lines",
+    "cluster_lines",
+    "TRAILING_DOT_LEADER_RE",
 ]

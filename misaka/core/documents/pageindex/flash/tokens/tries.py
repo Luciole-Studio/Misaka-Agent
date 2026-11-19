@@ -2,22 +2,36 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Any
+from typing import Any, Iterable, Iterator, Optional
 
 from ..model import (
     _strip_diacritics,
+    avg_char_width2,
+    intervals_overlap,
+    to_number,
+    rect_union,
+    EMPTY_RECT,
+    avg_char_width,
+    Line,
     char_category,
+    is_word_category,
+    is_punct_category,
+    letter_count,
+    punct_count,
+    info_weight,
+    Block,
 )
+
 from .token_types import (
-    TokenView,
     can_extend_token,
+    is_trimmable_token,
+    TokenView,
+    wrap_tokens,
     enumerate_tokens,
     first_token,
-    is_trimmable_token,
     last_token,
-    wrap_tokens,
 )
+
 
 # --------------------------------------------------------------------------- #
 # Token trie matcher and builder.
@@ -42,9 +56,9 @@ class TrieConfig:
 class BuiltTrie:
     """Built trie wrapper containing the root node and a reverse-match flag."""
 
-    __slots__ = ("primary_slot", "secondary_slot")
+    __slots__ = ("secondary_slot", "primary_slot")
 
-    def __init__(self, primary_item: TrieNode, candidate_flag: bool):
+    def __init__(self, primary_item: "TrieNode", candidate_flag: bool):
         self.secondary_slot = primary_item   # root node
         self.primary_slot = candidate_flag   # reverse-match flag
 
@@ -64,15 +78,15 @@ def set_case_fold(primary_item: TrieConfig, other_flag: bool) -> TrieConfig:
 class TrieNode:
     """- trie node."""
 
-    __slots__ = ("children", "depth", "dict_suffix_link", "failure_link", "is_terminal", "payload", "primary_slot", "str")
+    __slots__ = ("str", "depth", "primary_slot", "children", "dict_suffix_link", "failure_link", "is_terminal", "payload")
 
     def __init__(self, other_text: str, depth: int, case_fold: bool):
         self.str = other_text
         self.depth = depth
         self.primary_slot = case_fold
-        self.children: dict[str, TrieNode] = {}
+        self.children: dict[str, "TrieNode"] = {}
         self.dict_suffix_link = None
-        self.failure_link: TrieNode | None = None
+        self.failure_link: Optional["TrieNode"] = None
         self.is_terminal = False
         self.payload = None
 
@@ -101,13 +115,13 @@ def trie_walk_step(node: TrieNode, other_text: str) -> TrieNode:
     return node
 
 
-def aho_corasick_match(trie: BuiltTrie, tokens) -> dict | None:
+def aho_corasick_match(trie: BuiltTrie, tokens) -> Optional[dict]:
     """Aho-Corasick walk over a trie. Returns the shortest earliest terminal match and its payload. Dictionary-suffix matches use the suffix depth for match length while retaining the current node payload, which is load-bearing for edge cases."""
     if isinstance(tokens, list):
         tokens = wrap_tokens(tokens)
     if trie.primary_slot:
         tokens = tokens.reverse()
-    matched_tokens: TokenView | None = None
+    matched_tokens: Optional[TokenView] = None
     matched_reverse = None
     earliest_start = -1
     node: TrieNode = trie.secondary_slot   # root node
@@ -140,7 +154,7 @@ def aho_corasick_match(trie: BuiltTrie, tokens) -> dict | None:
     return {"tokens": matched_tokens, "payload": matched_reverse}
 
 
-def aho_corasick_tokens(trie: BuiltTrie, tokens) -> TokenView | None:
+def aho_corasick_tokens(trie: BuiltTrie, tokens) -> Optional[TokenView]:
     """Return only the matched token view from an Aho-Corasick match."""
     token = aho_corasick_match(trie, tokens)
     return token["tokens"] if token is not None else None
@@ -156,7 +170,7 @@ class TrieBuilder:
         self.secondary_slot = query_value                # the config
 
 
-def _trie_insert_entry(builder: TrieBuilder, entry: str, payload: Any | None = None) -> None:
+def _trie_insert_entry(builder: TrieBuilder, entry: str, payload: Optional[Any] = None) -> None:
     """Insert one phrase into the trie after character-by-character tokenization. This keeps punctuation-attached phrases such as ``vol.`` and ``etc.`` aligned with document tokenization. The optional payload is stored only on an empty terminal payload slot."""
     node = builder.primary_slot
     tokens: list[str] = []
@@ -185,7 +199,7 @@ def _trie_insert_entry(builder: TrieBuilder, entry: str, payload: Any | None = N
         node.payload = payload
 
 
-def trie_bulk_insert(builder: TrieBuilder, entries, payload: Any | None = None) -> None:
+def trie_bulk_insert(builder: TrieBuilder, entries, payload: Optional[Any] = None) -> None:
     """Bulk-insert phrases into ``builder`` with a shared terminal payload."""
     for entry in entries:
         _trie_insert_entry(builder, entry, payload)
@@ -221,7 +235,7 @@ def _trie_finalize(builder: TrieBuilder) -> BuiltTrie:
     return BuiltTrie(builder.primary_slot, builder.secondary_slot.primary_slot)
 
 
-def build_trie(strings: Iterable[str], other_trie: TrieConfig | None = None) -> BuiltTrie:
+def build_trie(strings: Iterable[str], other_trie: Optional[TrieConfig] = None) -> BuiltTrie:
     """Build a trie from a list of phrase strings."""
     if other_trie is None:
         other_trie = TrieConfig()
@@ -231,7 +245,7 @@ def build_trie(strings: Iterable[str], other_trie: TrieConfig | None = None) -> 
     return _trie_finalize(builder)
 
 
-def trie_prefix_match(trie: BuiltTrie, tokens) -> TokenView | None:
+def trie_prefix_match(trie: BuiltTrie, tokens) -> Optional[TokenView]:
     """Return the longest prefix match against the token trie."""
     # ``tokens`` may be a TokenView or a list; coerce.
     if isinstance(tokens, list):
@@ -239,7 +253,7 @@ def trie_prefix_match(trie: BuiltTrie, tokens) -> TokenView | None:
     if trie.primary_slot:
         tokens = tokens.reverse()
 
-    matched: TokenView | None = None
+    matched: Optional[TokenView] = None
     node: TrieNode = trie.secondary_slot   # root node
     for entry in enumerate_tokens(tokens):
         if not node.children:

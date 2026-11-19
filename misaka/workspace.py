@@ -15,8 +15,7 @@ _FOLDER_KEEPS_FILES = 10
 
 
 def _doc_node(m, workspace=None):
-    """Build a workspace-tree node for an indexed document: its PageIndex structure when it has
-    one. A document without one is a leaf; ``doc_outline`` lists its pages. Listing each page's
+    """Build a workspace-tree node for an indexed document: its outline when it has one. A document without one is a leaf; ``doc_outline`` lists its pages. Listing each page's
     first line here read every page of every document on each call -- 140,000 nodes on a
     33,308-document project, a 21 MB index the view cut at 200 KB before the task board
     (2026-10-27, R33)."""
@@ -26,7 +25,7 @@ def _doc_node(m, workspace=None):
     tree = corpus._tree(did, workspace=workspace)
     if tree:
         node["nodes"] = tree
-        node["summary"] += " (PageIndex structure)"
+        node["summary"] += " (with outline)"
     return node
 
 

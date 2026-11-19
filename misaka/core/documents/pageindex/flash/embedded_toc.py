@@ -43,6 +43,7 @@ import re
 from collections import Counter
 from io import BytesIO
 from pathlib import Path
+from typing import Optional, Union
 
 import pypdfium2 as pdfium
 
@@ -107,7 +108,7 @@ def _title_template(title: str) -> str:
     )
 
 
-def read_bookmarks(doc_handle: str | Path | BytesIO) -> list[dict]:
+def read_bookmarks(doc_handle: Union[str, Path, BytesIO]) -> list[dict]:
     """Extract raw bookmark entries as {title, level, page}, all 1-based.
 
     Returns [] when the document has no outline, the handle is not one
@@ -260,11 +261,14 @@ def bookmarks_to_structure(entries: list[dict], n_pages: int) -> list[dict]:
 
 
 def _same_heading(node: dict, chapter: dict) -> bool:
-    if node["start_index"] != chapter["start_index"]:
-        return False
     node_norm = _normalize_title(node["title"])
     chapter_norm = _normalize_title(chapter["title"])
     if not node_norm or not chapter_norm:
+        return False
+    # A bookmark can target the page before its printed title
+    if node["start_index"] == chapter["start_index"] + 1:
+        return node_norm == chapter_norm
+    if node["start_index"] != chapter["start_index"]:
         return False
     return (node_norm == chapter_norm or node_norm.endswith(chapter_norm)
             or chapter_norm.endswith(node_norm)
@@ -326,11 +330,11 @@ def _repair_titles(structure: list[dict], entries: list[dict]) -> None:
         visit(node)
 
 
-def _find_entry_node(root: dict, entry: dict) -> dict | None:
+def _find_entry_node(root: dict, entry: dict) -> Optional[dict]:
     """Locate a node in ``root``'s subtree that already represents ``entry``."""
     entry_norm = _normalize_title(entry["title"])
 
-    def visit(node: dict) -> dict | None:
+    def visit(node: dict) -> Optional[dict]:
         if abs(node["start_index"] - entry["page"]) <= 1:
             node_norm = _normalize_title(node["title"])
             if entry_norm and node_norm and (
@@ -349,7 +353,7 @@ def _find_entry_node(root: dict, entry: dict) -> dict | None:
 
 def merge_bookmark_skeleton(
     structure: list[dict], entries: list[dict], n_pages: int,
-    page_texts: list[str] | None = None,
+    page_texts: Optional[list[str]] = None,
 ) -> list[dict]:
     """Re-hang the detected tree under the bookmark chapter frame (SKELETON tier).
 
@@ -359,11 +363,11 @@ def merge_bookmark_skeleton(
     detected hierarchy disagrees with the bookmark frame) is dissolved --
     its heading stays behind as a leaf and its children are placed
     individually. A node that duplicates its chapter heading (same start
-    page, normalized-equal or numbering-prefixed title) dissolves into it
-    without leaving a leaf. Nodes wholly before the first chapter stay at
-    the root. All end_index values are recomputed for the merged tree, so
-    detected ends derived from the heading-at-page-top signal may gain one
-    page of slack.
+    page, normalized-equal or numbering-prefixed title; or the next page,
+    normalized-equal title) dissolves into it without leaving a leaf.
+    Nodes wholly before the first chapter stay at the root. All end_index
+    values are recomputed for the merged tree, so detected ends derived
+    from the heading-at-page-top signal may gain one page of slack.
 
     With ``page_texts``, two extra passes run: detected titles are
     repaired from same-page bookmark strings, and deeper bookmark entries
@@ -585,8 +589,8 @@ def merge_bookmark_tree(
 
 
 def apply_embedded_toc(
-    structure: list[dict], doc_handle: str | Path | BytesIO, n_pages: int,
-    page_texts: list[str] | None = None,
+    structure: list[dict], doc_handle: Union[str, Path, BytesIO], n_pages: int,
+    page_texts: Optional[list[str]] = None,
 ) -> tuple[list[dict], str]:
     """Classify the document's bookmarks and apply the matching tier.
 
@@ -607,14 +611,8 @@ def apply_embedded_toc(
 
 
 __all__ = [
-    "FULL",
-    "IGNORE",
-    "SKELETON",
+    "IGNORE", "SKELETON", "FULL",
+    "read_bookmarks", "validate_bookmarks", "classify_bookmarks",
+    "bookmarks_to_structure", "merge_bookmark_skeleton", "merge_bookmark_tree",
     "apply_embedded_toc",
-    "bookmarks_to_structure",
-    "classify_bookmarks",
-    "merge_bookmark_skeleton",
-    "merge_bookmark_tree",
-    "read_bookmarks",
-    "validate_bookmarks",
 ]

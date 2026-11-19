@@ -2,20 +2,37 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from ..model import (
-    alignment_code,
+    _trim_unicode_ws,
+    left_aligned,
+    right_aligned,
+    center_aligned,
+    Rect,
+    last_span,
     heading_score,
+    Line,
+    last_line_of,
+    first_span_of,
+    block_text,
+    deaccented_text,
+    letter_count,
+    dominant_style_of,
+    info_weight,
+    is_upper_dominant,
+    alignment_code,
+    Block,
 )
-from ..tokens import (
-    is_word_token,
-    tokenize_block,
-)
+from ..tokens import is_superscript_adjacent, clamp_value, enumerate_tokens, jenkins_hash, trie_prefix_match, set_case_fold, TrieConfig, build_trie, tokenize_block, _de_norm, BuiltTrie, is_word_token
+
 from .scoring import (
     TitleCandidate,
     is_cover_like_page,
     is_title_candidate_block,
     score_title_candidate,
 )
+
 
 # --------------------------------------------------------------------------- #
 # Title detection state.
@@ -25,12 +42,12 @@ from .scoring import (
 class TitleSearchState:
     """Title-detection state: document, visited blocks, and current best candidate."""
 
-    __slots__ = ("primary_slot", "secondary_slot", "tertiary_slot")
+    __slots__ = ("tertiary_slot", "primary_slot", "secondary_slot")
 
     def __init__(self, doc):
         self.tertiary_slot = doc
         self.primary_slot: set = set()
-        self.secondary_slot: TitleCandidate | None = None
+        self.secondary_slot: Optional[TitleCandidate] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -38,27 +55,12 @@ class TitleSearchState:
 # --------------------------------------------------------------------------- #
 
 
-def detect_title(doc) -> TitleCandidate | None:
+def detect_title(doc) -> Optional[TitleCandidate]:
     """Iterate early pages, score title-like block groups, and return the best candidate."""
     state = TitleSearchState(doc)
     has_seen_da = False                                  # "broke into body" flag
 
     for page in doc.primary_slot:
-        # Special branch: landscape cover document
-        if (
-            doc.secondary_slot.style_slot > len(doc.primary_slot) / 2
-            and page.page_index <= 1
-            and page.bounds.bbox_width() > page.bounds.bbox_height()
-            and page.primary_slot.secondary_slot < 500
-        ):
-            for idx, block in enumerate(page.secondary_slot):
-                if (
-                    is_title_candidate_block(block) and id(block) not in state.primary_slot
-                    and heading_score(block) > page.primary_slot.primary_slot - 0.1
-                ):
-                    score_title_candidate(state, page, idx)
-            break
-
         if (
             is_cover_like_page(doc, page)
             or (page.page_index <= 1 and len(doc.primary_slot) >= 10 and page.primary_slot.secondary_slot < 0.8 * doc.secondary_slot.secondary_slot)

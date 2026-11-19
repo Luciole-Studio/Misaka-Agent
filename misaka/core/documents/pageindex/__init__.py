@@ -1,46 +1,11 @@
-"""MISAKA's in-process PageIndex adapter."""
+"""PageIndex Flash, upstream's bytes: the LLM-free reader of a PDF's outline.
 
-from __future__ import annotations
+``flash/`` and ``naming.py`` are https://github.com/VectifyAI/PageIndex at
+340b8535a219ea448c4c0f5bdd354761449b55b3 (2026-11-18): ``pageindex/flash`` without its
+``README.md`` and ``assets/``, and ``pageindex/naming.py``, which ``flash/api.py`` imports. MIT,
+``LICENSE.PageIndex``. This file is the one thing here that is not upstream's.
 
-import importlib.util
-
-# The third-party packages the vendored tree imports, all of them MISAKA's own dependencies
-# since 2026-10-07 (they were the ``pageindex`` extra). One missing is a broken install.
-REQUIREMENTS = ("PyPDF2", "pypdfium2", "regex", "sortedcontainers")
-
-INSTALL_HINT = "reinstall MISAKA (PyPDF2 and sortedcontainers are its dependencies; in a checkout, uv sync)"
-
-
-class PageIndexUnavailable(RuntimeError):
-    """PageIndex's packages are missing from this install.
-
-    A distinct type so callers can tell "this install cannot do structure extraction at all"
-    -- actionable, and the same for every document -- from a per-document parse failure.
-    """
-
-
-def available() -> bool:
-    """Whether structure extraction can run in this install."""
-    for name in REQUIREMENTS:
-        try:
-            if importlib.util.find_spec(name) is None:
-                return False
-        except (ImportError, ValueError):
-            return False
-    return True
-
-
-def build_tree(pdf, *, workers=None) -> list[dict]:
-    """Return the deterministic PageIndex outline for a PDF."""
-    try:
-        from .flash import page_index_flash
-    except ModuleNotFoundError as exc:
-        if exc.name in set(REQUIREMENTS):
-            raise PageIndexUnavailable(
-                f"PageIndex structure extraction needs the optional extra: {INSTALL_HINT}"
-            ) from exc
-        raise
-    return page_index_flash(pdf, workers=workers).get("structure") or []
-
-
-__all__ = ["INSTALL_HINT", "REQUIREMENTS", "PageIndexUnavailable", "available", "build_tree"]
+Nothing in this directory is edited: ``tests/test_pageindex_vendored.py`` fails on any byte of
+difference. MISAKA's side is ``documents/pdf_outline.py``. To take a newer upstream, copy the
+same paths over these and set that test's digest to the one it prints.
+"""

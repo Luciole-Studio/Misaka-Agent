@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import re
 
+from .glyph_tables import (
+    _load_glyph_tables,
+    _get_unicode_for_glyph,
+    _from_char_code,
+)
 from .cmap_parse import (
+    _to_number,
     _parse_int,
     _parse_tounicode_cmap,
-    _to_number,
 )
-from .glyph_tables import (
-    _from_char_code,
-    _get_unicode_for_glyph,
-    _load_glyph_tables,
-)
+
 
 _TYPE1_SPECIAL_BYTES = b"/[]{}()"
 # content stream tokenizer tokenises with PDF parser whitespace = {SP, TAB, CR, LF}
@@ -186,8 +187,17 @@ def _simple_font_to_unicode(
     return to_unicode
 
 
-def _font_unicode_map(pdf_doc, xref: int) -> tuple[int, dict[int, str]] | None:
-    """Return the final per-charcode glyph-unicode map for one font as ``(bytes_per_code, {charcode: unicode})``. Simple fonts use 1-byte codes; Identity-H/V composite fonts use 2-byte codes with the included ToUnicode map. ``None`` means uncovered input such as non-Identity composite CMaps or unreadable dictionaries; callers then skip the page patch walk and keep PDFium's output."""
+def _tounicode_map(pdf_doc, stream_xref: int, map_cache: dict) -> dict[int, str]:
+    """Parse a ToUnicode stream once per distinct content per document: fonts, and each page's own copy of a font, often carry the same CMap, and one 0000-FFFF range expands to 65,536 entries. Fonts with equal CMaps share the parsed dict, so it is read-only."""
+    data = pdf_doc.xref_stream(stream_xref)
+    key = ("tounicode", data)
+    if key not in map_cache:
+        map_cache[key] = _parse_tounicode_cmap(data)
+    return map_cache[key]
+
+
+def _font_unicode_map(pdf_doc, xref: int, map_cache: dict) -> tuple[int, dict[int, str]] | None:
+    """Return the final per-charcode glyph-unicode map for one font as ``(bytes_per_code, {charcode: unicode})``. Simple fonts use 1-byte codes; Identity-H/V composite fonts use 2-byte codes with the included ToUnicode map. ``None`` means uncovered input such as non-Identity composite CMaps or unreadable dictionaries; callers then skip the page patch walk and keep PDFium's output. ``map_cache`` is the caller's per-document cache; parsed ToUnicode streams are kept there."""
     glyphs, encs = _load_glyph_tables()
 
     def _xref_key(number: int, other_text: str) -> tuple[str, str]:
@@ -218,8 +228,7 @@ def _font_unicode_map(pdf_doc, xref: int) -> tuple[int, dict[int, str]] | None:
         tu_map: dict[int, str] | None = None
         if pdf_value_type == "xref":
             try:
-                tu_map = _parse_tounicode_cmap(
-                    pdf_doc.xref_stream(int(pdf_value.split()[0])))
+                tu_map = _tounicode_map(pdf_doc, int(pdf_value.split()[0]), map_cache)
             except Exception:
                 tu_map = None  # ToUnicode parsing rejects -> no ToUnicode map
         # The "font carries a ToUnicode map" flag is set only for a present,
@@ -346,7 +355,7 @@ def _font_unicode_map(pdf_doc, xref: int) -> tuple[int, dict[int, str]] | None:
     pdf_value_type, pdf_value = _xref_key(xref, "ToUnicode")
     if pdf_value_type == "xref":
         try:
-            included = _parse_tounicode_cmap(pdf_doc.xref_stream(int(pdf_value.split()[0])))
+            included = _tounicode_map(pdf_doc, int(pdf_value.split()[0]), map_cache)
         except Exception:
             included = None  # ToUnicode parsing error path: treat as absent
 
@@ -391,3 +400,45 @@ def _font_unicode_map(pdf_doc, xref: int) -> tuple[int, dict[int, str]] | None:
                     if codepoint != -1:
                         final[font] = _from_char_code(codepoint)  # amend overwrites
     return 1, final
+
+
+def _font_widths(pdf_doc, xref: int):
+    """Per-code advance at font size 1, read from the font dict by char code: simple fonts /FirstChar + /Widths else /MissingWidth, Identity-H composites /W else /DW (1000). ``None`` where the advance comes from elsewhere (no /Widths, other CMaps), and for Type 3: its exact widths split words ("Typ es") that the ink-box end keeps whole."""
+    def number(value, default):
+        try:
+            return float(value.get_object())
+        except Exception:
+            return default
+
+    font = pdf_doc._resolve_object(xref)
+    if font is None or not hasattr(font, "raw_get"):
+        return None
+    subtype = font.get("/Subtype")
+    if subtype == "/Type0":
+        if font.get("/Encoding") != "/Identity-H":
+            return None
+        descendant = font["/DescendantFonts"][0].get_object()
+        default = number(descendant["/DW"], 1000.0) if "/DW" in descendant else 1000.0
+        table: dict[int, float] = {}
+        entries = descendant["/W"] if "/W" in descendant else []
+        index = 0
+        while index + 1 < len(entries):
+            start = int(number(entries[index], 0))
+            second = entries[index + 1].get_object()
+            if isinstance(second, list):        # c [w1 w2 ...]
+                for offset, value in enumerate(second):
+                    table[start + offset] = number(value, default)
+                index += 2
+            else:                               # c_first c_last w
+                value = number(entries[index + 2], default) if index + 2 < len(entries) else default
+                for code in range(max(start, 0), min(int(number(second, start - 1)), 0xFFFF) + 1):
+                    table[code] = value
+                index += 3
+        return lambda code: table.get(code, default) * 0.001
+    if subtype == "/Type3" or "/Widths" not in font:
+        return None
+    first = int(number(font["/FirstChar"], 0)) if "/FirstChar" in font else 0
+    descriptor = font["/FontDescriptor"] if "/FontDescriptor" in font else None
+    missing = number(descriptor["/MissingWidth"], 0.0) if descriptor is not None and "/MissingWidth" in descriptor else 0.0
+    table = {first + offset: number(value, missing) for offset, value in enumerate(font["/Widths"])}
+    return lambda code: table.get(code, missing) * 0.001

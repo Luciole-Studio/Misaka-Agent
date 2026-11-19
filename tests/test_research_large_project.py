@@ -61,7 +61,7 @@ def test_a_document_without_structure_is_a_leaf(board, monkeypatch):
     assert flat == {"node_id": "doc:flat", "title": "One page of OCR", "summary": "1 pages",
                     "source": "/w/ocr/p1.txt", "nodes": []}
     assert book["nodes"] == [{"node_id": "0001", "title": "Chapter 1"}]
-    assert book["summary"] == "300 pages (PageIndex structure)"
+    assert book["summary"] == "300 pages (with outline)"
 
 
 def test_the_task_board_comes_before_the_runs(board, monkeypatch):

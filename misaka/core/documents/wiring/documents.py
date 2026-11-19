@@ -427,6 +427,8 @@ def register(harn):
             return _text("Cancelled.")
         note = _ocr_note(await _off_loop(_row, params.doc_id, workspace))
         note += _figure_summary(await _off_loop(corpus.figures, params.doc_id, workspace=workspace))
+        origin = await _off_loop(corpus.outline_note, params.doc_id, workspace=workspace)
+        note += f"{origin[:1].upper()}{origin[1:]}.\n" if origin else ""
         if o:
             cut = truncateHead(o, TruncationOptions(maxLines=2**31 - 1, maxBytes=OUTLINE_MAX_BYTES))
             tail = ("Use doc_read(doc_id, node=<node-id>) to read a section.\n" if not cut.truncated else
@@ -442,11 +444,7 @@ def register(harn):
         tail = "" if not cut.truncated else (
             f"[{formatSize(OUTLINE_MAX_BYTES)} limit reached: {cut.outputLines} of {cut.totalLines} pages "
             "shown. Read the rest with doc_read(doc_id, pages=<range>); doc_find locates text beyond the cut.]\n")
-        why = "" if await _off_loop(corpus.pageindex_available) else (
-            "This install cannot extract document structure (the pageindex extra is missing), so "
-            "every document here is page-navigable only. Report that rather than concluding the "
-            "document is unstructured.\n")
-        return _text(note + why + untrusted(
+        return _text(note + untrusted(
             params.doc_id, f"# {st['title']} (no structure tree; navigate by page)\n{cut.content}") + tail)
 
     class ReadParams(BaseModel):

@@ -108,9 +108,9 @@ def test_every_install_has_what_pdf_outlines_need():
     import tomllib
     from pathlib import Path
 
-    from misaka.core.documents import pageindex
+    from misaka.core.documents import pdf_outline
     project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     named = {requirement.split("=")[0].split(">")[0].strip().lower() for requirement in project["dependencies"]}
-    assert {name.lower() for name in pageindex.REQUIREMENTS} - named <= {"regex"}, "regex comes with tiktoken"
+    assert {name.lower() for name in pdf_outline.REQUIREMENTS} - named <= {"regex"}, "regex comes with tiktoken"
     assert "tiktoken" in named
     assert project["optional-dependencies"]["pageindex"] == [], "the old extra still installs"

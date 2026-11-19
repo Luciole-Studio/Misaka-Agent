@@ -9,6 +9,7 @@ from .char_stats import (
     _min_nan_propagating,
 )
 
+
 # --------------------------------------------------------------------------- #
 # Rectangle model #
 # --------------------------------------------------------------------------- #
@@ -17,12 +18,13 @@ from .char_stats import (
 class RectLike:
     """Empty base for objects that expose bbox accessors."""
 
+    pass
 
 
 class Rect(RectLike):
     """Axis-aligned bbox. PDF coordinates: top > bottom (y increases upward). """
 
-    __slots__ = ("left", "primary_slot", "right", "top")
+    __slots__ = ("left", "right", "top", "primary_slot")
 
     def __init__(self, other_item: float, candidate_item: float, reference_item: float, next_item: float):
         self.left = other_item
@@ -42,7 +44,7 @@ class Rect(RectLike):
     def center_x(self) -> float: return (self.left + self.right) / 2       # x-center
     def center_y(self) -> float: return (self.top + self.primary_slot) / 2            # y-center
 
-    def contains(self, other_rect: Rect) -> bool:
+    def contains(self, other_rect: "Rect") -> bool:
         return (
             self.left <= other_rect.left
             and self.right >= other_rect.right
@@ -186,7 +188,7 @@ def same_y_extent(primary_item: Bounded, secondary_item: Bounded, candidate_item
 
 def intervals_overlap(value: float, other_item: float, candidate_item: float, reference_item: float) -> bool:
     """Return whether the two closed ranges overlap by either endpoint."""
-    return (value <= candidate_item <= other_item) or (candidate_item <= value <= reference_item)
+    return (value <= candidate_item and candidate_item <= other_item) or (candidate_item <= value and value <= reference_item)
 
 
 def y_overlaps(primary_item: Bounded, secondary_item: Bounded) -> bool:

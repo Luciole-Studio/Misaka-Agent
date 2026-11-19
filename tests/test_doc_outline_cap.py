@@ -52,7 +52,6 @@ def _pages(count):
 def by_page(outline, monkeypatch):
     monkeypatch.setattr(documents.corpus, "tree_outline", lambda doc_id, workspace: "")
     monkeypatch.setattr(documents.corpus, "figures", lambda doc_id, workspace: [])
-    monkeypatch.setattr(documents.corpus, "pageindex_available", lambda: True)
 
     def serve(count):
         monkeypatch.setattr(documents.corpus, "structure", lambda doc_id, workspace: _pages(count))

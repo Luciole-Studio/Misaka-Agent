@@ -3,23 +3,23 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
-from decimal import ROUND_HALF_UP, Decimal
-from typing import Protocol
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Any, Iterator, Optional, Protocol
 
 from .char_stats import (
-    CharStats,
     _trim_unicode_ws,
-    info_weight,
-    letter_count,
+    CharStats,
     merge_char_stats,
+    letter_count,
+    info_weight,
 )
 from .rects import (
+    Rect,
     EMPTY_RECT,
     Bounded,
-    Rect,
     rect_union,
 )
+
 
 # --------------------------------------------------------------------------- #
 # Text span #
@@ -51,15 +51,7 @@ class Span(Bounded):
     """Span emitted by one text-showing item. Stores raw and trimmed text, character statistics, skew, font family/name, font size, bold/italic flags, and bbox helpers."""
 
     __slots__ = (
-        "char_stats",
-        "font_family",
-        "font_name",
-        "font_size",
-        "measure_slot",
-        "previous_slot",
-        "primary_slot",
-        "state_slot",
-        "text",
+        "text", "state_slot", "char_stats", "previous_slot", "font_family", "font_name", "font_size", "primary_slot", "measure_slot",
     )
 
     def __init__(
@@ -95,7 +87,7 @@ class Span(Bounded):
         self.primary_slot = bool(bold) or bool(_bold_font_re.search(self.font_name))
         # Italic is name-derived only. The ``italic`` parameter is accepted
         # for adapter compatibility but is not consulted.
-        del italic
+        del italic  # noqa: F841 -- explicitly drop the arg
         self.measure_slot = bool(_italic_font_re.search(self.font_name))
 
     def char_count(self) -> int:                                # type: ignore[override]
@@ -116,26 +108,14 @@ class Line(Bounded):
     """A list of spans on roughly the same baseline, with line-wide character statistics, first letter-bearing span, weighted bold/italic/skew/font-size aggregates, cached text, numbering state, column index, and span list."""
 
     __slots__ = (
-        "alignment_slot",
-        "cache_slot",
-        "char_stats",
-        "marker_slot",
-        "measure_slot",
-        "metric_slot",
-        "previous_slot",
-        "primary_slot",
-        "state_slot",
-        "style_slot",
-        "weighted_ratio_primary",
-        "weighted_ratio_secondary",
-        "weighted_ratio_tertiary",
+        "primary_slot", "char_stats", "alignment_slot", "weighted_ratio_primary", "weighted_ratio_secondary", "weighted_ratio_tertiary", "metric_slot", "previous_slot", "measure_slot", "marker_slot", "state_slot", "style_slot", "cache_slot",
     )
 
     def __init__(self):
         super().__init__(EMPTY_RECT)
         self.primary_slot: list[Span] = []
         self.char_stats: CharStats = CharStats("")
-        self.alignment_slot: Span | None = None
+        self.alignment_slot: Optional[Span] = None
         self.weighted_ratio_primary: float = 0.0
         self.weighted_ratio_secondary: float = 0.0
 
@@ -144,7 +124,7 @@ class Line(Bounded):
         self.previous_slot: float = 0.0
         # Column index assigned by the column pass; -1 means unassigned.
         self.measure_slot: int = -1
-        self.marker_slot: str | None = None
+        self.marker_slot: Optional[str] = None
         self.state_slot: int = -1
         self.style_slot: str = ""
         self.cache_slot: float = 0.0
@@ -243,6 +223,6 @@ def _format_half_up_one_decimal(value: float) -> str:
     return str(Decimal(value).quantize(_ONE_DECIMAL_QUANTUM, rounding=ROUND_HALF_UP))
 
 
-def style_key(span: Span) -> str:
+def style_key(span: "Span") -> str:
     """Style hash ``"<fontName> <B|R> <size rounded to 0.1>"`` using shared half-up rounding."""
     return f"{span.font_style()} {_format_half_up_one_decimal(span.font_size)}"

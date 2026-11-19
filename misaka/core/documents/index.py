@@ -19,8 +19,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 import zipfile
 
-from misaka.core.documents import htmltext, mineru, text_outline
-from misaka.core.documents.pageindex import PageIndexUnavailable
+from misaka.core.documents import htmltext, mineru, outline
 from misaka.utils import atomic
 
 DOC_ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -1494,51 +1493,6 @@ def source_title(p):
     return htmltext.clip(title.strip(), htmltext.MAX_TITLE_CHARS) or None
 
 
-TREE_WORKERS = 2
-
-TREE_MIN_PAGES = 20
-
-_warned_no_pageindex = False
-
-
-def pageindex_available():
-    """Whether this install can do structure extraction at all (the ``pageindex`` extra)."""
-    from .pageindex import available
-    return available()
-
-
-def _warn_no_pageindex(p):
-    """Say once, out loud, that every outline in this run was skipped for the same reason.
-
-    Without this the extra's absence is invisible: ingestion succeeds, the corpus gets pages
-    and no `tree.json`, and the only trace is a `(pages)` marker in `doc tree` three commands
-    later. Once per process, because a scan hits it for every PDF in the folder.
-    """
-    global _warned_no_pageindex
-    if _warned_no_pageindex:
-        return
-    _warned_no_pageindex = True
-    from .pageindex import INSTALL_HINT
-    print(f"Warning: no PageIndex structure extraction for {os.path.basename(p)} (and any other "
-          f"document in this run): PageIndex's packages are missing from this install, so documents "
-          f"are split into pages only, with no outline.\n         To fix it: {INSTALL_HINT}\n"
-          f"         Then re-run the same `misaka doc add`/`doc scan` to backfill the outline.",
-          file=sys.stderr)
-
-
-TEXT_TREE_SUFFIXES = frozenset({".txt", ".md", ".markdown"})
-
-
-def _text_tree(pages, ext, reason):
-    """The text outline as JSON, or None. A miss is settled (``none_found``): the reader is
-    deterministic over the stored pages, so asking again would only repeat the answer."""
-    nodes = text_outline.build_text_tree(pages, markdown=ext in {".md", ".markdown"})
-    if nodes:
-        return json.dumps(nodes, ensure_ascii=False)
-    _note(reason, "tree", "none_found")
-    return None
-
-
 def _stored_pages(ddir, count):
     """The page texts a document was indexed with, in order -- the numbers an outline must use."""
     pages = []
@@ -1551,99 +1505,8 @@ def _stored_pages(ddir, count):
     return pages
 
 
-def _outline_for(p, ext, pages, reason):
-    """One outline call for either family: the text reader over the stored pages, or PageIndex
-    over the PDF. ``pages`` is only consulted for the text family.
-
-    A scan states no outline PageIndex can read -- it has no bookmarks and no text layer to lay
-    out -- so the headings MinerU marks on its pages stand in, where it read the document.
-    """
-    if ext in TEXT_TREE_SUFFIXES:
-        return _text_tree(pages, ext, reason)
-    tree = _build_tree_with_reason(p, reason)
-    if tree or ext != ".pdf" or reason.get("tree") != "none_found" or _ocr_engine() != mineru.BINARY:
-        return tree
-    return _printed_tree(p, len(pages or ()), reason)
-
-
-def _printed_tree(p, count, reason):
-    """The outline the headings printed on a scan's pages make, as JSON, or None.
-
-    Sparser than a publisher's, and not always right: against the bookmarks of three scanned books
-    it found 2, 7 and 7 of 23, 25 and 48, and of what it offered on one of them about half were a
-    title page's lines or a running head rather than sections. On another all twelve were sections.
-    A document that would otherwise have no outline at all is what this is weighed against.
-    """
-    if not count:
-        return None
-    try:
-        found = mineru.headings(p, count)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-    marked = ["\n\n".join(f"{'#' * level} {title}" for level, title in found.get(number, []))
-              for number in range(1, count + 1)]
-    nodes = text_outline.build_text_tree(marked, markdown=True)
-    if not nodes:
-        return None
-    reason.pop("tree", None)
-    return json.dumps(nodes, ensure_ascii=False)
-
-
-_PDFIUM = threading.Lock()
-
-
-def _build_tree_with_reason(p, reason):
-    """`build_tree(p, reason=...)`, tolerating a stand-in that predates the keyword.
-
-    Tests monkeypatch `build_tree` with plain `lambda p: ...`, and so may callers outside this
-    module. Requiring the keyword would turn those into TypeErrors during ingestion, which is
-    the one thing outline extraction must never do; a stand-in that cannot report simply
-    reports nothing, and an unknown reason is treated as unsettled.
-    """
-    try:
-        return build_tree(p, reason=reason)
-    except TypeError:
-        return build_tree(p)
-
-
-def build_tree(p, *, workers=TREE_WORKERS, reason=None):
-    """Return the PageIndex outline of a PDF as JSON text, or None for other formats or on failure.
-
-    None has four meanings and the caller needs them apart: re-ingest should stop asking a
-    document that genuinely has no outline, but must keep asking one that was skipped because
-    the extra was missing -- installing it is exactly how a user repairs their corpus. Pass a
-    dict as ``reason`` to be told which happened, the way ``extract_pages`` reports what it
-    learned through ``meta``.
-
-    ``reason["tree"]`` is one of ``not_pdf``, ``none_found``, ``extra_missing``, ``failed``,
-    and is absent when an outline was returned. Only ``none_found`` is settled: the others can
-    all change without the document changing.
-    """
-    if os.path.splitext(p)[1].lower() != ".pdf":
-        _note(reason, "tree", "not_pdf")
-        return None
-    try:
-        from .pageindex import build_tree as pageindex_tree
-        with _PDFIUM:
-            nodes = pageindex_tree(os.path.abspath(p), workers=workers)
-        if nodes:
-            return json.dumps(nodes, ensure_ascii=False)
-        _note(reason, "tree", "none_found")
-        return None
-    except PageIndexUnavailable:
-        _warn_no_pageindex(p)
-        _note(reason, "tree", "extra_missing")
-        return None
-    except Exception:  # noqa: BLE001 - outline extraction must not block ingestion
-        _note(reason, "tree", "failed")
-        return None
-
-
 def _page_path(ddir, page):
     return os.path.join(ddir, "pages", f"p{page:04d}.txt")
-
-
-TREE_ATTEMPT_VERSION = 1
 
 
 EXTRACT_VERSION = 3
@@ -1902,6 +1765,29 @@ def ingest(p, title=None, with_tree=True, task_id=None, workspace=None):
         return _index(p, sha, ddir, title, with_tree, task_id, workspace)
 
 
+def _outline_due(ddir, p, count):
+    """Whether an indexed document is asked for its outline: it is long enough, a reader takes its
+    format, it has no tree, and no attempt by the current readers is on record."""
+    if count < outline.MIN_PAGES or not outline.reads(os.path.splitext(p)[1].lower()):
+        return False
+    if _real_file(os.path.join(ddir, "tree.json"), ddir):
+        return False
+    attempt = (_read_meta_at(ddir) or {}).get("outline")
+    return not isinstance(attempt, dict) or attempt.get("version") != outline.VERSION
+
+
+def _keep_outline(ddir, found):
+    """Store an outline attempt on an indexed document: the tree where one was built, and the
+    attempt itself, so that a miss or a failure is not asked for again."""
+    if found.nodes:
+        atomic.write_text(os.path.join(ddir, "tree.json"), json.dumps(found.nodes, ensure_ascii=False))
+    if found.record:
+        with _meta_lock(ddir):
+            meta = _read_meta_at(ddir) or {}
+            meta["outline"] = found.record
+            atomic.write_text(os.path.join(ddir, "meta.json"), json.dumps(meta, ensure_ascii=False, indent=2))
+
+
 def _index(p, sha, ddir, title, with_tree, task_id, workspace):
     """``ingest`` past the hash, under the lock that lets one caller at a time index this content."""
     doc_id = os.path.basename(ddir)
@@ -1911,21 +1797,8 @@ def _index(p, sha, ddir, title, with_tree, task_id, workspace):
             raise ValueError(f"Document ID collision: {doc_id}")
         count = _link(existing, p, task_id)
         count = _reread(existing, p, count)
-        meta = _read_meta_at(existing) or {}
-        if (with_tree and count >= TREE_MIN_PAGES
-                and not _real_file(os.path.join(existing, "tree.json"), existing)
-                and meta.get("tree_attempted_version") != TREE_ATTEMPT_VERSION):
-            why = {}
-            ext = os.path.splitext(p)[1].lower()
-            tree = _outline_for(p, ext, _stored_pages(existing, count) if ext in TEXT_TREE_SUFFIXES else None, why)
-            if tree:
-                atomic.write_text(os.path.join(existing, "tree.json"), tree)
-            elif why.get("tree") == "none_found":
-                with _meta_lock(existing):
-                    meta = _read_meta_at(existing) or {}
-                    meta["tree_attempted_version"] = TREE_ATTEMPT_VERSION
-                    atomic.write_text(os.path.join(existing, "meta.json"),
-                                      json.dumps(meta, ensure_ascii=False, indent=1))
+        if with_tree and _outline_due(existing, p, count):
+            _keep_outline(existing, outline.derive(p, lambda: _stored_pages(existing, count)))
         return doc_id, count
     if os.path.lexists(ddir):
         raise ValueError(f"Invalid or colliding corpus entry: {doc_id}")
@@ -1935,9 +1808,10 @@ def _index(p, sha, ddir, title, with_tree, task_id, workspace):
         raise _no_text_error(p, pages, extracted.pop("ocr_error", None))
     extracted.pop("ocr_error", None)
     extracted.pop("visuals_unread", None)
-    tree_wanted = with_tree and len(pages) >= TREE_MIN_PAGES
-    tree_reason = {}
-    tree = _outline_for(p, os.path.splitext(p)[1].lower(), pages, tree_reason) if tree_wanted else None
+    found = None
+    if with_tree and len(pages) >= outline.MIN_PAGES and outline.reads(os.path.splitext(p)[1].lower()):
+        found = outline.derive(p, lambda: pages,
+                               printed_pages=len(pages) if _ocr_engine() == mineru.BINARY else 0)
     _sweep_stale_stages(corpus_root(workspace))
     stage = f"{ddir}{STAGE_SUFFIX}{os.getpid()}-{threading.get_ident()}"
     shutil.rmtree(stage, ignore_errors=True)
@@ -1947,11 +1821,10 @@ def _index(p, sha, ddir, title, with_tree, task_id, workspace):
             with open(_page_path(stage, i + 1), "w", encoding="utf-8") as f:
                 f.write(t)
         shutil.copy2(p, os.path.join(stage, "source" + os.path.splitext(p)[1].lower()))
-        if tree:
+        if found and found.nodes:
             with open(os.path.join(stage, "tree.json"), "w", encoding="utf-8") as f:
-                f.write(tree)
-        attempted = ({"tree_attempted_version": TREE_ATTEMPT_VERSION}
-                     if tree_reason.get("tree") == "none_found" else {})
+                json.dump(found.nodes, f, ensure_ascii=False)
+        attempted = {"outline": found.record} if found and found.record else {}
         meta = {"doc_id": doc_id, "title": title or source_title(p) or os.path.basename(p),
                 "orig_path": p, "paths": [p], **attempted, "extract_version": EXTRACT_VERSION,
                 "sha256": sha, "pages": len(pages), "task_id": task_id,
@@ -2376,19 +2249,23 @@ def read_pages(doc_id, start, end, max_chars=12000, offset=0, workspace=None):
     return window
 
 
+def outline_note(doc_id, workspace=None):
+    """Where a document's outline came from, or why it has none, as a clause. Empty for no such
+    document, and for an outline whose source the corpus did not record."""
+    ddir = resolve_doc(doc_id, workspace=workspace)
+    m = _read_meta_at(ddir) if ddir else None
+    if not m:
+        return ""
+    return outline.describe(m.get("outline"), has_tree=_real_file(os.path.join(ddir, "tree.json"), ddir),
+                            ext=os.path.splitext(m.get("orig_path") or "")[1].lower(), pages=int(m.get("pages") or 0))
+
+
 def structure(doc_id, workspace=None):
     m = _meta(doc_id, workspace=workspace)
     if not m:
         return None
     tree = _tree(doc_id, workspace=workspace)
     if tree:
-        return {"mode": "tree", "title": m["title"], "tree": tree}
-    mode = "pages only, no structure tree"
-    if os.path.splitext(m.get("orig_path") or "")[1].lower() != ".pdf":
-        mode += " (this format has no outline)"
-    elif not pageindex_available():
-        from .pageindex import INSTALL_HINT
-        mode += (f": the pageindex extra is not installed. {INSTALL_HINT}, "
-                 "then re-run `misaka doc add <file>` to build it")
-    return {"mode": mode, "title": m["title"],
+        return {"mode": outline_note(doc_id, workspace=workspace) or "outline", "title": m["title"], "tree": tree}
+    return {"mode": f"pages only, {outline_note(doc_id, workspace=workspace)}", "title": m["title"],
             "pages": page_heads(doc_id, workspace=workspace)}

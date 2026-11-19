@@ -6,6 +6,7 @@ import json
 import unicodedata
 from pathlib import Path
 
+
 _DROP_CHARS = str.maketrans({
     # U+FFFE is PDFium's "no unicode mapping" textpage sentinel. The
     # patch pipeline (_apply_font_unicode) replaces it with decoded text
@@ -88,10 +89,33 @@ def _is_invisible_format_mark(number: int) -> bool:
 # U+0000..U+00FF; Arabic bidi type table covers U+0600..U+06FF indexed by the low byte
 # (the "" at 0x1D follows the extraction rule placeholder for nonexistent U+061D).
 
-_BIDI_BASE_TYPES = ["BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "S", "B", "S", "WS", "B", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "B", "B", "B", "S", "WS", "ON", "ON", "ET", "ET", "ET", "ON", "ON", "ON", "ON", "ON", "ES", "CS", "ES", "CS", "CS", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "CS", "ON", "ON", "ON", "ON", "ON", "ON", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "ON", "ON", "ON", "ON", "ON", "ON", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "ON", "ON", "ON", "ON", "BN", "BN", "BN", "BN", "BN", "BN", "B", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "BN", "CS", "ON", "ET", "ET", "ET", "ET", "ON", "ON", "ON", "ON", "L", "ON", "ON", "BN", "ON", "ON", "ET", "ET", "EN", "EN", "ON", "L", "ON", "ON", "ON", "EN", "L", "ON", "ON", "ON", "ON", "ON", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "ON", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "L", "ON", "L", "L", "L", "L", "L", "L", "L", "L"]
+_BIDI_BASE_TYPES = (
+    "BN BN BN BN BN BN BN BN BN S B S WS B BN BN BN BN BN BN BN BN BN BN BN BN "
+    "BN BN B B B S WS ON ON ET ET ET ON ON ON ON ON ES CS ES CS CS EN EN EN EN "
+    "EN EN EN EN EN EN CS ON ON ON ON ON ON L L L L L L L L L L L L L L L L L L "
+    "L L L L L L L L ON ON ON ON ON ON L L L L L L L L L L L L L L L L L L L L "
+    "L L L L L L ON ON ON ON BN BN BN BN BN BN B BN BN BN BN BN BN BN BN BN BN "
+    "BN BN BN BN BN BN BN BN BN BN BN BN BN BN BN BN CS ON ET ET ET ET ON ON ON "
+    "ON L ON ON BN ON ON ET ET EN EN ON L ON ON ON EN L ON ON ON ON ON L L L L "
+    "L L L L L L L L L L L L L L L L L L L ON L L L L L L L L L L L L L L L L L "
+    "L L L L L L L L L L L L L L ON L L L L L L L L "
+).split()
 assert len(_BIDI_BASE_TYPES) == 256
 _BIDI_ARABIC_TYPES = [
-    "" if bidi_type == "~" else bidi_type for bidi_type in ["AN", "AN", "AN", "AN", "AN", "AN", "ON", "ON", "AL", "ET", "ET", "AL", "CS", "AL", "ON", "ON", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "AL", "AL", "~", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "AN", "AN", "AN", "AN", "AN", "AN", "AN", "AN", "AN", "AN", "ET", "AN", "AN", "AL", "AL", "AL", "NSM", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "AL", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "AN", "ON", "NSM", "NSM", "NSM", "NSM", "NSM", "NSM", "AL", "AL", "NSM", "NSM", "ON", "NSM", "NSM", "NSM", "NSM", "AL", "AL", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "EN", "AL", "AL", "AL", "AL", "AL", "AL"]
+    "" if bidi_type == "~" else bidi_type for bidi_type in (
+        "AN AN AN AN AN AN ON ON AL ET ET AL CS AL ON ON NSM NSM NSM NSM NSM NSM "
+        "NSM NSM NSM NSM NSM AL AL ~ AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL "
+        "AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL "
+        "AL AL AL AL AL NSM NSM NSM NSM NSM NSM NSM NSM NSM NSM NSM NSM NSM NSM NSM "
+        "NSM NSM NSM NSM NSM NSM AN AN AN AN AN AN AN AN AN AN ET AN AN AL AL AL "
+        "NSM AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL "
+        "AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL "
+        "AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL "
+        "AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL AL "
+        "AL AL AL NSM NSM NSM NSM NSM NSM NSM AN ON NSM NSM NSM NSM NSM NSM AL AL "
+        "NSM NSM ON NSM NSM NSM NSM AL AL EN EN EN EN EN EN EN EN EN EN AL AL AL AL "
+        "AL AL "
+    ).split()
 ]
 assert len(_BIDI_ARABIC_TYPES) == 256
 
@@ -216,7 +240,8 @@ def _apply_bidi_reordering(text: str, start_level: int = -1, vertical: bool = Fa
     highest = -1
     lowest_odd = 99
     for layout_value in levels:
-        highest = max(highest, layout_value)
+        if layout_value > highest:
+            highest = layout_value
         if layout_value < lowest_odd and (layout_value & 1):
             lowest_odd = layout_value
     for level in range(highest, lowest_odd - 1, -1):
@@ -235,8 +260,8 @@ def _apply_bidi_reordering(text: str, start_level: int = -1, vertical: bool = Fa
 
 
 def _rtl_sign(char: str) -> int:
-    """+1 for LTR runs, -1 for a strong right-to-left char (bidi class R/AL, e.g. Hebrew/Arabic). PDFium reports RTL text in logical order with decreasing char origins, so the LTR ``advance = ox - prev_text_x`` model (prev_text_x = ox+glyph_w, a right edge) yields a large negative advance. For RTL chunks the x-axis is signed with ``sign*ox`` so the reading-direction advance is positive and the existing LTR merge logic applies unchanged."""
-    return -1 if unicodedata.bidirectional(char) in ("R", "AL") else 1
+    """+1 for LTR runs, -1 for a strong right-to-left char (bidi class R/AL, e.g. Hebrew/Arabic). PDFium reports RTL text in logical order with decreasing char origins, so the LTR ``advance = ox - prev_text_x`` model (prev_text_x = ox+glyph_w, a right edge) yields a large negative advance. For RTL chunks the x-axis is signed with ``sign*ox`` so the reading-direction advance is positive and the existing LTR merge logic applies unchanged. A multi-code-point value (a ligature, a Devanagari conjunct, a Thai cluster) takes the class of its first code point, like ``_reverse_if_rtl``."""
+    return -1 if char and unicodedata.bidirectional(char[0]) in ("R", "AL") else 1
 
 
 def _reverse_if_rtl(chars: str) -> str:
@@ -250,8 +275,10 @@ def _reverse_if_rtl(chars: str) -> str:
 
 
 def _read_end(mapping: dict, sign: int) -> float:
-    """The reading-direction FAR edge of a glyph (the edge facing the next char). PDFium reports the origin (ox) as the glyph's LEFT edge in both directions; the glyph extends RIGHT by glyph_w. So: * LTR (reading right): far edge = right edge = max(ox+glyph_w, ink right). * RTL (reading left): far edge = LEFT edge = ox (the origin itself). The next char's gap is then measured to its NEAR edge -- ox for LTR, ox+glyph_w for RTL -- in ``_read_gap`` below. (Earlier this added glyph_w on the RTL side too, which used the PREVIOUS glyph's width and injected spurious spaces.)"""
+    """The reading-direction FAR edge of a glyph (the edge facing the next char). PDFium reports the origin (ox) as the glyph's LEFT edge in both directions; the glyph extends RIGHT by glyph_w. So: * LTR (reading right): far edge = the pen end the font's width for the char's code gives (code_end), else right edge = max(ox+glyph_w, ink right): glyph_w is looked up by unicode and can land on another glyph's width. * RTL (reading left): far edge = LEFT edge = ox (the origin itself). The next char's gap is then measured to its NEAR edge -- ox for LTR, ox+glyph_w for RTL -- in ``_read_gap`` below. (Earlier this added glyph_w on the RTL side too, which used the PREVIOUS glyph's width and injected spurious spaces.)"""
     if sign > 0:
+        if "code_end" in mapping:
+            return mapping["code_end"]
         return max(mapping["ox"] + mapping["glyph_w"], mapping["right"])
     return mapping["ox"]
 

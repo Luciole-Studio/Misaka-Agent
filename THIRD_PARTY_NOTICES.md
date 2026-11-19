@@ -258,7 +258,8 @@ MISAKA 的部分文件移植自其它项目。移植代码所附带的许可证�
 `misaka/ai/**`、`misaka/core/**`、`misaka/agent/**`、`misaka/ui/tui/**` 的大部分是
 Pi（coding agent）的 Python 移植；`misaka/ui/panel/**` 是 herdr 的移植。
 `misaka/extensions/misaka_lcm/vendor/**` 原样收录自 hermes-lcm，
-`misaka/core/documents/pageindex/**` 原样收录自 PageIndex，两者各自保留上游的许可证文件。
+`misaka/core/documents/pageindex/flash/**` 与同目录的 `naming.py` 原样收录自 PageIndex
+（提交 `340b8535a219ea448c4c0f5bdd354761449b55b3`），两者各自保留上游的许可证文件。
 
 > 维护提示：新增一处从外部项目移植的代码时，把上游的许可证头随代码一起搬进来，
 > 并在本文件登记一条。判断依据是上游文件自己是否带许可证头——例如 Pi 树内恰好

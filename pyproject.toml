@@ -29,6 +29,7 @@ dependencies = [
     "pyyaml>=6.0",
     "pypdfium2==4.30.0",
     "PyPDF2==3.0.1",
+    "pycryptodome>=3.20",
     "regex>=2024.0.0",
     "sortedcontainers==2.4.0",
     "pillow>=10",
@@ -74,7 +75,7 @@ exclude = [
 ]
 
 [tool.ruff]
-extend-exclude = ["misaka/core/skills/assets", "misaka/core/skills/vendor", "tests/skills_hermes_native", "misaka/extensions/misaka_lcm/vendor", "misaka/extensions/misaka_lcm/native", "tests/hermes_lcm_native", "tests/web/fixtures", "scripts/check-windows-footguns.py"]
+extend-exclude = ["misaka/core/documents/pageindex/flash", "misaka/core/documents/pageindex/naming.py", "misaka/core/skills/assets", "misaka/core/skills/vendor", "tests/skills_hermes_native", "misaka/extensions/misaka_lcm/vendor", "misaka/extensions/misaka_lcm/native", "tests/hermes_lcm_native", "tests/web/fixtures", "scripts/check-windows-footguns.py"]
 
 [tool.ruff.lint]
 extend-select = ["ASYNC210", "ASYNC220", "ASYNC221", "ASYNC222", "ASYNC230", "ASYNC251"]

@@ -5,30 +5,30 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
-from typing import Any
+from typing import Any, Iterator, Optional, Protocol
 
 from .char_stats import (
-    CharStats,
-    info_weight,
     is_punct_category,
-    is_upper_dominant,
-    letter_count,
+    CharStats,
     merge_char_stats,
+    letter_count,
     punct_count,
+    info_weight,
+    is_upper_dominant,
 )
 from .rects import (
     EMPTY_RECT,
     Bounded,
-    center_aligned,
-    left_aligned,
     rect_union,
+    left_aligned,
     right_aligned,
+    center_aligned,
 )
 from .span_line import (
-    Line,
     Span,
-    style_key,
+    Line,
     text_of_line,
+    style_key,
 )
 
 
@@ -36,34 +36,10 @@ class Block(Bounded):
     """A vertically contiguous group of lines that share layout, such as a paragraph or heading run. Adding lines maintains weighted style, size, text, bbox, reading-order, classification, and cache fields."""
 
     __slots__ = (
-        "alignment_slot",
-        "cache_slot",
-        "char_stats",
-        "deaccented_text_cache",
-        "dominant_size_cache",
-        "dominant_style_cache",
-        "is_body_paragraph",
-        "isolated_centered",
-        "marker_slot",
-        "measure_slot",
-        "metric_slot",
-        "orig_index",
-        "previous_slot",
-        "primary_slot",
-        "reading_order_index",
-        "size_char_counts",
-        "state_slot",
-        "style_char_counts",
-        "style_slot",
-        "token_text_cache",
-        "tokens_cache",
-        "type",
-        "used_as_heading",
-        "weighted_font_size",
-        "weighted_ratio_primary",
-        "weighted_ratio_secondary",
-        "weighted_ratio_tertiary",
-        "weighted_skew",
+        "primary_slot", "char_stats", "alignment_slot", "weighted_ratio_tertiary", "previous_slot", "weighted_skew", "weighted_font_size", "weighted_ratio_primary", "weighted_ratio_secondary", "style_slot",
+        "style_char_counts", "size_char_counts", "reading_order_index", "orig_index", "type", "isolated_centered", "is_body_paragraph", "measure_slot", "used_as_heading",
+        "repeat_of", "state_slot", "marker_slot", "metric_slot",
+        "dominant_style_cache", "dominant_size_cache", "token_text_cache", "deaccented_text_cache", "cache_slot", "tokens_cache",
     )
 
     def __init__(self):
@@ -87,16 +63,17 @@ class Block(Bounded):
         self.is_body_paragraph: bool = False
         self.measure_slot: bool = False
         self.used_as_heading: bool = False
+        self.repeat_of: Optional[Block] = None   # copy on the previous page that this block repeats
         self.state_slot: int = 0
         self.marker_slot: int = 0
         self.metric_slot: float = 0.0
         # caches, invalidated on every add_line
-        self.dominant_style_cache: str | None = None
-        self.dominant_size_cache: float | None = None
-        self.token_text_cache: str | None = None
-        self.deaccented_text_cache: str | None = None
-        self.cache_slot: str | None = None
-        self.tokens_cache: Any | None = None
+        self.dominant_style_cache: Optional[str] = None
+        self.dominant_size_cache: Optional[float] = None
+        self.token_text_cache: Optional[str] = None
+        self.deaccented_text_cache: Optional[str] = None
+        self.cache_slot: Optional[str] = None
+        self.tokens_cache: Optional[Any] = None
 
     def __iter__(self):
         return iter(self.primary_slot)
@@ -125,7 +102,7 @@ class Block(Bounded):
         """Weighted skew fraction -- ."""
         return self.weighted_skew
 
-    def add_line(self, other_line) -> Block:
+    def add_line(self, other_line) -> "Block":
         """Add a line while maintaining weighted style, size, character, bbox, and per-style histograms."""
         self.alignment_slot = self.alignment_slot and (len(self.primary_slot) <= 0 or center_aligned(self, other_line, 1))
         self.primary_slot.append(other_line)
@@ -174,10 +151,10 @@ def iter_sorted_children(primary_item):
 # --------------------------------------------------------------------------- #
 
 
-def argmax_key(items) -> str | None:
+def argmax_key(items) -> Optional[str]:
     """return the key with max value. ``None`` if empty. ``items`` may be a ``dict`` (in which case we iterate ``.items``) or any iterable of ``(key, value)`` pairs. """
     pairs = items.items() if isinstance(items, dict) else items
-    best: str | None = None
+    best: Optional[str] = None
     candidate_item = float("-inf")
     for reference_item, entry_item in pairs:
         if entry_item <= candidate_item:

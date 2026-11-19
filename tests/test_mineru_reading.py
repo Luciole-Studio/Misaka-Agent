@@ -16,7 +16,7 @@ from PIL import Image
 from misaka.cli import setup_wizard
 from misaka.config import home, product
 from misaka.core.documents import index as corpus
-from misaka.core.documents import mineru
+from misaka.core.documents import mineru, pdf_outline
 from tests.test_pdf_ocr_routing import _layer
 
 PAGE = "第{n}頁的正文足夠長，足以算作這一頁確實讀到了文字，而且每一頁都不相同。"
@@ -554,7 +554,7 @@ def test_a_failed_run_costs_the_titles_of_its_batch_only(stand_in):
 
 def outlined(tmp_path, monkeypatch, found):
     """``corpus.ingest`` of a scan whose pages MinerU marks with ``found`` ({page: [titles]})."""
-    monkeypatch.setattr(corpus, "build_tree", lambda p, reason=None: corpus._note(reason, "tree", "none_found"))
+    monkeypatch.setattr(pdf_outline, "read", lambda pdf, workers=None: {"structure": [], "toc_source": "detected"})
     monkeypatch.setattr(mineru, "headings",
                         lambda path, count: {n: [(2, t) for t in titles] for n, titles in found.items()})
     scan = tmp_path / "scan.pdf"
@@ -578,7 +578,7 @@ def test_a_scan_whose_headings_are_too_few_keeps_page_navigation(tmp_path, monke
 
 def test_an_outline_of_its_own_is_not_replaced(tmp_path, monkeypatch, stand_in):
     own = [{"title": "第一編 總論", "node_id": "0000", "start_index": 1, "end_index": 24}]
-    monkeypatch.setattr(corpus, "build_tree", lambda p, reason=None: json.dumps(own, ensure_ascii=False))
+    monkeypatch.setattr(pdf_outline, "read", lambda pdf, workers=None: {"structure": own, "toc_source": "bookmarks"})
     asked = []
     monkeypatch.setattr(mineru, "headings", lambda path, count: asked.append(path) or {})
     scan = tmp_path / "scan.pdf"
@@ -595,7 +595,7 @@ def test_a_document_ocrmypdf_read_is_not_asked_for_headings(tmp_path, monkeypatc
     settings(ocr_engine="ocrmypdf")
     asked = []
     monkeypatch.setattr(mineru, "headings", lambda path, count: asked.append(path) or {})
-    monkeypatch.setattr(corpus, "build_tree", lambda p, reason=None: corpus._note(reason, "tree", "none_found"))
+    monkeypatch.setattr(pdf_outline, "read", lambda pdf, workers=None: {"structure": [], "toc_source": "detected"})
     monkeypatch.setattr(corpus, "_ocrmypdf_pages", lambda *a, **k: {n: PAGE.format(n=n) for n in range(1, 25)})
     scan = tmp_path / "scan.pdf"
     scan.write_bytes(b"%PDF-1.4 a scan\n")

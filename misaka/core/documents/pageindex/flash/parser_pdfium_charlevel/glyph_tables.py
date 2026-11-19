@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .cmap_parse import _parse_int
 
+
 # ---------------------------------------------------------------------------
 # Font Unicode-map construction.
 #
