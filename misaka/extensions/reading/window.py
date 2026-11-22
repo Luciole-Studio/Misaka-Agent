@@ -37,7 +37,7 @@ USAGE = ("/read open SOURCE... --question Q [--intent T]   open a reading; this 
          "/read graph RUN_ID      /read chat RUN_ID [--here]   lead an existing reading from this window",
          "/read close             leave reading mode         /read stop   stop the running operation",
          "Actions: overview reconstruct presuppose transform compare translate reread generate",
-         "/read SUBCOMMAND --help for details")
+         "/read SUBCOMMAND --help for details; the guide is docs/guide/reading.md")
 
 
 def split(text):

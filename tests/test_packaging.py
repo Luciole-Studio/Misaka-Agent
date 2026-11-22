@@ -12,7 +12,7 @@ def test_sdist_and_wheel_keep_package_with_ignored_source_symlink(tmp_path):
     root = Path(__file__).resolve().parents[1]
     project = tmp_path / "project"
     project.mkdir()
-    for name in ("pyproject.toml", ".gitignore", "LICENSE"):
+    for name in ("pyproject.toml", ".gitignore", "README.md", "LICENSE"):
         shutil.copyfile(root / name, project / name)
 
     expected = {

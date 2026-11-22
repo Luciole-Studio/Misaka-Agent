@@ -2,6 +2,7 @@
 name = "misaka"
 version = "0.19.30"
 description = "A research team of AI agents for the humanities and social sciences"
+readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "makiko", email = "nishikinokki@gmail.com" }]
 license = "Apache-2.0"
