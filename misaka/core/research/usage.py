@@ -375,9 +375,11 @@ def _trace_windows(rows, known_paths, inspected=None):
         for path in candidates.get(session_id, ()):
             if path not in inspected:
                 inspected[path] = _read_usage_file(path)
+            source = inspected[path]
+            incomplete |= not source.complete
             # Older receipts can lack one of these IDs. A header match alone
             # cannot select among files when a receipt includes an entry identity.
-            matches[path] = {(key, rid) for _, entry, request, *_ in inspected[path].entries
+            matches[path] = {(key, rid) for _, entry, request, *_ in source.entries
                              for key, rid in ((entry, request), (entry, None), (None, request))}
         for identity in identities:
             paths = [path for path, entries in matches.items() if identity == (None, None) or identity in entries]
@@ -392,15 +394,10 @@ _PANEL_STOP_GRACE_SECONDS = 60
 
 
 def _panel_neighbors(con, run, roots, complete):
-    from misaka.config import home
     from misaka.core.research import runs
 
-    # Legacy Board rows can store either spelling and may predate Windows path normalization.
-    stored = {home.stored(path) for path in roots}
-    aliases = sorted(stored | {str(home.from_stored(path)) for path in stored} |
-                     ({run["root_session"]} if run["root_session"] else set()))
     trace_ids, competing, legacy_cutoffs = set(), [], []
-    for other, created, updated, status, periods, recorded in runs.prior_window_runs(con, run["id"], aliases):
+    for other, created, updated, status, periods, recorded in runs.prior_window_runs(con, run["id"], roots):
         trace_ids.add(other)
         if recorded is None and complete is None and type(created) is int:
             # Preserve creation-order estimates for two legacy runs with no binding events.

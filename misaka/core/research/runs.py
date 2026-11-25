@@ -962,30 +962,30 @@ def root_session_history(con, run_id):
     return _root_session_evidence(current, events, created, updated, absolute=os.path.realpath)
 
 
-def prior_window_runs(con, run_id, aliases):
+def prior_window_runs(con, run_id, roots):
     """Find the other runs that used these windows, and their proven stays when available."""
-    keys = {key for path in aliases if (key := _root_session_path(path, os.path.realpath)) is not None}
-    folded_keys = {os.path.normcase(path) for path in keys}
+    folded_keys = {os.path.normcase(path) for path in roots}
 
     def resolve_related(path):
-        # Legacy pointers may use Windows path aliases. Resolve only possible matches.
+        # Binding events already use resolved paths. Check differently cased pointers when relevant.
         path = os.path.abspath(path)
-        if path not in keys and os.path.normcase(path) in folded_keys:
+        if path not in roots and os.path.normcase(path) in folded_keys:
             return os.path.realpath(path)
         return path
-    slots = ",".join("?" * len(aliases))
-    collate = " COLLATE NOCASE" if os.name == "nt" else ""
+
     rows = con.execute(
         "SELECT run.id, run.created_at, run.updated_at, run.status, run.root_session, "
         "event.id, event.created_at, event.payload FROM research_runs AS run "
         "LEFT JOIN events AS event ON event.task_id=run.id AND event.kind=? "
-        f"WHERE run.id<>? AND (event.id IS NOT NULL OR run.root_session{collate} IN ({slots})) "
-        "ORDER BY run.id, event.id", (_ROOT_SESSION_BOUND, run_id, *aliases),
+        "WHERE run.id<>? AND (event.id IS NOT NULL OR run.root_session IS NOT NULL) "
+        "ORDER BY run.id, event.id", (_ROOT_SESSION_BOUND, run_id),
     )
     for (other, created, updated, status, current), history in groupby(rows, key=lambda row: row[:5]):
         events = [(at, payload) for _, _, _, _, _, event_id, at, payload in history if event_id is not None]
-        windows, complete = _root_session_evidence(current, events, created, updated, absolute=resolve_related)
-        shared = windows.keys() & keys
+        # Before binding events existed, a pointer could use a directory link of any spelling.
+        resolve = resolve_related if events else os.path.realpath
+        windows, complete = _root_session_evidence(current, events, created, updated, absolute=resolve)
+        shared = windows.keys() & roots
         if shared:
             yield other, created, updated, status, [period for path in shared for period in windows[path]], complete
 

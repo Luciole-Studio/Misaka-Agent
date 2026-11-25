@@ -3988,37 +3988,50 @@ class AgentSession:
         self._isAgentRunActive = True
         self._agentRunAbortRequested = False
         self._settleBeforeQueuedMessages = False
+        flushing_started = False
         try:
-            messages = await self._prepareRun(trigger, admit, queued=queued)
+            messages, contributed = await self._prepareRun(trigger, admit, queued=queued)
+            # Held messages belong ahead of the new turn. Finish the startup writes
+            # before claiming the queued turn or consuming its next-turn context.
+            flushing_started = True
+            self._flushPendingBashMessages()
+            self._flushPendingCustomMessages()
+            self._failedResponse = None
+            self._recordSelection()
+            if onStarted is not None:
+                onStarted()
+            if queued:
+                selected = {id(message) for message in queued}
+                taken = {id(message) for message in self.agent.takeQueuedMessages(lambda message: id(message) in selected)}
+                if not taken:
+                    raise RuntimeError("Queued messages were cleared before the next run started")
+                messages = [message for message in messages if id(message) not in selected or id(message) in taken]
+            messages.extend(self._pendingNextTurnMessages)
+            self._pendingNextTurnMessages = []
+            messages.extend(contributed)
         except BaseException as error:
             self._runtimeTrace.write("run_finished", status="aborted" if isinstance(error, asyncio.CancelledError) else "not_started")
             self._runtimeTrace = None
             self._isAgentRunActive = False
-            self._flushPendingBashMessages()
-            self._flushPendingCustomMessages()
-            self._handBackQueuedReceipts(error)
-            if isinstance(error, _CustomRunBlocked):
-                try:
+            self._runSystemPromptOptions = None
+            try:
+                if not flushing_started:
+                    self._flushPendingBashMessages()
+                    self._flushPendingCustomMessages()
+                if isinstance(error, _CustomRunBlocked):
                     if not queued:
                         self._appendCustomMessage(trigger["message"])
                         self._refreshFinalizedContext()
                         self._emit({"type": "message_start", "message": trigger["message"]})
                         self._emit({"type": "message_end", "message": trigger["message"]})
+                    return
+            finally:
+                try:
+                    self._handBackQueuedReceipts(error)
                 finally:
                     self._settleAgentRun()
-                return
-            self._settleAgentRun()
             raise
-        # Messages held while the run was starting go before its starting messages, as they would
-        # have while idle. No run exists yet, so they cannot split a tool call from its result.
-        self._flushPendingBashMessages()
-        self._flushPendingCustomMessages()
-        if onStarted is not None:
-            onStarted()
 
-        # Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
-        self._failedResponse = None
-        self._recordSelection()
         # The run records the loadout in the transcript; restored tools that did not register by now
         # are dropped, so a tool that never registers does not stay pending.
         self._pendingToolNames.clear()
@@ -4088,11 +4101,8 @@ class AgentSession:
     async def _prepareRun(
         self, trigger: BeforeAgentStartTrigger, admit: Callable[[], None] | None = None, *,
         queued: list[AgentMessage] | None = None,
-    ) -> list[AgentMessage]:
-        """Prepare a run and return its starting messages: compact first when needed, emit
-        before_agent_start, apply the run's prompt options and tool loadout, and build the starting
-        message followed by pending nextTurn messages (consumed here) and handler messages, with a
-        system patch first when the prompt changed."""
+    ) -> tuple[list[AgentMessage], list[AgentMessage]]:
+        """Prepare the starting messages and hook contributions before claiming the turn."""
         # Check if we need to compact before sending (catches aborted responses).
         # The starting message is sent below, so do not continue the agent here
         # (pi agent-session.ts:1230-1234): continuing would emit a whole agent run —
@@ -4116,42 +4126,23 @@ class AgentSession:
             messages.append(self._buildUserMessage(text, normalized_images))
         if admit is not None:
             admit()
-        # Inject any pending "nextTurn" messages as context alongside the starting message
-        pending_next_turn = self._pendingNextTurnMessages
-        messages.extend(pending_next_turn)
-        self._pendingNextTurnMessages = []
-        try:
-            for message in contributed:
-                normalized_message = _message_dict(message)
-                messages.append(
-                    _normalize_nullish_message_content(
-                        {
-                            "role": "custom",
-                            "customType": read_field(normalized_message, "customType"),
-                            # Untyped extensions can pass null/missing content; normalize at ingestion.
-                            "content": _message_content(normalized_message),
-                            "display": bool(read_field(normalized_message, "display")),
-                            "details": read_field(normalized_message, "details"),
-                            "timestamp": int(time.time() * 1000),
-                        }
-                    )
-                )
-            update_message = self._preparePromptAndToolLoadout(options)
-            if queued:
-                # The start hook can clear the queue. Keep its delivery claim inside
-                # the same rollback boundary as pending next-turn messages.
-                selected = {id(message) for message in queued}
-                taken = {id(message) for message in self.agent.takeQueuedMessages(lambda message: id(message) in selected)}
-                if not taken:
-                    raise RuntimeError("Queued messages were cleared before the next run started")
-                messages = [message for message in messages if id(message) not in selected or id(message) in taken]
-        except BaseException:
-            self._pendingNextTurnMessages = [*pending_next_turn, *self._pendingNextTurnMessages]
-            raise
+        normalized_contributions = []
+        for message in contributed:
+            normalized_message = _message_dict(message)
+            normalized_contributions.append(_normalize_nullish_message_content({
+                "role": "custom",
+                "customType": read_field(normalized_message, "customType"),
+                # Untyped extensions can pass null/missing content; normalize at ingestion.
+                "content": _message_content(normalized_message),
+                "display": bool(read_field(normalized_message, "display")),
+                "details": read_field(normalized_message, "details"),
+                "timestamp": int(time.time() * 1000),
+            }))
+        update_message = self._preparePromptAndToolLoadout(options)
         self._runSystemPromptOptions = options
         if update_message is not None:
             messages.insert(0, update_message)
-        return messages
+        return messages, normalized_contributions
 
     def _settleAgentRun(self) -> None:
         """Release everyone waiting on idle, but only if the session really is idle.
@@ -4496,9 +4487,13 @@ class AgentSession:
     def _flushPendingBashMessages(self) -> None:
         if not self._pendingBashMessages:
             return
-        for bash_message in self._pendingBashMessages:
-            self.sessionManager.appendMessage(bash_message)
-        self._pendingBashMessages = []
+        persisted = 0
+        try:
+            for bash_message in self._pendingBashMessages:
+                self.sessionManager.appendMessage(bash_message)
+                persisted += 1
+        finally:
+            del self._pendingBashMessages[:persisted]
         self._refreshFinalizedContext()
 
     def _flushPendingCustomMessages(self) -> None:
@@ -4512,12 +4507,16 @@ class AgentSession:
         # the next toolResult to arrive, which is the opposite of showing it.
         if not self._pendingCustomMessages:
             return
-        for custom_message in self._pendingCustomMessages:
-            self._appendCustomMessage(custom_message)
-            self._refreshFinalizedContext()
-            self._emit({"type": "message_start", "message": custom_message})
-            self._emit({"type": "message_end", "message": custom_message})
-        self._pendingCustomMessages = []
+        persisted = 0
+        try:
+            for custom_message in self._pendingCustomMessages:
+                self._appendCustomMessage(custom_message)
+                persisted += 1
+                self._refreshFinalizedContext()
+                self._emit({"type": "message_start", "message": custom_message})
+                self._emit({"type": "message_end", "message": custom_message})
+        finally:
+            del self._pendingCustomMessages[:persisted]
 
     async def _checkCompaction(
         self,

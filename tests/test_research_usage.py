@@ -433,6 +433,40 @@ def test_window_binding_records_time_after_entering_the_board_transaction(tmp_pa
         assert updated["updated_at"] == bound_at == 1005
 
 
+def test_legacy_absolute_window_alias_uses_the_same_cutoff(tmp_path, monkeypatch, directory_alias):
+    real, alias = directory_alias
+    window = _session(real / "panel.jsonl", {"type": "session", "id": "panel"},
+                      _call("big", 100, 1, 1_050_000), _call("big", 50, 1, 2_050_000))
+    now = 1000
+    monkeypatch.setattr(runs, "time", SimpleNamespace(time=lambda: now))
+    with closing(tasks.connect(str(home.path("db")))) as con:
+        first = runs.create(con, workspace=str(tmp_path), question="First legacy run")
+        now = 2000
+        other = runs.create(con, workspace=str(tmp_path), question="Second legacy run")
+        con.execute("UPDATE research_runs SET root_session=? WHERE id=?", (str(window), first["id"]))
+        con.execute("UPDATE research_runs SET root_session=? WHERE id=?", (str(alias / window.name), other["id"]))
+        spent = usage.run_usage(con, runs.get(con, first["id"]))
+        assert spent["estimated_panel_usage"]["tokens"] == 100
+
+
+def test_receipt_lookup_retains_evidence_when_a_second_candidate_is_damaged(tmp_path):
+    from misaka.core import session_catalog
+
+    header = {"type": "session", "id": "shared"}
+    call = {**_call("fixture", 100, 0, 1_000), "id": "accepted"}
+    call["message"]["requestId"] = "request"
+    good = _session(tmp_path / "good.jsonl", header, call)
+    damaged = _session(tmp_path / "damaged.jsonl", header)
+    with damaged.open("ab") as stream:
+        stream.write(b'{"type":"message",')
+    index = session_catalog._index_dir()
+    index.mkdir(parents=True, exist_ok=True)
+    for path in (good, damaged):
+        session_catalog._write(index / f"{path.stem}.json", {"id": "shared", "path": str(path)})
+    receipt = {"event": "model_receipt_saved", "session_id": "shared", "entry_id": "accepted", "request_id": "request"}
+    assert usage._trace_windows([receipt], set()) == ({usage._path_key(good)}, True)
+
+
 @pytest.mark.parametrize("evidence", ["journal", "catalog", "ambiguous", "duplicate-current-id"])
 def test_legacy_rebound_windows_are_recovered_only_with_evidence(tmp_path, monkeypatch, capsys, evidence):
     from misaka.cli import app

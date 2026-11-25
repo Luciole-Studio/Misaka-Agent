@@ -10,9 +10,10 @@ import pytest
 from misaka.agent.types import AgentTool, AgentToolResult, AgentTurnDecision
 from misaka.ai.providers.faux import fauxAssistantMessage, fauxThinking, fauxToolCall
 from misaka.ai.types import TextContent
+from misaka.core.bash_executor import BashResult
 from misaka.utils.js import spawn
 from misaka.utils.values import read_field
-from tests.suite_harness import createHarness
+from tests.suite_harness import createHarness, getUserTexts
 
 RETRY = {"retry": {"enabled": True, "maxRetries": 3, "baseDelayMs": 1}}
 _background: set[asyncio.Task[Any]] = set()
@@ -88,6 +89,58 @@ async def test_cleared_deferred_queue_keeps_the_next_turn_note():
         custom = [read_field(message, "content") for message in harness.session.messages
                   if read_field(message, "role") == "custom"]
         assert custom == ["retain"]
+
+
+@pytest.mark.parametrize("held_kind", ["custom", "bashExecution"])
+async def test_failed_startup_flush_keeps_the_queued_turn_for_retry(monkeypatch, held_kind):
+    held = False
+    notes = ["persisted before the error", "persist after retry"]
+
+    def extension(pi):
+        async def before_start(_event, _ctx):
+            nonlocal held
+            if not held:
+                held = True
+                for note in notes:
+                    if held_kind == "custom":
+                        await harness.session.sendCustomMessage({"customType": "held", "content": note},
+                                                                {"triggerTurn": False})
+                    else:
+                        harness.session.recordBashResult("fixture", BashResult(note, 0, False, False))
+
+        pi.on("before_agent_start", before_start)
+
+    async with createHarness(extensionFactories=[extension]) as harness:
+        session = harness.session
+        await session.sendCustomMessage({"customType": "note", "content": "next turn"}, {"deliverAs": "nextTurn"})
+        await session.followUp("queued question")
+        append_name = "appendCustomMessageEntry" if held_kind == "custom" else "appendMessage"
+        real_append = getattr(session.sessionManager, append_name)
+        append_calls = 0
+
+        def fail_second_append(*args, **kwargs):
+            nonlocal append_calls
+            append_calls += 1
+            if append_calls == 2:
+                raise OSError("transcript unavailable before turn")
+            return real_append(*args, **kwargs)
+
+        with monkeypatch.context() as failing:
+            failing.setattr(session.sessionManager, append_name, fail_second_append)
+            with pytest.raises(OSError, match="transcript unavailable before turn"):
+                await session._resumeQueuedMessages()
+        await asyncio.wait_for(session.waitForIdle(), 1)
+        assert session.agent.hasQueuedMessages()
+        assert not getUserTexts(harness)
+
+        harness.setResponses([fauxAssistantMessage("done")])
+        await session._resumeQueuedMessages()
+        assert getUserTexts(harness) == ["queued question"]
+        assert [read_field(message, "content") for message in session.messages
+                if read_field(message, "role") == "custom"] == (notes if held_kind == "custom" else []) + ["next turn"]
+        if held_kind == "bashExecution":
+            assert [read_field(message, "output") for message in session.messages
+                    if read_field(message, "role") == held_kind] == notes
 
 
 async def test_terminal_tool_settles_before_delivering_stop_hook_feedback():
