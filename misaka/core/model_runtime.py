@@ -41,6 +41,7 @@ from misaka.ai.models import (
 from misaka.ai.providers.all import builtinProviders, getBuiltinModelDataGeneratedAt
 from misaka.ai.providers.openrouter import personalizeOpenRouterCatalog
 from misaka.ai.providers.radius import RadiusProviderOptions, radiusProvider
+from misaka.ai.runtime_observation import observe
 from misaka.ai.types import (
     AnyModel,
     AssistantImages,
@@ -70,6 +71,13 @@ from misaka.ai.utils.model_operations import (
     imageErrorResult,
 )
 from misaka.ai.utils.models_error import ModelsError
+from misaka.ai.utils.overflow import isContextOverflow
+from misaka.ai.utils.provider_retry import (
+    classifyProviderFailure,
+    providerRetryAfterMs,
+    providerRetryDelayCap,
+)
+from misaka.ai.utils.retry import isRetryableAssistantError, retryDelayLimitMessage
 from misaka.ai.utils.transcript import normalizeContext
 from misaka.config import home
 from misaka.core.auth_storage import AuthStorage
@@ -89,7 +97,9 @@ from misaka.core.remote_catalog_provider import (
     withPersonalizedCatalog,
     withRemoteCatalog,
 )
+from misaka.core.retry_circuit import CircuitOpenError, Permit, RetryCircuits
 from misaka.core.runtime_credentials import RuntimeCredentials
+from misaka.core.runtime_trace import current_scope
 from misaka.core.virtual_models import (
     FailedRoute,
     ModelRoute,
@@ -291,6 +301,7 @@ class ModelRuntime:
         self._providerAvailabilitySeq: dict[str, int] = {}
         self._availabilityError: str | None = None
         self._credentialOperations: dict[str, asyncio.Future[Any]] = {}
+        self._retryCircuits = RetryCircuits()
         self.authStorage = authStorage
         self._lastResolvedApiKey: dict[tuple[str, str | None], str] = {}
         self._recoveredCredentials: dict[str, set[str]] = {}
@@ -841,14 +852,7 @@ class ModelRuntime:
         )
 
     def stream(self, model: Model, context: Context, options: Any = None) -> AssistantMessageEventStream:
-        transcript = normalizeContext(context)
-
-        async def setup() -> AssistantMessageEventStream:
-            assertChatModel(model)
-            provider, requestModel, requestOptions = await self._prepareRequest(model, options)
-            return provider.stream(requestModel, transcript, requestOptions)
-
-        return lazyStream(model, setup)
+        return self._chatStream(model, normalizeContext(context), options, simple=False)
 
     async def complete(self, model: Model, context: Context, options: Any = None) -> AssistantMessage:
         return await self.stream(model, context, options).result()
@@ -881,12 +885,62 @@ class ModelRuntime:
 
             return lazyStream(model, routed)
 
+        return self._chatStream(model, transcript, options, simple=True)
+
+    def _chatStream(self, model, transcript, options, *, simple):
+        permit: Permit | None = None
+        started_model = model
+        signal = read_field(options, "signal")
+        retry_wait_cap = 0.0
+
         async def setup() -> AssistantMessageEventStream:
+            nonlocal permit, started_model, retry_wait_cap
             assertChatModel(model)
             provider, requestModel, requestOptions = await self._prepareRequest(model, options)
-            return provider.streamSimple(requestModel, transcript, requestOptions)
+            started_model = requestModel
+            retry_wait_cap = providerRetryDelayCap(
+                requestOptions.maxRetryDelayMs, read_field(options, "runtimeMaxAgentDelayMs")
+            )
+            requestOptions = requestOptions.model_copy(update={"maxRetryDelayMs": retry_wait_cap})
+            session_id = read_field(options, "sessionId")
+            if not session_id and (scope := current_scope()):
+                session_id = scope.card_id or scope.run_id
+            if session_id and not signal_aborted(signal):
+                route = (session_id, requestModel.provider, requestModel.api, requestModel.baseUrl, requestModel.id)
+                permit = self._retryCircuits.admit(route, background=bool(read_field(options, "runtimeCacheWarm")))
+            send = provider.streamSimple if simple else provider.stream
+            return send(requestModel, transcript, requestOptions)
 
-        return lazyStream(model, setup)
+        def finish(message: AssistantMessage | None, cause: BaseException | None) -> None:
+            outcome = "ignored"
+            if isinstance(message, AssistantMessage) and not signal_aborted(signal):
+                if message.stopReason == "error":
+                    if isinstance(cause, CircuitOpenError):
+                        disposition, transient = "circuit_open", False
+                    else:
+                        disposition, transient = classifyProviderFailure(cause)
+                    if disposition is not None:
+                        message.retryTransient = disposition == "transient" or transient
+                        message.retryStop = None if disposition == "transient" else disposition
+                    if disposition == "transient" and isinstance(cause, Exception):
+                        message.retryAfterMs = providerRetryAfterMs(cause)
+                        if message.retryAfterMs is not None and 0 < retry_wait_cap < message.retryAfterMs:
+                            observe("provider_retry_stopped", reason="retry_delay_limit", retry_source="server",
+                                    delay_ms=message.retryAfterMs)
+                            message.retryStop = "retry_delay_limit"
+                            message.errorMessage = retryDelayLimitMessage(message.retryAfterMs, retry_wait_cap, message.errorMessage)
+                    if disposition is None:
+                        transient = isRetryableAssistantError(message)
+                    if transient and not isContextOverflow(message, started_model.contextWindow):
+                        outcome = "transient"
+                elif message.stopReason != "aborted":
+                    outcome = "success"
+            cooldown = self._retryCircuits.finish(permit, outcome) if permit is not None else None
+            if cooldown is not None and message is not None:
+                message.retryStop = "circuit_open"
+                message.errorMessage = f"{message.errorMessage}\nModel route circuit is open: try again in {cooldown}s."
+
+        return lazyStream(model, setup, on_result=finish)
 
     async def completeSimple(self, model: Model, context: Context, options: Any = None) -> AssistantMessage:
         return await self.streamSimple(model, context, options).result()

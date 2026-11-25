@@ -12,6 +12,8 @@ import json
 import time
 from contextlib import closing
 
+import pytest
+
 from misaka.core import graph
 from misaka.core.platform import tasks
 from misaka.core.research import runs
@@ -224,6 +226,38 @@ def _seed(con, workspace):
     for table, values in rows.items():
         for value in values:
             con.execute(f"INSERT INTO {table} VALUES ({','.join('?' * len(value))})", value)
+
+
+@pytest.mark.parametrize("budget_available", [True, False])
+def test_trace_reads_v18_board_submissions_without_migrating_it(tmp_path, capsys, budget_available):
+    from misaka.cli.app import main
+    from misaka.config import home
+
+    board = home.path("db")
+    digest = "e" * 64
+    with closing(tasks.connect(str(board))) as con:
+        _seed(con, str(tmp_path))
+        card = tasks.create_task(con, "Existing card", assignee="10032", workspace=str(tmp_path))
+        con.execute("UPDATE research_run_tasks SET task_id=? WHERE task_id='t_1'", (card,))
+        assert tasks.add_event(con, card, "submitted", {"artifact_digests": {"result.md": digest}}, generation=1)
+        assert tasks.add_event(con, card, "budget_usage", {"totalTokens": 128}, generation=1)
+        submitted_id = con.execute("SELECT id FROM events WHERE task_id=? AND kind='submitted'", (card,)).fetchone()[0]
+        if not budget_available:
+            con.execute("DROP TABLE budget_reservations")
+    saved_board = board.read_bytes()
+
+    assert main(["trace", "show", "r_old", "--json"]) == 0
+    trace = json.loads(capsys.readouterr().out)
+    assert trace["recording"] == "unavailable"
+    assert trace["board_incomplete"] is not budget_available
+    expected_budget = {"recorded_tokens": 128, "reserved_tokens": 0, "expired_reservation_tokens": 0}
+    assert trace["budget"] == (expected_budget if budget_available else None)
+    [submission] = trace["board_events"]
+    assert submission["event"] == "submitted"
+    assert submission["board_event_id"] == submitted_id
+    assert submission["card_id"] == card and submission["generation"] == 1
+    assert submission["artifact_hashes"] == [digest]
+    assert board.read_bytes() == saved_board
 
 
 def test_a_v18_board_is_carried_into_graphs_and_resumes_where_it_was(tmp_path):

@@ -73,7 +73,7 @@ def _session_limits_text(limits):
         parts.append(f"output limit {limits['max_output_tokens']:,} tokens")
     return "".join(f" | {part}" for part in parts)
 USAGE = (
-    "Usage: /research [--depth N] [--parallel N] [--sister-parallel N] [--followups N] [--revisions N] [--max-nodes N] [QUESTION]\n"
+    "Usage: /research [--diagnostics] [--depth N] [--parallel N] [--sister-parallel N] [--followups N] [--revisions N] [--max-nodes N] [QUESTION]\n"
     f"       Start research at once (depth defaults to {runs.DEFAULT_LIMITS['max_depth']}, LO parallelism to "
     f"{runs.DEFAULT_LIMITS['parallel']}, Sister cards per LO to {runs.DEFAULT_LIMITS['sister_parallel']}, follow-up rounds per node to "
     f"{runs.DEFAULT_LIMITS['max_followups']}, revisions per node to {runs.DEFAULT_LIMITS['max_revisions']}, nodes to "
@@ -86,6 +86,7 @@ USAGE = (
     "       Options precede QUESTION. A question may start with a number: a bare leading number is the depth\n"
     "       only when nothing but options follows it (/research 3, /research 3 --parallel 2 QUESTION).\n"
     "       --parallel limits LO nodes.\n"
+    "       --diagnostics records a detailed trace for a new run, including its continuations.\n"
     "       --sister-parallel N limits active Sister cards per LO; global/per-Sister admission limits still apply.\n"
     "       --followups N: after its first cards are back, how many more times a node may send its Sisters out\n"
     "       (0-6), over its whole life. Talking a plan over with you is never counted.\n"
@@ -188,7 +189,11 @@ def parse_command(raw):
     selected = {}
     while words:
         option, separator, value = words[0].partition("=")
-        if option in _OPTIONS:
+        if option == "--diagnostics":
+            if separator or "diagnostics" in selected:
+                raise ValueError("--diagnostics is a flag and may be supplied once.")
+            selected["diagnostics"] = True
+        elif option in _OPTIONS:
             key = _OPTIONS[option]
             if key in selected:
                 raise ValueError(f"{option} was supplied more than once.")
@@ -205,7 +210,7 @@ def parse_command(raw):
         line = words[1].strip() if len(words) > 1 else ""
         words = line.split(None, 1)
     limits = runs.normalize_limits(selected)
-    return {"action": "activate", "limits": {key: limits[key] for key in _OPTIONS.values()},
+    return {"action": "activate", "limits": {key: limits[key] for key in (*_OPTIONS.values(), "diagnostics") if key in limits},
             "explicit": explicit, "question": line}
 
 
@@ -275,9 +280,10 @@ def _status(con, target, workspace):
         return "No matching research run was found."
     value = runs.summary(con, run["id"])
     reading = budget.status(con, _cfg().get("token_cap"), task_id=run["id"])
+    spent = usage.run_usage(con, run)
     token_text = (f" | tokens used by this run {reading['used']:,}"
                   + (f" of its cap {reading['cap']:,}" if reading["cap"] else "")
-                  + f" | spent {usage.money(usage.run_usage(con, run)['total'])} (misaka usage --run {run['id']})")
+                  + f" | spent {usage.money(spent['total'])}{usage.panel_usage_note(spent)} (misaka usage --run {run['id']})")
     return (
         f"{value['id']} | project {runs.project_name(run)!r} ({value['workspace']}) | "
         f"{value['status']}/{value['phase']} | depth {value['wave']}/{value['limits']['max_depth']} | "

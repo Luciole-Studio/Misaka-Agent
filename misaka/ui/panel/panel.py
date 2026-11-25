@@ -1737,7 +1737,12 @@ def _term_size():
     return rows, cols
 
 
-def launch():
+def _chat_argv(*options, diagnostics=False):
+    mode = ["--diagnostics"] if diagnostics else []
+    return [sys.executable, "-m", "misaka", "chat", *mode, *options]
+
+
+def launch(*, diagnostics=False):
     # Nesting guard, as in herdr main.rs:469-503: every pane process carries MISAKA_NET_PANE,
     # and opening the panel inside a pane would recurse forever. MISAKA_ALLOW_NESTED=1 is the
     # escape hatch (herdr's experimental.allow_nested).
@@ -1804,12 +1809,12 @@ def launch():
             control.request("pane.close", {"id": pane["id"]})
     listing = panes()
     workspace = os.path.realpath(os.getcwd())
-    lo = next((p for p in listing
+    lo = None if diagnostics else next((p for p in listing
                if p["title"] == "Last Order" and p["alive"]
                and os.path.realpath(p["cwd"]) == workspace), None)
     if lo is None:
         created = control.request("pane.create", {
-            "argv": [sys.executable, "-m", "misaka", "chat"],
+            "argv": _chat_argv(diagnostics=diagnostics),
             "cwd": os.getcwd(), "title": "Last Order",
             "env": {"MISAKA_THEME": hui.theme_variant()}})
         listing = panes()
@@ -2202,7 +2207,7 @@ def launch():
         else:
             place = {"space": current["id"], "name": row["label"]}
         if resumed:
-            argv = [sys.executable, "-m", "misaka", "chat"]
+            argv = _chat_argv(diagnostics=diagnostics)
             if role != "last-order":
                 argv += ["--as", role]
             argv += ["--session", path]
@@ -2286,7 +2291,7 @@ def launch():
         name = menu["items"][index]
         close_menu()
         if name != "no sisters":   # A Sister joins the focused pane's tab as a grid pane.
-            new_pane([sys.executable, "-m", "misaka", "chat", "--as", name], name, place={"grid": focused})
+            new_pane(_chat_argv("--as", name, diagnostics=diagnostics), name, place={"grid": focused})
 
     def menu_key(key):
         """herdr modal.rs:147-160 handle_global_menu_key: esc closes, k/up and j/down move, enter picks."""
@@ -3924,7 +3929,7 @@ def launch():
             draw_sidebar()
         elif hit[0] == "sessnew":                 # agents footer: a fresh Last Order session, a space of its own here
             space = active_space()
-            new_pane([sys.executable, "-m", "misaka", "chat"], LO_TITLE, place={"space": True},
+            new_pane(_chat_argv(diagnostics=diagnostics), LO_TITLE, place={"space": True},
                      cwd=space["folder"] if space else None)
         elif hit[0] == "sessmode":                # sessions header: this space <-> every folder
             side["sess_mode"] = "all" if side["sess_mode"] == "here" else "here"

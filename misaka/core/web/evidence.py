@@ -86,6 +86,43 @@ def read_provenance(path: str) -> dict[str, Any]:
         return {}
 
 
+def saved_page_url_key(url: str) -> str | None:
+    """Look up the exact saved page by URL, retaining its query and dropping its fragment."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/") or "/", parts.query, ""))
+
+
+def saved_pages(workspace, *, allowed=None):
+    """Index saved pages by URL and return their provenance, optionally using only selected paths."""
+    from misaka.core.documents.workspace import project_file
+
+    sites, titles = {}, {}
+    folder = Path(workspace, _PAGE_DIR)
+    if allowed is None:
+        candidates = sorted(folder.iterdir()) if folder.is_dir() else ()
+    else:
+        candidates = sorted(path for path in allowed if path.parent == folder)
+    for path in candidates:
+        if path.suffix != ".md":
+            continue
+        real = project_file(path, workspace)
+        if not real:
+            continue
+        meta = read_provenance(real)
+        for key in ("source_url", "final_url", "url", "requested_url"):
+            value = meta.get(key)
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                locator = saved_page_url_key(value)
+                if locator is not None:
+                    sites[locator] = real if locator not in sites or sites[locator] == real else None
+        url = meta.get("source_url") or meta.get("final_url") or ""
+        titles[real] = (str(meta.get("title") or ""), str(url))
+    return sites, titles
+
+
 def frontmatter_line_count(provenance: dict[str, Any]) -> int:
     """Lines the provenance block occupies: both ``---`` delimiters and the blank line.
 

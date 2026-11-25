@@ -4,6 +4,8 @@ for the user, the survey records connections between nodes, and a re-review cont
 team's own card in her own conversation."""
 import asyncio
 import os
+import subprocess
+import sys
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
@@ -243,29 +245,41 @@ async def test_the_runners_continue_a_card_the_way_the_sister_tools_do(lab):
 async def test_a_review_brief_too_long_for_a_command_line_reaches_the_card_whole(lab, tmp_path):
     """Issue #13: a red-team brief carries the node's whole evidence ledger -- 20,000 to 460,000
     characters measured on real runs -- and Windows refuses a command line past 32,767
-    (WinError 206). The child reads it from the file, every character of it."""
-    from misaka.cli import research_node
+    characters (WinError 206). Exercise the real spawn and child CLI; replace only the
+    model-driven card body with a byte-for-byte readback."""
     from misaka.core.research import node as node_module
-    brief = ("证据 " + "x" * 97 + "\r\n") * 5000 + "\ufeff-- end"
+
+    brief = ("证据 🎉 " + "x" * 97 + "\r\n") * 5000 + "\ufeff-- end"
+    received = tmp_path / "read back.txt"
+    child = tmp_path / "card reader.py"
+    child.write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from misaka.cli import research_node\n"
+        "received = Path(sys.argv[1])\n"
+        "def main_card(task_id, *, say):\n"
+        "    assert task_id == 't_1'\n"
+        "    received.write_bytes(say.encode('utf-8'))\n"
+        "    return 0\n"
+        "research_node.node.main_card = main_card\n"
+        "raise SystemExit(research_node.main(sys.argv[2:]))\n",
+        encoding="utf-8",
+    )
+    child_argv = [sys.executable, str(child), str(received), node_module.CARD_ARGV[-1]]
+    lab.monkeypatch.setattr(node_module, "CARD_ARGV", child_argv)
     headless = node_module.HeadlessRunner(lab.con, {})
-    spawned, exited = [], []
-    lab.monkeypatch.setattr(headless._processes, "spawn", lambda argv, **k: spawned.append(argv) or SimpleNamespace(
-        poll=lambda: 0 if exited else None, pid=1))
-    await headless.continue_card("t_1", brief, expected_generation=1)
-    [argv] = spawned
-    assert sum(len(arg) for arg in argv) < 1000
-    seen = []
-    from misaka.config import env as env_file
-    from misaka.utils import loop_watchdog
-    for owner, name in ((research_node, "setupCli"), (research_node.bootstrap, "install"),
-                        (loop_watchdog, "configure"), (env_file, "load")):
-        lab.monkeypatch.setattr(owner, name, lambda *a, **k: None)
-    lab.monkeypatch.setattr(research_node.node, "main_card", lambda task_id, *, say: seen.append((task_id, say)) or 0)
-    assert research_node.main(argv[3:]) == 0
-    assert seen == [("t_1", brief)]
-    exited.append(True)
-    headless._reap()
-    assert not os.path.exists(os.path.dirname(argv[-1]))
+    try:
+        await headless.continue_card("t_1", brief, expected_generation=1)
+        proc = headless.flying["t_1"]
+        argv = proc.args
+        assert argv[:-1] == [*child_argv, "t_1", "--say-file"]
+        assert len(subprocess.list2cmdline(argv)) < 32767 < len(brief)
+        assert await asyncio.to_thread(proc.wait, 20) == 0
+        assert received.read_bytes() == brief.encode("utf-8")
+        assert not await headless.pending(["t_1"])
+        assert not os.path.exists(os.path.dirname(argv[-1]))
+    finally:
+        await headless.stop("t_1")
 
 
 async def test_a_card_child_that_will_not_start_ends_the_node_at_the_failure_limit(lab):
@@ -279,7 +293,7 @@ async def test_a_card_child_that_will_not_start_ends_the_node_at_the_failure_lim
 
     def refuse(argv, **_kwargs):
         files.append(argv[-1])
-        raise OSError(206, "The filename or extension is too long")
+        raise OSError(11, "The process creation resource is temporarily unavailable")
 
     lab.monkeypatch.setattr(headless._processes, "spawn", refuse)
     for _ in range(task_store.FAILURE_LIMIT - 1):
@@ -298,6 +312,37 @@ async def test_a_card_child_that_will_not_start_ends_the_node_at_the_failure_lim
     exited.append(True)
     headless._reap()
     assert not os.path.exists(directory)
+
+
+async def test_winerror_206_fails_fast_even_after_prompt_file_conversion(lab):
+    from misaka.core.research import node
+
+    runner = node.HeadlessRunner(lab.con, {})
+    paths = []
+
+    def refuse(argv, **_kwargs):
+        paths.append(argv[-1])
+        raise OSError(206, "The filename or extension is too long")
+
+    lab.monkeypatch.setattr(runner._processes, "spawn", refuse)
+    with pytest.raises(node.CardNotStarted, match="cannot start with these process arguments"):
+        await runner.continue_card("t_1", "fixture prompt", expected_generation=1)
+    assert len(paths) == 1 and not os.path.exists(paths[0])
+
+
+async def test_pane_spawn_206_is_terminal_instead_of_repolled(lab):
+    from misaka.core.research import node
+    from misaka.ui.panel import client
+
+    card = cards.create(lab.con, str(lab.tmp), "Fixture", "Check launch", "10032")
+
+    def refuse(_method, _params):
+        raise RuntimeError("[WinError 206] The filename or extension is too long")
+
+    lab.monkeypatch.setattr(client, "request", refuse)
+    runner = node.PaneRunner(lab.con, {}, "root", "p1")
+    with pytest.raises(node.CardNotStarted, match="cannot start with these process arguments"):
+        await runner.launch_ready(task_ids=[card])
 
 
 def test_a_card_goes_on_in_its_newest_own_conversation(tmp_path):

@@ -534,6 +534,8 @@ class SisterRuntime:
         task["_attachments"] = cards.attachment_list(base, row["id"], workspace=row["workspace"])
         task["_handoffs"] = worker.card_handoffs(self.con, row)
         task.update(worker.card_extras(self.con, row, self.cfg))
+        scope = worker.card_file_scope(task, base)
+        task["_file_scope"] = scope
         reading = budget.status(self.con, self.cfg.get("token_cap"), task_id=row["id"])
         if reading["mode"] == "stop":
             if db.back_to_ready(
@@ -550,7 +552,7 @@ class SisterRuntime:
                     generation=row["generation"],
                 )
             return None
-        if reading["mode"] == "beast":
+        if reading["mode"] == "beast" and scope is None:
             task["beast"] = True
             db.add_event(self.con, row["id"], "beast_mode", reading)
         return task
@@ -641,7 +643,7 @@ class SisterRuntime:
                 prepared = self._prepare_card(db.get(self.con, task_id))
                 if prepared is None:
                     raise RuntimeError("The token budget limit has been reached; the card remains ready.")
-                prompt = worker.card_prompt(prepared)
+                prompt = worker.card_prompt(prepared, file_scope=prepared["_file_scope"])
                 if resumed:
                     try:
                         handle = existing or await self._restore(task_id, context)
@@ -760,13 +762,11 @@ class SisterRuntime:
                 )
                 handle.supervisor = supervisor
                 return self.snapshot(task_id, launched=True)
-            except BaseException:
-                db.back_to_ready(
-                    self.con,
-                    task_id,
-                    generation=generation,
-                    claim_lock=lock,
-                )
+            except BaseException as error:
+                if isinstance(error, worker.InvalidLocalWork):
+                    db.block_task(self.con, task_id, "needs_input", str(error), generation=generation, claim_lock=lock)
+                else:
+                    db.back_to_ready(self.con, task_id, generation=generation, claim_lock=lock)
                 if manager:
                     try:
                         await asyncio.shield(manager.close())
@@ -993,6 +993,15 @@ class SisterRuntime:
                         return
                     owner_lock = str(handle.claim_lock)
                     self._record_result(handle, owner_lock)
+                    from misaka.core.network import dispatch
+
+                    if not handle.stop_requested and await asyncio.to_thread(
+                        dispatch.recover_terminal_submission, self.con, row,
+                    ):
+                        settled = self._row_for_run(handle, token)
+                        if settled is not None:
+                            await self._finish_if_settled(handle, token, settled)
+                        return
                     if self._closing:
                         db.back_to_ready(
                             self.con,
@@ -1006,7 +1015,8 @@ class SisterRuntime:
                         return
                     if handle.agent.status != "completed":
                         reason = handle.agent.error or "Sister runtime failed"
-                        if worker.stopped_at_cap(reason):
+                        retry_stop = handle.agent.retry_stop
+                        if worker.stopped_at_cap(reason, retry_stop=retry_stop):
                             if db.back_to_ready(
                                 self.con,
                                 handle.board_id,
@@ -1026,6 +1036,7 @@ class SisterRuntime:
                             handle.board_id,
                             generation=handle.generation,
                             claim_lock=handle.claim_lock,
+                            retry_stop=retry_stop,
                         )
                         if changed:
                             await self._notify(handle, token)
@@ -1374,6 +1385,7 @@ class SisterRuntime:
         prepared = dict(row)
         prepared.update(worker.card_extras(
             self.con, row, self.cfg, include_materials=False))
+        worker.card_file_scope(prepared, row["workspace"])
         manager = _SisterManager(self.session, self.cfg, prepared, row["workspace"])
         manager._semaphore = self._sister_semaphore
         manager._session_dir(context)

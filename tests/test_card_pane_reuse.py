@@ -107,6 +107,63 @@ def test_a_dead_pane_is_still_the_cards_window(panel):
     assert panel._card_pane_to_reuse("t_1") is pane
 
 
+@pytest.mark.parametrize("active", [False, True])
+def test_old_daemon_is_not_reused_after_checkpoint_protocol_change(monkeypatch, active):
+    from misaka.ui.panel import client
+
+    calls = []
+
+    def request(method, **kwargs):
+        calls.append(method)
+        if method == "ping":
+            return {"proto": 56}  # the daemon before prepared submissions were recoverable
+        if method == "panes.list":
+            return {"panes": [{"card": "t_fixture", "alive": active}]}
+
+    monkeypatch.setattr(client, "check_sock_path", lambda: None)
+    monkeypatch.setattr(client, "request", request)
+    monkeypatch.setattr(client, "_wait_for_dying_daemon", lambda **kwargs: None)
+    monkeypatch.setattr(client, "_spawn_and_wait", lambda timeout: {"proto": d.PROTOCOL})
+    if active:
+        with pytest.raises(RuntimeError, match="still has a running task card"):
+            client.ensure()
+    else:
+        assert client.ensure() == {"proto": d.PROTOCOL}
+    assert calls == (["ping", "panes.list"] if active else ["ping", "panes.list", "server.stop"])
+
+
+async def test_panel_watcher_recovers_a_dead_workers_prepared_submission(panel, home, monkeypatch):
+    from misaka.core.network import dispatch, worker
+
+    con = panel._board()
+    tid, _ = _card(panel, home, status="ready")
+    generation = tasks.get(con, tid)["generation"]
+    assert tasks.claim(con, tid, "net:fixture", generation=generation)
+    out = home / "out"
+    out.mkdir()
+    con.execute("UPDATE tasks SET output_dir=? WHERE id=?", (str(out), tid))
+    row = tasks.get(con, tid)
+    worker.record_output_baseline(con, row)
+    (out / "notes.md").write_text("the verified result\n", encoding="utf-8")
+    worker.declare_completion(con, row, "confirmed")
+    prepared = dispatch.prepare_submission(row, worker.build_submission(con, row, "confirmed"))
+    assert dispatch.record_terminal_submission(con, row, prepared)
+    pane = d.Pane("p1", "test", [], str(home), card=tid)
+    pane.claim_lock, pane.generation = row["claim_lock"], generation
+    pane.proc = SimpleNamespace(poll=lambda: 1, pid=-9001)
+    panel.panes[pane.id] = pane
+
+    async def skip_catalog():
+        return None
+
+    monkeypatch.setattr(panel, "_sweep_catalog", skip_catalog)
+    monkeypatch.setattr(panel, "_watch_consultations", lambda _: panel._stopping.set())
+    await panel._watch_cards()
+    assert tasks.get(con, tid)["status"] == "done"
+    assert pane.claim_lock is None
+    assert '"summary": "confirmed"' in tasks.latest_payload(con, tid, "submitted")
+
+
 async def test_replacing_a_program_keeps_the_pane_its_seat_and_its_size(panel, home):
     pane = panel.create(IDLE, str(home), title="before")
     pane_id, seat = pane.id, panel._tab_holding(pane.id)

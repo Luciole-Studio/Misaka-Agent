@@ -98,6 +98,7 @@ LAYOUT: dict[str, Entry] = {
     "mcp_log": Entry("logs/mcp/mcp.log", "logs"),
     "web_logs": Entry("logs/web", "logs"),
     "moa_traces": Entry("logs/moa-traces", "logs"),
+    "runtime_traces": Entry("state/runtime-traces", "state", 0o700),
     "net_sock": Entry("run/net.sock", "run"),
     "net_snapshot": Entry("run/net.json", "run"),
     "locks": Entry("run/locks", "run"),

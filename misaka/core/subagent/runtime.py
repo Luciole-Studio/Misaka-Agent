@@ -781,6 +781,7 @@ class AgentTask:
     allowed_agent_types: list[str] = field(default_factory=list)
     status: str = "pending"
     error: str | None = None
+    retry_stop: str | None = None
     result: dict[str, Any] | None = None
     notified: bool = False
     notification_id: str = field(default_factory=lambda: secrets.token_hex(16))
@@ -1896,6 +1897,7 @@ class SubagentManager:
                 raise AgentCancelled()
             task.status = "running"
             task.error = None
+            task.retry_stop = None
             task.notified = False
             task.prompt_accepted = False
             task._done.clear()
@@ -1927,6 +1929,12 @@ class SubagentManager:
             env.pop(key, None)
         env.update(self._durable_child_environment(task))
         await self._extension_environment(task, env)
+        from misaka.core.runtime_trace import trace_environment
+
+        for key in ("MISAKA_TRACE_RUN_ID", "MISAKA_TRACE_DIAGNOSTICS", "MISAKA_TRACE_CARD_ID",
+                    "MISAKA_TRACE_GENERATION", "MISAKA_TRACE_CARD_ATTEMPT"):
+            env.pop(key, None)
+        env.update(trace_environment())
         env.update(
             {
                 "PYTHONUNBUFFERED": "1",
@@ -2245,6 +2253,8 @@ class SubagentManager:
                     task.initial_prompt_sent = True
                     if event.get("error"):
                         task.error = str(event["error"])
+                        retry_stop = event.get("retryStop")
+                        task.retry_stop = retry_stop if isinstance(retry_stop, str) else None
                     turn_done = True
                     break
         finally:

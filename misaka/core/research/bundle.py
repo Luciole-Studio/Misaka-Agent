@@ -27,16 +27,16 @@ import tempfile
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 from misaka.core.documents import index as corpus
+from misaka.core.documents.workspace import SOURCE_DIRECTORY as SOURCES_DIR
+from misaka.core.documents.workspace import SOURCE_MANIFEST as MANIFEST
+from misaka.core.documents.workspace import document_file, project_file
 from misaka.core.research import ledger, runs
 from misaka.core.tools.path_utils import DOWNLOAD_DIR_NAME
-from misaka.core.web.evidence import check_material_read, read_provenance
+from misaka.core.web import evidence
 from misaka.utils.paths import posix_relpath
 
-MANIFEST = "SOURCES.md"
-SOURCES_DIR = "sources"
 _SCAN_LIMIT = 4 * 1024 * 1024
 _SCAN_SUFFIXES = (".md", ".markdown", ".txt", ".rst")
 _NODE_SEEDS = ("synthesis",)
@@ -110,11 +110,6 @@ def place(src, dst):
     return True
 
 
-def _url_key(url, *, query=True):
-    parts = urlsplit(url)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/") or "/", parts.query if query else "", ""))
-
-
 def _clip(text, limit):
     text = " ".join(str(text or "").split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -127,31 +122,17 @@ class _Index:
 
     def __init__(self, workspace):
         self.workspace = os.path.realpath(workspace)
-        self.pages = {}
-        self.docs = {}
+        self._pages = None
         self.titles = {}
+        self.docs = {}
         self.digests = {}
         self.consulted = {}
-        pages = os.path.join(self.workspace, DOWNLOAD_DIR_NAME, "pages")
-        for name in (sorted(os.listdir(pages)) if os.path.isdir(pages) else []):
-            real = self.file_inside(os.path.join(pages, name))
-            if not real or not name.endswith(".md"):
-                continue
-            meta = read_provenance(real)
-            for key in ("source_url", "final_url", "url", "requested_url"):
-                value = meta.get(key)
-                if isinstance(value, str) and value.startswith(("http://", "https://")):
-                    key_ = _url_key(value)
-                    self.pages[key_] = real if key_ not in self.pages or self.pages[key_] == real else None
-            url = meta.get("source_url") or meta.get("final_url") or ""
-            self.titles[real] = (str(meta.get("title") or ""), str(url))
         try:
             docs = corpus.docs(workspace=self.workspace)
         except Exception:  # noqa: BLE001 - a corpus fault costs doc: resolution, not the bundle
             docs = []
         for doc in docs:
-            candidates = [doc.get("orig_path"), *(doc.get("paths") or [])]
-            real = next((r for p in candidates if p and (r := self.file_inside(p))), None)
+            real = document_file(doc, self.workspace)
             if not real:
                 continue
             self.docs[str(doc.get("doc_id"))] = real
@@ -161,23 +142,22 @@ class _Index:
             for task_id in doc.get("task_ids") or []:
                 self.consulted.setdefault(str(task_id), set()).add(real)
 
+    @property
+    def pages(self):
+        if self._pages is None:
+            self._pages, titles = evidence.saved_pages(self.workspace)
+            self.titles.update(titles)
+        return self._pages
+
+    def provenance(self, real):
+        path = Path(real)
+        if path.parent == Path(self.workspace, DOWNLOAD_DIR_NAME, "pages") and path.suffix == ".md":
+            meta = evidence.read_provenance(real)
+            return (str(meta.get("title") or ""), str(meta.get("source_url") or meta.get("final_url") or ""))
+        return self.titles.get(real, ("", ""))
+
     def file_inside(self, path):
-        """The real path of ``path`` when it is a regular file, not a symlink, inside the project
-        and outside ``.git``; else None."""
-        try:
-            st = os.lstat(path)
-        except (OSError, ValueError):
-            return None
-        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
-            return None
-        real = os.path.realpath(path)
-        if not corpus.under(real, self.workspace) or os.path.relpath(real, self.workspace).split(os.sep)[0] == ".git":
-            return None
-        try:
-            check_material_read(real)
-        except ValueError:
-            return None
-        return real
+        return project_file(path, self.workspace)
 
     def dir_inside(self, path):
         try:
@@ -208,6 +188,8 @@ class _Collector:
         self.consulted = set()
         self.seen = set()
         self.cards = {}
+        self.scopes = {}
+        self.scope_pages = {}
         self.nodes = {}
         for task in runs.tasks(con, run["id"]):
             if task["output_dir"]:
@@ -227,54 +209,96 @@ class _Collector:
             raise ValueError("source changed since its registered sha256; original evidence is unresolved")
         return actual
 
-    def cite(self, locator, by, bases, *, origin=None):
-        real, reason = self._resolve(locator, bases)
+    def card_scope(self, task):
+        from misaka.core.network import worker
+
+        task_id = task["id"]
+        if task_id not in self.scopes:
+            try:
+                scope = worker.load_card_file_scope(self.con, task)
+            except worker.InvalidLocalWork as error:
+                self.unresolved.append((task_id, str(error), ""))
+                self.scopes[task_id] = (frozenset(), None)
+            else:
+                self.scopes[task_id] = (None, None) if scope is None else (
+                    frozenset(map(Path, (*scope.inputs, scope.output))), Path(scope.output))
+        return self.scopes[task_id]
+
+    def _allowed(self, real, allowed):
+        path = Path(real)
+        if allowed is not None and path not in allowed:
+            return False
+        for parent in path.parents:
+            task = self.cards.get(str(parent))
+            if task is not None:
+                scope, output = self.card_scope(task)
+                return scope is None or path == output
+        return True
+
+    def cite(self, locator, by, bases, *, origin=None, allowed=None):
+        real, reason = self._resolve(locator, bases, allowed=allowed)
         if real is None:
             if reason and (locator, reason, by) not in self.unresolved:
                 self.unresolved.append((locator, reason, by))
             return
         if real == origin:
-            return
+            return real
         source = self.sources.get(real)
         if source is None:
             source = self.sources[real] = Source(real, posix_relpath(real, self.index.workspace))
         line = (f"as `{locator}` " if locator.startswith(("doc:", "http://", "https://")) else "") + by
         if line not in source.cited:
             source.cited.append(line)
-        self.follow(real)
+        self.follow(real, allowed=allowed)
+        return real
 
-    def _resolve(self, locator, bases):
+    def _resolve(self, locator, bases, *, allowed=None):
         if locator.startswith("doc:"):
             real = self.index.docs.get(locator[4:].split("#", 1)[0])
-            return real, "" if real else "not in this project's corpus"
-        if locator.startswith(("http://", "https://")):
-            real = self.index.pages.get(_url_key(locator))
-            return real, "" if real else f"no saved copy under {DOWNLOAD_DIR_NAME}/"
-        for spelling in _spellings(locator):
-            for base in ([""] if os.path.isabs(spelling) else bases):
-                candidate = os.path.join(base, spelling)
-                real = self.index.file_inside(candidate)
+            reason = "not in this project's corpus"
+        elif locator.startswith(("http://", "https://")):
+            if allowed is None:
+                pages = self.index.pages
+            else:
+                if allowed not in self.scope_pages:
+                    self.scope_pages[allowed], _titles = evidence.saved_pages(self.index.workspace, allowed=allowed)
+                pages = self.scope_pages[allowed]
+            real = pages.get(evidence.saved_page_url_key(locator))
+            reason = f"no saved copy under {DOWNLOAD_DIR_NAME}/"
+        else:
+            real = None
+            reason = "" if os.path.isabs(locator) else "no such file in this project"
+            for spelling in _spellings(locator):
+                for base in ([""] if os.path.isabs(spelling) else bases):
+                    candidate = os.path.join(base, spelling)
+                    real = self.index.file_inside(candidate)
+                    if real:
+                        break
+                    if self.index.dir_inside(candidate):
+                        return None, ""
                 if real:
-                    return real, ""
-                if self.index.dir_inside(candidate):
-                    return None, ""
-        return None, "" if os.path.isabs(locator) else "no such file in this project"
+                    break
+        if real is None:
+            return None, reason
+        if not self._allowed(real, allowed):
+            return None, "outside the card's local work scope"
+        return real, ""
 
-    def follow(self, real):
+    def follow(self, real, *, allowed=None):
         """A cited card output brings that card's declared sources; a cited node product
         brings that node's."""
         for folder, task in self.cards.items():
             if real.startswith(folder + os.sep):
-                self.card(task)
+                self.card(task, allowed=allowed)
                 return
         for folder, node in self.nodes.items():
             if real.startswith(folder + os.sep):
-                self.node(node)
+                self.node(node, allowed=allowed)
                 return
 
-    def scan(self, path, by, bases):
+    def scan(self, path, by, bases, *, allowed=None):
         real = self.index.file_inside(path)
-        if not real or not real.lower().endswith(_SCAN_SUFFIXES):
+        if not real or not self._allowed(real, allowed) or not real.lower().endswith(_SCAN_SUFFIXES):
             return
         try:
             self.checked_digest(real)
@@ -286,27 +310,33 @@ class _Collector:
             self.unresolved.append((posix_relpath(real, self.index.workspace), str(error), by))
             return
         for locator in locators_in(text):
-            self.cite(locator, by, [*bases, os.path.dirname(real)], origin=real)
+            self.cite(locator, by, [*bases, os.path.dirname(real)], origin=real, allowed=allowed)
 
-    def card(self, task):
-        if ("card", task["id"]) in self.seen:
+    def card(self, task, *, allowed=None):
+        scope, output = self.card_scope(task)
+        if scope is not None:
+            allowed = scope if allowed is None else scope & allowed
+        visit = ("card", task["id"], allowed)
+        if visit in self.seen or (allowed is not None and not allowed):
             return
-        self.seen.add(("card", task["id"]))
+        self.seen.add(visit)
         bases = [self.index.workspace, *([task["output_dir"]] if task["output_dir"] else [])]
         for finding in ledger.findings(self.con, self.run["id"], task_id=task["id"]):
             by = f'by [{task["id"]}] "{_clip(finding["text"], 100)}" ({finding["claim_type"]})'
             for claim in ledger.claims(self.con, finding["id"]):
                 if claim["source_file"]:
                     quote = f' — "{_clip(claim["quote"], 100)}"' if claim["quote"] else ""
-                    self.cite(claim["source_file"], by + quote, bases)
-                    where = ledger.locate(claim, self.index.workspace)
-                    if where and not where.startswith("located"):
-                        self.unlocated.append((claim["source_file"], where, by + quote))
+                    real = self.cite(claim["source_file"], by + quote, bases, allowed=allowed)
+                    if allowed is None or real is not None:
+                        where = ledger.locate(claim, self.index.workspace)
+                        if where and not where.startswith("located"):
+                            self.unlocated.append((claim["source_file"], where, by + quote))
         for row in runs.artifacts(self.con, self.run["id"], task_id=task["id"]):
-            self.scan(row["path"], f"in `{posix_relpath(row['path'], self.index.workspace)}`", bases)
-        self.consulted |= self.consulted_by(task)
+            if scope is None or Path(row["path"]) == output:
+                self.scan(row["path"], f"in `{posix_relpath(row['path'], self.index.workspace)}`", bases, allowed=allowed)
+        self.consulted |= self.consulted_by(task, allowed=allowed)
 
-    def consulted_by(self, task):
+    def consulted_by(self, task, *, allowed=None):
         """Files a card looked at, whether or not it cited them: what its sessions fetched,
         downloaded, read or opened through the document tools, the corpus documents linked to
         it, and the downloads it declared as written."""
@@ -330,18 +360,22 @@ class _Collector:
             sessions.append(current["session_file"])
         for session_file in dict.fromkeys(sessions):
             out |= consulted_in_session(session_file, self.index)
-        return out
+        scope, _output = self.card_scope(task)
+        if scope is not None:
+            allowed = scope if allowed is None else scope & allowed
+        return {real for real in out if self._allowed(real, allowed)}
 
-    def node(self, node):
-        if ("node", node["id"]) in self.seen:
+    def node(self, node, *, allowed=None):
+        visit = ("node", node["id"], allowed)
+        if visit in self.seen:
             return
-        self.seen.add(("node", node["id"]))
+        self.seen.add(visit)
         for row in _node_products(self.con, self.run, node, self.index):
             if row["kind"] in _NODE_SEEDS:
                 self.scan(row["path"], f"in `{posix_relpath(row['path'], self.index.workspace)}`",
-                          [self.index.workspace])
+                          [self.index.workspace], allowed=allowed)
         for task in runs.tasks(self.con, self.run["id"], node_id=node["id"]):
-            self.card(task)
+            self.card(task, allowed=allowed)
 
 
 _READ_TOOLS = ("read",)
@@ -492,7 +526,7 @@ def _build(collector, *, folder, manifest, sources_dir, title, products, cards=(
         return posix_relpath(path, index.workspace)
 
     def provenance(real):
-        title_, url = index.titles.get(real, ("", ""))
+        title_, url = index.provenance(real)
         return " — ".join(part for part in (f'"{_clip(title_, 120)}"' if title_ else "", url) if part)
 
     lines = [f"# Sources — {title}", "", _NOTE, "", "## Products", ""]
@@ -508,8 +542,8 @@ def _build(collector, *, folder, manifest, sources_dir, title, products, cards=(
             continue
         lines.append(f"- `{source.placed}` ← `{source.relative}`"
                      + (" (copied: a hard link was not possible)" if source.copied else ""))
-        if provenance(source.real):
-            lines.append(f"  - {provenance(source.real)}")
+        if detail := provenance(source.real):
+            lines.append(f"  - {detail}")
         lines.append(f"  - sha256 {source.digest}")
         lines += [f"  - cited {how}" for how in source.cited]
     if not any(s.placed for s in to_place):
@@ -522,7 +556,8 @@ def _build(collector, *, folder, manifest, sources_dir, title, products, cards=(
     consulted = sorted((r, real) for real in collector.consulted - set(collector.sources)
                        if (r := rel(real)).split("/")[0] == DOWNLOAD_DIR_NAME)
     lines += ["", "## Consulted but not cited (left where they are)", ""]
-    lines += [f"- `{r}`" + (f" — {provenance(real)}" if provenance(real) else "") for r, real in consulted] or ["- (none)"]
+    lines += [f"- `{r}`" + (f" — {detail}" if (detail := provenance(real)) else "")
+              for r, real in consulted] or ["- (none)"]
     lines += ["", "## Quotations not where they are cited", ""]
     lines += [f"- `{loc}` — {where} ({by})" for loc, where, by in collector.unlocated] or ["- (none)"]
     lines += ["", "## Unresolved locators", ""]
@@ -558,11 +593,13 @@ def card_bundle(con, run, task, index=None):
     if folder is None:
         return None
     collector = _Collector(con, run, index)
+    scope, output = collector.card_scope(task)
     collector.card(task)
     return _build(collector, folder=folder, manifest=os.path.join(folder, MANIFEST),
                   sources_dir=os.path.join(folder, SOURCES_DIR),
                   title=f"{posix_relpath(folder, index.workspace)} — [{task['id']}] {task['title']}",
-                  products=runs.artifacts(con, run["id"], task_id=task["id"]))
+                  products=[row for row in runs.artifacts(con, run["id"], task_id=task["id"])
+                            if scope is None or Path(row["path"]) == output])
 
 
 def node_bundle(con, run, node):

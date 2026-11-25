@@ -207,7 +207,7 @@ class ProviderRequestOptions(RuntimeModel):
     # with an error containing the requested delay, allowing higher-level retry logic
     # to handle it with user visibility.
     # Default: 60000 (60 seconds). Set to 0 to disable the cap.
-    maxRetryDelayMs: int | None = None
+    maxRetryDelayMs: float | None = None
 
 
 class StreamOptions(ProviderRequestOptions):
@@ -515,6 +515,10 @@ class AssistantMessage(SchemaModel):
     model: str
     responseModel: str | None = None  # Concrete model reported by the provider when different from the requested `model`
     responseId: str | None = None  # Provider-specific response/message identifier when the upstream API exposes one
+    requestId: str | None = None  # Local request identity used only for runtime observation and accounting
+    retryStop: str | None = Field(default=None, exclude=True)
+    retryAfterMs: float | None = Field(default=None, exclude=True)
+    retryTransient: bool = Field(default=False, exclude=True)
     # Exact provider-native effort level used for this response. Absent for legacy or unmanaged responses.
     providerThinkingLevel: str | None = None
     # Pi thinking level the agent loop requested for this response. Absent outside the agent loop and for legacy responses.

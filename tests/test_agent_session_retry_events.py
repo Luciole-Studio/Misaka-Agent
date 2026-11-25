@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
 from misaka.agent.types import AgentTool, AgentToolResult
 from misaka.ai.providers.faux import fauxAssistantMessage, fauxThinking, fauxToolCall
 from misaka.ai.types import TextContent
@@ -65,6 +67,19 @@ def _echoTool(toolRuns: list[str]) -> AgentTool:
 
 
 # --- AgentSession retry and event characterization ----------------------------------------------
+
+
+async def test_agent_settled_reports_interrupted_before_settle_work(monkeypatch):
+    async with createHarness() as harness:
+        async def failed_boundary():
+            raise RuntimeError("before-settle failure")
+
+        monkeypatch.setattr(harness.session, "_runBeforeSettleBoundary", failed_boundary)
+        harness.setResponses([fauxAssistantMessage("finished")])
+        with pytest.raises(RuntimeError, match="before-settle failure"):
+            await harness.session.prompt("run")
+        [settled] = harness.eventsOfType("agent_settled")
+        assert read_field(settled, "interrupted") is True
 
 
 async def test_retries_after_a_transient_error_and_succeeds():

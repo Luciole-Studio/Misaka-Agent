@@ -24,7 +24,7 @@ from misaka.ai.types import (
 )
 from misaka.ai.utils.diagnostics import formatThrownValue
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
-from misaka.utils.js import UNDEFINED, jsString
+from misaka.utils.js import jsString
 
 
 def _createSetupErrorMessage(model: Model, error: Any, timestamp: int) -> AssistantMessage:
@@ -55,15 +55,28 @@ def _hasResult(source: AsyncIterable[AssistantMessageEvent]) -> bool:
 async def _forwardStream(
     target: AssistantMessageEventStream,
     source: AsyncIterable[AssistantMessageEvent],
+    finish: Callable[[AssistantMessage | None, BaseException | None], None],
 ) -> None:
     async for event in source:
-        target.push(event, cause=getattr(source, "error_cause", None))
-    target.end(await source.result() if _hasResult(source) else UNDEFINED)  # type: ignore[attr-defined]
+        cause = getattr(source, "error_cause", None)
+        if event.type == "done":
+            finish(event.message, None)
+        elif event.type == "error":
+            finish(event.error, cause)
+        target.push(event, cause=cause)
+    if _hasResult(source):
+        result = await source.result()  # type: ignore[attr-defined]
+        finish(result, getattr(source, "error_cause", None))
+        target.end(result)
+    else:
+        target.end()
 
 
 def lazyStream(
     model: Model,
     setup: Callable[[], Awaitable[AsyncIterable[AssistantMessageEvent]]],
+    *,
+    on_result: Callable[[AssistantMessage | None, BaseException | None], None] | None = None,
 ) -> AssistantMessageEventStream:
     """Returns a stream synchronously while running async setup (auth resolution,
     lazy module loading) behind it. Setup failures terminate the stream with an
@@ -73,14 +86,24 @@ def lazyStream(
 
     async def run() -> None:
         inner: Any = None
+        finished = False
+
+        def finish(message: AssistantMessage | None, cause: BaseException | None) -> None:
+            nonlocal finished
+            if on_result is not None and not finished:
+                finished = True
+                on_result(message, cause)
+
         try:
             inner = await setup()
-            await _forwardStream(outer, inner)
+            await _forwardStream(outer, inner, finish)
         except Exception as error:  # noqa: BLE001 - `.catch(...)` turns any failure into the stream's error
             message = _createSetupErrorMessage(model, error, startedAt)
+            finish(message, error)
             outer.push(ErrorEvent(reason="error", error=message), cause=error)
             outer.end(message)
         finally:
+            finish(None, None)
             settled = getattr(inner, "settled", None)
             if settled is not None:
                 await settled()

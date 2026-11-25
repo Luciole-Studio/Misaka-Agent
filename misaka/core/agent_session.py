@@ -41,6 +41,7 @@ from misaka.ai.models import (
     getSupportedThinkingLevels,
     modelsAreEqual,
 )
+from misaka.ai.runtime_observation import observation_sink, observe
 from misaka.ai.session_resources import cleanupSessionResources
 from misaka.ai.types import (
     AssistantMessage,
@@ -56,8 +57,8 @@ from misaka.ai.utils.overflow import isContextOverflow, isRecoverableLength
 from misaka.ai.utils.retry import (
     RetryCallbacks,
     RetryPolicy,
+    assistantRetryDelay,
     isRetryableAssistantError,
-    retryDelayMs,
 )
 from misaka.ai.utils.transcript import (
     getCurrentSystemMessage,
@@ -125,6 +126,7 @@ from misaka.core.moments import CoreCommand, Moments
 from misaka.core.nested_tool_calls import NestedToolCallOptions, NestedToolCallRunner
 from misaka.core.prompt_templates import PromptTemplate, expandPromptTemplate
 from misaka.core.resource_loader import ResourceLoaderLike
+from misaka.core.runtime_trace import SessionTrace
 from misaka.core.session_export import exportSessionToJsonl
 from misaka.core.session_manager import (
     SessionManager,
@@ -349,6 +351,8 @@ class AgentSession:
     # Class-level defaults for doubles built without __init__, as `moments`.
     _nestedToolCalls: NestedToolCallRunner | None = None
     _hiddenDeclarations: frozenset[str] = frozenset()
+    _runtimeTrace: SessionTrace | None = None
+    _transcriptWriteFailed = False
 
     def __init__(self, config: AgentSessionConfig | dict[str, Any]) -> None:
         resolved = config if isinstance(config, AgentSessionConfig) else AgentSessionConfig(**config)
@@ -445,6 +449,7 @@ class AgentSession:
         self._isEmittingAgentSettled = False
         self._deferredSettledActions: list[Callable[[], Awaitable[None]]] = []
         self._stopHookContinuationPending = False
+        self._settleBeforeQueuedMessages = False
         self._baseToolDefinitions: dict[str, Any] = {}
         self._toolRegistry: dict[str, AgentTool] = {}
         self._toolDefinitions: dict[str, _ToolDefinitionEntry] = {}
@@ -2600,9 +2605,19 @@ class AgentSession:
             self._emit(event)
 
         if event_type == "message_end" and message is not None:
-            entry_id = self._persistMessage(message)
+            try:
+                entry_id = self._persistMessage(message)
+            except Exception:
+                self._transcriptWriteFailed = True
+                if self._runtimeTrace is not None:
+                    self._runtimeTrace.outcome = "error"
+                    self._runtimeTrace.failure_reason = "transcript_persist_error"
+                raise
             if entry_id:
                 self._entryIdsByMessage[id(message)] = (message, entry_id)
+                if (self._runtimeTrace is not None and self.sessionManager.isPersisted()
+                        and self.sessionManager.getSessionFile() is not None and self.sessionManager.flushed):
+                    self._runtimeTrace.receipt(message, entry_id)
             assistant_message = _as_assistant_message(message)
             if assistant_message is not None:
                 self._lastAssistantMessage = assistant_message
@@ -2627,6 +2642,13 @@ class AgentSession:
                 self._flushPendingCustomMessages()
 
     def _emit(self, event: Any) -> None:
+        kind = read_field(event, "type")
+        if kind == "agent_start" and self._runtimeTrace is None:
+            self._runtimeTrace = SessionTrace(self.sessionId)
+        if self._runtimeTrace is not None:
+            self._runtimeTrace.event(event)
+            if kind == "agent_settled":
+                self._runtimeTrace = None
         for listener in list(self._eventListeners):
             listener(event)
 
@@ -2753,10 +2775,13 @@ class AgentSession:
             self._turnIndex = 0
             await self._extensionRunner.emit({"type": "agent_start"})
         elif event_type == "agent_end":
+            self._settleBeforeQueuedMessages = bool(_event_field(event, "settleBeforeQueuedMessages", False))
             agent_end_event = {
                 "type": "agent_end",
                 "messages": list(_event_field(event, "messages", []) or []),
             }
+            if _event_field(event, "toolBatchTerminated", False):
+                agent_end_event["toolBatchTerminated"] = True
             hook_result = await self._extensionRunner.emitAgentEnd(agent_end_event)
             if _event_field(hook_result, "block", False):
                 reason = str(
@@ -3051,6 +3076,7 @@ class AgentSession:
                     ),
                     self._extensionRunner,
                 )
+                tool_registry[name].traceReadOnly = self._baseToolsOverride is None and name in {"read", "ls", "find", "grep"}
         for definition, source_info in all_custom_tools:
             tool_registry[definition.name] = wrapRegisteredTool(
                 RegisteredTool(definition=definition, sourceInfo=source_info),
@@ -3717,10 +3743,13 @@ class AgentSession:
                 previous_decision = previous_finish_turn(turn, signal)
                 if inspect.isawaitable(previous_decision):
                     previous_decision = await previous_decision
-            if read_field(previous_decision, "action") == "end":
+            previous_action = read_field(previous_decision, "action")
+            if previous_action == "end":
                 return previous_decision
-            if extension_continue or read_field(previous_decision, "action") == "continue":
+            if extension_continue or previous_action == "continue":
                 return AgentTurnDecision(action="continue")
+            if turn.toolBatchTerminated and (previous_action == "settle" or self.moments.settle_tool_turn(turn)):
+                return AgentTurnDecision(action="settle")
             return None
 
         self.agent.finishTurn = finish_turn
@@ -3924,6 +3953,28 @@ class AgentSession:
         onStarted: Callable[[], None] | None = None,
         *,
         admit: Callable[[], None] | None = None,
+        queued: list[AgentMessage] | None = None,
+    ) -> None:
+        trace = SessionTrace(self.sessionId)
+        self._runtimeTrace = trace
+        self._transcriptWriteFailed = False
+        try:
+            with observation_sink(trace.observe):
+                await self._driveRun(trigger, onStarted, admit=admit, queued=queued)
+        except BaseException as error:
+            if self._runtimeTrace is trace:
+                trace.write("run_finished", status="aborted" if isinstance(error, asyncio.CancelledError) else "error",
+                            reason=trace.failure_reason or "run_error")
+                self._runtimeTrace = None
+            raise
+
+    async def _driveRun(
+        self,
+        trigger: BeforeAgentStartTrigger,
+        onStarted: Callable[[], None] | None,
+        *,
+        admit: Callable[[], None] | None,
+        queued: list[AgentMessage] | None,
     ) -> None:
         """Start a run from a user or custom message. The session counts as busy from here on, so
         messages sent while before_agent_start handlers run are queued into this run instead of
@@ -3936,19 +3987,31 @@ class AgentSession:
         window's phase)."""
         self._isAgentRunActive = True
         self._agentRunAbortRequested = False
+        self._settleBeforeQueuedMessages = False
         try:
-            messages = await self._prepareRun(trigger, admit)
+            if queued:
+                messages = await self._prepareRun(trigger, admit, queued=queued)
+                selected = {id(message) for message in queued}
+                taken = {id(message) for message in self.agent.takeQueuedMessages(lambda message: id(message) in selected)}
+                messages = [message for message in messages if id(message) not in selected or id(message) in taken]
+                if not taken:
+                    raise RuntimeError("Queued messages were cleared before the next run started")
+            else:
+                messages = await self._prepareRun(trigger, admit)
         except BaseException as error:
+            self._runtimeTrace.write("run_finished", status="aborted" if isinstance(error, asyncio.CancelledError) else "not_started")
+            self._runtimeTrace = None
             self._isAgentRunActive = False
             self._flushPendingBashMessages()
             self._flushPendingCustomMessages()
             self._handBackQueuedReceipts(error)
             if isinstance(error, _CustomRunBlocked):
                 try:
-                    self._appendCustomMessage(trigger["message"])
-                    self._refreshFinalizedContext()
-                    self._emit({"type": "message_start", "message": trigger["message"]})
-                    self._emit({"type": "message_end", "message": trigger["message"]})
+                    if not queued:
+                        self._appendCustomMessage(trigger["message"])
+                        self._refreshFinalizedContext()
+                        self._emit({"type": "message_start", "message": trigger["message"]})
+                        self._emit({"type": "message_end", "message": trigger["message"]})
                 finally:
                     self._settleAgentRun()
                 return
@@ -3967,32 +4030,49 @@ class AgentSession:
         # The run records the loadout in the transcript; restored tools that did not register by now
         # are dropped, so a tool that never registers does not stay pending.
         self._pendingToolNames.clear()
+        before_settle_interrupted = True
         try:
-            await self.agent.prompt(messages)
+            if queued:
+                await self.agent.prompt(messages, skipInitialSteeringPoll=True)
+            else:
+                await self.agent.prompt(messages)
             while not self._agentRunAbortRequested:
                 if await self._handlePostAgentRun():
                     if self._agentRunAbortRequested:
                         break
                     await self.agent.continue_()
                     continue
-                if self._agentRunAbortRequested or not await self._runBeforeSettleBoundary():
+                if self._transcriptWriteFailed or self._agentRunAbortRequested or not await self._runBeforeSettleBoundary():
                     break
                 if self._agentRunAbortRequested:
                     break
                 await self.agent.continue_()
+            before_settle_interrupted = self._transcriptWriteFailed
+        except asyncio.CancelledError:
+            if self._runtimeTrace is not None:
+                self._runtimeTrace.outcome = "aborted"
+            raise
+        except Exception:
+            if self._runtimeTrace is not None:
+                self._runtimeTrace.outcome = "error"
+                self._runtimeTrace.failure_reason = self._runtimeTrace.failure_reason or "run_error"
+            raise
         finally:
             if self._agentRunAbortRequested:
                 self._finishCancelledRetry()
+            if self._agentRunAbortRequested or _beingCancelled():
+                self._handBackQueuedReceipts(RuntimeError("The run was aborted before delivery"))
             self._failedResponse = None
             self._runSystemPromptOptions = None
+            self._transcriptWriteFailed = False
             self._flushPendingBashMessages()
             self._flushPendingCustomMessages()
-            await self._emitAgentSettled()
+            await self._emitAgentSettled(interrupted=before_settle_interrupted)
 
     def _handBackQueuedReceipts(self, error: BaseException) -> None:
         """MISAKA fork: custom messages whose sender redelivers them (a receipt with `_onError`: the Sister
-        outbox, mail) that were queued into a run that then did not start (a hook blocked it, or preparing it
-        failed) leave the Agent's queues and are failed back to that sender, which redelivers each into a fresh
+        outbox, mail) that are still queued when a run is blocked, fails to start, or is aborted leave the Agent's
+        queues and are failed back to that sender, which redelivers each into a fresh
         run. Left queued they would wait for some unrelated later run, and every redelivery would meet the receipt
         (`sendCustomMessage`) and be dropped. Every other message stays queued for the next run, as upstream leaves
         it: one without a receipt, or with a receipt nobody redelivers (a sub-agent's or a background shell's
@@ -4009,12 +4089,13 @@ class AgentSession:
         )
         if not taken:
             return
-        reason = RuntimeError(f"The run this message was queued into did not start: {error}")
+        reason = RuntimeError(f"Queued message was not delivered: {error}")
         for message in taken:
             self._failCustomReceipt(receipt_of(message), reason)
 
     async def _prepareRun(
-        self, trigger: BeforeAgentStartTrigger, admit: Callable[[], None] | None = None
+        self, trigger: BeforeAgentStartTrigger, admit: Callable[[], None] | None = None, *,
+        queued: list[AgentMessage] | None = None,
     ) -> list[AgentMessage]:
         """Prepare a run and return its starting messages: compact first when needed, emit
         before_agent_start, apply the run's prompt options and tool loadout, and build the starting
@@ -4031,7 +4112,9 @@ class AgentSession:
         contributed, options = await self._emitBeforeAgentStart(trigger)
 
         messages: list[Any] = []
-        if trigger["messageType"] == "custom":
+        if queued:
+            messages.extend(queued)
+        elif trigger["messageType"] == "custom":
             messages.append(trigger["message"])
         else:
             # Normalize images after before_agent_start so extension-driven model selection
@@ -4089,7 +4172,7 @@ class AgentSession:
             if not waiter.done():
                 waiter.set_result(None)
 
-    async def _emitAgentSettled(self) -> None:
+    async def _emitAgentSettled(self, *, interrupted: bool = False) -> None:
         """Announce that the run has fully settled (pi agent-session.ts:609-616,1094-1096).
 
         Reached only once the retry / auto-compaction / queued-continuation loop in
@@ -4103,9 +4186,19 @@ class AgentSession:
         self._isAgentRunActive = False
         self._isEmittingAgentSettled = True
         try:
-            aborted = self._agentRunAbortRequested
-            await self._extensionRunner.emit({"type": "agent_settled", "aborted": aborted})
-            self._emit({"type": "agent_settled", "aborted": aborted})
+            event = {"type": "agent_settled", "aborted": self._agentRunAbortRequested}
+            if interrupted:
+                event["interrupted"] = True
+            await self._extensionRunner.emit(dict(event))
+            self._emit(event)
+        except asyncio.CancelledError:
+            deferred, self._deferredSettledActions = self._deferredSettledActions, []
+            try:
+                self._handBackQueuedReceipts(RuntimeError("The run was cancelled while settling"))
+                self._handBackDeferred(deferred)
+            finally:
+                self._settleAgentRun()
+            raise
         finally:
             self._isEmittingAgentSettled = False
         # Runs requested from `agent_settled` handlers are deferred until every settled handler
@@ -4160,6 +4253,25 @@ class AgentSession:
             "a cancellation kept %d run(s) deferred past agent_settled from starting; %d delivery(ies) handed back",
             len(actions), handed)
 
+    def resumeQueuedMessagesAfterSettle(self) -> None:
+        """An accepted terminal tool turn can now deliver its queued messages in a new run."""
+        if self.agent.hasQueuedMessages():
+            self._deferredSettledActions.append(self._resumeQueuedMessages)
+
+    async def _resumeQueuedMessages(self) -> None:
+        queued = self.agent.peekQueuedMessages()
+        if not queued:
+            return
+        message = queued[0]
+        if _message_role(message) == "user":
+            content = _message_content(message)
+            images = [part for part in content if read_field(part, "type") == "image"] if isinstance(content, list) else []
+            trigger = {"messageType": "user", "prompt": self._extractUserMessageText(content), "images": images}
+        else:
+            trigger = {"messageType": "custom", "message": message}
+
+        await self._startRun(trigger, queued=queued)
+
     async def _handlePostAgentRun(self) -> bool:
         message = self._lastAssistantMessage
         tool_results = self._lastAssistantToolResults
@@ -4168,12 +4280,20 @@ class AgentSession:
         if self._agentRunAbortRequested:
             self._finishCancelledRetry()
             return False
+        if self._transcriptWriteFailed:
+            # The tool may have already committed its effect. Its missing transcript entry
+            # cannot be resolved by repeating the model turn on a generic I/O error.
+            self._stopHookContinuationPending = False
+            self._finishFailedRetry(read_field(message, "errorMessage"))
+            return False
         if message is None:
             return self.agent.hasQueuedMessages()
 
         if self._stopHookContinuationPending:
             self._stopHookContinuationPending = False
             return True
+        if self._settleBeforeQueuedMessages:
+            return False
 
         if (self._isRetryableError(message) or await self._recoverRejectedCredential(message)) \
                 and await self._prepareRetry(message):
@@ -4185,16 +4305,8 @@ class AgentSession:
             self._finishCancelledRetry()
             return False
 
-        if message.stopReason == "error" and self._retryAttempt > 0:
-            self._emit(
-                {
-                    "type": "auto_retry_end",
-                    "success": False,
-                    "attempt": self._retryAttempt,
-                    "finalError": message.errorMessage,
-                }
-            )
-            self._retryAttempt = 0
+        if message.stopReason == "error":
+            self._finishFailedRetry(message.errorMessage)
 
         if await self._checkCompaction(message, True, tool_results):
             return not self._agentRunAbortRequested
@@ -4206,7 +4318,7 @@ class AgentSession:
 
     async def _runBeforeSettleBoundary(self) -> bool:
         if not self._extensionRunner.hasHandlers("agent_before_settle"):
-            return self.agent.hasQueuedMessages()
+            return not self._settleBeforeQueuedMessages and self.agent.hasQueuedMessages()
         self._isBeforeSettle = True
         self._abortDuringBeforeSettle = False
         try:
@@ -4219,7 +4331,8 @@ class AgentSession:
             final_context = self._buildBoundaryContext([], "agent_before_settle")
             if self._abortDuringBeforeSettle:
                 return False
-            should_continue = bool(result["continue"]) or self.agent.hasQueuedMessages()
+            should_continue = bool(result["continue"]) or (
+                not self._settleBeforeQueuedMessages and self.agent.hasQueuedMessages())
             if should_continue and not final_context["canContinue"]:
                 if result["continue"]:
                     self._reportInvalidBoundaryContinuation("agent_before_settle")
@@ -4243,7 +4356,7 @@ class AgentSession:
         )
 
     def _willRetryAfterAgentEnd(self, event: Any) -> bool:
-        if self._agentRunAbortRequested:
+        if self._agentRunAbortRequested or self._transcriptWriteFailed:
             return False
         if self._stopHookContinuationPending:
             return True
@@ -4256,6 +4369,11 @@ class AgentSession:
             if assistant_message is not None:
                 return self._isRetryableError(assistant_message)
         return False
+
+    def _finishFailedRetry(self, error: str | None) -> None:
+        if self._retryAttempt > 0:
+            self._emit({"type": "auto_retry_end", "success": False, "attempt": self._retryAttempt, "finalError": error})
+            self._retryAttempt = 0
 
     def _summarizationRetryCallbacks(self, source: dict[str, str]) -> RetryCallbacks:
         return RetryCallbacks(
@@ -4326,13 +4444,19 @@ class AgentSession:
             self._retryAttempt -= 1
             return False
 
-        delay_ms = retryDelayMs(self._retryPolicyFrom(settings), self._retryAttempt)
+        delay_ms, source = assistantRetryDelay(message, self._retryPolicyFrom(settings), self._retryAttempt)
+        if delay_ms is None:
+            self._retryAttempt -= 1
+            observe("provider_retry_stopped", request_id=message.requestId, reason="retry_delay_limit",
+                    retry_source=source, delay_ms=message.retryAfterMs)
+            return False
         self._emit(
             {
                 "type": "auto_retry_start",
                 "attempt": self._retryAttempt,
                 "maxAttempts": max_retries,
                 "delayMs": delay_ms,
+                "retrySource": source,
                 "errorMessage": message.errorMessage or "Unknown error",
             }
         )
@@ -4877,7 +5001,7 @@ def _auth_overrides(signal: Any | None) -> Any:
     return AuthResolutionOverrides(signal=signal)
 
 
-async def _sleep_with_abort(delay_ms: int, signal: Any) -> bool:
+async def _sleep_with_abort(delay_ms: float, signal: Any) -> bool:
     if bool(getattr(signal, "aborted", False)):
         return False
     if delay_ms <= 0:

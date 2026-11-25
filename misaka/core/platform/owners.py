@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
 
@@ -29,6 +30,7 @@ class CardOwner:
     scope_label = "run"
     token_cap_setting = ""
     resume_command = ""
+    rate_limit_max_attempts: int | None = None
 
     def card(self, con: sqlite3.Connection, task_id: str) -> dict[str, Any] | None:
         """The owner's context for a card it owns, with ``scope`` (the unit of work the card belongs
@@ -38,6 +40,11 @@ class CardOwner:
     def session_overrides(self, con: sqlite3.Connection, context: dict[str, Any]) -> dict[str, Any]:
         """Settings the card's session runs with instead of the global ones."""
         return {}
+
+    def card_trace(self, con: sqlite3.Connection, context: dict[str, Any], *, card_id: str,
+                   generation: int | None, attempt_id: str | None) -> AbstractContextManager[None]:
+        """Resolve a card's trace before the caller closes its board connection."""
+        return nullcontext()
 
     def card_deleted(self, con: sqlite3.Connection, task_id: str) -> None:
         """A card was deleted from the board; forget it, in the same transaction."""
@@ -60,6 +67,10 @@ class CardOwner:
 
     def guard(self, con: sqlite3.Connection, task_id: str, context: dict[str, Any]) -> None:
         """Raise ValueError when an ordinary board tool must not act on this card."""
+
+    def requires_card_file(self, context: dict[str, Any]) -> bool:
+        """Whether cards predating the Board contract require a readable scope mirror."""
+        return False
 
     def reads_results(self, con: sqlite3.Connection, context: dict[str, Any]) -> bool:
         """Whether a driver of the owner is reading this card's results itself, so Last Order need not

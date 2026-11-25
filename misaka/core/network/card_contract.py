@@ -1,9 +1,102 @@
 """What a card contract holds besides its prose: its deliverable's filename, and the findings a card
 declares as it works."""
+import os
 import re
+from pathlib import Path, PureWindowsPath
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class LocalWork(BaseModel):
+    """An opt-in card that can do its work with named local files."""
+
+    model_config = ConfigDict(extra="forbid")
+    input_paths: list[str] = Field(min_length=1, description=(
+        "Existing files, relative to the project. List every input the card needs."))
+    tools: list[Literal["read", "write", "edit"]] = Field(default_factory=lambda: ["read", "write"], description=(
+        "Include read and write. Add edit only when needed. Card notes and completion are supplied automatically."))
+
+    @field_validator("input_paths")
+    @classmethod
+    def _relative_files(cls, paths):
+        normalized = []
+        for name in paths:
+            path = PureWindowsPath(name)
+            posix = path.as_posix()
+            if (not path.parts or path.anchor or ".." in path.parts or ":" in name
+                    or name.startswith("~") or posix.startswith("~")
+                    or name != name.strip() or posix != posix.strip()
+                    or any(ord(char) < 32 or char == "`" for char in name)):
+                raise ValueError(f"Local work input {name!r} must be a project-relative file path.")
+            normalized.append(posix)
+        return list(dict.fromkeys(normalized))
+
+    @field_validator("tools")
+    @classmethod
+    def _required_tools(cls, tools):
+        if not {"read", "write"} <= set(tools):
+            raise ValueError("Local work requires the read and write tools.")
+        return list(dict.fromkeys(tools))
+
+    def resolve_inputs(self, workspace):
+        from misaka.core.web.evidence import check_material_read
+
+        root = Path(workspace).resolve(strict=True)
+        paths = []
+        for name in self.input_paths:
+            try:
+                path = (root / name).resolve(strict=True)
+                relative = path.relative_to(root)
+                if relative.parts and relative.parts[0].casefold() == ".git":
+                    raise ValueError("expected project material outside .git")
+                if not path.is_file():
+                    raise ValueError("expected a regular file")
+                check_material_read(str(path))
+            except (OSError, RuntimeError, ValueError) as error:
+                raise ValueError(f"Local work input {name!r} must be an existing file inside the project.") from error
+            paths.append(str(path))
+        return tuple(dict.fromkeys(paths))
+
+    def tool_names(self):
+        return (*self.tools, "misaka_card_note", "misaka_card_complete")
+
+
+def local_deliverable(name):
+    from misaka.core.documents.workspace import SOURCE_DIRECTORY, SOURCE_MANIFEST
+    from misaka.core.tools.write import _refuse_office_package
+    from misaka.utils.node_path import WINDOWS_RESERVED_NAMES
+
+    if name is None:
+        raise ValueError("Local work requires one named deliverable.")
+    one_file(name)
+    device = name.split(".", 1)[0].rstrip().upper()
+    if (name.endswith((".", " ")) or any(char in '<>"|?*' for char in name)
+            or device in WINDOWS_RESERVED_NAMES or device in {"CONIN$", "CONOUT$"}
+            or name.casefold() in {SOURCE_MANIFEST.casefold(), SOURCE_DIRECTORY.casefold()}):
+        raise ValueError(f"Local work deliverable {name!r} is not a writable filename for this card.")
+    try:
+        _refuse_office_package(name, "write")
+    except RuntimeError as error:
+        raise ValueError(f"Local work deliverable {name!r}: {error}") from error
+    return name
+
+
+def local_output(workspace, output_dir, name, inputs):
+    """Validate the writable entry before any scoped operation uses it."""
+    output = Path(output_dir) / name
+    try:
+        output.relative_to(Path(workspace).resolve(strict=True))
+        if output.resolve() != output or output in map(Path, inputs):
+            raise ValueError("the deliverable is an alias or a declared input")
+        if output.exists() and (not output.is_file() or not os.access(output, os.W_OK)):
+            raise ValueError("the deliverable is not a writable regular file")
+        ancestor = next(parent for parent in output.parents if parent.exists())
+        if not ancestor.is_dir() or not os.access(ancestor, os.W_OK | os.X_OK):
+            raise ValueError("the output directory is not writable")
+    except (OSError, RuntimeError, ValueError) as error:
+        raise ValueError(f"Local work deliverable {name!r} must be a separate writable file inside the project.") from error
+    return output
 
 
 class Finding(BaseModel):

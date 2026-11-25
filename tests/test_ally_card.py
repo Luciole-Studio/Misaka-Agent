@@ -29,7 +29,8 @@ class Ally:
     def __init__(self, tmp_path, *, kind=None):
         self.script, self.log = tmp_path / "script.json", tmp_path / "agent.log"
         Path(os.environ["MISAKA_HOME"], "settings.json").write_text(json.dumps({"allies": {"fake": {
-            "command": [sys.executable, FAKE, str(self.script), str(self.log)],
+            # Keep tests/posix.py out of the child's stdlib import lookup on Windows.
+            "command": [sys.executable, "-P", FAKE, str(self.script), str(self.log)],
             "description": "A scripted agent."}}}), encoding="utf-8")
         self.project = tmp_path / "project"
         self.project.mkdir()

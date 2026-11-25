@@ -352,8 +352,11 @@ async def createAgentSession(options: CreateAgentSessionOptions | None = None) -
     cacheWarmer = CacheWarmer(modelRuntime, sessionManager, lambda: settingsManager.getCacheWarmingMode(), decideCacheWarming)
 
     def buildRequestOptions(requestModel: Model[Any], options: Any = None) -> dict[str, Any]:
+        from misaka.ai.utils.retry import DEFAULT_MAX_AGENT_RETRY_DELAY_MS
+
         options = _toDict(options)
         providerRetrySettings = settingsManager.getProviderRetrySettings()
+        sessionRetrySettings = settingsManager.getRetrySettings()
         httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs()
         effectiveTimeoutMs = 2147483647 if httpIdleTimeoutMs == 0 else httpIdleTimeoutMs
         headerRunner = extensionRunnerRef.get("current")
@@ -375,6 +378,8 @@ async def createAgentSession(options: CreateAgentSessionOptions | None = None) -
             ),
             "maxRetries": nullish(options.get("maxRetries"), providerRetrySettings.get("maxRetries")),
             "maxRetryDelayMs": nullish(options.get("maxRetryDelayMs"), providerRetrySettings.get("maxRetryDelayMs")),
+            "runtimeMaxAgentDelayMs": nullish(sessionRetrySettings.get("maxAgentDelayMs"), DEFAULT_MAX_AGENT_RETRY_DELAY_MS)
+            if sessionRetrySettings.get("enabled") and int(sessionRetrySettings.get("maxRetries") or 0) > 0 else None,
             "transformHeaders": transformHeaders,
         }
 
@@ -426,9 +431,12 @@ async def createAgentSession(options: CreateAgentSessionOptions | None = None) -
         # shallow-copy the messages array or refresh the model object without changing
         # the provider request, so top-level object identity is not a valid cache key.
         if requestOptions.get("sessionId") == sessionManager.getSessionId():
-            cacheWarmer.start(
-                CacheWarmRequest(model=model, context=context, options=requestOptions), cacheContextIsCurrent(model)
-            )
+            from misaka.ai.runtime_observation import observation_context
+
+            with observation_context(request_id=None):
+                cacheWarmer.start(
+                    CacheWarmRequest(model=model, context=context, options=requestOptions), cacheContextIsCurrent(model)
+                )
         return modelRuntime.streamSimple(model, context, requestOptions)
 
     async def transformContext(messages: list[AgentMessage], signal: Any | None = None) -> list[AgentMessage]:

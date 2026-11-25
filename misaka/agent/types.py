@@ -159,13 +159,15 @@ class AgentTurnContext:
     # Messages that this loop invocation will return if it exits at this point. Prompt runs include the initial prompt
     # messages; continuation runs do not include pre-existing context messages.
     newMessages: list[AgentMessage]
+    toolBatchTerminated: bool = False
 
 
 @dataclass(slots=True)
 class AgentTurnDecision:
     """Decision returned by `FinishTurn`. Returning None preserves normal scheduling."""
 
-    action: Literal["continue", "end"]
+    # `settle` ends a terminating tool turn and leaves queued messages for the run owner to resume.
+    action: Literal["continue", "end", "settle"]
 
 
 # Called after a completed assistant turn and all of its tool-result messages, but before `turn_end`.
@@ -495,6 +497,8 @@ class AgentTool(Tool):
 
     # Human-readable label for UI display.
     label: str
+    # Set by AgentSession only for the runtime's own passive read tools.
+    traceReadOnly: bool = Field(default=False, exclude=True)
     aliases: tuple[str, ...] = Field(default=(), exclude=True)
     # Optional compatibility shim for raw tool-call arguments before schema validation.
     # Must return an object that matches `TParameters`.
@@ -541,6 +545,8 @@ class AgentStartEvent:
 class AgentEndEvent:
     messages: list[AgentMessage]
     type: Literal["agent_end"] = "agent_end"
+    toolBatchTerminated: bool = False
+    settleBeforeQueuedMessages: bool = False
 
 
 # Turn lifecycle - a turn is one assistant response + any tool calls/results

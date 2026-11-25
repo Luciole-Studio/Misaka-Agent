@@ -1,15 +1,45 @@
-"""Collect verified task artifacts into the canonical document store."""
+"""Resolve project source files and collect verified task artifacts into the document store."""
 
 import logging
 import os
+import stat
 
 from misaka.core.documents import index as corpus
 
 logger = logging.getLogger(__name__)
 
-HANDED_OVER_FOLDERS = frozenset({"sources", "reports"})
+SOURCE_MANIFEST = "SOURCES.md"
+SOURCE_DIRECTORY = "sources"
+HANDED_OVER_FOLDERS = frozenset({SOURCE_DIRECTORY, "reports"})
 ORIGINAL_SUFFIXES = frozenset({".pdf", ".djvu", ".epub", ".doc", ".docx", ".docm", ".ppt", ".pptx", ".pptm",
                                ".xls", ".xlsx", ".xlsm"})
+
+
+def project_file(path, workspace):
+    """Return the real path of a readable regular project file, excluding file symlinks and Git metadata."""
+    from misaka.core.web.evidence import check_material_read
+
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        real = os.path.realpath(path)
+        root = os.path.realpath(workspace)
+        if not corpus.under(real, root) or os.path.relpath(real, root).split(os.sep)[0].casefold() == ".git":
+            return None
+        check_material_read(real)
+    except (OSError, ValueError):
+        return None
+    return real
+
+
+def document_file(metadata, workspace):
+    """Choose the project's copy of a document in the corpus's provenance order."""
+    candidates = [metadata.get("orig_path"), *(metadata.get("paths") or [])]
+    return next((real for path in candidates if path and (real := project_file(path, workspace))), None)
+
+
+def doc_source(doc_id, workspace):
+    return document_file(corpus._meta(doc_id, workspace=workspace) or {}, workspace)
 
 
 def belongs_in_corpus(task, path):
@@ -25,7 +55,9 @@ def belongs_in_corpus(task, path):
 
 def ingest_artifacts(con, task, artifacts=None):
     """Ingest verified task artifacts, rejecting empty or escaping paths."""
+    from misaka.core.network.worker import scoped_artifacts
 
+    artifacts = scoped_artifacts(con, task, artifacts)
     workspace = task["workspace"] or ""
     root = os.path.realpath(workspace) if workspace else ""
     collected = []
@@ -50,4 +82,5 @@ def ingest_artifacts(con, task, artifacts=None):
     return collected
 
 
-__all__ = ["belongs_in_corpus", "ingest_artifacts"]
+__all__ = ["SOURCE_DIRECTORY", "SOURCE_MANIFEST", "belongs_in_corpus", "doc_source", "document_file",
+           "ingest_artifacts", "project_file"]

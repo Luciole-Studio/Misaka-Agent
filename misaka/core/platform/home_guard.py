@@ -21,7 +21,10 @@ Two halves, because the tools differ in what can be known about them:
 
 from __future__ import annotations
 
+import asyncio
 import os
+from pathlib import Path
+from types import SimpleNamespace
 
 from misaka.config import home
 from misaka.core.wiring import KINDS
@@ -63,12 +66,14 @@ class HomeGuard:
     """Refuses a file tool's write where this session may not write, and reports a name a shell
     command left at the top of the home, once, on that command's result."""
 
-    def __init__(self, kind="foreground", workspace=None, *, guard_paths=False, report_strays=True):
+    def __init__(self, kind="foreground", workspace=None, *, guard_paths=False, report_strays=True,
+                 card_file_scope=None):
         self.tools = []
         self._kind = kind
         self._workspace = workspace or os.getcwd()
         self._guard_paths = guard_paths
         self._report_strays = report_strays
+        self._card_file_scope = card_file_scope
         self._seen = set(home.strays())
 
     def _refusal(self, path):
@@ -83,12 +88,93 @@ class HomeGuard:
                     "Tell Last Order what should change.")
         return refusal(target, self._workspace, self._kind) or owners.frozen_refusal(target)
 
+    def _read_target(self, path):
+        try:
+            target = Path(path).resolve(strict=True)
+            if self._card_file_scope.allows_read(target) and target.is_file():
+                return target
+        except (OSError, RuntimeError, ValueError):
+            pass
+        raise ValueError("Read a declared local input or the deliverable shown in the card contract.")
+
+    def _write_target(self, path):
+        from misaka.core.network.card_contract import local_output
+
+        scope = self._card_file_scope
+        target = Path(scope.output)
+        if Path(path) != target:
+            raise ValueError(f"Write only the card's deliverable at {scope.output}.")
+        local_output(self._workspace, target.parent, target.name, scope.inputs)
+        if reason := self._refusal(target):
+            raise ValueError(reason)
+        return target
+
+    def configure_tool_options(self, options):
+        if self._card_file_scope is None:
+            return
+        from misaka.core.tools.edit import defaultEditOperations
+        from misaka.core.tools.read import defaultReadOperations
+        from misaka.utils import atomic
+
+        async def access_read(path):
+            target = await asyncio.to_thread(self._read_target, path)
+            await defaultReadOperations.access(str(target))
+
+        def replace(path, content):
+            atomic.write_text(self._write_target(path), content)
+
+        async def write(path, content):
+            await asyncio.to_thread(replace, path, content)
+
+        def ensure_parent(path):
+            target = Path(self._card_file_scope.output)
+            if Path(path) != target.parent:
+                raise ValueError(f"Write only the card's deliverable at {target}.")
+            self._write_target(target).parent.mkdir(parents=True, exist_ok=True)
+
+        async def mkdir(path):
+            await asyncio.to_thread(ensure_parent, path)
+
+        async def access_edit(path):
+            target = await asyncio.to_thread(self._write_target, path)
+            await defaultEditOperations.access(str(target))
+
+        async def read_edit(path):
+            target = await asyncio.to_thread(self._write_target, path)
+            return await defaultEditOperations.readFile(str(target))
+
+        options.setdefault("read", {})["operations"] = SimpleNamespace(
+            **{**vars(defaultReadOperations), "access": access_read})
+        options.setdefault("write", {})["operations"] = SimpleNamespace(writeFile=write, mkdir=mkdir)
+        options.setdefault("edit", {})["operations"] = SimpleNamespace(
+            access=access_edit, readFile=read_edit, writeFile=write)
+
     async def tool_call(self, event, ctx=None):
         if not self._guard_paths:
             return None
         tool = str(read_field(event, "toolName", "") or "")
         args = read_field(event, "input", None)
         args = args if isinstance(args, dict) else {}
+        if self._card_file_scope is not None and tool not in self._card_file_scope.tools:
+            return {"block": True, "reason": "Use the local work tools listed in the card's session."}
+        if self._card_file_scope is not None and tool in {"read", "write", "edit"}:
+            from misaka.core.tools.path_utils import resolveReadPath, resolveToCwd
+
+            path = str(args.get("path") or "")
+            cwd = read_field(ctx, "cwd", None) or self._workspace
+            try:
+                resolved = resolveToCwd(path, cwd)
+                if tool == "read":
+                    target = self._read_target(resolveReadPath(path, cwd))
+                    if target != Path(resolved):
+                        return {"updatedInput": {**args, "path": str(target)}}
+                else:
+                    target = self._write_target(resolved)
+                    if tool == "edit" and not target.is_file():
+                        raise ValueError(f"The card deliverable does not exist at {target}. Use write to create it.")
+            except (OSError, RuntimeError, ValueError) as error:
+                return {"block": True, "reason": str(error)}
+            return None
         prepared = None
         if tool == "office":
             from misaka.core.tools._office.paths import output_paths
@@ -127,7 +213,8 @@ def part(spec):
     guard_paths = kind in _PATH_KINDS or (kind == "bare" and is_last_order(spec.profile_dir))
     if kind == "bare" and not guard_paths:
         return None
-    return HomeGuard(spec.kind, spec.workspace, guard_paths=guard_paths, report_strays=kind != "bare")
+    return HomeGuard(spec.kind, spec.workspace, guard_paths=guard_paths, report_strays=kind != "bare",
+                     card_file_scope=spec.card_file_scope)
 
 
 __all__ = ["HomeGuard", "part", "refusal"]

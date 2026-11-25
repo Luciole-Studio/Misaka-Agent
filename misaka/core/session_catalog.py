@@ -255,6 +255,19 @@ def find_session(session_id):
     return saved
 
 
+def saved_session_paths(session_ids):
+    """Find requested stored transcripts in one pass, leaving ambiguous IDs unresolved."""
+    matches = {}
+    if session_ids:
+        for file in _index_dir().glob("*.json"):
+            record = _object(file)
+            session_id, path = record.get("id"), record.get("path")
+            if (isinstance(session_id, str) and session_id in session_ids and isinstance(path, str)
+                    and readSessionHeader(path).get("id") == session_id):
+                matches.setdefault(session_id, set()).add(os.path.normcase(os.path.realpath(path)))
+    return {session_id: next(iter(paths)) for session_id, paths in matches.items() if len(paths) == 1}
+
+
 def spaces_in_use():
     """Every panel space some session still belongs to."""
     return {value["space"] for value in map(_object, _index_dir().glob("*.json")) if value.get("space")}

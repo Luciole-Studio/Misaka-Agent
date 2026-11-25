@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, fields, is_dataclass, replace
 from types import SimpleNamespace
 from typing import Any, Literal
+from uuid import uuid4
 
 from misaka.agent.stream_fn import getDefaultStreamFn
 from misaka.agent.types import (
@@ -41,6 +42,11 @@ from misaka.agent.types import (
     ToolExecutionUpdateEvent,
     TurnEndEvent,
     TurnStartEvent,
+)
+from misaka.ai.runtime_observation import (
+    has_observation_sink,
+    observation_context,
+    observe,
 )
 from misaka.ai.types import (
     AssistantMessage,
@@ -207,6 +213,7 @@ async def _runLoop(
     config = initialConfig
     lastCompletedTurn: PrepareNextTurnContext | None = None
     explicitContinuation = False
+    toolBatchTerminated = False
     # Check for steering messages at start (user may have typed while waiting)
     pendingMessages: list[AgentMessage] = list(
         (await maybe_await(config.getSteeringMessages()) if config.getSteeringMessages else None) or []
@@ -271,7 +278,25 @@ async def _runLoop(
                 )
 
             # Stream assistant response
-            message = await _streamAssistantResponse(currentContext, config, signal, emit, streamFunction)
+            request_id = uuid4().hex if has_observation_sink() else None
+            if request_id is None:
+                message = await _streamAssistantResponse(currentContext, config, signal, emit, streamFunction)
+            else:
+                started = time.perf_counter()
+                with observation_context(request_id=request_id, auxiliary=False):
+                    observe("model_started", provider=config.model.provider, model=config.model.id)
+                    try:
+                        message = await _streamAssistantResponse(currentContext, config, signal, emit, streamFunction, request_id)
+                    except (Exception, asyncio.CancelledError) as error:
+                        observe("model_finished", status="aborted" if isinstance(error, asyncio.CancelledError)
+                                or signal_aborted(signal) else "timeout" if isinstance(error, TimeoutError) else "error",
+                                duration_ms=jsRound((time.perf_counter() - started) * 1000))
+                        raise
+                    observe("model_finished", status=message.stopReason,
+                            duration_ms=jsRound((time.perf_counter() - started) * 1000),
+                            usage={"input": message.usage.input, "output": message.usage.output,
+                                   "cache_read": message.usage.cacheRead, "cache_write": message.usage.cacheWrite,
+                                   "total": message.usage.totalTokens} if message.usage.totalTokens else None)
             newMessages.append(message)
 
             if message.stopReason in ("error", "aborted"):
@@ -292,6 +317,7 @@ async def _runLoop(
 
             toolResults: list[ToolResultMessage] = []
             hasMoreToolCalls = False
+            toolBatchTerminated = False
             if len(toolCalls) > 0:
                 # A "length" stop means the output was cut off by the token limit, so
                 # every tool call in the message may carry truncated arguments. Fail
@@ -302,7 +328,8 @@ async def _runLoop(
                     else await _executeToolCalls(currentContext, message, config, signal, emit)
                 )
                 toolResults.extend(executedToolBatch.messages)
-                hasMoreToolCalls = not executedToolBatch.terminate
+                toolBatchTerminated = executedToolBatch.terminate
+                hasMoreToolCalls = not toolBatchTerminated
 
                 for result in toolResults:
                     currentContext.messages.append(result)
@@ -313,15 +340,21 @@ async def _runLoop(
                 toolResults=toolResults,
                 context=currentContext,
                 newMessages=newMessages,
+                toolBatchTerminated=toolBatchTerminated,
             )
             decision = await maybe_await(config.finishTurn(lastCompletedTurn, signal)) if config.finishTurn else None
             await _emit(emit, TurnEndEvent(message=message, toolResults=toolResults))
 
-            if read_field(decision, "action") == "end":
+            action = read_field(decision, "action")
+            if signal_aborted(signal) or action == "end":
                 await _emit(emit, AgentEndEvent(messages=newMessages))
                 return
+            if action == "settle" and toolBatchTerminated:
+                await _emit(emit, AgentEndEvent(messages=newMessages, toolBatchTerminated=True,
+                                               settleBeforeQueuedMessages=True))
+                return
 
-            explicitContinuation = read_field(decision, "action") == "continue"
+            explicitContinuation = action == "continue"
             pendingMessages = list(
                 (await maybe_await(config.getSteeringMessages()) if config.getSteeringMessages else None) or []
             )
@@ -346,7 +379,7 @@ async def _runLoop(
         # No more messages, exit
         break
 
-    await _emit(emit, AgentEndEvent(messages=newMessages))
+    await _emit(emit, AgentEndEvent(messages=newMessages, toolBatchTerminated=toolBatchTerminated))
 
 
 def _declareToolChanges(context: AgentContext, pendingMessages: list[AgentMessage]) -> list[AgentMessage]:
@@ -454,6 +487,7 @@ async def _streamAssistantResponse(
     signal: Any | None,
     emit: AgentEventSink,
     streamFunction: StreamFn,
+    request_id: str | None = None,
 ) -> AssistantMessage:
     """Stream an assistant response from the LLM.
     This is where AgentMessage[] gets transformed to Message[] for the LLM.
@@ -488,6 +522,8 @@ async def _streamAssistantResponse(
     async def result() -> AssistantMessage:
         message = await response.result()
         message.thinkingLevel = config.reasoning if config.reasoning is not None else "off"
+        if request_id is not None:
+            message.requestId = request_id
         return message
 
     partialMessage: AssistantMessage | None = None
@@ -579,6 +615,7 @@ async def _failToolCallsFromTruncatedMessage(
             emit,
             ToolExecutionStartEvent(toolCallId=toolCall.id, toolName=toolCall.name, args=toolCall.arguments),
         )
+        _observeRejectedTool(toolCall, reason="truncated_response")
         finalized = _FinalizedToolCallOutcome(
             toolCall=toolCall,
             result=_createErrorToolResult(
@@ -639,6 +676,7 @@ async def _executeToolCallsSequential(
 
         preparation = await _prepareToolCall(currentContext, assistantMessage, toolCall, config, signal)
         if preparation.kind == "immediate":
+            _observeRejectedTool(toolCall)
             finalized = _FinalizedToolCallOutcome(
                 toolCall=toolCall,
                 result=preparation.result,
@@ -688,6 +726,7 @@ async def _executeToolCallsParallel(
 
         preparation = await _prepareToolCall(currentContext, assistantMessage, toolCall, config, signal)
         if preparation.kind == "immediate":
+            _observeRejectedTool(toolCall)
             finalized = _FinalizedToolCallOutcome(
                 toolCall=toolCall,
                 result=preparation.result,
@@ -703,6 +742,7 @@ async def _executeToolCallsParallel(
             preparation: _PreparedToolCall = preparation, toolCall: AgentToolCall = toolCall
         ) -> _FinalizedToolCallOutcome:
             if signal_aborted(signal):
+                _observeRejectedTool(toolCall)
                 finalized = _FinalizedToolCallOutcome(
                     toolCall=toolCall,
                     result=_createErrorToolResult("Operation aborted"),
@@ -911,21 +951,31 @@ async def runToolCall(toolCall: AgentToolCall, options: RunToolCallOptions) -> A
     assistantMessage, context, signal = options.assistantMessage, options.context, options.signal
     preparation = await _prepareToolCall(context, assistantMessage, toolCall, options, signal, options.tools)
     if preparation.kind == "immediate":
+        _observeRejectedTool(toolCall, nested=True)
         return AgentToolCallOutcome(toolCall=toolCall, result=preparation.result, isError=preparation.isError)
     executed = await _executePreparedToolCall(
-        preparation, signal, options.onUpdate if options.onUpdate is not None else (lambda _partialResult: None)
+        preparation, signal, options.onUpdate if options.onUpdate is not None else (lambda _partialResult: None), nested=True
     )
-    return await _finalizeExecutedToolCall(context, assistantMessage, preparation, executed, options, signal)
+    outcome = await _finalizeExecutedToolCall(context, assistantMessage, preparation, executed, options, signal)
+    observe("tool_finished", call_id=toolCall.id, nested=True, is_error=outcome.isError)
+    return outcome
+
+
+def _observeRejectedTool(toolCall: AgentToolCall, *, nested: bool = False, reason: str | None = None) -> None:
+    observe("tool_rejected", call_id=toolCall.id, tool=toolCall.name, nested=nested, status="not_executed", reason=reason)
 
 
 async def _executePreparedToolCall(
     prepared: _PreparedToolCall,
     signal: Any | None,
     onUpdate: _ToolUpdateSink,
+    *,
+    nested: bool = False,
 ) -> _ExecutedToolCallOutcome:
     updateEvents: list[asyncio.Future[Any]] = []
     acceptingUpdates = True
     startedAt = time.perf_counter()
+    durationMs = None
 
     def elapsed() -> int:
         return jsRound((time.perf_counter() - startedAt) * 1000)
@@ -936,16 +986,28 @@ async def _executePreparedToolCall(
         updateEvents.append(startTask(maybe_await(onUpdate(partialResult))))
 
     try:
+        observe("tool_entered", call_id=prepared.toolCall.id, tool=prepared.tool.name,
+                read_only=prepared.tool.traceReadOnly, nested=nested)
         result = _coerceAgentToolResult(
             await maybe_await(prepared.tool.execute(prepared.toolCall.id, prepared.args, signal, update))
         )
         durationMs = elapsed()
         acceptingUpdates = False
+        observe("tool_returned", call_id=prepared.toolCall.id, duration_ms=durationMs,
+                status="error" if result.isError else "ok")
         await asyncio.gather(*updateEvents)
         return _ExecutedToolCallOutcome(result=result, isError=result.isError is True, durationMs=durationMs)
     except BaseException as error:  # noqa: BLE001 - `catch (error)`; see `_reraiseIfNotToolFailure`
-        durationMs = elapsed()
         acceptingUpdates = False
+        if durationMs is None:
+            durationMs = elapsed()
+            if isinstance(error, Exception) or (isinstance(error, asyncio.CancelledError) and signal_aborted(signal)):
+                observe("tool_returned", call_id=prepared.toolCall.id, duration_ms=durationMs,
+                        status="aborted" if signal_aborted(signal) else "timeout" if isinstance(error, TimeoutError) else "error")
+        else:
+            # A progress callback can fail after a real executor result. Keep reporting the
+            # callback failure to the caller, but do not change the recorded executor result.
+            durationMs = elapsed()
         await asyncio.gather(*updateEvents, return_exceptions=True)
         _reraiseIfNotToolFailure(error, signal)
         return _ExecutedToolCallOutcome(

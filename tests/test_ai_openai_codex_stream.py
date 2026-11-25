@@ -8,7 +8,7 @@ MISAKA fork, in what the Python adapter forces on the fakes:
   (``_cachedWebsocket``), answers ``recv()`` from a queue, and reports ``state`` the way ``readyState`` is numbered. A
   socket that never opens is a connector that waits out ``open_timeout`` and raises ``TimeoutError``, as websockets does.
 - vitest's fake timers: the WebSocket timeouts run on real 50 ms clocks; the cached socket's age is moved back on its
-  creation time instead of moving the system time; retry sleeps are recorded by replacing ``_sleep``.
+  creation time instead of moving the system time; retry sleeps are recorded at the shared provider helper.
 - ``originator`` defaults to MISAKA's client name; zstd is checked only where a codec is installed.
 """
 
@@ -37,6 +37,7 @@ from misaka.ai.api.openai_codex_responses import stream as streamOpenAICodexResp
 from misaka.ai.api.openai_codex_responses import (
     streamSimple as streamSimpleOpenAICodexResponses,
 )
+from misaka.ai.runtime_observation import observation_sink
 from misaka.ai.types import (
     Context,
     Model,
@@ -45,7 +46,9 @@ from misaka.ai.types import (
     ToolResultMessage,
     UserMessage,
 )
+from misaka.ai.utils._sdk_error import provider_error_status
 from misaka.ai.utils.pi_user_agent import getPiUserAgent
+from misaka.ai.utils.provider_retry import providerRetryDisposition
 from misaka.ai.utils.transcript import normalizeContext
 from misaka.core.provider_attribution import CLIENT_NAME
 from misaka.utils.js import AbortController
@@ -370,13 +373,15 @@ async def test_aborts_sse_fetch_after_the_configured_http_timeout_when_response_
 
     fetchMock.impl = neverAnswers
 
-    result = await streamOpenAICodexResponses(
+    response = streamOpenAICodexResponses(
         codexModel(), helloContext(), {"apiKey": mockToken(), "transport": "sse", "timeoutMs": 10}
-    ).result()
+    )
+    result = await response.result()
 
     assert len(fetchMock.calls) == 1
     assert result.stopReason == "error"
     assert result.errorMessage == "Codex SSE response headers timed out after 10ms"
+    assert providerRetryDisposition(response.error_cause) == "transient"
 
 
 async def test_aborts_sse_body_reads_after_response_headers_arrive(fetchMock):
@@ -770,8 +775,10 @@ async def test_closes_one_shot_websockets_when_cache_retention_is_none(fetchMock
     sockets = stubWebSocket(monkeypatch, onSend, state=None)
     options = {"apiKey": mockToken(), "cacheRetention": "none", "sessionId": "one-off-summary", "transport": "auto"}
 
-    await streamOpenAICodexResponses(codexModel(), helloContext(timestamp=1), options).result()
-    await streamOpenAICodexResponses(codexModel(), helloContext(timestamp=1), options).result()
+    observations = []
+    with observation_sink(lambda kind, _data: observations.append(kind)):
+        await streamOpenAICodexResponses(codexModel(), helloContext(timestamp=1), options).result()
+        await streamOpenAICodexResponses(codexModel(), helloContext(timestamp=1), options).result()
 
     assert len(sockets) == 2
     assert sum(socket.closed for socket in sockets) == 2
@@ -779,6 +786,7 @@ async def test_closes_one_shot_websockets_when_cache_retention_is_none(fetchMock
     assert all("prompt_cache_key" not in body for body in sentBodies)
     assert getOpenAICodexWebSocketDebugStats("one-off-summary") is None
     assert fetchMock.calls == []
+    assert all(not kind.startswith("http_") for kind in observations)
 
 
 async def test_falls_back_to_sse_when_websocket_connect_does_not_open_before_the_connect_timeout(fetchMock, monkeypatch):
@@ -1128,6 +1136,30 @@ async def test_recovers_a_missing_cached_websocket_continuation(fetchMock, monke
 # --- SSE retries --------------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("status", "code"), [(400, "server_busy"), (413, "server_busy"), (429, "insufficient_quota"), (429, "usage_limit_reached")]
+)
+async def test_deterministic_codex_sse_failures_make_one_http_attempt(fetchMock, recordedSleeps, status, code):
+    fetchMock.impl = lambda _request: httpx.Response(
+        status, headers={"retry-after-ms": "0", "x-should-retry": "true"},
+        json={"error": {"code": code, "message": "Please retry your request", "plan_type": "PRO"}},
+    )
+    response = streamSimpleOpenAICodexResponses(
+        codexModel(), helloContext(), {"apiKey": mockToken(), "transport": "sse", "maxRetries": 2}
+    )
+
+    result = await response.result()
+
+    assert len(fetchMock.calls) == 1
+    assert result.stopReason == "error"
+    assert recordedSleeps == []
+    assert provider_error_status(response.error_cause) == status
+    assert response.error_cause.code == code
+    assert providerRetryDisposition(response.error_cause) == "provider_terminal"
+    if status == 429:
+        assert result.errorMessage == "You have hit your ChatGPT usage limit (pro plan)."
+
+
 @pytest.fixture
 def recordedSleeps(monkeypatch):
     """``vi.spyOn(globalThis, "setTimeout")`` over the retry sleeps; they return at once."""
@@ -1136,7 +1168,7 @@ def recordedSleeps(monkeypatch):
     async def sleep(ms: float, _signal: Any = None) -> None:
         delays.append(ms)
 
-    monkeypatch.setattr(codex, "_sleep", sleep)
+    monkeypatch.setattr("misaka.ai.utils.provider_retry._abortableSleep", sleep)
     return delays
 
 
@@ -1159,8 +1191,7 @@ _FIXED_NOW = datetime(2026, 5, 13, tzinfo=UTC).timestamp()
     ],
 )
 async def test_uses_the_retry_header_for_sse_retries(fetchMock, recordedSleeps, monkeypatch, name, makeHeaders, expectedDelay):
-    # `vi.setSystemTime(...)`, for the adapter's own clock only.
-    monkeypatch.setattr(codex, "time", SimpleNamespace(time=lambda: _FIXED_NOW, time_ns=time.time_ns, monotonic=time.monotonic))
+    monkeypatch.setattr("misaka.ai.utils.provider_retry._now_ms", lambda: _FIXED_NOW * 1000)
     codexRequests = 0
 
     def impl(_request: httpx.Request) -> httpx.Response:
@@ -1200,6 +1231,42 @@ async def test_fails_immediately_when_a_retry_delay_exceeds_the_limit(fetchMock,
     assert len(fetchMock.calls) == 1
 
 
+async def test_accepts_a_fractional_retry_after_equal_to_the_cap(fetchMock, recordedSleeps):
+    replies = iter([httpx.Response(503, headers={"retry-after-ms": "1000.5"}), sseResponse(buildSSEPayload("completed"))])
+    fetchMock.impl = lambda _request: next(replies)
+
+    result = await streamSimpleOpenAICodexResponses(
+        codexModel(), helloContext(), {"apiKey": mockToken(), "transport": "sse", "maxRetries": 1, "maxRetryDelayMs": 1000.5}
+    ).result()
+
+    assert result.stopReason == "stop"
+    assert recordedSleeps == [1000.5]
+    assert len(fetchMock.calls) == 2
+
+
+async def test_cancel_during_codex_sse_provider_backoff(fetchMock):
+    fetchMock.impl = lambda _request: httpx.Response(503, headers={"retry-after": "60"})
+    controller = AbortController()
+    waiting = asyncio.Event()
+
+    def observe_retry(kind, _metadata):
+        if kind == "provider_retry":
+            waiting.set()
+
+    with observation_sink(observe_retry):
+        response = streamOpenAICodexResponses(
+            codexModel(), helloContext(), {"apiKey": mockToken(), "transport": "sse", "maxRetries": 2, "signal": controller.signal}
+        )
+        try:
+            await asyncio.wait_for(waiting.wait(), 2)
+        finally:
+            controller.abort()
+        result = await asyncio.wait_for(response.result(), 2)
+
+    assert result.stopReason == "aborted"
+    assert len(fetchMock.calls) == 1
+
+
 @pytest.mark.skipif(not _HAS_ZSTD, reason="no zstd codec installed (compression.zstd or zstandard)")
 async def test_zstd_compresses_sse_request_bodies(fetchMock):
     fetchMock.impl = lambda _request: sseResponse(buildSSEPayload("completed"))
@@ -1227,7 +1294,8 @@ async def test_zstd_compresses_sse_request_bodies(fetchMock):
     assert fetchMock.calls[-1].headers["content-encoding"] == "zstd"
 
 
-async def test_uses_exponential_backoff_across_repeated_sse_retries_without_retry_headers(fetchMock, recordedSleeps):
+async def test_uses_shared_exponential_jitter_ceiling_for_sse_retries(fetchMock, recordedSleeps, monkeypatch):
+    monkeypatch.setattr("misaka.ai.utils.retry.random.randint", lambda low, high: high)
     codexRequests = 0
 
     def impl(_request: httpx.Request) -> httpx.Response:
@@ -1247,6 +1315,6 @@ async def test_uses_exponential_backoff_across_repeated_sse_retries_without_retr
         codexModel(), helloContext(), {"apiKey": mockToken(), "transport": "sse", "maxRetries": 3}
     ).result()
 
-    assert recordedSleeps == [1000, 2000, 4000]
+    assert recordedSleeps == [500, 1000, 2000]
     assert _text(result) == "Hello"
     assert codexRequests == 4

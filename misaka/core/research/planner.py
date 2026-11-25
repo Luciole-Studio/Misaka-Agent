@@ -13,7 +13,9 @@ from pathlib import Path
 from misaka.ai.utils._output_limit import hit_output_limit
 from misaka.config import home
 from misaka.core.network.card_contract import (
+    LocalWork,
     format_deliverable,
+    local_deliverable,
     one_file,
     split_deliverable,
 )
@@ -78,6 +80,9 @@ several calls: the first with `plan_markdown` and the first tasks, the rest with
 plan to fit one call.
 This tool records your dispatch command; research cards are created only from an accepted call, never from
 JSON in your final answer or a submission file.
+When a native Sister can complete a card from specific local files already in the project, give the card
+`local_work` with its project-relative `input_paths` and the `tools` it needs. The card can read those inputs
+and write its deliverable. Omit `local_work` for discovery, collaboration, or external material.
 After the tool accepts your command, end with a short plain-text summary.
 
 Rules:
@@ -630,7 +635,7 @@ def publish_project_brief(workspace, plan, *, round=1):
     return str(path)
 
 
-def _validate_task(raw, roster, index):
+def _validate_task(raw, roster, index, *, workspace=None):
     if not isinstance(raw, dict):
         raise ValueError(f"Task {index} is not an object.")  # noqa: TRY004 - callers treat bad input as ValueError
     required = ("local_id", "title", "question", "rationale", "deliverable", "assignee")
@@ -640,7 +645,7 @@ def _validate_task(raw, roster, index):
             raise ValueError(f"Task {index} is missing {key!r}.")
         task[key] = task[key].strip()
     try:
-        one_file(split_deliverable(task["deliverable"])[0])
+        name = one_file(split_deliverable(task["deliverable"])[0])
     except ValueError as error:
         raise ValueError(f"Task {task['local_id']}: {error}") from error
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", task["local_id"]):
@@ -651,6 +656,21 @@ def _validate_task(raw, roster, index):
         raise ValueError(
             f"Task {task['local_id']} names a Sister outside the roster: {task['assignee']}"
         )
+    if raw.get("local_work") is not None:
+        from misaka.core.network.ally import presets
+
+        if task["assignee"] in presets.names():
+            raise ValueError(f"Task {task['local_id']}: local_work requires a native Sister.")
+        try:
+            local_work = LocalWork.model_validate(raw["local_work"])
+            local_deliverable(name)
+            if workspace is not None:
+                local_work.resolve_inputs(workspace)
+        except ValueError as error:
+            raise ValueError(f"Task {task['local_id']}, local_work: {error}") from error
+        task["local_work"] = local_work.model_dump()
+    else:
+        task.pop("local_work", None)
     for key in ("method", "source_strategy", "falsifiers", "assignee_reason"):
         task[key] = str(task.get(key) or "").strip()
     for key in ("dependencies", "capabilities"):
@@ -664,8 +684,8 @@ def _validate_task(raw, roster, index):
     return task
 
 
-def _validate_tasks(raw_tasks, roster_ids):
-    tasks = [_validate_task(raw, roster_ids, i) for i, raw in enumerate(raw_tasks or [], 1)]
+def _validate_tasks(raw_tasks, roster_ids, *, workspace=None):
+    tasks = [_validate_task(raw, roster_ids, i, workspace=workspace) for i, raw in enumerate(raw_tasks or [], 1)]
     local_ids = [task["local_id"] for task in tasks]
     if len(local_ids) != len(set(local_ids)):
         raise ValueError("Last Order returned duplicate task local_id values.")
@@ -711,7 +731,7 @@ def _validate_decisions(raw, *, tasks, allowed):
     return decisions
 
 
-def validate_plan(obj, roster, *, decisions_allowed=False, root=False, red_team_required=True):
+def validate_plan(obj, roster, *, decisions_allowed=False, root=False, red_team_required=True, workspace=None):
     if not isinstance(obj, dict):
         raise ValueError("Last Order planning output is not an object.")  # noqa: TRY004 - callers treat bad input as ValueError
     status = obj.get("status")
@@ -721,7 +741,7 @@ def validate_plan(obj, roster, *, decisions_allowed=False, root=False, red_team_
     if not isinstance(plan_markdown, str) or not plan_markdown.strip():
         raise ValueError("Last Order returned an incomplete plan_markdown value.")
     roster_ids = {r["id"] if isinstance(r, dict) else str(r) for r in roster}
-    tasks = _validate_tasks(obj.get("tasks"), roster_ids)
+    tasks = _validate_tasks(obj.get("tasks"), roster_ids, workspace=workspace)
     decisions = _validate_decisions(obj.get("decisions"), tasks=tasks, allowed=decisions_allowed)
     if status == "ready" and not tasks and not decisions:
         raise ValueError("A ready research plan must contain at least one task or one decision.")
@@ -874,7 +894,8 @@ Read the live workspace view before planning.
         con, run, cfg, worker, node, prompt, key="plan", name="misaka_research_assign",
         description="Last Order: assign the research plan, record its forks, and choose its red-team Sister",
         model=commands.Plan,
-        validate=lambda value: validate_plan(value, roster, decisions_allowed=forks, root=runs.is_root(node)),
+        validate=lambda value: validate_plan(value, roster, decisions_allowed=forks, root=runs.is_root(node),
+                                             workspace=run["workspace"]),
         session_dir=session_dir, sister_catalog=roster, merge=commands.merge_plan,
         reply=lambda payload: "Accepted misaka_research_assign. " + commands.plan_receipt(payload, forks=forks),
     )

@@ -150,12 +150,30 @@ def _turn_failure(event):
             continue
         stop = _field(message, "stopReason")
         if stop == "error":
-            return "error", str(_field(message, "errorMessage", "") or "request error")
+            return "error", str(_field(message, "errorMessage", "") or "request error"), _field(message, "retryStop")
         if stop == "length":
             from misaka.ai.utils._output_limit import output_limit_error
-            return "length", output_limit_error(message)
+            return "length", output_limit_error(message), None
         return None
     return None
+
+
+def _terminal_completion_receipt(event, call_id):
+    if not call_id or not _field(event, "toolBatchTerminated", False):
+        return False
+    messages = _field(event, "messages", []) or []
+    if len(messages) < 2:
+        return False
+    return _matches_completion(*messages[-2:], call_id)
+
+
+def _matches_completion(assistant, receipt, call_id):
+    if _field(assistant, "role") != "assistant" or _field(receipt, "role") != "toolResult":
+        return False
+    calls = [block for block in _field(assistant, "content", []) if _field(block, "type") == "toolCall"]
+    return (len(calls) == 1 and _field(calls[0], "id") == _field(receipt, "toolCallId") == call_id
+            and _field(calls[0], "name") == _field(receipt, "toolName") == "misaka_card_complete"
+            and _field(receipt, "isError") is False)
 
 
 PROGRESS_SECONDS = 60
@@ -181,7 +199,7 @@ class TodoPart:
 
     _consultation = None
 
-    def __init__(self, task_id, sender):
+    def __init__(self, task_id, sender, *, bounded_card=False):
         from typing import Literal
 
         from pydantic import BaseModel, Field, create_model
@@ -206,6 +224,11 @@ class TodoPart:
         self._nudged_generation = None
         self._held_generation = None
         self._turn_clean = False
+        self._bounded_card = bounded_card
+        self._terminal_call_id = None
+        self._terminal_end = False
+        self._complete_again = ("Then call misaka_card_complete again on its own." if bounded_card else
+                                "Then call misaka_card_complete again and end the turn with the plain-text summary.")
         self._failure = None
         self._continued_generation = None
         self._idle_watch = None
@@ -292,12 +315,14 @@ class TodoPart:
                                   **{name: spec for name, (_owner, spec) in owned_fields.items()})
 
         async def note_exec(tool_call_id, raw, signal, on_update, ctx):
+            from misaka.core.network import worker
             from misaka.core.platform import cards
             p = raw if isinstance(raw, NoteParams) else NoteParams(**(raw or {}))
             c = con()
             row = bdb.get(c, task_id)
+            findings = [item.model_dump(exclude_none=True) for item in p.findings]
             evidence = {
-                "findings": [item.model_dump(exclude_none=True) for item in p.findings],
+                "findings": worker.scoped_findings(c, row, findings) if findings else findings,
                 "uncertain": [item.strip() for item in p.uncertain if item.strip()],
             }
 
@@ -367,9 +392,20 @@ class TodoPart:
                     "included -- call misaka_card_note again with the complete list (it replaces this one). "
                     "Then call misaka_card_complete again.")
             worker.declare_completion(con(), row, p.summary.strip())
+            if bounded_card:
+                self._terminal_call_id = tool_call_id
+                return {**_text("Completion recorded. The runtime will submit the card when this turn settles."),
+                        "terminate": True}
             return _text("Completion recorded for this attempt. End the turn now with a short plain-text "
                          "summary; the card is submitted when the turn ends.")
 
+        complete_instruction = (
+            "Call `misaka_card_complete` alone after the contract deliverable exists and the work is done. "
+            "The runtime submits the card at the end of that tool turn."
+            if bounded_card else
+            "Call `misaka_card_complete` only when the contract deliverable exists in the card's output "
+            "directory and the work is done; then end the turn with a short summary."
+        )
         self.tools = [
             ToolDefinition(
                 name="misaka_card_complete", label="Complete the card",
@@ -380,8 +416,7 @@ class TodoPart:
                 parameters=typeboxSchema(CompleteParams), execute=complete_exec,
                 promptSnippet="Declare the card finished and submit it",
                 promptGuidelines=[
-                    ("Call `misaka_card_complete` only when the contract deliverable exists in the card's output "
-                     "directory and the work is done; then end the turn with a short summary."),
+                    complete_instruction,
                     ("Answering a message from Last Order or reporting progress does not finish the card: just end "
                      "the turn without the call and keep working on the next one."),
                 ]),
@@ -491,6 +526,8 @@ class TodoPart:
         self._cancel_idle_watch()
         self._summary = None
         self._summary_token = None
+        self._terminal_call_id = None
+        self._terminal_end = False
         row = self._owned_row()
         if row is not None:
             from misaka.core.network import worker
@@ -547,11 +584,18 @@ class TodoPart:
             from misaka.core.network import messages
             messages.settle_consultation(self.con(), *consultation, status, reason=reason)
 
+    def settle_tool_turn(self, turn):
+        return (self._terminal_call_id is not None and len(turn.toolResults) == 1
+                and _matches_completion(turn.message, turn.toolResults[0], self._terminal_call_id))
+
     async def agent_end(self, event, ctx=None):
         reason, text = _assistant_end(event)
-        self._turn_clean = reason == "stop"
+        terminal_batch = reason in {"toolUse", "stop"} and _field(event, "toolBatchTerminated", False)
+        self._terminal_end = terminal_batch and _terminal_completion_receipt(event, self._terminal_call_id)
+        self._turn_clean = reason == "stop" or (self._bounded_card and terminal_batch)
         self._failure = _turn_failure(event)
-        row = self._owned_row() if self._turn_clean else None
+        can_submit = self._terminal_end or (reason == "stop" and not self._bounded_card)
+        row = self._owned_row() if can_submit else None
         from misaka.core.network import worker
         completion = worker.declared_completion(self.con(), row) if row is not None else None
         self._summary = (completion or text) if completion is not None else None
@@ -559,13 +603,17 @@ class TodoPart:
 
     async def agent_settled(self, event=None, ctx=None):
         self._calls_settled()
+        terminal_end = self._terminal_end
+        if terminal_end and (_field(event, "aborted", False) or _field(event, "interrupted", False)):
+            self._summary = self._summary_token = None
+            return
         failure, self._failure = self._failure, None
         if failure is not None:
             self._settle_failure(*failure)
             return
         summary, token = self._summary, self._summary_token
         if summary is None or token is None:
-            if self._turn_clean and not self._declared():
+            if self._turn_clean and (self._bounded_card or not self._declared()):
                 self._hold_if_running()
                 await self._redeclare_if_done()
             if self._consultation is not None:
@@ -594,6 +642,9 @@ class TodoPart:
             prepared = await asyncio.to_thread(dispatch.prepare_submission, row, submission)
             if self._summary_token is not token:
                 return
+            if terminal_end and not dispatch.record_terminal_submission(self.con(), row, prepared):
+                self._summary = self._summary_token = None
+                return
             accepted = dispatch.accept_state(
                 self.con(),
                 row,
@@ -602,6 +653,8 @@ class TodoPart:
                 claim_lock=row["claim_lock"],
             )
             if accepted:
+                if terminal_end:
+                    self.session.resumeQueuedMessagesAfterSettle()
                 await asyncio.to_thread(
                     dispatch.accept_side_effects,
                     self.con(),
@@ -617,8 +670,7 @@ class TodoPart:
                     and self._nudged_generation != int(row["generation"])
                     and self._owned_row() is not None):
                 self._nudged_generation = int(row["generation"])
-                self._prompt(f"Submission incomplete: {error} Then call misaka_card_complete again and "
-                             "end the turn with the plain-text summary.")
+                self._prompt(f"Submission incomplete: {error} {self._complete_again}")
                 self._summary = self._summary_token = None
                 return
             if self._owned_row() is not None:
@@ -633,7 +685,7 @@ class TodoPart:
         if self._summary_token is token and (accepted or self._owned_row() is None):
             self._summary = self._summary_token = None
 
-    def _settle_failure(self, stop, reason):
+    def _settle_failure(self, stop, reason, retry_stop):
         """A run that ended in an error or a cut reply, with nothing left to run automatically
         (pi's retries and recovery are behind ``agent_settled``). A pane used to sit on it with
         the card running, its claim heartbeated and nobody to type -- a headless card fails the
@@ -641,17 +693,17 @@ class TodoPart:
         as a workflow's driver gives Last Order; the second cut fails like an error. The board's
         failure model decides the rest: a backoff and a retry, or a card that stays failed."""
         row = self._owned_row()
+        from misaka.core.network import worker
+
         if row is None:
             if self._consultation is not None:
-                from misaka.core.network import worker
-                if worker.stopped_at_cap(reason):
+                if worker.stopped_at_cap(reason, retry_stop=retry_stop):
                     self._end_consultation("stopped", "the run's token budget is spent")
                 else:
                     self._end_consultation("failed", reason)
             return
         generation = int(row["generation"])
-        from misaka.core.network import worker
-        if worker.stopped_at_cap(reason):
+        if worker.stopped_at_cap(reason, retry_stop=retry_stop):
             if self._bdb.back_to_ready(self.con(), self.task_id, generation=generation,
                                        claim_lock=row["claim_lock"]):
                 self._bdb.add_event(self.con(), self.task_id, "budget_stop", {"reason": reason},
@@ -665,7 +717,7 @@ class TodoPart:
         if self._bdb.add_event(self.con(), self.task_id, "failed", {"reason": reason},
                                generation=generation, claim_lock=row["claim_lock"]):
             self._bdb.mark_failed(self.con(), self.task_id, generation=generation,
-                                  claim_lock=row["claim_lock"], reason=reason)
+                                  claim_lock=row["claim_lock"], reason=reason, retry_stop=retry_stop)
 
     def _hold_if_running(self):
         """A clean turn end without ``misaka_card_complete``: the card stays running and the
@@ -686,7 +738,10 @@ class TodoPart:
         missing = worker.missing_deliverable(row)
         detail = (f"its deliverable `{missing}` is not under `{row['output_dir']}` yet"
                   if missing else "the turn ended without `misaka_card_complete`")
-        self._hold(f"The card is still running: {detail}. Call `misaka_card_complete` when the work "
+        if not missing and self._bounded_card:
+            detail = "the turn ended without a successful standalone `misaka_card_complete` call"
+        call = "Call `misaka_card_complete` on its own" if self._bounded_card else "Call `misaka_card_complete`"
+        self._hold(f"The card is still running: {detail}. {call} when the work "
                    "is done; if this turn only answered a message, keep working.")
 
     def _watch_idle(self, generation):

@@ -141,11 +141,34 @@ def iter_cards(workspace):
 
 
 def create(con, workspace, title, body, assignee, *, reviewer=None, model=None,
-           priority=0, origin_session=None, after_row=None, needs=()):
+           priority=0, origin_session=None, after_row=None, needs=(), local_work=None):
     """The one front door for new cards: index row first (it mints the id), then ``after_row(tid)``
     for whatever else the row must be tied to (a workflow's link), then the file. Any failure before
     the file exists rolls the row back -- no card exists without its truth, and no file without its row."""
     workspace = tasks.canonical_workspace(workspace)
+    scope = None
+    name = None
+    if local_work is not None:
+        from misaka.core.network.ally import presets
+        from misaka.core.network.card_contract import (
+            LocalWork,
+            local_deliverable,
+            local_output,
+        )
+        from misaka.core.network.worker import contract_deliverable
+        from misaka.utils.redact import redact_payload
+
+        if assignee in presets.names():
+            raise ValueError("Local work requires a native Sister.")
+        contract = LocalWork.model_validate(local_work)
+        inputs = contract.resolve_inputs(workspace)
+        root = Path(workspace).resolve(strict=True)
+        scope = contract.model_dump()
+        scope["input_paths"] = [Path(path).relative_to(root).as_posix() for path in inputs]
+        scope = LocalWork.model_validate(scope).model_dump()
+        name = local_deliverable(contract_deliverable({"body": body}))
+        if redact_payload([scope, name]) != [scope, name]:
+            raise ValueError("Local work filenames cannot contain credential-like values.")
     needs = list(dict.fromkeys(needs))
     for parent_id in needs:
         parent = tasks.get(con, parent_id)
@@ -154,15 +177,19 @@ def create(con, workspace, title, body, assignee, *, reviewer=None, model=None,
     tid = tasks.create_task(con, title, body=body, assignee=assignee, model=model,
                             priority=priority,
                             reviewer=reviewer, workspace=workspace,
-                            origin_session=origin_session)
+                            origin_session=origin_session, local_work=scope, local_deliverable=name)
     fields = {"id": tid, "title": title, "status": "ready", "generation": 1, "assignee": assignee,
               "reviewer": reviewer, "model": model,
               "priority": priority,
               "origin_session": origin_session, "created_at": _now_iso()}
+    if scope is not None:
+        fields["local_work"] = scope
     text = body.strip() + f"\n\n{LOG_HEADING}\n- {_now_iso()} last-order: created\n"
     try:
         if after_row is not None:
             after_row(tid)
+        if scope is not None:
+            local_output(workspace, tasks.get(con, tid)["output_dir"], name, inputs)
         if needs:
             fields.update(needs=needs, status="todo")
             con.execute("UPDATE tasks SET status='todo' WHERE id=?", (tid,))

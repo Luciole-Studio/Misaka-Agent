@@ -362,7 +362,7 @@ class CacheWarmer:
             message = await self.models.streamSimple(
                 run.model,
                 run.context,
-                _spread(run.options, maxTokens=1, maxRetries=0, signal=run.controller.signal),
+                _spread(run.options, maxTokens=1, maxRetries=0, signal=run.controller.signal, runtimeCacheWarm=True),
             ).result()
             if not self.validateRun(run):
                 return

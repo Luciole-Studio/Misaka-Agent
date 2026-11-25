@@ -10,15 +10,35 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from asyncio import CancelledError
+from contextlib import contextmanager, nullcontext
 
 from pydantic import Field
 
 from misaka.core.platform import owners
+from misaka.core.platform import tasks as task_store
 from misaka.core.research import runs
 
 
 def _has_runs(con):
     return bool(con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_runs'").fetchone())
+
+
+@contextmanager
+def _trace_card(run_id, diagnostics, card_id, generation, attempt):
+    from misaka.core.runtime_trace import scope_event, trace_scope
+
+    with trace_scope(run_id, diagnostics, card_id=card_id, generation=generation, attempt=attempt):
+        scope_event("card_started", status="started")
+        state = "failed"
+        try:
+            yield
+            state = "finished"
+        except (CancelledError, KeyboardInterrupt):
+            state = "cancelled"
+            raise
+        finally:
+            scope_event("card_finished", status=state)
 
 
 TOOL_DESCRIPTIONS = {
@@ -58,6 +78,7 @@ class ResearchOwner(owners.CardOwner):
     scope_label = "research run"
     token_cap_setting = "research.token_cap"
     resume_command = "/research resume"
+    rate_limit_max_attempts = 5
 
     def card(self, con, task_id):
         context = runs.task_context(con, task_id)
@@ -65,6 +86,14 @@ class ResearchOwner(owners.CardOwner):
 
     def session_overrides(self, con, context):
         return runs.session_overrides(runs.get(con, context["run_id"]))
+
+    def card_trace(self, con, context, *, card_id, generation, attempt_id):
+        run = runs.get(con, context["run_id"])
+        if run is None:
+            return nullcontext()
+        attempt = task_store.get_run(con, attempt_id) if attempt_id else None
+        return _trace_card(run["id"], runs.diagnostics_enabled(run), card_id, generation,
+                           attempt["attempt"] if attempt is not None else None)
 
     def card_deleted(self, con, task_id):
         if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_cards'").fetchone():
@@ -122,6 +151,9 @@ class ResearchOwner(owners.CardOwner):
             "assignment, dependencies and review. Use the current research phase tools, "
             f"or ask the user to run /research resume {context['run_id']} for a paused run."
         )
+
+    def requires_card_file(self, context):
+        return context["kind"] == "research"
 
     def reads_results(self, con, context):
         try:

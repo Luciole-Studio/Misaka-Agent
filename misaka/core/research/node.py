@@ -26,6 +26,12 @@ from misaka.utils import loop_watchdog
 from misaka.utils.prompt_file import removePromptFile, writePromptToTempFile
 
 
+def _launch_arguments_too_long(error):
+    if isinstance(error, OSError):
+        return (getattr(error, "winerror", None) or error.errno) == 206
+    return "[WinError 206]" in str(error)  # The pane daemon sends the spawn error as text.
+
+
 class ProcessSpawner:
     """Managed research children, independent of visible panes and their terminals.
 
@@ -151,6 +157,8 @@ class PaneRunner:
                         "place": {"grid": self.home}})
                     self._said.pop(tid, None)
                 except (RuntimeError, OSError) as error:
+                    if _launch_arguments_too_long(error):
+                        raise CardNotStarted(f"Card {tid} cannot start with these process arguments: {error}") from error
                     if self._said.get(tid) != str(error):
                         self._said[tid] = str(error)
                         print(f"card {tid}: {error}", flush=True)
@@ -159,9 +167,14 @@ class PaneRunner:
         """Continue a settled card in her own conversation, in this tab: the daemon request
         ``misaka_sister_message`` makes (a new generation under the daemon's claim)."""
         from misaka.ui.panel import client as net
-        await asyncio.to_thread(net.request, "pane.continue_card", {
-            "task_id": task_id, "say": say, "expected_generation": expected_generation,
-            "place": {"grid": self.home}})
+        try:
+            await asyncio.to_thread(net.request, "pane.continue_card", {
+                "task_id": task_id, "say": say, "expected_generation": expected_generation,
+                "place": {"grid": self.home}})
+        except (RuntimeError, OSError) as error:
+            if _launch_arguments_too_long(error):
+                raise CardNotStarted(f"Card {task_id} cannot start with these process arguments: {error}") from error
+            raise
 
     async def stop(self, task_id, *, expected_generation=None, expected_claim_lock=None, research_owner=None, **_kwargs):
         from misaka.ui.panel import client as net
@@ -249,8 +262,13 @@ class HeadlessRunner:
                 continue
             if sum(taken.values()) >= host_cap or taken.get(row["assignee"], 0) >= assignee_cap:
                 continue
-            self.flying[task_id] = self._processes.spawn(
-                [*CARD_ARGV, task_id], cwd=None, new_session=True)
+            try:
+                self.flying[task_id] = self._processes.spawn(
+                    [*CARD_ARGV, task_id], cwd=None, new_session=True)
+            except OSError as error:
+                if _launch_arguments_too_long(error):
+                    raise CardNotStarted(f"Card {task_id} cannot start with these process arguments: {error}") from error
+                raise
             taken[row["assignee"]] = taken.get(row["assignee"], 0) + 1
 
     async def continue_card(self, task_id, say, *, expected_generation):
@@ -266,6 +284,8 @@ class HeadlessRunner:
                                          cwd=None, new_session=True)
         except OSError as error:
             removePromptFile(written)
+            if _launch_arguments_too_long(error):
+                raise CardNotStarted(f"Card {task_id} cannot start with these process arguments: {error}") from error
             failures = self._spawn_failures.get(task_id, 0) + 1
             self._spawn_failures[task_id] = failures
             if failures >= task_store.FAILURE_LIMIT:
@@ -464,8 +484,10 @@ def run_interactive(run_id, node_id, *, runner_key):
         "MISAKA_USAGE_DB": str(cfg["db"]), "MISAKA_USAGE_TASK_ID": run_id,
         "MISAKA_USAGE_GENERATION": "1", "MISAKA_USAGE_TOKEN_CAP": ""})
     from misaka.cli.engine import main as engine_main
+    from misaka.core.runtime_trace import trace_scope
     try:
-        return asyncio.run(loop_watchdog.watched(engine_main(flags, assembly.engine_options())))
+        with trace_scope(run_id, runs.diagnostics_enabled(run)):
+            return asyncio.run(loop_watchdog.watched(engine_main(flags, assembly.engine_options())))
     except Exception as error:  # noqa: BLE001 - a window that never opened is the node's failure to report
         traceback.print_exc()
         con = task_store.connect(os.path.expanduser(CFG["db"]))
@@ -480,10 +502,13 @@ def run_interactive(run_id, node_id, *, runner_key):
 def run_headless(run_id, node_id, *, runner_key):
     from misaka.core.research import workflow
     from misaka.core.research.window import node_session
+    from misaka.core.runtime_trace import trace_scope
 
     async def routine(con, cfg, runner, progress):
-        async with node_session(con, cfg, runs.get(con, run_id), runs.node(con, node_id)) as owner:
-            return await workflow.expand_node(
-                con, cfg, runner, owner, run_id=run_id, node_id=node_id, progress=progress, session=owner.session)
+        run = runs.get(con, run_id)
+        with trace_scope(run_id, runs.diagnostics_enabled(run)):
+            async with node_session(con, cfg, run, runs.node(con, node_id)) as owner:
+                return await workflow.expand_node(
+                    con, cfg, runner, owner, run_id=run_id, node_id=node_id, progress=progress, session=owner.session)
 
     return _run(f"node {node_id}", routine, row_id=node_id, runner_key=runner_key)

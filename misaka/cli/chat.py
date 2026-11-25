@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 from misaka.config import current_config, home, profiles, sessions, sisters
@@ -43,13 +44,16 @@ def resolve_session(session, who):
     return resolved.path
 
 
-def launch(who, model=None, cont=False, pick=False, session=None, read_only=False, catalog=None, attach=False, skills=None):
+def launch(who, model=None, cont=False, pick=False, session=None, read_only=False, catalog=None, attach=False, skills=None,
+           *, diagnostics=False):
     """Open chat; only the writable form assembles an agent. ``who=None`` means Last Order."""
     from misaka.core.session_manager import readSessionHeader
     if not sys.stdin.isatty():
         sys.exit("misaka chat needs a terminal; stdin is not a TTY.\n"
                  "For a scripted, non-interactive turn use `misaka dm <who> \"<message>\"`.")
     if read_only or attach:
+        if diagnostics:
+            sys.exit("--diagnostics requires a writable chat session.")
         access = "--attach" if attach else "--read-only"
         if not (session or catalog) or (session and catalog):
             sys.exit(f"chat {access} needs exactly one of --session or --catalog.")
@@ -117,9 +121,11 @@ def launch(who, model=None, cont=False, pick=False, session=None, read_only=Fals
         "MISAKA_INPUT_HISTORY": str(home.path("input_history") / f"{who or 'last-order'}.json")})
 
     from misaka.cli.engine import main as engine_main
+    from misaka.core.runtime_trace import trace_scope
     from misaka.utils import loop_watchdog
     loop_watchdog.configure("chat", exit_on_stall=False)
-    sys.exit(asyncio.run(loop_watchdog.watched(engine_main(flags, session_assembly.engine_options()))))
+    with trace_scope(None, True) if diagnostics else nullcontext():
+        sys.exit(asyncio.run(loop_watchdog.watched(engine_main(flags, session_assembly.engine_options()))))
 
 
 def _display_value(value):

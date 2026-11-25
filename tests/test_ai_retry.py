@@ -16,6 +16,7 @@ from misaka.ai.utils.retry import (
     retryAssistantCall,
     retryDelayMs,
 )
+from misaka.core.settings_manager import SettingsManager
 from misaka.utils.js import AbortController
 
 openAIExplicitRetryMessage = (
@@ -173,6 +174,26 @@ def test_caps_agent_retry_delay():
     assert retryDelayMs(SimpleNamespace(baseDelayMs=2000, maxAgentDelayMs=0), 5) == 0
 
 
+@pytest.mark.parametrize(("base", "cap", "expected"), [(3.5, 10.5, 3), (2000.0, 10.5, 10)])
+async def test_retry_jitter_accepts_configured_fractional_delays(monkeypatch, base, cap, expected):
+    settings = SettingsManager.inMemory({"retry": {"baseDelayMs": base, "maxAgentDelayMs": cap, "maxRetries": 1}})
+    policy = RetryPolicy(**settings.getRetrySettings())
+    outcomes = iter([_failed("terminated"), fauxAssistantMessage("recovered")])
+    scheduled = _Fn()
+
+    def largest_sample(low, high):
+        assert low == 0
+        assert isinstance(high, int)
+        return high
+
+    monkeypatch.setattr("misaka.ai.utils.retry.random.randint", largest_sample)
+
+    result = await retryAssistantCall(_produce(lambda: next(outcomes)), policy, None, RetryCallbacks(onRetryScheduled=scheduled))
+
+    assert result.stopReason == "stop"
+    assert scheduled.calls[0][2] == expected
+
+
 disabled = RetryPolicy(enabled=False, maxRetries=3, baseDelayMs=0)
 enabled = RetryPolicy(enabled=True, maxRetries=3, baseDelayMs=0)
 
@@ -226,7 +247,7 @@ async def test_retries_a_transient_error_up_to_max_retries_then_returns_the_fina
     assert (False, 3, "terminated") in onRetryFinished.calls
 
 
-async def test_reports_capped_retry_delays():
+async def test_reports_jittered_delays_within_the_cap(monkeypatch):
     # Regression for #8826.
     n = 0
     policy = RetryPolicy(enabled=True, maxRetries=4, baseDelayMs=10, maxAgentDelayMs=15)
@@ -237,10 +258,20 @@ async def test_reports_capped_retry_delays():
         return _failed("terminated") if n < 5 else fauxAssistantMessage("recovered")
 
     onRetryScheduled = _Fn()
+    samples = iter([3, 15, 0, 7])
+    ceilings = []
+
+    def sample(low, high):
+        assert low == 0
+        ceilings.append(high)
+        return next(samples)
+
+    monkeypatch.setattr("misaka.ai.utils.retry.random.randint", sample)
 
     await retryAssistantCall(_produce(respond), policy, None, RetryCallbacks(onRetryScheduled=onRetryScheduled))
 
-    assert [call[2] for call in onRetryScheduled.calls] == [10, 15, 15, 15]
+    assert ceilings == [10, 15, 15, 15]
+    assert [call[2] for call in onRetryScheduled.calls] == [3, 15, 0, 7]
 
 
 async def test_stops_retrying_once_a_call_succeeds():

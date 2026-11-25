@@ -172,8 +172,9 @@ async def test_exhausts_max_retries_and_emits_failure(sessions, tmp_path: Path):
     assert session.isRetrying is False
 
 
-async def test_caps_agent_retry_delay(sessions, tmp_path: Path):
+async def test_caps_agent_retry_delay(sessions, tmp_path: Path, monkeypatch):
     # Regression for #8826.
+    monkeypatch.setattr("misaka.ai.utils.retry.random.randint", lambda low, high: high)
     streamFn, _calls = scriptedStreamFn(failing(4))
     session = await createSession(sessions, tmp_path, streamFn, maxRetries=5, maxAgentDelayMs=5)
     delays: list[Any] = []

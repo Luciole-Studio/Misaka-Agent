@@ -16,6 +16,7 @@ MISAKA fork, kept to what the Python SDK and platform force (each is marked wher
 from __future__ import annotations
 
 import contextlib
+import math
 import re
 import time
 from collections.abc import Mapping, Sequence
@@ -46,6 +47,7 @@ from misaka.ai.api.simple_options import (
 )
 from misaka.ai.api.transform_messages import transformMessages
 from misaka.ai.models import calculateCost, clampThinkingLevel
+from misaka.ai.runtime_observation import has_observation_sink, observe
 from misaka.ai.types import (
     AssistantMessage,
     CacheRetention,
@@ -314,6 +316,30 @@ def _field(value: Any, key: str) -> Any:
     return value.get(key) if isinstance(value, Mapping) else None
 
 
+def _observeHttpAttempts(client: Any) -> None:
+    # Each stream owns its SDK client. Hooks observe its redirects and retries,
+    # and do not fire when a request is canceled before transport dispatch.
+    hooks = getattr(getattr(client, "_client", None), "event_hooks", None)
+    if not isinstance(hooks, Mapping):
+        return
+    requests, responses = hooks.get("request"), hooks.get("response")
+    if not isinstance(requests, list) or not isinstance(responses, list):
+        return
+    attempt = 0
+
+    async def onRequest(_request: Any) -> None:
+        nonlocal attempt
+        attempt += 1
+        observe("http_attempt", attempt=attempt)
+
+    async def onResponse(response: Any) -> None:
+        observe("http_response", attempt=attempt, status_code=response.status_code)
+
+    requests.append(onRequest)
+    responses.append(onResponse)
+    observe("http_observable")
+
+
 def stream(
     model: Model,
     context: TranscriptContext,
@@ -340,6 +366,18 @@ def stream(
             timestamp=time.time_ns() // 1_000_000,
         )
         client: Any = None
+        observing = has_observation_sink()
+        usageObservation: dict[str, Any] = {"status": "missing"}
+
+        def parseUsage(raw: Any) -> Usage:
+            nonlocal usageObservation
+            usage = None
+            try:
+                usage = _parseChunkUsage(raw, model)
+                return usage
+            finally:
+                if observing:
+                    usageObservation = _inspectUsage(raw, usage)
 
         # `reasoning_details` are replay metadata, not user-visible stream deltas.
         # Keep them in memory during streaming and serialize once when the block is finalized.
@@ -366,6 +404,8 @@ def stream(
                 cacheSessionId,
                 compat,
             )
+            if observing:
+                _observeHttpAttempts(client)
             params = _buildParams(
                 model,
                 normalizedContext,
@@ -577,7 +617,7 @@ def stream(
                     if isinstance(chunk.get("model"), str) and len(chunk["model"]) > 0 and chunk["model"] != model.id:
                         output.responseModel = output.responseModel or chunk["model"]
                     if chunk.get("usage") is not None:
-                        output.usage = _parseChunkUsage(chunk["usage"], model)
+                        output.usage = parseUsage(chunk["usage"])
 
                     choices = chunk.get("choices")
                     choice = (choices[0] if choices else None) if isinstance(choices, list) else None
@@ -587,7 +627,7 @@ def stream(
                     # Fallback: some providers (e.g., Moonshot) return usage
                     # in choice.usage instead of the standard chunk.usage
                     if chunk.get("usage") is None and choice.get("usage") is not None:
-                        output.usage = _parseChunkUsage(choice["usage"], model)
+                        output.usage = parseUsage(choice["usage"])
 
                     if choice.get("finish_reason"):
                         output.rawStopReason = choice["finish_reason"]
@@ -703,6 +743,8 @@ def stream(
             stream.push(DoneEvent(reason=output.stopReason, message=output))
             stream.end()
         except Exception as error:  # noqa: BLE001 - every failure becomes the stream's error event
+            if observing and (isinstance(error, TimeoutError) or type(error).__name__ == "APITimeoutError"):
+                observe("model_timeout", status="timeout")
             for block in output.content:
                 if block.type == "thinking":
                     applyStreamedReasoningDetails(block)
@@ -718,6 +760,8 @@ def stream(
             stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
             stream.end()
         finally:
+            if observing:
+                observe("provider_usage", **usageObservation)
             await _openai_sdk._close_client(client)
 
     spawn_stream_task(run(), stream=stream)
@@ -1480,6 +1524,65 @@ def _parseChunkUsage(rawUsage: Mapping[str, Any], model: Model) -> Usage:
     )
     calculateCost(model, usage)
     return usage
+
+
+def _inspectUsage(rawUsage: Any, usage: Usage | None) -> dict[str, Any]:
+    """Check provider reporting against normalization without retaining the payload."""
+    if not isinstance(rawUsage, Mapping):
+        return {"status": "partial", "issues": ["invalid_usage_object"]}
+
+    present = []
+    raw = {}
+    issues = []
+    field_groups = (
+        ("", rawUsage, ("prompt_tokens", "completion_tokens", "total_tokens", "prompt_cache_hit_tokens",
+                       "prompt_cache_miss_tokens", "cached_tokens")),
+        ("prompt_tokens_details.", rawUsage.get("prompt_tokens_details"), ("cached_tokens", "cache_write_tokens")),
+        ("completion_tokens_details.", rawUsage.get("completion_tokens_details"), ("reasoning_tokens",)),
+    )
+    for prefix, record, fields in field_groups:
+        if record is not None and not isinstance(record, Mapping):
+            issues.append(f"invalid_{prefix.removesuffix('.')}")
+        if not isinstance(record, Mapping):
+            continue
+        for field in fields:
+            if field in record:
+                name = prefix + field
+                present.append(name)
+                value = record[field]
+                if type(value) is int or (type(value) is float and math.isfinite(value)):
+                    raw[name] = value
+                if value is not None and (type(value) is not int or value < 0):
+                    issues.append(f"invalid_{name}")
+
+    if usage is None:
+        status = "conflicting" if issues else "partial"
+        issues.append("usage_normalization_failed")
+        return {"status": status, "raw": raw, "present": present, "issues": issues}
+    if not present and not issues:
+        return {"status": "missing"}
+
+    totals = {
+        "prompt_tokens": usage.input + usage.cacheRead + usage.cacheWrite,
+        "completion_tokens": usage.output,
+        "total_tokens": usage.totalTokens,
+        "prompt_cache_miss_tokens": usage.input + usage.cacheWrite,
+        "prompt_cache_hit_tokens": usage.cacheRead,
+        "cached_tokens": usage.cacheRead,
+        "prompt_tokens_details.cached_tokens": usage.cacheRead,
+    }
+    issues.extend(f"{field}_mismatch" for field, expected in totals.items() if field in raw and raw[field] != expected)
+    if usage.reasoning is not None and usage.reasoning > usage.output:
+        issues.append("reasoning_exceeds_output")
+    complete = all(raw.get(name, -1) >= 0 for name in ("prompt_tokens", "completion_tokens"))
+    return {
+        "status": "conflicting" if issues else "reported" if complete else "partial",
+        "raw": raw,
+        "present": present,
+        "normalized": {"input": usage.input, "output": usage.output, "cache_read": usage.cacheRead,
+                       "cache_write": usage.cacheWrite, "total": usage.totalTokens, "reasoning": usage.reasoning},
+        "issues": issues,
+    }
 
 
 def _mapStopReason(reason: str | None) -> dict[str, str]:

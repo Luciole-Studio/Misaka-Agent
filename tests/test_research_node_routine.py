@@ -476,6 +476,49 @@ async def test_a_node_goes_on_without_a_card_its_last_order_gave_up(lab):
     assert tasks.get(con, by_id["archive"]["id"])["generation"] == 1
 
 
+@pytest.mark.parametrize("stop_event", [
+    {"reason": "consecutive_rate_limits"},
+    {"failure_kind": "provider_terminal"},
+])
+async def test_circuit_stopped_card_waits_for_explicit_resume_when_another_card_fails(lab, stop_event):
+    con, run, root = lab.con, lab.run, lab.root
+    _two_cards(lab)
+    plan = runs.action(con, run["id"], root["id"], "plan")["payload"]
+    plan["tasks"].append({**plan["tasks"][0], "local_id": "museum", "title": "Museum",
+                          "deliverable": "museum.md"})
+    runs.replace_action(con, run, root, "plan", plan, session_file=run["root_session"], tool_call_id="plan-3")
+    _script(lab, reviews={1: []}, alternatives=[], dispositions=None,
+            decide=lambda con_: {"decisions": [], "declined": []},
+            cards_failed=lambda con_, key: {"decision": "conclude", "reason": "the archive is unavailable"})
+    normal_drive = workflow._drive_tasks
+
+    async def fail_cards(con_, cfg, runner, run_id, *, scope, **kwargs):
+        successful = set()
+        for row in runs.tasks(con_, run_id):
+            if row["id"] not in scope:
+                continue
+            if row["local_id"] == "museum":
+                successful.add(row["id"])
+                continue
+            if row["status"] == "failed":
+                continue
+            con_.execute("UPDATE tasks SET status='failed' WHERE id=?", (row["id"],))
+            cards.set_fields(row["workspace"], row["id"], status="failed", generation=1)
+            if row["local_id"] == "fiscal":
+                tasks.add_event(con_, row["id"], "gave_up", stop_event, generation=1)
+        if successful:
+            await normal_drive(con_, cfg, runner, run_id, scope=successful, **kwargs)
+        return "failed"
+
+    lab.monkeypatch.setattr(workflow, "_drive_tasks", fail_cards)
+    assert await _expand(lab, _Runner(con)) == "failed"
+    by_id = {row["local_id"]: row for row in runs.tasks(con, run["id"], kind="research", node_id=root["id"])}
+    assert runs.given_up_cards(con, run["id"]) == {by_id["archive"]["id"]}
+    runs.resume(con, run["id"], driver_lock="driver:test")
+    resumed = tasks.get(con, by_id["fiscal"]["id"])
+    assert (resumed["status"], resumed["generation"]) == ("ready", 2)
+
+
 def test_with_no_retry_left_a_failed_review_fails_its_node_without_a_turn(lab):
     con, run, root = lab.con, lab.run, lab.root
     for call in ("a", "b"):

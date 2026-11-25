@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 import pytest
 
-from misaka.ai.utils.provider_retry import retryProviderRequest
+from misaka.ai.utils.provider_retry import providerRetryAfterMs, retryProviderRequest
 from misaka.utils.js import AbortController
 from tests.fake_timers import FakeTimers
 
@@ -66,6 +66,17 @@ async def test_retries_retryable_provider_errors(monkeypatch):
     assert request.calls == 2
 
 
+async def test_fails_fast_on_explicit_quota_exhaustion():
+    error = providerError(429, {"x-should-retry": "true", "retry-after-ms": "0"})
+    error.code = "insufficient_quota"  # type: ignore[attr-defined]
+    request = _Request(error)
+
+    with pytest.raises(Exception) as raised:
+        await retryProviderRequest(request, {"maxRetries": 2})
+    assert raised.value is error
+    assert request.calls == 1
+
+
 async def test_does_not_retry_errors_the_provider_marks_as_non_retryable():
     error = providerError(429, {"x-should-retry": "false"})
     request = _Request(error)
@@ -92,6 +103,10 @@ async def test_rejects_a_provider_requested_retry_delay_above_the_limit():
     with pytest.raises(Exception, match=r"Server requested 277403s retry delay \(max: 1s\)"):
         await retryProviderRequest(request, {"maxRetries": 1, "maxRetryDelayMs": 1000})
     assert request.calls == 1
+
+
+def test_an_expired_http_date_is_an_explicit_zero_delay():
+    assert providerRetryAfterMs(providerError(429, {"retry-after": "Fri, 31 Dec 1999 23:59:59 GMT"})) == 0
 
 
 async def test_allows_disabling_the_provider_requested_retry_delay_cap(monkeypatch):

@@ -37,6 +37,25 @@ async def test_a_relative_path_reads_the_document(tmp_path, read):
     assert "The plain text of this document" in text and f"{doc_id} p1-" in text
 
 
+@pytest.mark.parametrize(("encoding", "detected"), [("gbk", "gb18030"), ("utf-8", "utf-8")])
+async def test_chinese_text_extraction_preserves_source_contents(tmp_path, read, encoding, detected):
+    source = tmp_path / "研究记录.txt"
+    body = "中国社会科学研究：我们正在测试这个程序保存文件之后恢复工作。\n" * 900
+    source.write_bytes(body.encode(encoding))
+    metadata = {}
+
+    pages = corpus.extract_pages(str(source), meta=metadata)
+
+    assert len(pages) > 1
+    assert "".join(pages) == body
+    assert metadata["encoding"] == detected
+    original = source.read_bytes()
+    corpus.ingest(str(source), workspace=str(tmp_path))
+    indexed = await read(doc_id=source.name, pages="1")
+    assert body.splitlines()[0] in indexed
+    assert source.read_bytes() == original
+
+
 async def test_an_absolute_path_reads_the_document(tmp_path, read):
     _doc_id, path = _indexed(tmp_path)
     assert "The plain text of this document" in await read(doc_id=str(path), pages="1")

@@ -590,9 +590,10 @@ def readSessionHeader(file_path: str) -> dict[str, Any]:
     """The header line of a session file (``id``, ``cwd``, ``timestamp``), or ``{}``.
     Reads one line: the panel calls this for every file it lists."""
     try:
-        with open(normalizePath(file_path), encoding="utf-8") as handle:
-            entry = json.loads(handle.readline())
-    except (OSError, ValueError):
+        path = normalizePath(file_path)
+        with open(path, "rb") as handle:
+            entry = json.loads(handle.readline().decode("utf-8"))
+    except (OSError, ValueError, RecursionError):
         return {}
     return entry if _is_session_header(entry) else {}
 
@@ -827,6 +828,14 @@ class SessionManager:
         return True
 
     def _appendEntry(self, entry: SessionEntry) -> None:
+        if self.persist and "usageRunId" not in entry and (
+            entry.get("usage") is not None or read_field(entry.get("message"), "usage") is not None
+        ):
+            from misaka.core.runtime_trace import current_scope
+
+            scope = current_scope()
+            # A null owner records ordinary spending. An absent field is old history.
+            entry["usageRunId"] = scope.run_id if scope is not None else None
         flushed = self._persist(entry)
         self.fileEntries.append(entry)
         entry_id = entry.get("id")

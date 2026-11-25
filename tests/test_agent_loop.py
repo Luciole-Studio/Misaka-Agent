@@ -33,6 +33,7 @@ from misaka.ai.types import (
     UserMessage,
 )
 from misaka.ai.utils.event_stream import createAssistantMessageEventStream
+from misaka.utils.js import AbortController
 
 
 def createUsage() -> dict[str, Any]:
@@ -733,6 +734,28 @@ async def test_runs_finishTurn_after_tool_result_messages_and_before_turn_end():
     assert ordering[-3:] == ["message_end:toolResult", "finishTurn", "turn_end"]
 
 
+@pytest.mark.parametrize("mode", ["sequential", "parallel"])
+async def test_cancelled_tool_turn_keeps_result_and_does_not_request_another_turn(mode):
+    controller = AbortController()
+    requests = []
+
+    async def execute(_call_id, _params, *_rest):
+        controller.abort()
+        return AgentToolResult(content=[TextContent(text="interrupted")], details={})
+
+    def stream(*_args):
+        requests.append(True)
+        if len(requests) > 1:
+            return respond(createAssistantMessage([text("unexpected second request")]))
+        return respond(createAssistantMessage([toolCall("tool-1", "echo", {"value": "hello"})], "toolUse"))
+
+    events = await drain(agentLoop([createUserMessage("echo")], AgentContext(messages=[], tools=[echoTool(execute)]),
+                                   config(toolExecution=mode), controller.signal, stream))
+    assert len(requests) == 1
+    assert [event.type for event in events][-2:] == ["turn_end", "agent_end"]
+    assert [result.toolCallId for result in events[-2].toolResults] == ["tool-1"]
+
+
 @pytest.mark.parametrize("reason", ["error", "aborted"])
 async def test_runs_finishTurn_for_an_error_assistant_before_turn_end_without_changing_the_hard_exit(reason):
     ordering: list[str] = []
@@ -1193,6 +1216,7 @@ async def test_should_stop_after_a_tool_batch_when_every_tool_result_sets_termin
     assert llmCalls == 1
     assert [message.role for message in messages] == ["system", "user", "assistant", "toolResult"]
     assert len([event for event in events if event.type == "turn_end"]) == 1
+    assert events[-1].toolBatchTerminated
 
 
 async def test_should_stop_after_a_blocked_tool_call_when_beforeToolCall_sets_terminate_true():

@@ -26,6 +26,7 @@ from typing import Any
 
 from misaka.agent.request_budget import context_token_upper_bound, usage_tokens
 from misaka.ai.api._thinking_allowance import thinking_allowance
+from misaka.ai.runtime_observation import observe
 from misaka.ai.types import AssistantMessage, ErrorEvent
 from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stream_task
 from misaka.core.platform import budget
@@ -115,14 +116,34 @@ def _exhausted_text(reading: dict, need: int) -> str:
             f"to go on.")
 
 
-async def _lease(current, local, need: int, want: int, signal: Any) -> dict:
+def _observe_admission(event: str, reading: dict, estimate: dict) -> None:
+    cap = reading.get("cap")
+    used = reading.get("used")
+    leased = reading.get("lease") is not None
+    granted = reading.get("tokens", 0)
+    balance = {}
+    if cap or reading.get("local"):
+        # The Board returns held after inserting our lease. Report other requests' holds at admission.
+        balance = {
+            "budget_scope": "local" if reading.get("local") else "board",
+            "budget_cap": cap,
+            "budget_used": used,
+            "budget_remaining": max(0, cap - used),
+            "budget_held": reading["held"] - (granted if leased else 0),
+        }
+    observe(event, status=reading["status"], budget_granted=granted, budget_leased=leased, **estimate, **balance)
+
+
+async def _lease(current, local, need: int, want: int, signal: Any, on_wait) -> dict:
     path, task_id, generation, cap = current if current else (None, None, None, 0)
     wait = WAIT_FIRST
+    waiting = False
     while True:
         if local is not None:
+            local_reading = {"used": local.used, "held": local.in_flight, "cap": local.limit, "local": True}
             room = local.limit - local.used - local.in_flight
             if room < need:
-                return {"status": "exhausted", "used": local.used, "cap": local.limit, "local": True}
+                return {"status": "exhausted", **local_reading}
             want = min(want, room)
         if current and cap:
             reading = await asyncio.to_thread(budget.lease_request_path, path, cap, task_id, generation, need, want)
@@ -133,9 +154,14 @@ async def _lease(current, local, need: int, want: int, signal: Any) -> dict:
                 local.in_flight += reading["tokens"]
             if current and reading.get("cap"):
                 _last[(path, task_id)] = (reading["cap"] - reading["used"], reading["cap"])
+            if local is not None and not reading.get("cap"):
+                return {**reading, **local_reading}
             return reading
+        if not waiting:
+            on_wait(reading)
+            waiting = True
         if read_field(signal, "aborted"):
-            return {"status": "aborted"}
+            return {**reading, "status": "aborted"}
         await asyncio.sleep(wait)
         wait = min(WAIT_MOST, wait * 2)
 
@@ -159,17 +185,27 @@ def meter(model: Any, context: Any, options: Any, send) -> AssistantMessageEvent
             logger.warning("%s takes no output limit: the token cap leases its whole output, "
                            "but cannot cut a reply short", model.api)
         extra = thinking_allowance(model, options)
-        need = bound + min(MIN_OUTPUT_TOKENS, output) + extra
+        minimum_output = min(MIN_OUTPUT_TOKENS, output)
+        need = bound + minimum_output + extra
         want = bound + output + extra
+        estimate = {"budget_input_bound": bound, "budget_minimum_output": minimum_output,
+                    "budget_thinking_allowance": extra, "budget_need": need, "budget_desired": want}
+
+        def waiting(reading):
+            _observe_admission("budget_wait", reading, estimate)
+
         try:
-            reading = await _lease(current, local, need, want, read_field(options, "signal"))
+            reading = await _lease(current, local, need, want, read_field(options, "signal"), waiting)
         except Exception as error:  # noqa: BLE001 - a ledger that cannot be read sends nothing: fail closed, visibly
+            _observe_admission("budget_unavailable", {"status": "unavailable"}, estimate)
             _ended(out, model, "error", f"token ledger unavailable: {type(error).__name__}: {error}", startedAt)
             return
         if reading["status"] == "aborted":
+            _observe_admission("budget_aborted", reading, estimate)
             _ended(out, model, "aborted", "Request was aborted", startedAt)
             return
         if reading["status"] == "exhausted":
+            _observe_admission("budget_refused", reading, estimate)
             if reading.get("local"):
                 _ended(out, model, "error", f"this session's allowance of {reading['cap']:,} tokens is used up", startedAt)
                 return
@@ -178,8 +214,10 @@ def meter(model: Any, context: Any, options: Any, send) -> AssistantMessageEvent
             _ended(out, model, "error", _exhausted_text(reading, need), startedAt)
             return
         lease, granted = reading.get("lease"), int(reading["tokens"])
+        _observe_admission("budget_admitted", reading, estimate)
         streamed, started = 0, False
         message = terminal = None
+        cause = None
         try:
             inner = send(_limited(options, granted - bound - extra))
             renewed = time.monotonic()
@@ -193,6 +231,7 @@ def meter(model: Any, context: Any, options: Any, send) -> AssistantMessageEvent
                     await asyncio.to_thread(budget.renew_request_path, current[0], lease)
                 if read_field(event, "type") in ("done", "error"):
                     terminal = event
+                    cause = getattr(inner, "error_cause", None)
                     continue
                 out.push(event)
             message = await inner.result()
@@ -217,7 +256,7 @@ def meter(model: Any, context: Any, options: Any, send) -> AssistantMessageEvent
                 except Exception:
                     logger.warning("token ledger: a request's usage (%s tokens) was not recorded", used, exc_info=True)
         if terminal is not None:
-            out.push(terminal)
+            out.push(terminal, cause=cause)
         if failure is not None:
             _ended(out, model, "error", failure, startedAt)
         else:

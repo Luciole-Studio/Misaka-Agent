@@ -52,6 +52,38 @@ def tmp_path(tmp_path):
     return Path(os.path.realpath(tmp_path))
 
 
+@pytest.fixture(params=["resolved-path", "filesystem"])
+def directory_alias(tmp_path, monkeypatch, request):
+    """Check canonical paths independently of the account's ability to create a directory link."""
+    target, alias = tmp_path / "target", tmp_path / "alias"
+    target.mkdir()
+    if request.param == "filesystem":
+        if os.name == "nt":
+            import _winapi
+
+            try:
+                _winapi.CreateJunction(str(target), str(alias))
+            except OSError as error:
+                # Unsupported filesystem, access denied, or missing privilege.
+                if getattr(error, "winerror", None) in (1, 5, 50, 1314):
+                    pytest.skip(f"Cannot create a directory junction: {error}")
+                raise
+        else:
+            alias.symlink_to(target, target_is_directory=True)
+    else:
+        alias.mkdir()
+        realpath = os.path.realpath
+
+        def resolve(path, *, strict=False):
+            name = os.fspath(path)
+            if isinstance(name, str) and Path(name).is_relative_to(alias):
+                path = target / Path(name).relative_to(alias)
+            return realpath(path, strict=strict)
+
+        monkeypatch.setattr(os.path, "realpath", resolve)
+    return target, alias
+
+
 @pytest.fixture(autouse=True)
 def unwatched_loops():
     """A test that runs a command entry in this process (``app._cmd_research``) configures the

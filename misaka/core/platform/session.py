@@ -10,6 +10,7 @@ from misaka.agent.guards import install_guards
 from misaka.core.platform.vocabulary import NO_PROGRESS_VOCABULARY
 from misaka.utils import loop_watchdog
 from misaka.utils.async_lifecycle import settle
+from misaka.utils.values import read_field
 
 IDLE_POLL_SECONDS = 5.0
 IDLE_TIMEOUT_REASON = "Execution timed out (inactivity)"
@@ -289,26 +290,25 @@ async def _run_session(flags, prompt, cwd, on_event=None, timeout=600, env=None,
                 await asyncio.wait_for(session.abort(), 10)
             except Exception:  # noqa: BLE001, S110 - aborting after a timeout is best-effort
                 pass
-        text, err = None, None
+        text, err, retry_stop = None, None, None
         msgs = session.state.messages or []
         last = msgs[-1] if msgs else None
-        role = last.get("role") if isinstance(last, dict) else getattr(last, "role", None)
-        if role == "assistant":
-            stop = last.get("stopReason") if isinstance(last, dict) else getattr(last, "stopReason", None)
+        if read_field(last, "role") == "assistant":
+            stop = read_field(last, "stopReason")
             if stop in ("error", "aborted", "length") and not timed_out:
                 from misaka.ai.utils._output_limit import output_limit_error
-                err = (last.get("errorMessage") if isinstance(last, dict)
-                       else getattr(last, "errorMessage", None)) or (
+                err = read_field(last, "errorMessage") or (
                     output_limit_error(last) if stop == "length" else f"request {stop}")
-            parts = last.get("content") if isinstance(last, dict) else getattr(last, "content", None)
-            for c in parts or []:
-                ctype = c.get("type") if isinstance(c, dict) else getattr(c, "type", None)
-                if ctype == "text":
-                    text = (text or "") + (c.get("text") if isinstance(c, dict) else getattr(c, "text", ""))
+                if stop == "error":
+                    retry_stop = read_field(last, "retryStop")
+            for part in read_field(last, "content") or []:
+                if read_field(part, "type") == "text":
+                    text = (text or "") + read_field(part, "text", "")
         return {
             "text": text,
             "timed_out": timed_out,
             "error": err,
+            "retry_stop": retry_stop,
             "session_file": session_file,
         }
     except Exception as e:  # noqa: BLE001
