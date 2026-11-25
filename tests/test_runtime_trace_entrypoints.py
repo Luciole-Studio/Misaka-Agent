@@ -41,6 +41,46 @@ def test_panel_passes_diagnostics_to_new_chat_commands(monkeypatch):
     ]
 
 
+def test_diagnostic_panel_handles_a_pane_finishing_during_startup(monkeypatch, tmp_path):
+    from misaka.ui.panel import panel
+
+    class StartupReachedLayout(Exception):
+        pass
+
+    old_pane = {"id": "old", "title": "Last Order", "alive": True, "cwd": str(tmp_path)}
+    new_pane = {**old_pane, "id": "diagnostic"}
+    working = {**old_pane, "reported": {"state": "working"}}
+    idle = {**old_pane, "reported": {"state": "idle"}}
+    listings = iter([[working], [working], [idle, new_pane]])
+    sizes = iter([(24, 80)])
+
+    def terminal_size():
+        if (size := next(sizes, None)) is not None:
+            return size
+        raise StartupReachedLayout
+
+    def request(name, options=None):
+        if name == "ping":
+            return {"panels": []}
+        if name == "panes.list":
+            return {"panes": next(listings)}
+        if name == "pane.create":
+            assert "--diagnostics" in options["argv"]
+            return {"pane_id": new_pane["id"]}
+        pytest.fail(f"Unexpected startup request: {name}")
+
+    monkeypatch.delenv("MISAKA_NET_PANE", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(panel.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(panel.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(panel, "_term_size", terminal_size)
+    monkeypatch.setattr(panel.net, "ensure", lambda: None)
+    monkeypatch.setattr(panel.net, "CFG", {"net_sock": "fixture"})
+    monkeypatch.setattr(panel, "_Sock", lambda _path: SimpleNamespace(request=request))
+    with pytest.raises(StartupReachedLayout):
+        panel.launch(diagnostics=True)
+
+
 def test_chat_enables_diagnostics_when_reopening(monkeypatch, tmp_path):
     from misaka.cli import chat, engine
     from misaka.core import wiring

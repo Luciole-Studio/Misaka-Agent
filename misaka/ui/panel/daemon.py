@@ -2070,11 +2070,12 @@ class Daemon:
                     pane.claim_lock = None          # ownership changed: observe only, never touch state
                     continue
                 if not pane.alive():
-                    recovered = False
                     try:
                         recovered = await asyncio.to_thread(dispatch.recover_terminal_submission, con, row)
                     except Exception:
                         logging.getLogger(__name__).exception("Could not recover card %s after pane exit", row["id"])
+                        # A failed lookup cannot establish that the worker left no prepared submission.
+                        continue
                     if not still_ours(pane) or pane.claim_lock != row["claim_lock"] or pane.generation != row["generation"]:
                         continue
                     if recovered:

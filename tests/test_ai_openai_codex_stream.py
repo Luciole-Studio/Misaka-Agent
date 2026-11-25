@@ -1199,7 +1199,9 @@ async def test_uses_the_retry_header_for_sse_retries(fetchMock, recordedSleeps, 
         codexRequests += 1
         if codexRequests == 1:
             return httpx.Response(
-                429, headers=makeHeaders(), content=json.dumps({"error": {"code": "rate_limit_exceeded", "message": "rate limited"}})
+                429, headers=makeHeaders(), json={
+                    "error": {"code": "rate_limit_exceeded", "message": "rate limited"}, "billing": "active",
+                },
             )
         return sseResponse(buildSSEPayload("completed"))
 

@@ -14,7 +14,6 @@ import json
 import math
 import os
 import time
-from collections import Counter
 from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -33,14 +32,15 @@ def _blank():
 
 
 def _recorded_usage(usage):
-    tokens = usage.get("totalTokens")
+    counts = tuple(usage.get(key) for key in (*_TOKEN_FIELDS, "totalTokens"))
+    if any(count is not None and (type(count) is not int or count < 0) for count in counts):
+        raise ValueError("Invalid recorded token count")
     cost = usage.get("cost")
     price = cost.get("total") if isinstance(cost, dict) else None
     amount = float(price or 0)
     if not math.isfinite(amount):
         raise ValueError("Invalid recorded cost")
-    return (1, *(int(usage.get(key) or 0) for key in _TOKEN_FIELDS), int(tokens or 0), amount,
-            int(bool(tokens) and not price))
+    return (1, *(count or 0 for count in counts), amount, int(bool(counts[-1]) and not price))
 
 
 def _add(into, usage):
@@ -84,7 +84,8 @@ def _spent(entry):
 
 
 def _path_key(path):
-    return os.path.normcase(os.path.realpath(path))
+    # Resolve aliases without folding distinct files in case-sensitive directories.
+    return os.path.realpath(path)
 
 
 @dataclass
@@ -345,21 +346,46 @@ def _journal_windows(con, run_id):
     return paths
 
 
-def _trace_windows(rows, known_paths):
+def _trace_windows(rows, known_paths, inspected=None):
     """Locate persisted receipts outside the Board's known window and card transcripts."""
     from misaka.core import session_catalog
     from misaka.core.session_manager import readSessionHeader
 
-    receipts = {row["session_id"] for row in rows if row["event"] == "model_receipt_saved" and row.get("session_id")}
+    receipts = {}
+    for row in rows:
+        if row["event"] == "model_receipt_saved" and row.get("session_id"):
+            receipts.setdefault(row["session_id"], set()).add((row.get("entry_id"), row.get("request_id")))
     if not receipts:
         return set(), False
-    counts = Counter(readSessionHeader(path).get("id") for path in known_paths)
-    missing = receipts.difference(counts)
+    incomplete = False
     try:
-        found = session_catalog.saved_session_paths(missing)
+        candidates = session_catalog.saved_session_candidates(receipts)
     except OSError:
-        found = {}
-    return set(found.values()), bool(missing.difference(found) or any(counts[sid] > 1 for sid in receipts))
+        candidates = {}
+        incomplete = True
+    for path in known_paths:
+        session_id = readSessionHeader(path).get("id")
+        if isinstance(session_id, str) and session_id in receipts:
+            candidates.setdefault(session_id, set()).add(path)
+
+    found = set()
+    inspected = inspected if inspected is not None else {}
+    for session_id, identities in receipts.items():
+        matches = {}
+        for path in candidates.get(session_id, ()):
+            if path not in inspected:
+                inspected[path] = _read_usage_file(path)
+            # Older receipts can lack one of these IDs. A header match alone
+            # cannot select among files when a receipt includes an entry identity.
+            matches[path] = {(key, rid) for _, entry, request, *_ in inspected[path].entries
+                             for key, rid in ((entry, request), (entry, None), (None, request))}
+        for identity in identities:
+            paths = [path for path, entries in matches.items() if identity == (None, None) or identity in entries]
+            if len(paths) == 1:
+                found.add(paths[0])
+            else:
+                incomplete = True
+    return found.difference(known_paths), incomplete
 
 
 _PANEL_STOP_GRACE_SECONDS = 60
@@ -440,10 +466,10 @@ def run_usage(con, run):
     for root in panel_roots:
         add_window(root)
 
-    unresolved = False
+    unresolved, inspected = False, {}
     if not complete:
         known_paths = panel_paths.union(group_paths)
-        found, unresolved = _trace_windows(trace_rows[run_id], known_paths)
+        found, unresolved = _trace_windows(trace_rows[run_id], known_paths, inspected)
         roots.update(found)
         panel_roots.update(found)
         for root in found:
@@ -451,7 +477,7 @@ def run_usage(con, run):
 
     panel_files = sorted(panel_paths)
     paths = dict.fromkeys([*panel_files, *group_paths])
-    sources = {path: _read_usage_file(path) for path in paths}
+    sources = {path: inspected[path] if path in inspected else _read_usage_file(path) for path in paths}
     before = None
     panel_owners = {}
     ambiguous_panel = len(roots) > 1 or unresolved or complete is False

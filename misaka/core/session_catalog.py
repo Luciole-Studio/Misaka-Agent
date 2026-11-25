@@ -255,8 +255,8 @@ def find_session(session_id):
     return saved
 
 
-def saved_session_paths(session_ids):
-    """Find requested stored transcripts in one pass, leaving ambiguous IDs unresolved."""
+def saved_session_candidates(session_ids):
+    """Find paths for the requested IDs in one pass, verifying each session header."""
     matches = {}
     if session_ids:
         for file in _index_dir().glob("*.json"):
@@ -264,8 +264,8 @@ def saved_session_paths(session_ids):
             session_id, path = record.get("id"), record.get("path")
             if (isinstance(session_id, str) and session_id in session_ids and isinstance(path, str)
                     and readSessionHeader(path).get("id") == session_id):
-                matches.setdefault(session_id, set()).add(os.path.normcase(os.path.realpath(path)))
-    return {session_id: next(iter(paths)) for session_id, paths in matches.items() if len(paths) == 1}
+                matches.setdefault(session_id, set()).add(os.path.realpath(path))
+    return matches
 
 
 def spaces_in_use():

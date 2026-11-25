@@ -1784,8 +1784,9 @@ def launch(*, diagnostics=False):
                 pane["unseen"] = True
         return raw
 
-    def panes():
-        return note_turns(control.request("panes.list")["panes"])
+    def panes(*, track_turns=True):
+        raw = control.request("panes.list")["panes"]
+        return note_turns(raw) if track_turns else raw
 
     def note_exit(pane_id, exit_code):
         """A pane's program ended on its own: keep its last lines. When Last Order dies at
@@ -1803,11 +1804,12 @@ def launch(*, diagnostics=False):
         except OSError:
             pass
 
-    listing = panes()
+    # Visibility is undefined until the pane is focused and its layout is loaded.
+    listing = panes(track_turns=False)
     for pane in listing:      # Clean up dead Last Order panes first.
         if pane["title"] == "Last Order" and not pane["alive"]:
             control.request("pane.close", {"id": pane["id"]})
-    listing = panes()
+    listing = panes(track_turns=False)
     workspace = os.path.realpath(os.getcwd())
     lo = None if diagnostics else next((p for p in listing
                if p["title"] == "Last Order" and p["alive"]
@@ -1817,9 +1819,10 @@ def launch(*, diagnostics=False):
             "argv": _chat_argv(diagnostics=diagnostics),
             "cwd": os.getcwd(), "title": "Last Order",
             "env": {"MISAKA_THEME": hui.theme_variant()}})
-        listing = panes()
+        listing = panes(track_turns=False)
         lo = next(p for p in listing if p["id"] == created["pane_id"])
     focused = lo["id"]
+    note_turns(listing)
     # Cursor state is kept per pane: position and visibility belong to each pane (the engine
     # hides the real cursor and draws its own block; a shell shows it). With one global value,
     # any path that forgot to resync on pane switch would stack the real cursor on top of the

@@ -643,7 +643,7 @@ def _scoped_source(path, root, scope):
         except (OSError, RuntimeError, ValueError):
             continue
         if not scope.allows_read(resolved):
-            return None
+            continue
         real = project_file(resolved, str(root))
         if real is not None:
             return posix_relpath(real, root)

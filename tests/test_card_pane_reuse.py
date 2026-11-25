@@ -132,7 +132,10 @@ def test_old_daemon_is_not_reused_after_checkpoint_protocol_change(monkeypatch, 
     assert calls == (["ping", "panes.list"] if active else ["ping", "panes.list", "server.stop"])
 
 
-async def test_panel_watcher_recovers_a_dead_workers_prepared_submission(panel, home, monkeypatch):
+@pytest.mark.parametrize("busy_once", [False, True])
+async def test_panel_watcher_recovers_a_dead_workers_prepared_submission(panel, home, monkeypatch, busy_once):
+    import sqlite3
+
     from misaka.core.network import dispatch, worker
 
     con = panel._board()
@@ -156,12 +159,32 @@ async def test_panel_watcher_recovers_a_dead_workers_prepared_submission(panel, 
     async def skip_catalog():
         return None
 
+    recover = dispatch.recover_terminal_submission
+    attempts = []
+
+    def recover_after_contention(connection, observed):
+        attempts.append(observed["claim_lock"])
+        if busy_once and len(attempts) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return recover(connection, observed)
+
+    def finish_poll(_):
+        if busy_once and len(attempts) == 1:
+            current = tasks.get(con, tid)
+            assert current["status"] == "running" and current["claim_lock"] == row["claim_lock"]
+        else:
+            panel._stopping.set()
+
     monkeypatch.setattr(panel, "_sweep_catalog", skip_catalog)
-    monkeypatch.setattr(panel, "_watch_consultations", lambda _: panel._stopping.set())
-    await panel._watch_cards()
+    monkeypatch.setattr(panel, "_watch_consultations", finish_poll)
+    monkeypatch.setattr(d, "CARD_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(dispatch, "recover_terminal_submission", recover_after_contention)
+    await asyncio.wait_for(panel._watch_cards(), timeout=3)
     assert tasks.get(con, tid)["status"] == "done"
     assert pane.claim_lock is None
     assert '"summary": "confirmed"' in tasks.latest_payload(con, tid, "submitted")
+    assert attempts == [row["claim_lock"]] * (2 if busy_once else 1)
+    assert con.execute("SELECT COUNT(*) FROM events WHERE task_id=? AND kind='submitted'", (tid,)).fetchone()[0] == 1
 
 
 async def test_replacing_a_program_keeps_the_pane_its_seat_and_its_size(panel, home):

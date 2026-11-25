@@ -7,7 +7,7 @@ import json
 import os
 import sqlite3
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -106,6 +106,15 @@ def test_request_identity_deduplicates_only_the_same_request(tmp_path):
     assert usage.session_usage([first, second])["calls"] == 2
 
 
+def test_usage_keeps_the_spelling_of_distinct_resolved_windows_paths(tmp_path, monkeypatch):
+    upper, lower = tmp_path / "Sales.jsonl", tmp_path / "sales.jsonl"
+    with monkeypatch.context() as patch:
+        # Model an NTFS directory that contains both names as returned by realpath.
+        patch.setattr(os.path, "realpath", os.fspath)
+        patch.setattr(os.path, "normcase", lambda path: os.fspath(path).lower())
+        assert usage._path_key(upper) != usage._path_key(lower)
+
+
 @pytest.mark.parametrize("seed_format", ["current", "legacy", "unproven"])
 def test_usage_cli_counts_native_fork_seed_only_once(tmp_path, monkeypatch, capsys, seed_format):
     from misaka.cli import app
@@ -153,7 +162,8 @@ def test_usage_cli_counts_native_fork_seed_only_once(tmp_path, monkeypatch, caps
         assert any(line.strip().startswith("total") and "150 tokens" in line and "$1.50" in line
                    for line in out.splitlines())
         if seed_format == "unproven":
-            assert "Unverified fork history" in out and "100 tokens" in out
+            unverified = next(line for line in out.splitlines() if "Unverified fork history" in line)
+            assert "100 tokens" in unverified
         else:
             assert "Unverified fork history" not in out
 
@@ -297,7 +307,7 @@ async def test_resume_here_preserves_usage_across_windows(tmp_path, monkeypatch,
     monkeypatch.delenv("MISAKA_NET_PANE", raising=False)
     monkeypatch.setattr(repo, "enabled", lambda *a: False)
     monkeypatch.setattr("misaka.core.runtime_trace._append", lambda *a, **kw: None)
-    monkeypatch.setattr("misaka.core.session_catalog.saved_session_paths",
+    monkeypatch.setattr("misaka.core.session_catalog.saved_session_candidates",
                         lambda *a: pytest.fail("Complete binding history should not consult the catalog"))
     board = home.path("db")
     monkeypatch.setattr(app, "current_config", lambda: {"db": str(board), "token_cap": 0})
@@ -402,7 +412,28 @@ def test_root_binding_rolls_back_with_its_event_and_checks_driver(tmp_path, fail
         assert complete and set(windows) == {usage._path_key(a)}
 
 
-@pytest.mark.parametrize("evidence", ["journal", "catalog", "ambiguous"])
+def test_window_binding_records_time_after_entering_the_board_transaction(tmp_path, monkeypatch):
+    now = 1000
+    monkeypatch.setattr(runs, "time", SimpleNamespace(time=lambda: now))
+    with closing(tasks.connect(str(home.path("db")))) as con:
+        run_id = runs.create(con, workspace=str(tmp_path), question="Time the window binding")["id"]
+        write_txn = tasks.write_txn
+
+        @contextmanager
+        def delayed(connection):
+            nonlocal now
+            with write_txn(connection):
+                now = 1005
+                yield
+
+        monkeypatch.setattr(tasks, "write_txn", delayed)
+        updated = runs.set_state(con, run_id, root_session=str(tmp_path / "new.jsonl"))
+        (bound_at,) = con.execute("SELECT created_at FROM events WHERE task_id=? AND kind=?",
+                                  (run_id, runs._ROOT_SESSION_BOUND)).fetchone()
+        assert updated["updated_at"] == bound_at == 1005
+
+
+@pytest.mark.parametrize("evidence", ["journal", "catalog", "ambiguous", "duplicate-current-id"])
 def test_legacy_rebound_windows_are_recovered_only_with_evidence(tmp_path, monkeypatch, capsys, evidence):
     from misaka.cli import app
     from misaka.core import session_catalog
@@ -415,13 +446,14 @@ def test_legacy_rebound_windows_are_recovered_only_with_evidence(tmp_path, monke
         run_id = run["id"]
         stamp = run["created_at"] * 1000
         directory = Path(sessions.role_dir())
-        first_call = _call("big", 100, 0, stamp)
+        first_call = {**_call("big", 100, 0, stamp), "id": "accepted"}
         if evidence == "journal":
             first_call["usageRunId"] = run_id
         else:
             first_call["message"]["requestId"] = "first"
         a = _session(directory / "old.jsonl", {"type": "session", "id": "old-window"}, first_call)
-        b = _session(directory / "current.jsonl", {"type": "session", "id": "current-window"},
+        current_id = "old-window" if evidence == "duplicate-current-id" else "current-window"
+        b = _session(directory / "current.jsonl", {"type": "session", "id": current_id},
                      {**_call("big", 50, 0, stamp), "usageRunId": run_id}, _call("big", 900, 0, stamp))
         con.execute("UPDATE research_runs SET root_session=? WHERE id=?", (home.stored(b), run_id))
         if evidence == "journal":
@@ -436,24 +468,32 @@ def test_legacy_rebound_windows_are_recovered_only_with_evidence(tmp_path, monke
             session_catalog._write(index / "one.json", {"id": "old-window", "path": str(a)})
             session_catalog._write(index / "stale.json", {"id": "unmatched-window", "path": str(b)})
             if evidence == "ambiguous":
-                copy = _session(directory / "copy.jsonl", {"type": "session", "id": "old-window"})
+                copy = _session(directory / "copy.jsonl", {"type": "session", "id": "old-window"}, first_call)
                 session_catalog._write(index / "two.json", {"id": "old-window", "path": str(copy)})
 
         glob = Path.glob
         catalog_scans = []
+        read_usage_file = usage._read_usage_file
+        loaded = []
 
         def count_catalog(path, *args, **kwargs):
             if path == session_catalog._index_dir():
                 catalog_scans.append(path)
             return glob(path, *args, **kwargs)
 
+        def count_usage_read(path):
+            loaded.append(path)
+            return read_usage_file(path)
+
         monkeypatch.setattr(Path, "glob", count_catalog)
+        monkeypatch.setattr(usage, "_read_usage_file", count_usage_read)
         app._cmd_usage(SimpleNamespace(run=run_id, limit=10))
         out = capsys.readouterr().out
         total = next(line for line in out.splitlines() if line.strip().startswith("total"))
         assert total.split()[3] == ("50" if evidence == "ambiguous" else "150")
         assert "Window history incomplete" in out and "Unassigned panel usage" in out
         assert len(catalog_scans) == (0 if evidence == "journal" else 1)
+        assert len(loaded) == len(set(loaded))
 
 
 @pytest.mark.parametrize("other_started", [0, 3])
@@ -525,7 +565,10 @@ def test_usage_cli_ignores_nonoverlapping_window_adoption(tmp_path, monkeypatch,
         assert ("Unassigned panel usage (outside total)" in output) is not bool(expected)
 
 
-@pytest.mark.parametrize("damage,expected", [("empty", 50), ("truncated", 150), ("bad_line", 175), ("bad_usage", 150)])
+@pytest.mark.parametrize("damage,expected", [
+    ("empty", 50), ("truncated", 150), ("bad_line", 175), ("bad_usage", 150),
+    ("bad_token_type", 150), ("negative_tokens", 150),
+])
 def test_usage_cli_flags_incomplete_prior_window(tmp_path, monkeypatch, capsys, damage, expected):
     from misaka.cli import app
 
@@ -542,8 +585,11 @@ def test_usage_cli_flags_incomplete_prior_window(tmp_path, monkeypatch, capsys, 
         with a.open("ab") as stream:
             if damage == "bad_line":
                 stream.write(b"{\xff}\n")
-            if damage == "bad_usage":
-                invalid = {**first, "message": {**first["message"], "usage": {"input": "damaged"}}}
+            invalid_usages = {"bad_usage": {"input": "damaged"},
+                              "bad_token_type": {"input": True, "output": 2.7, "totalTokens": 3},
+                              "negative_tokens": {"input": -1, "totalTokens": -1}}
+            if damage in invalid_usages:
+                invalid = {**first, "message": {**first["message"], "usage": invalid_usages[damage]}}
                 stream.write((json.dumps(invalid) + "\n").encode())
             if damage != "empty":
                 stream.write((json.dumps(first) + "\n").encode())

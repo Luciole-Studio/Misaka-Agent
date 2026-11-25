@@ -1537,6 +1537,7 @@ class SubagentManager:
             raise RuntimeError(task.error or f"Agent {task.id} failed")
 
     async def _drive(self, task: AgentTask, prompt: str, *, notify: bool) -> None:
+        task.retry_stop = None
         try:
             async with self._semaphore:
                 if task._stop_requested:
@@ -1897,7 +1898,6 @@ class SubagentManager:
                 raise AgentCancelled()
             task.status = "running"
             task.error = None
-            task.retry_stop = None
             task.notified = False
             task.prompt_accepted = False
             task._done.clear()

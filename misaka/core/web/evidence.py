@@ -82,7 +82,7 @@ def read_provenance(path: str) -> dict[str, Any]:
                 except ValueError:
                     out[key.strip()] = value.strip()
             return out
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return {}
 
 
@@ -92,7 +92,7 @@ def saved_page_url_key(url: str) -> str | None:
         parts = urlsplit(url)
     except ValueError:
         return None
-    return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/") or "/", parts.query, ""))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", parts.query, ""))
 
 
 def saved_pages(workspace, *, allowed=None):

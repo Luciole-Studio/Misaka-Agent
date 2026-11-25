@@ -12,6 +12,7 @@ import json
 import os
 import secrets
 import socket
+import sqlite3
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -223,8 +224,10 @@ class _SisterManager(SubagentManager):
         self.output_dir = str(row["output_dir"] or workspace)
         self.runtime_dir = Path(session_roots.card_session_dir(row))
         self.beast = False
-        self.owner_context = dict(row).get("_owner_context")
-        self.session_overrides = dict(row).get("_session_overrides") or {}
+        metadata = dict(row)
+        self.file_scope = metadata.get("_file_scope")
+        self.owner_context = metadata.get("_owner_context")
+        self.session_overrides = metadata.get("_session_overrides") or {}
         from misaka.core.model_resolver import findExactModelReferenceMatch
         from misaka.core.subagent.model import (
             normalize_model_for_api,
@@ -567,213 +570,226 @@ class SisterRuntime:
     ) -> dict[str, Any]:
         """Claim and start one ready card; return before the model turn ends."""
         async with self._lock:
-            if self._closing:
-                raise RuntimeError("Sister runtime is closing")
-            await asyncio.to_thread(self._reconcile, [task_id])
-            row = db.get(self.con, task_id)
-            if row is None:
-                raise ValueError(f"Card not found: {task_id}")
-            existing = self._handles.get(task_id)
-            if (
-                existing
-                and not existing.done.is_set()
-                and existing.generation == int(row["generation"])
-            ):
-                return self.snapshot(task_id, launched=False, note="already running")
-            if row["status"] != "ready":
-                raise ValueError(f"Card {task_id} is not ready (current status: {row['status']}).")
-            from misaka.core.network.ally import presets
-            if row["assignee"] in presets.names():
-                from misaka.ui.panel import client as net
-                await asyncio.to_thread(net.ensure)
-                out = await asyncio.to_thread(net.request, "pane.run_card", {"task_id": task_id})
-                return {"task_id": task_id, "sister": row["assignee"], "status": "running",
-                        "pane": out["pane_id"]}
-            profile = os.path.join(str(self.cfg["profiles_root"]), row["assignee"])
-            if not os.path.isdir(profile):
-                raise ValueError(f"Sister {row['assignee']} is not in the roster.")
-            lock = f"lo:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
-            generation = int(row["generation"])
-            if not db.claim(
-                self.con,
-                task_id,
-                lock,
-                generation=generation,
-                pid=os.getpid(),
-                worker_identity=self._owner_identity,
-                **_admission_limits(),
-            ):
-                raise ValueError(db.claim_refusal(task_id)
-                                 or f"Card {task_id} was claimed by another dispatcher.")
-            self._owned_claims.add(lock)
-            workspace = db.workspace_for(row)
-            try:
-                if not os.path.isdir(workspace):
-                    db.block_task(self.con, task_id, "needs_input", f"the project folder no longer exists: {workspace}",
-                                  generation=generation)
-                    raise RuntimeError(f"Card {task_id}: its folder {workspace} no longer exists.")
-                if not row["workspace"] and not db.set_workspace(
-                    self.con,
-                    task_id,
-                    workspace,
-                    generation=generation,
-                    claim_lock=lock,
-                ):
-                    raise RuntimeError("The task claim expired.")
-            except BaseException:
-                db.back_to_ready(
-                    self.con,
-                    task_id,
-                    generation=generation,
-                    claim_lock=lock,
-                )
-                raise
-            db.add_event(
-                self.con,
-                task_id,
-                "claimed",
-                {"lock": lock, "workspace": workspace, "runtime": "sister"},
-                generation=generation,
+            return await self._launch_locked(
+                task_id, context=context, tool_call_id=tool_call_id, on_update=on_update,
             )
-            manager: _SisterManager | None = None
-            handle: SisterHandle | None = None
-            agent: AgentTask | None = None
-            resumed = bool(row["agent_id"] and row["workspace"])
-            try:
-                prepared = self._prepare_card(db.get(self.con, task_id))
-                if prepared is None:
-                    raise RuntimeError("The token budget limit has been reached; the card remains ready.")
-                prompt = worker.card_prompt(prepared, file_scope=prepared["_file_scope"])
-                if resumed:
-                    try:
-                        handle = existing or await self._restore(task_id, context)
-                        manager, agent = handle.manager, handle.agent
-                        if not manager or not agent:
-                            raise RuntimeError("The Sister session is incomplete.")
-                        manager.beast = bool(prepared.get("beast"))
-                        manager.owner_context = prepared.get("_owner_context")
-                        manager.session_overrides = prepared.get("_session_overrides") or {}
-                        await manager.send_message(
-                            agent.id,
-                            prompt,
-                            context=context,
-                            notify=False,
-                        )
-                    except ValueError as error:
-                        detail = str(error).casefold()
-                        broken = any(
-                            marker in detail
-                            for marker in (
-                                "transcript does not exist",
-                                "transcript is empty",
-                                "no valid session header",
-                                "transcript is malformed",
-                                "has no sister session log",
-                                "session path does not match the board record",
-                            )
-                        )
-                        if not broken:
-                            raise
-                        session_root = Path(session_roots.card_session_dir(row))
-                        metadata = getattr(agent, "metadata_path", None) or next(
-                            (candidate for candidate in (
-                                session_root / f"agent-{row['agent_id']}.meta.json",
-                            ) if candidate.exists()),
-                            None,
-                        )
-                        if isinstance(metadata, Path) and metadata.exists():
-                            quarantine = metadata.with_name(
-                                f"{metadata.name}.broken-{secrets.token_hex(4)}"
-                            )
-                            try:
-                                metadata.replace(quarantine)
-                            except OSError:
-                                metadata.unlink(missing_ok=True)
-                        if manager:
-                            await manager.close()
-                        if not db.clear_runtime(
-                            self.con,
-                            task_id,
-                            generation=generation,
-                            claim_lock=lock,
-                        ):
-                            raise RuntimeError("The Sister claim was revoked while restoring the session.") from error
-                        self._handles.pop(task_id, None)
-                        handle = None
-                        manager = None
-                        resumed = False
-                if not resumed:
-                    manager = _SisterManager(self.session, self.cfg, prepared, workspace)
-                    manager._semaphore = self._sister_semaphore
+
+    async def _launch_locked(
+        self,
+        task_id: str,
+        *,
+        context: Any,
+        tool_call_id: str,
+        on_update: Any = None,
+    ) -> dict[str, Any]:
+        """Reconcile, claim and start a card while the runtime lock is held."""
+        if self._closing:
+            raise RuntimeError("Sister runtime is closing")
+        await asyncio.to_thread(self._reconcile, [task_id])
+        row = db.get(self.con, task_id)
+        if row is None:
+            raise ValueError(f"Card not found: {task_id}")
+        existing = self._handles.get(task_id)
+        if (
+            existing
+            and not existing.done.is_set()
+            and existing.generation == int(row["generation"])
+        ):
+            return self.snapshot(task_id, launched=False, note="already running")
+        if row["status"] != "ready":
+            raise ValueError(f"Card {task_id} is not ready (current status: {row['status']}).")
+        from misaka.core.network.ally import presets
+        if row["assignee"] in presets.names():
+            from misaka.ui.panel import client as net
+            await asyncio.to_thread(net.ensure)
+            out = await asyncio.to_thread(net.request, "pane.run_card", {"task_id": task_id})
+            return {"task_id": task_id, "sister": row["assignee"], "status": "running",
+                    "pane": out["pane_id"]}
+        profile = os.path.join(str(self.cfg["profiles_root"]), row["assignee"])
+        if not os.path.isdir(profile):
+            raise ValueError(f"Sister {row['assignee']} is not in the roster.")
+        lock = f"lo:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
+        generation = int(row["generation"])
+        if not db.claim(
+            self.con,
+            task_id,
+            lock,
+            generation=generation,
+            pid=os.getpid(),
+            worker_identity=self._owner_identity,
+            **_admission_limits(),
+        ):
+            raise ValueError(db.claim_refusal(task_id)
+                             or f"Card {task_id} was claimed by another dispatcher.")
+        self._owned_claims.add(lock)
+        workspace = db.workspace_for(row)
+        try:
+            if not os.path.isdir(workspace):
+                db.block_task(self.con, task_id, "needs_input", f"the project folder no longer exists: {workspace}",
+                              generation=generation)
+                raise RuntimeError(f"Card {task_id}: its folder {workspace} no longer exists.")
+            if not row["workspace"] and not db.set_workspace(
+                self.con,
+                task_id,
+                workspace,
+                generation=generation,
+                claim_lock=lock,
+            ):
+                raise RuntimeError("The task claim expired.")
+        except BaseException:
+            db.back_to_ready(
+                self.con,
+                task_id,
+                generation=generation,
+                claim_lock=lock,
+            )
+            raise
+        db.add_event(
+            self.con,
+            task_id,
+            "claimed",
+            {"lock": lock, "workspace": workspace, "runtime": "sister"},
+            generation=generation,
+        )
+        manager: _SisterManager | None = None
+        handle: SisterHandle | None = None
+        agent: AgentTask | None = None
+        resumed = bool(row["agent_id"] and row["workspace"])
+        try:
+            prepared = self._prepare_card(db.get(self.con, task_id))
+            if prepared is None:
+                raise RuntimeError("The token budget limit has been reached; the card remains ready.")
+            prompt = worker.card_prompt(prepared, file_scope=prepared["_file_scope"])
+            if resumed:
+                try:
+                    handle = existing or await self._restore(task_id, context)
+                    manager, agent = handle.manager, handle.agent
+                    if not manager or not agent:
+                        raise RuntimeError("The Sister session is incomplete.")
                     manager.beast = bool(prepared.get("beast"))
-                    definition = manager.resolve_definition(manager.agent_type, workspace)
-                    agent = await manager.create_task(
-                        definition=definition,
-                        description=f"{row['assignee']} · {row['title']}",
-                        prompt=prompt,
-                        model=manager.model,
-                        background=True,
-                        name=task_id,
-                        isolation=None,
-                        cwd=workspace,
-                        tool_call_id=tool_call_id,
+                    manager.owner_context = prepared.get("_owner_context")
+                    manager.session_overrides = prepared.get("_session_overrides") or {}
+                    await manager.send_message(
+                        agent.id,
+                        prompt,
                         context=context,
-                        on_update=on_update,
+                        notify=False,
                     )
-                    orphan = await asyncio.to_thread(_adoptable_transcript, row)
-                    if orphan:
-                        await asyncio.to_thread(
-                            os.replace, orphan, str(agent.transcript))
-                        agent.initial_prompt_sent = True
-                        await agent.persist()
-                if not db.set_runtime(
-                    self.con,
-                    task_id,
-                    agent.id,
-                    str(agent.transcript),
-                    generation=generation,
-                    claim_lock=lock,
-                ):
-                    raise RuntimeError("The Sister claim was revoked while saving the session.")
-                if handle is None:
-                    handle = SisterHandle(
-                        board_id=task_id,
-                        sister=str(row["assignee"]),
-                        manager=manager,
-                        agent=agent,
-                        context=context,
-                        generation=generation,
+                except ValueError as error:
+                    detail = str(error).casefold()
+                    broken = any(
+                        marker in detail
+                        for marker in (
+                            "transcript does not exist",
+                            "transcript is empty",
+                            "no valid session header",
+                            "transcript is malformed",
+                            "has no sister session log",
+                            "session path does not match the board record",
+                        )
                     )
-                handle.context = context
-                token, done_event = self._begin_run(handle, generation, lock)
-                self._handles[task_id] = handle
-                if resumed:
-                    db.add_event(
+                    if not broken:
+                        raise
+                    session_root = Path(session_roots.card_session_dir(row))
+                    metadata = getattr(agent, "metadata_path", None) or next(
+                        (candidate for candidate in (
+                            session_root / f"agent-{row['agent_id']}.meta.json",
+                        ) if candidate.exists()),
+                        None,
+                    )
+                    if isinstance(metadata, Path) and metadata.exists():
+                        quarantine = metadata.with_name(
+                            f"{metadata.name}.broken-{secrets.token_hex(4)}"
+                        )
+                        try:
+                            metadata.replace(quarantine)
+                        except OSError:
+                            metadata.unlink(missing_ok=True)
+                    if manager:
+                        await manager.close()
+                    if not db.clear_runtime(
                         self.con,
                         task_id,
-                        "resumed",
-                        {"agent_id": agent.id},
                         generation=generation,
-                    )
-                else:
-                    manager.run_background(agent, prompt, notify=False)
-                supervisor = asyncio.create_task(
-                    self._supervise(handle, token, done_event)
+                        claim_lock=lock,
+                    ):
+                        raise RuntimeError("The Sister claim was revoked while restoring the session.") from error
+                    self._handles.pop(task_id, None)
+                    handle = None
+                    manager = None
+                    resumed = False
+            if not resumed:
+                manager = _SisterManager(self.session, self.cfg, prepared, workspace)
+                manager._semaphore = self._sister_semaphore
+                manager.beast = bool(prepared.get("beast"))
+                definition = manager.resolve_definition(manager.agent_type, workspace)
+                agent = await manager.create_task(
+                    definition=definition,
+                    description=f"{row['assignee']} · {row['title']}",
+                    prompt=prompt,
+                    model=manager.model,
+                    background=True,
+                    name=task_id,
+                    isolation=None,
+                    cwd=workspace,
+                    tool_call_id=tool_call_id,
+                    context=context,
+                    on_update=on_update,
                 )
-                handle.supervisor = supervisor
-                return self.snapshot(task_id, launched=True)
-            except BaseException as error:
-                if isinstance(error, worker.InvalidLocalWork):
-                    db.block_task(self.con, task_id, "needs_input", str(error), generation=generation, claim_lock=lock)
-                else:
-                    db.back_to_ready(self.con, task_id, generation=generation, claim_lock=lock)
-                if manager:
-                    try:
-                        await asyncio.shield(manager.close())
-                    except BaseException:  # noqa: BLE001, S110 - closing during teardown must not mask the board transition
-                        pass
-                self._handles.pop(task_id, None)
-                raise
+                orphan = await asyncio.to_thread(_adoptable_transcript, row)
+                if orphan:
+                    await asyncio.to_thread(
+                        os.replace, orphan, str(agent.transcript))
+                    agent.initial_prompt_sent = True
+                    await agent.persist()
+            if not db.set_runtime(
+                self.con,
+                task_id,
+                agent.id,
+                str(agent.transcript),
+                generation=generation,
+                claim_lock=lock,
+            ):
+                raise RuntimeError("The Sister claim was revoked while saving the session.")
+            if handle is None:
+                handle = SisterHandle(
+                    board_id=task_id,
+                    sister=str(row["assignee"]),
+                    manager=manager,
+                    agent=agent,
+                    context=context,
+                    generation=generation,
+                )
+            handle.context = context
+            token, done_event = self._begin_run(handle, generation, lock)
+            self._handles[task_id] = handle
+            if resumed:
+                db.add_event(
+                    self.con,
+                    task_id,
+                    "resumed",
+                    {"agent_id": agent.id},
+                    generation=generation,
+                )
+            else:
+                manager.run_background(agent, prompt, notify=False)
+            supervisor = asyncio.create_task(
+                self._supervise(handle, token, done_event)
+            )
+            handle.supervisor = supervisor
+            return self.snapshot(task_id, launched=True)
+        except BaseException as error:
+            if isinstance(error, worker.InvalidLocalWork):
+                db.block_task(self.con, task_id, "needs_input", str(error), generation=generation, claim_lock=lock)
+            else:
+                db.back_to_ready(self.con, task_id, generation=generation, claim_lock=lock)
+            if manager:
+                try:
+                    await asyncio.shield(manager.close())
+                except BaseException:  # noqa: BLE001, S110 - closing during teardown must not mask the board transition
+                    pass
+            self._handles.pop(task_id, None)
+            raise
 
     async def launch_ready(
         self,
@@ -953,6 +969,9 @@ class SisterRuntime:
     async def _supervise(
         self, handle: SisterHandle, token: object, done_event: asyncio.Event
     ) -> None:
+        from misaka.core.network import dispatch
+
+        recorded_runner = None
         try:
             while handle.agent and handle.manager:
                 async with handle.state_lock:
@@ -976,6 +995,9 @@ class SisterRuntime:
                     if handle.stalled:
                         await self._fail_stalled(handle, token)
                     return
+                if runner is recorded_runner:
+                    # Retry a blocked settlement without repeating the turn or holding its state lock.
+                    await asyncio.sleep(_OUTPUT_POLL_SECONDS)
                 async with handle.state_lock:
                     row = self._row_for_run(handle, token)
                     if row is None:
@@ -992,12 +1014,21 @@ class SisterRuntime:
                             self._event(handle, "stop_after_ownership_loss", {})
                         return
                     owner_lock = str(handle.claim_lock)
-                    self._record_result(handle, owner_lock)
-                    from misaka.core.network import dispatch
-
-                    if not handle.stop_requested and await asyncio.to_thread(
-                        dispatch.recover_terminal_submission, self.con, row,
-                    ):
+                    if runner is not recorded_runner:
+                        self._record_result(handle, owner_lock)
+                        recorded_runner = runner
+                    try:
+                        recovered = not handle.stop_requested and await asyncio.to_thread(
+                            dispatch.recover_terminal_submission, self.con, row,
+                        )
+                    except sqlite3.OperationalError as error:
+                        primary = getattr(error, "sqlite_errorcode", 0) & 0xFF
+                        if primary not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                            raise
+                        if self._closing:
+                            return
+                        continue
+                    if recovered:
                         settled = self._row_for_run(handle, token)
                         if settled is not None:
                             await self._finish_if_settled(handle, token, settled)
@@ -1385,7 +1416,7 @@ class SisterRuntime:
         prepared = dict(row)
         prepared.update(worker.card_extras(
             self.con, row, self.cfg, include_materials=False))
-        worker.card_file_scope(prepared, row["workspace"])
+        prepared["_file_scope"] = worker.card_file_scope(prepared, row["workspace"])
         manager = _SisterManager(self.session, self.cfg, prepared, row["workspace"])
         manager._semaphore = self._sister_semaphore
         manager._session_dir(context)
@@ -1439,7 +1470,7 @@ class SisterRuntime:
                     raise ValueError("User confirmation is required to start a Sister card with a new model turn.")
                 if not db.reopen_task(self.con, task_id, expected_generation=expected_generation):
                     raise RuntimeError("The Sister session changed; try again.")
-                started = await self.launch(task_id, context=context, tool_call_id="message")
+                started = await self._launch_locked(task_id, context=context, tool_call_id="message")
                 row = db.get(self.con, task_id)
                 await asyncio.to_thread(self._mail_card, row, message, summary)
                 handle = self._handles.get(task_id)
@@ -1512,7 +1543,7 @@ class SisterRuntime:
             generation = int(resumed["generation"])
             token, done_event = self._begin_run(handle, generation, lock)
             handle.context = context
-            handle.manager.beast = reading["mode"] == "beast"
+            handle.manager.beast = reading["mode"] == "beast" and handle.manager.file_scope is None
             try:
                 await handle.manager.send_message(
                     handle.agent.id, message, context=context, notify=False

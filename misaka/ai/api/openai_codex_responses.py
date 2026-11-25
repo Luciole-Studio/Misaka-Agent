@@ -1414,7 +1414,14 @@ def _parseErrorResponse(response: httpx.Response, body: bytes) -> ProviderRespon
         parsed = jsonParse(raw)
     except ValueError:
         parsed = None
-    err = parsed.get("error") if isinstance(parsed, Mapping) else None
+    err = parsed.get("error", parsed) if isinstance(parsed, Mapping) else None
+    provider_message = raw
+    if isinstance(parsed, Mapping):
+        # A response can attach billing status to an otherwise transient error.
+        detail = err.get("message") if isinstance(err, Mapping) else err
+        if not isinstance(detail, str):
+            detail = parsed.get("message")
+        provider_message = detail if isinstance(detail, str) else ""
     code = None
     if isinstance(err, Mapping):
         code = err.get("code") or err.get("type")
@@ -1441,7 +1448,7 @@ def _parseErrorResponse(response: httpx.Response, body: bytes) -> ProviderRespon
         status=response.status_code,
         headers=response.headers,
         code=code if isinstance(code, str) else None,
-        providerMessage=raw,
+        providerMessage=provider_message,
     )
 
 

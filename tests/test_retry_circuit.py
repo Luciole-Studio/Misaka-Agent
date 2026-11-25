@@ -95,6 +95,7 @@ async def test_delay_cap_reaches_outer_retry_classifier(monkeypatch, caps):
         model, runtime = await _configured(server.baseUrl)
         result = await _ask(runtime, model, maxRetries=0, **caps)
     assert len(server.requests) == 1
+    assert result.retryStop == "retry_delay_limit"
     assert not isRetryableAssistantError(result)
     assert tasks.classify_failure(result.errorMessage) == "retry_delay_limit"
 

@@ -880,16 +880,16 @@ def set_state(con, run_id, *, phase=None, status=None, error=None,
         fields.append("wave=?")
         values.append(int(wave))
     fields.append("updated_at=?")
-    now = int(time.time())
-    values.extend([now, run_id])
     with task_store.write_txn(con):
         if driver_lock is not None and not holds_driver(con, run_id, driver_lock):
             raise RuntimeError(f"Research run {run_id}: driver lease lost.")
+        now = int(time.time())
+        values.extend([now, run_id])
         if root_session:
             row = con.execute("SELECT root_session FROM research_runs WHERE id=?", (run_id,)).fetchone()
             if row is not None:
                 previous = home.stored(home.from_stored(row[0])) if row[0] else None
-                if previous is None or os.path.normcase(previous) != os.path.normcase(root_session):
+                if previous != root_session:
                     con.execute(
                         "INSERT INTO events(task_id,kind,payload,run_id,created_at) VALUES(?,?,?,?,?)",
                         (run_id, _ROOT_SESSION_BOUND, json.dumps({
@@ -909,7 +909,7 @@ def _root_binding(payload):
 
 
 def _root_session_path(value, absolute=os.path.abspath):
-    return (os.path.normcase(absolute(home.from_stored(value)))
+    return (absolute(home.from_stored(value))
             if isinstance(value, str) and value and "\0" not in value else None)
 
 
@@ -964,9 +964,15 @@ def root_session_history(con, run_id):
 
 def prior_window_runs(con, run_id, aliases):
     """Find the other runs that used these windows, and their proven stays when available."""
-    # Bindings are already stored with canonical paths. Compare their spellings
-    # without resolving unrelated windows on disk.
-    keys = {_root_session_path(path) for path in aliases}
+    keys = {key for path in aliases if (key := _root_session_path(path, os.path.realpath)) is not None}
+    folded_keys = {os.path.normcase(path) for path in keys}
+
+    def resolve_related(path):
+        # Legacy pointers may use Windows path aliases. Resolve only possible matches.
+        path = os.path.abspath(path)
+        if path not in keys and os.path.normcase(path) in folded_keys:
+            return os.path.realpath(path)
+        return path
     slots = ",".join("?" * len(aliases))
     collate = " COLLATE NOCASE" if os.name == "nt" else ""
     rows = con.execute(
@@ -978,7 +984,7 @@ def prior_window_runs(con, run_id, aliases):
     )
     for (other, created, updated, status, current), history in groupby(rows, key=lambda row: row[:5]):
         events = [(at, payload) for _, _, _, _, _, event_id, at, payload in history if event_id is not None]
-        windows, complete = _root_session_evidence(current, events, created, updated)
+        windows, complete = _root_session_evidence(current, events, created, updated, absolute=resolve_related)
         shared = windows.keys() & keys
         if shared:
             yield other, created, updated, status, [period for path in shared for period in windows[path]], complete

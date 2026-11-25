@@ -14,7 +14,13 @@ import hashlib
 import json
 import os
 
-from misaka.core.web.evidence import frontmatter_line_count, save_page
+from misaka.core.web.evidence import (
+    frontmatter_line_count,
+    read_provenance,
+    save_page,
+    saved_page_url_key,
+    saved_pages,
+)
 
 PROVENANCE = {
     "source_url": "https://example.com/page",
@@ -65,6 +71,31 @@ def test_the_frontmatter_round_trips(workspace):
         parsed[key.strip()] = json.loads(value.strip())
     assert parsed == provenance
     assert body == "\n\nTitle: T\n\nbody\n"
+
+
+def test_saved_page_urls_distinguish_trailing_slashes(workspace):
+    plain = "https://example.com/data?source=1"
+    with_slash = "https://example.com/data/?source=1"
+    first, _ = _write(workspace, {"source_url": plain}, "First resource")
+    second, _ = _write(workspace, {"source_url": with_slash}, "Second resource")
+    first, second = (workspace / first).resolve(), (workspace / second).resolve()
+
+    restricted, _ = saved_pages(workspace.resolve(), allowed={first})
+    assert restricted.get(saved_page_url_key(with_slash)) is None
+
+    pages, _ = saved_pages(workspace)
+    assert pages[saved_page_url_key(f"{plain}#section")] == str(first)
+    assert pages[saved_page_url_key(with_slash)] == str(second)
+
+
+def test_saved_page_index_survives_undecodable_file(workspace):
+    good, _ = _write(workspace, PROVENANCE, "body")
+    invalid = (workspace / good).with_name("000-invalid.md")
+    invalid.write_bytes(b'---\nsource_url: "https://example.com/\xff"\n---\n')
+
+    pages, _ = saved_pages(workspace)
+    assert pages == {PROVENANCE["source_url"]: str((workspace / good).resolve())}
+    assert read_provenance(str(invalid)) == {}
 
 
 def test_a_provenance_key_the_writer_has_never_seen_is_written_anyway(workspace):

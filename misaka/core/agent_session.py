@@ -3989,15 +3989,7 @@ class AgentSession:
         self._agentRunAbortRequested = False
         self._settleBeforeQueuedMessages = False
         try:
-            if queued:
-                messages = await self._prepareRun(trigger, admit, queued=queued)
-                selected = {id(message) for message in queued}
-                taken = {id(message) for message in self.agent.takeQueuedMessages(lambda message: id(message) in selected)}
-                messages = [message for message in messages if id(message) not in selected or id(message) in taken]
-                if not taken:
-                    raise RuntimeError("Queued messages were cleared before the next run started")
-            else:
-                messages = await self._prepareRun(trigger, admit)
+            messages = await self._prepareRun(trigger, admit, queued=queued)
         except BaseException as error:
             self._runtimeTrace.write("run_finished", status="aborted" if isinstance(error, asyncio.CancelledError) else "not_started")
             self._runtimeTrace = None
@@ -4145,6 +4137,14 @@ class AgentSession:
                     )
                 )
             update_message = self._preparePromptAndToolLoadout(options)
+            if queued:
+                # The start hook can clear the queue. Keep its delivery claim inside
+                # the same rollback boundary as pending next-turn messages.
+                selected = {id(message) for message in queued}
+                taken = {id(message) for message in self.agent.takeQueuedMessages(lambda message: id(message) in selected)}
+                if not taken:
+                    raise RuntimeError("Queued messages were cleared before the next run started")
+                messages = [message for message in messages if id(message) not in selected or id(message) in taken]
         except BaseException:
             self._pendingNextTurnMessages = [*pending_next_turn, *self._pendingNextTurnMessages]
             raise
@@ -4286,15 +4286,15 @@ class AgentSession:
             self._stopHookContinuationPending = False
             self._finishFailedRetry(read_field(message, "errorMessage"))
             return False
+        if self._settleBeforeQueuedMessages:
+            self._stopHookContinuationPending = False
+            return False
         if message is None:
             return self.agent.hasQueuedMessages()
 
         if self._stopHookContinuationPending:
             self._stopHookContinuationPending = False
             return True
-        if self._settleBeforeQueuedMessages:
-            return False
-
         if (self._isRetryableError(message) or await self._recoverRejectedCredential(message)) \
                 and await self._prepareRetry(message):
             if self._agentRunAbortRequested:
@@ -4356,7 +4356,7 @@ class AgentSession:
         )
 
     def _willRetryAfterAgentEnd(self, event: Any) -> bool:
-        if self._agentRunAbortRequested or self._transcriptWriteFailed:
+        if self._agentRunAbortRequested or self._transcriptWriteFailed or self._settleBeforeQueuedMessages:
             return False
         if self._stopHookContinuationPending:
             return True

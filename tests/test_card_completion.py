@@ -73,6 +73,21 @@ def _part(monkeypatch, con, tid, **options):
     return part
 
 
+def test_bounded_finding_resolves_output_basename_past_an_unapproved_root_file(tmp_path, request):
+    (tmp_path / "input.txt").write_text("Declared input", encoding="utf-8")
+    con, tid, output_dir = _board(tmp_path, request, local_work={"input_paths": ["input.txt"]})
+    row = tasks.get(con, tid)
+    deliverable = output_dir / "choson-tusol-genealogy.md"
+    deliverable.write_text("Approved card output", encoding="utf-8")
+    shadow = tmp_path / deliverable.name
+    shadow.write_text("Unapproved file with the same basename", encoding="utf-8")
+
+    findings = worker.scoped_findings(con, row, [{"text": "From the output", "source_file": deliverable.name}])
+    assert findings[0]["source_file"] == deliverable.relative_to(tmp_path).as_posix()
+    with pytest.raises(worker.InvalidLocalWork, match="declared local input"):
+        worker.scoped_findings(con, row, [{"text": "From the root", "source_file": str(shadow)}])
+
+
 def _turn(reason, text):
     return {"type": "agent_end", "messages": [
         {"role": "assistant", "stopReason": reason, "content": [{"type": "text", "text": text}]}]}
@@ -347,10 +362,11 @@ async def test_reconciler_only_reuses_frozen_terminal_completion(tmp_path, monke
     assert dispatch.finish_abandoned(con, abandoned) is None
 
 
-@pytest.mark.parametrize("changed", [False, True])
-async def test_attached_supervisor_recovers_only_a_matching_checkpoint(tmp_path, request, changed):
-    from misaka.core.network import dispatch
-    from misaka.core.network.sister_runtime import SisterHandle, SisterRuntime
+@pytest.mark.parametrize("change", [None, "artifact", "busy"])
+async def test_attached_supervisor_recovers_only_a_matching_checkpoint(tmp_path, request, monkeypatch, change):
+    import sqlite3
+
+    from misaka.core.network import dispatch, sister_runtime
 
     con, tid, out = _board(tmp_path, request)
     evidence = out / "choson-tusol-genealogy.md"
@@ -359,23 +375,42 @@ async def test_attached_supervisor_recovers_only_a_matching_checkpoint(tmp_path,
     worker.declare_completion(con, row, "verified")
     prepared = dispatch.prepare_submission(row, worker.build_submission(con, row, "verified"))
     assert dispatch.record_terminal_submission(con, row, prepared)
-    if changed:
+    if change == "artifact":
         evidence.write_text("# changed after checkpoint", encoding="utf-8")
+
+    recover = dispatch.recover_terminal_submission
+    attempts = []
+
+    def recover_after_contention(connection, observed):
+        attempts.append(observed["claim_lock"])
+        if change == "busy" and len(attempts) == 1:
+            error = sqlite3.OperationalError("database is locked")
+            error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+            raise error
+        return recover(connection, observed)
+
+    monkeypatch.setattr(dispatch, "recover_terminal_submission", recover_after_contention)
+    monkeypatch.setattr(sister_runtime, "_OUTPUT_POLL_SECONDS", 0.01)
 
     runner = asyncio.get_running_loop().create_future()
     runner.set_result(None)
-    runtime = SisterRuntime(None, lambda: con, dict)
+    runtime = sister_runtime.SisterRuntime(None, lambda: con, dict)
     runtime._notify = AsyncMock()
     manager = SimpleNamespace(close=AsyncMock())
-    agent = SimpleNamespace(runner=runner, status="failed", error="Sister exited")
-    handle = SisterHandle(tid, "10032", manager, agent, None, claim_lock="lock1")
+    agent = SimpleNamespace(runner=runner, status="failed", error="Sister exited", retry_stop=None,
+                            current_output=lambda: "verified")
+    handle = sister_runtime.SisterHandle(tid, "10032", manager, agent, None, claim_lock="lock1")
     runtime._handles[tid] = handle
     runtime._owned_claims.add("lock1")
-    await runtime._supervise(handle, handle.run_token, handle.done)
+    await asyncio.wait_for(runtime._supervise(handle, handle.run_token, handle.done), timeout=3)
 
     assert handle.done.is_set()
-    assert tasks.get(con, tid)["status"] == ("ready" if changed else "done")
-    assert con.execute("SELECT COUNT(*) FROM events WHERE task_id=? AND kind='submitted'", (tid,)).fetchone()[0] == int(not changed)
+    assert tasks.get(con, tid)["status"] == ("ready" if change == "artifact" else "done")
+    assert attempts == ["lock1"] * (2 if change == "busy" else 1)
+    events = con.execute("SELECT kind FROM events WHERE task_id=? AND kind IN ('sister_result','submitted') "
+                         "ORDER BY id", (tid,)).fetchall()
+    expected = ["sister_result"] if change == "artifact" else ["sister_result", "submitted"]
+    assert [event["kind"] for event in events] == expected
 
 
 async def test_completion_does_not_carry_into_a_turn_that_did_not_end_cleanly(tmp_path, monkeypatch, request):

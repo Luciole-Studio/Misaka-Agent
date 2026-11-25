@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from misaka.agent.types import AgentTool, AgentToolResult
+from misaka.agent.types import AgentTool, AgentToolResult, AgentTurnDecision
 from misaka.ai.providers.faux import fauxAssistantMessage, fauxThinking, fauxToolCall
 from misaka.ai.types import TextContent
 from misaka.utils.js import spawn
@@ -67,6 +67,60 @@ def _echoTool(toolRuns: list[str]) -> AgentTool:
 
 
 # --- AgentSession retry and event characterization ----------------------------------------------
+
+
+async def test_cleared_deferred_queue_keeps_the_next_turn_note():
+    def extension(pi):
+        async def before_start(event, _ctx):
+            if event["prompt"] == "queued question":
+                harness.session.clearQueue()
+
+        pi.on("before_agent_start", before_start)
+
+    async with createHarness(extensionFactories=[extension]) as harness:
+        await harness.session.sendCustomMessage({"customType": "note", "content": "retain"}, {"deliverAs": "nextTurn"})
+        await harness.session.followUp("queued question")
+        with pytest.raises(RuntimeError, match="Queued messages were cleared"):
+            await harness.session._resumeQueuedMessages()
+
+        harness.setResponses([fauxAssistantMessage("done")])
+        await harness.session.prompt("new question")
+        custom = [read_field(message, "content") for message in harness.session.messages
+                  if read_field(message, "role") == "custom"]
+        assert custom == ["retain"]
+
+
+async def test_terminal_tool_settles_before_delivering_stop_hook_feedback():
+    order = []
+
+    def extension(pi):
+        async def agent_end(event, _ctx):
+            if event.get("toolBatchTerminated"):
+                return {"block": True, "reason": "check the result"}
+
+        async def agent_settled(_event, _ctx):
+            order.append("settled")
+            harness.session.resumeQueuedMessagesAfterSettle()
+
+        pi.on("agent_end", agent_end)
+        pi.on("agent_settled", agent_settled)
+
+    async def execute(*_args):
+        return AgentToolResult(content=[TextContent(text="Done")], details={}, terminate=True)
+
+    def answer(*_args):
+        order.append("feedback delivered")
+        return fauxAssistantMessage("checked")
+
+    tool = AgentTool(name="complete", label="Complete", description="End the turn",
+                     parameters={"type": "object", "properties": {}}, execute=execute)
+    async with createHarness(tools=[tool], initialActiveToolNames=[tool.name], extensionFactories=[extension]) as harness:
+        harness.session.agent.finishTurn = lambda turn, _: AgentTurnDecision("settle") if turn.toolBatchTerminated else None
+        harness.setResponses([fauxAssistantMessage(fauxToolCall(tool.name, {}), {"stopReason": "toolUse"}), answer])
+        await harness.session.prompt("finish")
+
+        assert order == ["settled", "feedback delivered", "settled"]
+        assert read_field(harness.eventsOfType("agent_end")[0], "willRetry") is False
 
 
 async def test_agent_settled_reports_interrupted_before_settle_work(monkeypatch):

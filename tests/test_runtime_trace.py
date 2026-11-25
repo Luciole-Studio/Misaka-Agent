@@ -122,7 +122,9 @@ def test_logging_failure_is_visible_and_recovers(monkeypatch, caplog):
     assert trace.os.fsync is original
     assert "incomplete" in caplog.text
     recorder.observe("tool_returned", {"call_id": "call", "status": "ok", "duration_ms": 3})
-    assert report("failure-fixture")["recording"] == "incomplete"
+    snapshot = report("failure-fixture")
+    assert snapshot["recording"] == "incomplete"
+    assert any(row["event"] == "tool_returned" and row["call_id"] == "call" for row in snapshot["events"])
 
 
 def test_trace_cli_reports_historical_gaps_without_creating_files(capsys):
@@ -283,7 +285,7 @@ async def test_parallel_trace_distinguishes_executor_order_from_receipt_order(tm
 
     async def execute(call_id, _args, *_rest):
         if call_id == "first":
-            await second_returning.wait()
+            await asyncio.wait_for(second_returning.wait(), timeout=5)
         else:
             second_returning.set()
         return AgentToolResult(content=[TextContent(text="ok")], details={})
@@ -498,7 +500,7 @@ async def test_trace_keeps_long_receipt_session_id_for_saved_window_lookup(tmp_p
     events = json.loads(capsys.readouterr().out)["events"]
     [receipt] = [row for row in events if row["event"] == "model_receipt_saved"]
     assert receipt["session_id"] == session_id
-    assert usage._trace_windows(events, set()) == ({os.path.normcase(str(window.resolve()))}, False)
+    assert usage._trace_windows(events, set()) == ({str(window.resolve())}, False)
 
 
 def test_old_trace_and_valid_rows_survive_bad_rows(capsys):
@@ -601,7 +603,8 @@ def test_trace_reports_unreadable_board_without_hiding_jsonl(monkeypatch, capsys
         assert "Research Board evidence incomplete" in capsys.readouterr().out
 
 
-def test_board_only_research_trace_shows_submission_and_settlement_separately(tmp_path, capsys):
+@pytest.mark.parametrize("damaged_payload", [None, "{", "[]"])
+def test_board_only_research_trace_shows_submission_and_settlement_separately(tmp_path, capsys, damaged_payload):
     from misaka.core.platform import tasks
     from misaka.core.research import runs
 
@@ -633,6 +636,8 @@ def test_board_only_research_trace_shows_submission_and_settlement_separately(tm
         failed = tasks.create_task(con, "Stopped card", assignee="10032", workspace=str(tmp_path))
         runs.link_task(con, run_id, failed, kind="research", node=node)
         assert tasks.add_event(con, failed, "gave_up", {"failure_kind": "provider_terminal"}, generation=1)
+        if damaged_payload is not None:
+            con.execute("UPDATE events SET payload=? WHERE id=?", (damaged_payload, submission["board_event_id"]))
         other = tasks.create_task(con, "Other card", assignee="10032", workspace=str(tmp_path))
         tasks.add_event(con, other, "submitted", {"artifact_digests": {"unrelated.md": "a" * 64}}, generation=1)
 
@@ -641,17 +646,21 @@ def test_board_only_research_trace_shows_submission_and_settlement_separately(tm
     data = json.loads(output)
     assert data["recording"] == "unavailable"
     assert data["events"] == []
+    assert data["board_incomplete"] is (damaged_payload is not None)
     assert data["budget"] == {"recorded_tokens": 128, "reserved_tokens": 0, "expired_reservation_tokens": 0}
     same_submission, settled, stopped = data["board_events"]
-    assert same_submission == submission
+    hashes = [digest] if damaged_payload is None else []
+    assert same_submission == {**submission, "artifact_hashes": hashes}
     assert settled["event"] == "research_v2_settled" and settled["card_id"] == card
     assert settled["submission_event_id"] == submission["board_event_id"]
-    assert settled["artifact_hashes"] == [digest]
+    assert settled["artifact_hashes"] == hashes
     assert (stopped["event"], stopped["card_id"], stopped["reason"]) == ("gave_up", failed, "provider_terminal")
     assert "Private" not in output and "private.md" not in output and other not in output
     assert main(["trace", "show", run_id]) == 0
     text = capsys.readouterr().out
-    assert "submitted" in text and "research_v2_settled" in text and digest in text
+    assert "submitted" in text and "research_v2_settled" in text
+    assert (digest in text) is (damaged_payload is None)
+    assert ("Research Board evidence incomplete" in text) is (damaged_payload is not None)
 
 
 @pytest.mark.parametrize("folder_name", ["latest", "Newest.Hashed"])

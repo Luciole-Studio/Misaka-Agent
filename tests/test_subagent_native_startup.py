@@ -279,6 +279,24 @@ async def test_native_startup_failure_preserves_traceback(isolated):
         await manager.close()
 
 
+async def test_admission_failure_does_not_reuse_previous_turn_retry_stop(isolated, monkeypatch):
+    from misaka.core.network import worker
+
+    manager, session = host(isolated)
+    monkeypatch.setattr(manager, "_billed_to", lambda: ("fixture.db", "t-fixture", 1, None, 10))
+    monkeypatch.setattr(worker, "over_cap", lambda *_: True)
+    try:
+        task = await create(manager, session)
+        task.retry_stop = "provider_terminal"
+        await manager._drive(task, "A new attempt under a spent budget", notify=False)
+
+        assert task.status == "failed" and task.process is None
+        assert worker.stopped_at_cap(task.error, retry_stop=task.retry_stop)
+        assert task.retry_stop is None
+    finally:
+        await manager.close()
+
+
 async def test_failed_initialization_does_not_register_a_task(isolated, monkeypatch):
     from misaka.core.session_manager import SessionManager
 

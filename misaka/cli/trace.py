@@ -205,9 +205,10 @@ def _board_evidence(con, run_id):
     for row in rows:
         try:
             payload = json.loads(row["payload"] or "{}")
-        except (ValueError, RecursionError):
-            payload = {}
+        except (TypeError, ValueError, RecursionError):
+            payload = None
         if not isinstance(payload, dict):
+            yield None
             payload = {}
         event = {"event": row["kind"], "board_event_id": row["id"], "card_id": row["task_id"],
                  "generation": row["generation"], "created_at": row["created_at"]}
@@ -253,14 +254,19 @@ def _read_board(run_id):
     from misaka.core.research.usage import research_budget_summary
 
     evidence = []
+    incomplete = False
     try:
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as con:
             con.row_factory = sqlite3.Row
             con.execute("BEGIN")
             if con.execute("SELECT 1 FROM research_runs WHERE id=?", (run_id,)).fetchone() is None:
                 return None, [], False
-            evidence.extend(_board_evidence(con, run_id))
-            return research_budget_summary(con, run_id), evidence, False
+            for event in _board_evidence(con, run_id):
+                if event is None:
+                    incomplete = True
+                else:
+                    evidence.append(event)
+            return research_budget_summary(con, run_id), evidence, incomplete
     except (OSError, sqlite3.Error):
         # Older Boards may still have submissions when budget tables cannot be read.
         return None, evidence, True
