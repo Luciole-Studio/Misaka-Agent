@@ -133,6 +133,10 @@ class Moments:
     def command(self, name: str) -> CoreCommand | None:
         return next((command for command in self.commands() if command.name == name), None)
 
+    def settle_tool_turn(self, turn: Any) -> bool:
+        """Whether an owning part requires this completed tool batch to settle before new work."""
+        return any(consider(turn) for part in self.parts if (consider := getattr(part, "settle_tool_turn", None)))
+
     def project_tools(self, tools: list[Any]) -> list[Any]:
         """Request-visible views only; canonical registry definitions keep their owner."""
         for part in self.parts:

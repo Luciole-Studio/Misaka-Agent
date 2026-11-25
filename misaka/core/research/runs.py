@@ -25,6 +25,7 @@ import socket
 import sqlite3
 import time
 from contextlib import contextmanager
+from itertools import groupby
 from pathlib import Path
 
 from misaka.config import home
@@ -34,6 +35,7 @@ from misaka.utils import atomic
 
 CRITIQUE_KINDS = frozenset({"red_team", "final_review"})
 REVIEW_KINDS = CRITIQUE_KINDS | {"divergence"}
+_ROOT_SESSION_BOUND = "research_root_session_bound"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS research_runs (
@@ -488,6 +490,10 @@ def normalize_limits(raw=None):
         if not isinstance(raw["plan_approval"], bool):
             raise ValueError("plan_approval must be a boolean")
         result["plan_approval"] = raw["plan_approval"]
+    if "diagnostics" in raw:
+        if not isinstance(raw["diagnostics"], bool):
+            raise ValueError("diagnostics must be a boolean")
+        result["diagnostics"] = raw["diagnostics"]
     if raw.get("context_threshold") is not None:
         threshold = raw["context_threshold"]
         if (isinstance(threshold, bool) or not isinstance(threshold, (int, float))
@@ -802,6 +808,10 @@ def limits(run):
         return dict(DEFAULT_LIMITS)
 
 
+def diagnostics_enabled(run):
+    return run is not None and limits(run).get("diagnostics", False)
+
+
 ADJUSTABLE_LIMITS = {
     "sister_parallel": "at once",
     "parallel": "from the next level of nodes",
@@ -858,9 +868,10 @@ def set_state(con, run_id, *, phase=None, status=None, error=None,
               root_session=None, final_artifact=None, wave=None, driver_lock=None):
     """Update run state. With ``driver_lock`` the write lands only while that lease is held:
     a driver that lost its lease cannot fail or finish a run its successor now owns."""
+    root_session = root_session and home.stored(root_session)
     values, fields = [], []
     for name, value in (("phase", phase), ("status", status), ("last_error", error),
-                        ("root_session", root_session and home.stored(root_session)),
+                        ("root_session", root_session),
                         ("final_artifact", final_artifact)):
         if value is not None:
             fields.append(f"{name}=?")
@@ -869,12 +880,114 @@ def set_state(con, run_id, *, phase=None, status=None, error=None,
         fields.append("wave=?")
         values.append(int(wave))
     fields.append("updated_at=?")
-    values.extend([int(time.time()), run_id])
     with task_store.write_txn(con):
         if driver_lock is not None and not holds_driver(con, run_id, driver_lock):
             raise RuntimeError(f"Research run {run_id}: driver lease lost.")
+        now = int(time.time())
+        values.extend([now, run_id])
+        if root_session:
+            row = con.execute("SELECT root_session FROM research_runs WHERE id=?", (run_id,)).fetchone()
+            if row is not None:
+                previous = home.stored(home.from_stored(row[0])) if row[0] else None
+                if previous != root_session:
+                    con.execute(
+                        "INSERT INTO events(task_id,kind,payload,run_id,created_at) VALUES(?,?,?,?,?)",
+                        (run_id, _ROOT_SESSION_BOUND, json.dumps({
+                            "previous_session_file": previous, "session_file": root_session,
+                        }), run_id, now),
+                    )
         con.execute(f"UPDATE research_runs SET {','.join(fields)} WHERE id=?", values)
     return get(con, run_id)
+
+
+def _root_binding(payload):
+    try:
+        item = json.loads(payload)
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return item if isinstance(item, dict) and "previous_session_file" in item else None
+
+
+def _root_session_path(value, absolute=os.path.abspath):
+    return (absolute(home.from_stored(value))
+            if isinstance(value, str) and value and "\0" not in value else None)
+
+
+def _root_session_evidence(current, events, created, updated, *, absolute=os.path.abspath):
+    """Collect paths and stays in Board seconds. Use the times only when the chain is complete."""
+    current_path = _root_session_path(current, absolute)
+    windows = {}
+    last, started = None, created
+    timed_run = type(created) is int and type(updated) is int and 0 <= created <= updated
+    complete = not current or current_path is not None
+    for at, payload in events:
+        item = _root_binding(payload)
+        if item is None:
+            complete = False
+            continue
+        previous = _root_session_path(item["previous_session_file"], absolute)
+        new = _root_session_path(item.get("session_file"), absolute)
+        if previous:
+            windows.setdefault(previous, [])
+        if new:
+            windows.setdefault(new, [])
+        timed = timed_run and type(at) is int and started <= at <= updated
+        complete &= (timed and new is not None and previous == last
+                     and (previous is not None or item["previous_session_file"] is None))
+        if last is not None and timed:
+            windows[last].append((started, at))
+        if timed:
+            started = at
+        last = new
+    if current_path:
+        windows.setdefault(current_path, [])
+    if last is not None:
+        windows[last].append((started, None))
+    # Distinguish an older Board without events from an incomplete recorded chain.
+    return windows, (complete and last == current_path) if events or not current else None
+
+
+def root_session_history(con, run_id):
+    """Current and earlier roots with their occupancy periods when the chain is complete."""
+    rows = con.execute(
+        "SELECT run.root_session, run.created_at, run.updated_at, event.id, event.created_at, event.payload "
+        "FROM research_runs AS run "
+        "LEFT JOIN events AS event ON event.task_id=run.id AND event.kind=? "
+        "WHERE run.id=? ORDER BY event.id", (_ROOT_SESSION_BOUND, run_id),
+    ).fetchall()
+    if not rows:
+        return {}, False
+    current, created, updated, *_ = rows[0]
+    events = [(at, payload) for _, _, _, event_id, at, payload in rows if event_id is not None]
+    return _root_session_evidence(current, events, created, updated, absolute=os.path.realpath)
+
+
+def prior_window_runs(con, run_id, roots):
+    """Find the other runs that used these windows, and their proven stays when available."""
+    folded_keys = {os.path.normcase(path) for path in roots}
+
+    def resolve_related(path):
+        # Binding events already use resolved paths. Check differently cased pointers when relevant.
+        path = os.path.abspath(path)
+        if path not in roots and os.path.normcase(path) in folded_keys:
+            return os.path.realpath(path)
+        return path
+
+    rows = con.execute(
+        "SELECT run.id, run.created_at, run.updated_at, run.status, run.root_session, "
+        "event.id, event.created_at, event.payload FROM research_runs AS run "
+        "LEFT JOIN events AS event ON event.task_id=run.id AND event.kind=? "
+        "WHERE run.id<>? AND (event.id IS NOT NULL OR run.root_session IS NOT NULL) "
+        "ORDER BY run.id, event.id", (_ROOT_SESSION_BOUND, run_id),
+    )
+    for (other, created, updated, status, current), history in groupby(rows, key=lambda row: row[:5]):
+        events = [(at, payload) for _, _, _, _, _, event_id, at, payload in history if event_id is not None]
+        # Before binding events existed, a pointer could use a directory link of any spelling.
+        resolve = resolve_related if events else os.path.realpath
+        windows, complete = _root_session_evidence(current, events, created, updated, absolute=resolve)
+        shared = windows.keys() & roots
+        if shared:
+            yield other, created, updated, status, [period for path in shared for period in windows[path]], complete
 
 
 def request_stop(con, run_id):
@@ -923,7 +1036,7 @@ def _resume(con, run_id, *, driver_lock, clarification):
         round, previous = current_plan(con, run_id, branch["id"])
         if previous and previous["payload"].get("status") == "clarify":
             delete_action(con, run_id, branch["id"], plan_key(round))
-    reopen_cards(con, run_id)
+    reopen_cards(con, run_id, resume_retry_stops=True)
     con.execute(
         "UPDATE research_execution SET status='planning',updated_at=? "
         "WHERE run_id=? AND status IN ('waiting_input','awaiting_approval','failed')", (int(time.time()), run_id),
@@ -955,7 +1068,20 @@ def parked(con, row):
     return row["status"] in {"blocked", "triage"} and not help_waiting(con, row)
 
 
-def reopen_cards(con, run_id, node_id=None):
+def card_retry_stopped(con, row):
+    """Failures that require the user's explicit Research resume."""
+    if row["status"] != "failed":
+        return False
+    raw = task_store.latest_payload(con, row["id"], "gave_up", generation=row["generation"])
+    try:
+        event = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return False
+    return isinstance(event, dict) and (event.get("reason") == "consecutive_rate_limits"
+                                        or task_store.is_retry_stop(event.get("failure_kind")))
+
+
+def reopen_cards(con, run_id, node_id=None, *, resume_retry_stops=False):
     """Send the run's (or one node's) stopped, failed and unusable cards back to their Sisters.
     A failed card is retried like a stopped one: without this the node it killed replays the
     identical failure on every resume, and the only way out is editing this database by hand.
@@ -972,6 +1098,8 @@ def reopen_cards(con, run_id, node_id=None):
     given_up = given_up_cards(con, run_id, node_id)
     for row in tasks(con, run_id, node_id=node_id):
         if row["id"] in given_up:
+            continue
+        if not resume_retry_stops and card_retry_stopped(con, row):
             continue
         unusable = row["status"] == "done" and (
             task_store.latest_payload(con, row["id"], "research_review_missing", generation=row["generation"])

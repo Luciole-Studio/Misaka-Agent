@@ -28,7 +28,6 @@ import re
 import time
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, replace
-from email.utils import parsedate_to_datetime
 from typing import Any, Literal, NamedTuple, TypedDict
 from urllib.parse import urlparse
 
@@ -51,6 +50,7 @@ from misaka.ai.api.openai_responses_shared import (
 )
 from misaka.ai.api.simple_options import buildBaseOptions
 from misaka.ai.models import clampThinkingLevel
+from misaka.ai.runtime_observation import observe
 from misaka.ai.session_resources import registerSessionResourceCleanup
 from misaka.ai.types import (
     AssistantMessage,
@@ -77,6 +77,12 @@ from misaka.ai.utils.event_stream import AssistantMessageEventStream, spawn_stre
 from misaka.ai.utils.headers import headersToRecord
 from misaka.ai.utils.node_http_proxy import resolveHttpProxyUrlForTarget
 from misaka.ai.utils.pi_user_agent import getPiUserAgent
+from misaka.ai.utils.provider_retry import (
+    ProviderResponseError,
+    RetryDelayLimitError,
+    retryProviderRequest,
+)
+from misaka.ai.utils.retry import retryDelayLimitMessage
 from misaka.ai.utils.text import getSystemMessageText
 from misaka.ai.utils.transcript import (
     getDeclaredTools,
@@ -89,7 +95,6 @@ from misaka.ai.utils.uuid import uuidv7
 from misaka.core.provider_attribution import CLIENT_NAME
 from misaka.utils.js import (
     UNDEFINED,
-    jsNumber,
     jsonParse,
     jsonStringify,
     jsString,
@@ -104,9 +109,6 @@ from misaka.utils.values import maybe_await, signal_aborted
 
 _DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
 _JWT_CLAIM_PATH = "https://api.openai.com/auth"
-_DEFAULT_MAX_RETRIES = 0
-_BASE_DELAY_MS = 1000
-_DEFAULT_MAX_RETRY_DELAY_MS = 60_000
 _DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS = 15_000
 # The Codex backend accepts zstd-compressed request bodies on the SSE responses
 # endpoint (the same endpoint the official Codex client compresses against).
@@ -148,7 +150,7 @@ class OpenAICodexResponsesOptions(TypedDict, total=False):
     timeoutMs: int
     websocketConnectTimeoutMs: int
     maxRetries: int
-    maxRetryDelayMs: int
+    maxRetryDelayMs: float
     metadata: dict[str, Any]
     env: ProviderEnv
     reasoningEffort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
@@ -163,70 +165,6 @@ def _assertSuccessfulOutput(output: AssistantMessage) -> None:
         raise RuntimeError("Codex stream ended without a stop reason")
     if output.stopReason == "error" or output.stopReason == "aborted":
         raise RuntimeError(output.errorMessage or "An unknown error occurred")
-
-
-# ============================================================================
-# Retry Helpers
-# ============================================================================
-
-_TERMINAL_RATE_LIMIT_PATTERN = re.compile(
-    r"GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing",
-    re.IGNORECASE,
-)
-_RETRYABLE_ERROR_PATTERN = re.compile(
-    r"rate.?limit|overloaded|service.?unavailable|upstream.?connect|connection.?refused", re.IGNORECASE
-)
-
-
-def _isTerminalRateLimitError(errorText: str) -> bool:
-    return bool(_TERMINAL_RATE_LIMIT_PATTERN.search(errorText))
-
-
-def _isRetryableError(status: int, errorText: str) -> bool:
-    if status == 429 and _isTerminalRateLimitError(errorText):
-        return False
-    if status == 429 or status == 500 or status == 502 or status == 503 or status == 504:
-        return True
-    return bool(_RETRYABLE_ERROR_PATTERN.search(errorText))
-
-
-def _getRetryAfterDelayMs(headers: httpx.Headers | Mapping[str, str]) -> float | None:
-    retryAfterMs = headers.get("retry-after-ms")
-    if retryAfterMs is not None:
-        millis = jsNumber(retryAfterMs)
-        if math.isfinite(millis):
-            return max(0, millis)
-
-    retryAfter = headers.get("retry-after")
-    if not retryAfter:
-        return None
-
-    seconds = jsNumber(retryAfter)
-    if math.isfinite(seconds):
-        return max(0, seconds * 1000)
-
-    try:
-        date = parsedate_to_datetime(retryAfter).timestamp() * 1000
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return max(0, date - time.time() * 1000)
-
-
-class _RetryDelayExceededError(RuntimeError):
-    pass
-
-
-def _validateRetryDelayMs(delayMs: float, options: Any = None) -> float:
-    maxRetryDelayMs = nullishCoalesce(_option(options, "maxRetryDelayMs"), _DEFAULT_MAX_RETRY_DELAY_MS)
-    if maxRetryDelayMs > 0 and delayMs > maxRetryDelayMs:
-        raise _RetryDelayExceededError(
-            f"Server requested {math.ceil(delayMs / 1000)}s retry delay (max: {math.ceil(maxRetryDelayMs / 1000)}s)",
-        )
-    return delayMs
-
-
-async def _sleep(ms: float, signal: Any = None) -> None:
-    await _await_with_signal(asyncio.sleep(ms / 1000), signal)
 
 
 def _normalizeTimeoutMs(value: Any) -> int | None:
@@ -292,9 +230,10 @@ def stream(
             stopReason="pending",
             timestamp=time.time_ns() // 1_000_000,
         )
-        response: httpx.Response | None = None
-
         try:
+            transport = _option(options, "transport") or "auto"
+            if transport == "sse":
+                observe("http_observable")
             apiKey = _option(options, "apiKey")
             if not apiKey:
                 raise RuntimeError(f"No API key for provider: {model.provider}")
@@ -323,7 +262,6 @@ def stream(
             bodyJson = jsonStringify(body)
             httpTimeoutMs = _normalizeTimeoutMs(_option(options, "timeoutMs"))
             websocketConnectTimeoutMs = _normalizeTimeoutMs(_option(options, "websocketConnectTimeoutMs"))
-            transport = _option(options, "transport") or "auto"
             startEmitted = False
             websocketDisabledForSession = transport != "sse" and _isWebSocketSseFallbackActive(cacheSessionId)
             if websocketDisabledForSession:
@@ -415,103 +353,87 @@ def stream(
                 sseHeaders["content-encoding"] = "zstd"
             sseBody: bytes = nullishCoalesce(compressedBody, bodyJson.encode("utf-8"))
 
-            # Fetch with retry logic for rate limits and transient errors
-            lastError: BaseException | None = None
-            maxRetries = nullishCoalesce(_option(options, "maxRetries"), _DEFAULT_MAX_RETRIES)
-
+            signal = _option(options, "signal")
             readTimeout = httpTimeoutMs / 1000 if httpTimeoutMs is not None and httpTimeoutMs > 0 else None
-            async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(None, read=readTimeout)) as client:
-                attempt = 0
-                while attempt <= maxRetries:
-                    if signal_aborted(_option(options, "signal")):
-                        raise RuntimeError("Request was aborted")
+            if transport != "sse":
+                observe("http_observable")
+            attempt = 0
+
+            async def observeRequest(_request: httpx.Request) -> None:
+                nonlocal attempt
+                attempt += 1
+                observe("http_attempt", attempt=attempt)
+
+            async def observeResponse(response: httpx.Response) -> None:
+                observe("http_response", attempt=attempt, status_code=response.status_code)
+
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=httpx.Timeout(None, read=readTimeout),
+                event_hooks={"request": [observeRequest], "response": [observeResponse]},
+            ) as client:
+                async def sendRequest() -> httpx.Response:
+                    request = client.build_request(
+                        "POST", _resolveCodexUrl(model.baseUrl), headers=sseHeaders, content=sseBody
+                    )
+                    send = client.send(request, stream=True)
+                    try:
+                        received = await _await_with_signal(
+                            asyncio.wait_for(send, readTimeout) if readTimeout is not None else send, signal
+                        )
+                    except (TimeoutError, httpx.ReadTimeout) as error:
+                        raise httpx.ReadTimeout(
+                            f"Codex SSE response headers timed out after {httpTimeoutMs}ms", request=request
+                        ) from error
 
                     try:
-                        request = client.build_request(
-                            "POST", _resolveCodexUrl(model.baseUrl), headers=sseHeaders, content=sseBody
-                        )
-                        send = client.send(request, stream=True)
-                        try:
-                            response = await _await_with_signal(
-                                asyncio.wait_for(send, httpTimeoutMs / 1000)
-                                if httpTimeoutMs is not None and httpTimeoutMs > 0
-                                else send,
-                                _option(options, "signal"),
-                            )
-                        except (TimeoutError, httpx.ReadTimeout) as error:
-                            if not signal_aborted(_option(options, "signal")):
-                                raise RuntimeError(f"Codex SSE response headers timed out after {httpTimeoutMs}ms") from error
-                            raise
                         onResponse = _option(options, "onResponse")
                         if onResponse:
                             await maybe_await(
-                                onResponse({"status": response.status_code, "headers": headersToRecord(response.headers)}, model)
+                                onResponse({"status": received.status_code, "headers": headersToRecord(received.headers)}, model)
                             )
-
-                        if response.is_success:
-                            break
-
-                        errorText = (await response.aread()).decode("utf-8", errors="replace")
-                        await response.aclose()
-                        if attempt < maxRetries and _isRetryableError(response.status_code, errorText):
-                            retryAfterDelayMs = _getRetryAfterDelayMs(response.headers)
-                            delayMs = (
-                                _BASE_DELAY_MS * 2**attempt
-                                if retryAfterDelayMs is None
-                                else _validateRetryDelayMs(retryAfterDelayMs, options)
-                            )
-
-                            await _sleep(delayMs, _option(options, "signal"))
-                            attempt += 1
-                            continue
-
-                        # Parse error for friendly message on final attempt or non-retryable error
-                        fakeResponse = httpx.Response(
-                            response.status_code, content=errorText.encode("utf-8"), extensions={"reason_phrase": response.reason_phrase.encode()}
-                        )
-                        info = await _parseErrorResponse(fakeResponse)
-                        raise RuntimeError(info.get("friendlyMessage") or info["message"])
-                    except Exception as error:
-                        if getattr(error, "name", None) == "AbortError" or str(error) == "Request was aborted":
-                            raise RuntimeError("Request was aborted") from error
-                        lastError = error
-                        # Network errors are retryable
-                        if (
-                            attempt < maxRetries
-                            and not isinstance(lastError, _RetryDelayExceededError)
-                            and "usage limit" not in str(lastError)
-                        ):
-                            delayMs = _BASE_DELAY_MS * 2**attempt
-                            await _sleep(delayMs, _option(options, "signal"))
-                            attempt += 1
-                            continue
+                        if received.is_success:
+                            return received
+                        try:
+                            body = await _await_with_signal(received.aread(), signal)
+                        except httpx.TransportError as error:
+                            raise _parseErrorResponse(received, b"") from error
+                        raise _parseErrorResponse(received, body)
+                    except BaseException:
+                        await received.aclose()
                         raise
 
-                if response is None or not response.is_success:
-                    raise lastError or RuntimeError("Failed after retries")
+                response = await retryProviderRequest(sendRequest, {
+                    "maxRetries": _option(options, "maxRetries"),
+                    "maxRetryDelayMs": _option(options, "maxRetryDelayMs"),
+                    "signal": signal,
+                })
+                try:
+                    if response.status_code in (204, 205):
+                        raise RuntimeError("No response body")
+                    if not startEmitted:
+                        stream.push(StartEvent(partial=output))
+                    await _processStream(response, output, stream, model, grammarToolInputProperties, options)
+                finally:
+                    await response.aclose()
 
-                if response.status_code in (204, 205):
-                    raise RuntimeError("No response body")
-
-                if not startEmitted:
-                    startEmitted = True
-                    stream.push(StartEvent(partial=output))
-                await _processStream(response, output, stream, model, grammarToolInputProperties, options)
-
-                if signal_aborted(_option(options, "signal")):
+                if signal_aborted(signal):
                     raise RuntimeError("Request was aborted")
-
                 _assertSuccessfulOutput(output)
                 stream.push(DoneEvent(reason=output.stopReason, message=output))
                 stream.end()
         except Exception as error:  # noqa: BLE001 - every failure becomes the stream's error event
             output.stopReason = "aborted" if signal_aborted(_option(options, "signal")) else "error"
-            output.errorMessage = formatProviderError(normalizeProviderError(error))
+            if output.stopReason == "aborted":
+                output.errorMessage = "Request was aborted"
+            elif isinstance(error, RetryDelayLimitError):
+                output.errorMessage = retryDelayLimitMessage(error.delayMs, error.maxDelayMs, None).removesuffix(".")
+            else:
+                output.errorMessage = formatProviderError(normalizeProviderError(error))
+                if isinstance(error, _CodexProtocolError | _ProviderStreamEventCallbackError):
+                    output.retryStop = "provider_terminal"
             stream.push(ErrorEvent(reason=output.stopReason, error=output), cause=error)
             stream.end()
-        finally:
-            if response is not None:
-                await response.aclose()
 
     spawn_stream_task(run(), stream=stream)
     return stream
@@ -706,11 +628,10 @@ async def _processStream(
     )
 
 
-class _CodexApiError(RuntimeError):
+class _CodexApiError(ProviderResponseError):
     def __init__(self, message: str, options: Mapping[str, Any] | None = None) -> None:
-        super().__init__(message)
+        super().__init__(message, code=None if options is None else options.get("code"))
         self.name = "CodexApiError"
-        self.code = None if options is None else options.get("code")
         self.payload = None if options is None else options.get("payload")
         self.__cause__ = None if options is None else options.get("cause")
 
@@ -839,7 +760,7 @@ async def _parseSSE(response: httpx.Response, signal: Any = None) -> AsyncIterat
                 value = ""
                 done = True
             except httpx.ReadTimeout as error:
-                raise RuntimeError("terminated") from error
+                raise httpx.ReadTimeout("terminated", request=response.request) from error
             if signal_aborted(signal):
                 raise RuntimeError("Request was aborted")
             buffer += value
@@ -1486,30 +1407,49 @@ async def _processWebSocketStream(
 # ============================================================================
 
 
-async def _parseErrorResponse(response: httpx.Response) -> dict[str, str]:
-    raw = response.text
+def _parseErrorResponse(response: httpx.Response, body: bytes) -> ProviderResponseError:
+    raw = body.decode("utf-8", errors="replace")
     message = raw or response.reason_phrase or "Request failed"
-    friendlyMessage: str | None = None
-
     try:
         parsed = jsonParse(raw)
-        err = parsed.get("error") if isinstance(parsed, Mapping) else None
-        if err:
-            code = err.get("code") or err.get("type") or ""
-            if re.search(r"usage_limit_reached|usage_not_included|rate_limit_exceeded", jsString(code), re.IGNORECASE) or (
-                response.status_code == 429
-            ):
-                plan = f" ({err['plan_type'].lower()} plan)" if err.get("plan_type") else ""
-                mins = (
-                    max(0, round((err["resets_at"] * 1000 - time.time() * 1000) / 60000)) if err.get("resets_at") else None
-                )
-                when = f" Try again in ~{mins} min." if mins is not None else ""
-                friendlyMessage = jsTrim(f"You have hit your ChatGPT usage limit{plan}.{when}")
-            message = err.get("message") or friendlyMessage or message
-    except Exception:  # noqa: BLE001, S110 - `catch {}`: a body that is not the expected JSON keeps the raw text
-        pass
+    except ValueError:
+        parsed = None
+    err = parsed.get("error", parsed) if isinstance(parsed, Mapping) else None
+    provider_message = raw
+    if isinstance(parsed, Mapping):
+        # A response can attach billing status to an otherwise transient error.
+        detail = err.get("message") if isinstance(err, Mapping) else err
+        if not isinstance(detail, str):
+            detail = parsed.get("message")
+        provider_message = detail if isinstance(detail, str) else ""
+    code = None
+    if isinstance(err, Mapping):
+        code = err.get("code") or err.get("type")
+        if isinstance(err.get("message"), str) and err["message"]:
+            message = err["message"]
+        if response.status_code == 429 or re.search(
+            r"usage_limit_reached|usage_not_included|rate_limit_exceeded", jsString(code), re.IGNORECASE
+        ):
+            planType = err.get("plan_type")
+            plan = f" ({planType.lower()} plan)" if isinstance(planType, str) and planType else ""
+            resetsAt = err.get("resets_at")
+            when = ""
+            if resetsAt:
+                try:
+                    minutes = max(0, round((resetsAt - time.time()) / 60))
+                except (TypeError, ValueError, OverflowError):
+                    pass
+                else:
+                    when = f" Try again in ~{minutes} min."
+            message = f"You have hit your ChatGPT usage limit{plan}.{when}"
 
-    return {"message": message, **({} if friendlyMessage is None else {"friendlyMessage": friendlyMessage})}
+    return ProviderResponseError(
+        message,
+        status=response.status_code,
+        headers=response.headers,
+        code=code if isinstance(code, str) else None,
+        providerMessage=provider_message,
+    )
 
 
 # ============================================================================

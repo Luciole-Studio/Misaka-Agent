@@ -44,6 +44,7 @@ def launch(task_id, resume_only=False, say=None, consult=False):
     task.update(extras)
     lock = os.environ.get("MISAKA_USAGE_CLAIM_LOCK")
     generation = os.environ.get("MISAKA_USAGE_GENERATION")
+    attempt_id = None
     if consult:
         consulted, run_id, _consult_lock = worker.consult_env(task_id)
         with contextlib.closing(db.connect(CFG["db"])) as con:
@@ -51,6 +52,7 @@ def launch(task_id, resume_only=False, say=None, consult=False):
         if (not say or run is None or run["status"] != "running" or consulted != int(task["generation"])
                 or task["status"] not in db.CONSULTABLE):
             sys.exit(f"Card {task_id}: no consultation of this finished card is open for this pane.")
+        attempt_id = run_id
         resume_only = True
     elif lock and generation:
         if task["claim_lock"] != lock or int(task["generation"]) != int(generation):
@@ -102,5 +104,6 @@ def launch(task_id, resume_only=False, say=None, consult=False):
     from misaka.cli.engine import main as engine_main
     from misaka.utils import loop_watchdog
     loop_watchdog.configure(f"card-{task_id}", exit_on_stall=bool(lock and generation) or consult)
-    code = asyncio.run(loop_watchdog.watched(engine_main(flags, assembly.engine_options())))
+    with worker.load_card_trace(CFG["db"], task, attempt_id=attempt_id):
+        code = asyncio.run(loop_watchdog.watched(engine_main(flags, assembly.engine_options())))
     sys.exit(code)

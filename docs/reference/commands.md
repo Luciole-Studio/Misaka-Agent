@@ -13,21 +13,39 @@ lists them all.
 | Command | What it does |
 |---|---|
 | `misaka` | open the panel (`misaka panel` does the same). Runs the setup wizard first when your default provider has no sign-in; opens plain chat when the panel cannot run. |
+| `misaka panel --diagnostics` | open a new Last Order pane and enable detailed recording for writable chat panes opened from this panel |
 | `misaka setup [SECTION]` | the setup wizard, or one section of it: `environment`, `model`, `sisters`, `skills`, `documents`, `web`, `research`, `project` |
 | `misaka chat` | chat with Last Order without the panel (`--model` for another model, `-s NAME` to load a skill) |
 | `misaka chat --as 10032` | chat with one Sister |
 | `misaka chat --continue` | carry on the most recent conversation |
+| `misaka chat --diagnostics [--continue]` | enable detailed recording for this chat, including when reopening a conversation |
 | `misaka chat --pick` | choose a past conversation to reopen |
 | `misaka chat --attach --session PATH` | join a session that is already running, such as a research node |
 | `misaka dm 10032 "MESSAGE"` | send one message to an agent's contact session and wait for her reply; without a message, deliver what is waiting for her |
 | `misaka --version` | the installed version |
+
+### Runtime records
+
+| Command | What it does |
+|---|---|
+| `misaka trace last` | show the most recently recorded run |
+| `misaka trace show RUN_ID [--json]` | read a run's timeline, usage, failures, and unconfirmed operations |
+
+Default records summarise successful built-in read-only tools and keep individual records for
+state-changing or unknown tools and failures. Enable `--diagnostics` before starting to see
+individual read-only calls and observable HTTP attempts. Records contain metadata. Opening a
+conversation with diagnostics applies to subsequent execution. Earlier activity remains visible
+at the level originally recorded.
+
+See [Runtime traces](../guide/runtime-traces.md) for an interrupted write example and how to read the usage and budget fields.
 
 ### Research
 
 | Command | What it does |
 |---|---|
 | `misaka research "QUESTION"` | start a research run in this folder |
-| `misaka research --resume RUN_ID` | resume a run |
+| `misaka research --diagnostics "QUESTION"` | start a research run with detailed records for the coordinator and its Misaka child processes |
+| `misaka research --resume RUN_ID` | resume a run with the recording mode saved when it started |
 | `misaka research --tell RUN_ID [--to NODE_ID] "MESSAGE"` | say something to a running node's Last Order, the root's by default |
 | `misaka research --limits RUN_ID --sister-parallel 2 …` | change a running run's limits, with the options below |
 | `misaka usage [--run RUN_ID]` | what recent runs spent, or one run by conversation and model |
@@ -148,6 +166,7 @@ Available in Last Order's window.
 |---|---|
 | `/research` | choose the run's settings; your next message is the question |
 | `/research [OPTIONS] QUESTION` | start at once, with the same options as `misaka research` |
+| `/research --diagnostics QUESTION` | start a new research run with detailed records |
 | `/research status [RUN_ID]` | the state of the latest run in this folder, or the one you name |
 | `/research stop [RUN_ID]` | stop a run; it writes a partial report |
 | `/research resume [RUN_ID] [ANSWER]` | resume a paused run, answering its questions if it asked any |

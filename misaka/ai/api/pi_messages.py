@@ -429,7 +429,8 @@ def _serializeContext(context: TranscriptContext | Mapping[str, Any]) -> Any:
     as upstream sends ``context`` whole."""
     if not isinstance(context, BaseModel):
         return context
-    payload = context.model_dump(mode="json", exclude_none=True, exclude={"messages": {"__all__": {"toolsAdded": True}}})
+    payload = context.model_dump(mode="json", exclude_none=True,
+                                 exclude={"messages": {"__all__": {"toolsAdded", "requestId"}}})
     for message, dumped in zip(context.messages, payload["messages"], strict=True):
         tools = getattr(message, "toolsAdded", None)
         # `is not None`: `JSON.stringify` writes `"toolsAdded":[]` for an empty list.

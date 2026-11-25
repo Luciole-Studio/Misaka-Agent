@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from misaka.core.extensions.types import ToolDefinition
+from misaka.core.network.card_contract import LocalWork
 from misaka.core.research import runs
 
 
@@ -31,6 +32,9 @@ class Task(Params):
     dependencies: list[str] = Field(default_factory=list, description="local_id values from this same plan only; not prior rounds or Board task IDs.")
     capabilities: list[str] = Field(default_factory=list)
     priority: int = Field(default=0, strict=True)
+    local_work: LocalWork | None = Field(None, description=(
+        "Only for a native Sister who can finish with already-known local input files and one deliverable. "
+        "Omit for discovery, collaboration, external sources or work that needs other tools."))
 
 
 class RedTeam(Params):

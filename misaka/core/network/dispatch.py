@@ -13,6 +13,8 @@ from misaka.core.platform import admission, budget
 from misaka.core.platform import tasks as db
 
 _skipped_logged = set()
+_TERMINAL_SUBMISSION_EVENT = "terminal_submission_prepared"
+_CLAIM_FENCE = ("generation", "claim_lock", "worker_pid", "worker_identity", "claim_expires")
 
 
 def _profile_dir(cfg, assignee):
@@ -241,7 +243,7 @@ def run_task(con, t, cfg, *, say=None):
                 con, t["id"], "budget_stop", bud, generation=generation
             )
         return False
-    if bud["mode"] == "beast":
+    if bud["mode"] == "beast" and task.get("_local_work") is None:
         db.add_event(con, t["id"], "beast_mode", bud)
         task["beast"] = True
     usage_db = cfg.get("db")
@@ -267,6 +269,9 @@ def run_task(con, t, cfg, *, say=None):
             usage_token_cap=cfg.get("token_cap"),
             con=con,
         )
+    except worker.InvalidLocalWork as error:
+        db.block_task(con, t["id"], "needs_input", str(error), generation=generation, claim_lock=lock)
+        return False
     except BaseException as error:
         with db.write_txn(con):
             settle = db.mark_failed if isinstance(error, Exception) else db.back_to_ready
@@ -298,18 +303,20 @@ def run_task(con, t, cfg, *, say=None):
             "exit_code": verdict["exit_code"],
             "stderr_tail": verdict.get("stderr_tail", "")[-500:],
         }
-        blocked = str(verdict["reason"]).startswith("blocked:")
+        retry_stop = verdict.get("retry_stop")
+        blocked = not db.is_retry_stop(retry_stop) and failure["reason"].startswith("blocked:")
         if blocked:
             db.block_task(
                 con, t["id"], "needs_input",
-                str(verdict["reason"])[len("blocked:"):].strip(),
+                failure["reason"][len("blocked:"):].strip(),
                 generation=generation, claim_lock=lock,
             )
         elif db.add_event(
             con, t["id"], "failed", failure,
             generation=generation, claim_lock=lock,
         ):
-            db.mark_failed(con, t["id"], generation=generation, claim_lock=lock)
+            db.mark_failed(con, t["id"], generation=generation, claim_lock=lock,
+                           reason=failure["reason"], retry_stop=retry_stop)
     return True
 
 
@@ -337,15 +344,10 @@ def _submitted(submission, *, artifact_digests=None):
 
 
 def finish_abandoned(con, t, *, reason=db.ABANDONED_REASON):
-    """Release a dead worker's unfinished claim.
-
-    A completed lifecycle hook has already moved the row out of ``running`` and written its
-    ``submitted`` event atomically.  A dead worker still owning a running row therefore has no
-    result to recover or inspect.
-    """
-    fence = {"generation": t["generation"], "claim_lock": t["claim_lock"], "worker_pid": t["worker_pid"],
-                 "worker_identity": t["worker_identity"], "claim_expires": t["claim_expires"]}
-    outcome = db.reclaim_abandoned(con, t["id"], reason=reason, **fence)
+    """Finish a fenced terminal submission or release the dead worker's claim."""
+    if recover_terminal_submission(con, t):
+        return "submitted"
+    outcome = db.reclaim_abandoned(con, t["id"], reason=reason, **{key: t[key] for key in _CLAIM_FENCE})
     if outcome != "ready":
         return outcome
     db.add_event(
@@ -392,6 +394,56 @@ def prepare_submission(t, submission):
             digests[str(name)] = None
     return _PreparedSubmission((t["id"], t["generation"], t["claim_lock"], t["workspace"]),
                                _submitted(submission, artifact_digests=digests))
+
+
+def _terminal_fingerprint(row, prepared):
+    digests = prepared.payload["artifact_digests"]
+    name = worker.contract_deliverable(row)
+    path = worker.deliverable_path(row, name) if name else None
+    if (path is None or path.relative_to(Path(row["workspace"]).resolve()).as_posix() not in digests
+            or None in digests.values()):
+        raise worker.IncompleteSubmission("The declared deliverables could not be frozen for submission.")
+    value = json.dumps([row["body"], prepared.payload], sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def record_terminal_submission(con, row, prepared):
+    """Checkpoint the settled tool turn before the existing submission transaction."""
+    fingerprint = _terminal_fingerprint(row, prepared)
+    return db.add_event(con, row["id"], _TERMINAL_SUBMISSION_EVENT,
+                        {"fingerprint": fingerprint, "claim_lock": row["claim_lock"]},
+                        generation=row["generation"], claim_lock=row["claim_lock"])
+
+
+def recover_terminal_submission(con, row):
+    """Check a dead worker's frozen submission against its exact ownership fence."""
+    if not row["claim_lock"]:
+        return False
+    checkpoint = worker.attempt_payload(con, row, _TERMINAL_SUBMISSION_EVENT)
+    if checkpoint is None:
+        return False
+    summary = worker.declared_completion(con, row)
+    if summary is None:
+        return False
+    try:
+        submission = worker.build_submission(con, row, summary)
+        prepared = prepare_submission(row, submission)
+        if _terminal_fingerprint(row, prepared) != checkpoint.get("fingerprint"):
+            return False
+    except (OSError, ValueError):
+        return False
+    with db.write_txn(con):
+        current = db.get(con, row["id"])
+        if current is None or current["status"] != "running" or any(current[key] != row[key] for key in _CLAIM_FENCE):
+            return False
+        # The old lease may have expired. Renew it only inside the acceptance transaction,
+        # after matching the dead attempt's complete fence.
+        if not db.heartbeat(con, row["id"], row["claim_lock"], generation=row["generation"], progress=False):
+            return False
+        if not accept_state(con, row, prepared, generation=row["generation"], claim_lock=row["claim_lock"]):
+            return False
+    accept_side_effects(con, row, submission, generation=row["generation"])
+    return True
 
 
 def accept_state(con, t, submission, *, generation, claim_lock):

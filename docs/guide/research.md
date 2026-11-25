@@ -144,6 +144,26 @@ parents did not read, and what in it would count against their conclusions.
 
 ### 2. The cards
 
+For a native Sister's card that can finish with files already in the project, Last Order can
+set `local_work` on its `misaka_research_assign` task (or on a card added by
+`misaka_research_cards`). This example pairs with the task's usual `deliverable` field:
+
+```json
+{"local_work": {"input_paths": ["sources/north.txt"], "tools": ["read", "write"]},
+ "deliverable": "evidence.md\nState the record count and total."}
+```
+
+List every existing input file relative to the project root and name one deliverable that the
+`write` tool can create. The Board saves the approved file scope. A worker opens the card only
+when its Markdown and the Board agree. The card can read the named inputs and read or replace
+its deliverable. The tool list defaults to `read` and `write`. Include `edit` if needed. Findings
+recorded with `misaka_card_note` can cite the declared files, including document references
+that resolve to them. Call `misaka_card_complete` on its own to submit without another model
+reply. Any queued messages are processed after submission. Last Order can omit `local_work`
+for ordinary assignments, including work that requires discovery, collaboration, or outside sources.
+Older cards created before the Board recorded the scope still use their existing Markdown for
+this field. Keep that file with the card when resuming older work.
+
 Each assignment becomes a **card**: a Markdown file with the task, its sources and what to
 deliver. The Sisters (and [allies](team.md#allies) such as Claude Code) work their cards in
 parallel, each in its own session, in panes beside Last Order.

@@ -7,8 +7,11 @@ said "not submitting yet". Ten of ten submissions that day answered a message, n
 contract. Now completion is explicit, gated on the contract deliverable, and a turn without
 it leaves the card running."""
 import asyncio
+import json
 import os
 import time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -39,8 +42,11 @@ class _Session:
         self.moments = _Moments()
         self.agent = _Agent()
 
+    def resumeQueuedMessagesAfterSettle(self):
+        pass
 
-def _board(tmp_path, request, body=BODY):
+
+def _board(tmp_path, request, body=BODY, *, local_work=None):
     """A running card the way the daemon leaves one: file written (the file is the contract),
     row claimed under ``lock1`` at generation 1, output directory set."""
     from misaka.core.platform import cards
@@ -48,7 +54,7 @@ def _board(tmp_path, request, body=BODY):
     request.addfinalizer(con.close)
     out = tmp_path / "nodes" / "cards" / "t1"
     out.mkdir(parents=True)
-    tid = cards.create(con, str(tmp_path), "T5 genealogy", body, "10032")
+    tid = cards.create(con, str(tmp_path), "T5 genealogy", body, "10032", local_work=local_work)
     con.execute("UPDATE tasks SET status='running', claim_lock='lock1', claim_expires=?, output_dir=?, "
                 "worker_pid=? WHERE id=?", (int(time.time()) + 1800, str(out), os.getpid(), tid))
     from misaka.core.network import worker
@@ -56,15 +62,30 @@ def _board(tmp_path, request, body=BODY):
     return con, tid, out
 
 
-def _part(monkeypatch, con, tid):
+def _part(monkeypatch, con, tid, **options):
     monkeypatch.setenv("MISAKA_USAGE_TASK_ID", tid)
     monkeypatch.setenv("MISAKA_USAGE_CLAIM_LOCK", "lock1")
     monkeypatch.setenv("MISAKA_USAGE_GENERATION", "1")
     monkeypatch.delenv("MISAKA_SISTER_OWNER_CLAIM_LOCK", raising=False)
-    part = todo.TodoPart(tid, "10032")
+    part = todo.TodoPart(tid, "10032", **options)
     part._con = con
     part.attach(_Session())
     return part
+
+
+def test_bounded_finding_resolves_output_basename_past_an_unapproved_root_file(tmp_path, request):
+    (tmp_path / "input.txt").write_text("Declared input", encoding="utf-8")
+    con, tid, output_dir = _board(tmp_path, request, local_work={"input_paths": ["input.txt"]})
+    row = tasks.get(con, tid)
+    deliverable = output_dir / "choson-tusol-genealogy.md"
+    deliverable.write_text("Approved card output", encoding="utf-8")
+    shadow = tmp_path / deliverable.name
+    shadow.write_text("Unapproved file with the same basename", encoding="utf-8")
+
+    findings = worker.scoped_findings(con, row, [{"text": "From the output", "source_file": deliverable.name}])
+    assert findings[0]["source_file"] == deliverable.relative_to(tmp_path).as_posix()
+    with pytest.raises(worker.InvalidLocalWork, match="declared local input"):
+        worker.scoped_findings(con, row, [{"text": "From the root", "source_file": str(shadow)}])
 
 
 def _turn(reason, text):
@@ -129,6 +150,267 @@ async def test_complete_then_a_turn_end_submits_the_card(tmp_path, monkeypatch, 
     row = tasks.get(con, tid)
     assert row["status"] == "done"
     assert "Kwon Kun" in (tasks.latest_payload(con, tid, "submitted") or "")
+
+
+async def test_bounded_card_note_records_only_declared_evidence(tmp_path, monkeypatch, request):
+    source = tmp_path / "input.txt"
+    source.write_text("approved evidence", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("another card's material", encoding="utf-8")
+    con, tid, _out = _board(tmp_path, request, local_work={"input_paths": ["input.txt"]})
+    part = _part(monkeypatch, con, tid, bounded_card=True)
+    note = _tool(part, "misaka_card_note")
+
+    with pytest.raises(ValueError, match="declared local input"):
+        await note.execute("rejected", {"text": "out of scope", "findings": [
+            {"text": "One record", "source_file": "other.txt"},
+        ]}, None, None, None)
+    assert tasks.latest_payload(con, tid, "card_evidence") is None
+
+    await note.execute("accepted", {"text": "checked", "findings": [
+        {"text": "One record", "source_file": str(source)},
+    ]}, None, None, None)
+    evidence = json.loads(tasks.latest_payload(con, tid, "card_evidence"))
+    assert evidence["findings"][0]["source_file"] == "input.txt"
+
+
+def test_dispatch_blocks_a_card_whose_approved_scope_changed(tmp_path, monkeypatch, request):
+    from misaka.core.network import dispatch
+    from misaka.core.platform import cards
+
+    (tmp_path / "input.txt").write_text("approved evidence", encoding="utf-8")
+    con, tid, _out = _board(tmp_path, request, local_work={"input_paths": ["input.txt"]})
+    assert tasks.back_to_ready(con, tid, generation=1, claim_lock="lock1")
+    cards.set_fields(str(tmp_path), tid, local_work=None)
+    monkeypatch.setattr(dispatch, "_profile_dir", lambda *_: str(tmp_path))
+    assert not dispatch.run_task(con, tasks.get(con, tid), {"provider": "p", "default_model": "m"})
+    row = tasks.get(con, tid)
+    assert row["status"] == "blocked" and row["block_kind"] == "needs_input"
+    assert "local work mirror" in row["block_reason"]
+    assert row["claim_lock"] is None
+
+
+def _terminal_end(*, is_error=False, terminated=True):
+    return {"type": "agent_end", "toolBatchTerminated": terminated, "messages": [
+        {"role": "assistant", "stopReason": "toolUse", "content": [
+            {"type": "toolCall", "id": "complete", "name": "misaka_card_complete"},
+        ]},
+        {"role": "toolResult", "toolCallId": "complete", "toolName": "misaka_card_complete", "isError": is_error},
+    ]}
+
+
+@pytest.mark.parametrize(("stop_reason", "queue", "mode", "batch_sizes"), [
+    ("toolUse", "steer", "one-at-a-time", [1, 2]), ("stop", "followUp", "all", [2]),
+    ("toolUse", "mail", "one-at-a-time", [1, 2]), ("toolUse", "notification", "one-at-a-time", [2]),
+    ("toolUse", "cancelled-mail", "one-at-a-time", []),
+])
+async def test_queued_input_is_processed_after_the_bounded_card_submits(
+    tmp_path, monkeypatch, request, stop_reason, queue, mode, batch_sizes,
+):
+    from misaka.ai.providers.faux import fauxAssistantMessage, fauxToolCall
+    from misaka.core.session_manager import SessionManager
+    from tests.suite_harness import createHarness, getUserTexts
+
+    con, tid, out = _board(tmp_path, request)
+    part = _part(monkeypatch, con, tid, bounded_card=True)
+    (out / "choson-tusol-genealogy.md").write_text("Verified card evidence.\n", encoding="utf-8")
+    observed = []
+    delivered = []
+    settling = asyncio.Event()
+    receipted = queue in {"mail", "notification", "cancelled-mail"}
+
+    def extension(pi):
+        async def after_tool(event, ctx):
+            if event["toolName"] != "misaka_card_complete":
+                return
+            for index in range(2):
+                text = f"Queued while completing {index}"
+                if receipted:
+                    await harness.session.sendCustomMessage(
+                        {"customType": "task-notification" if queue == "notification" else "agent-messages",
+                         "content": text, "display": True},
+                        {"triggerTurn": True, "deliverAs": "followUp" if queue == "notification" else "steer",
+                         "_deliveryId": f"fixture-delivery-{index}",
+                         "_onPersist": lambda: delivered.append("saved"), "_onError": lambda _: delivered.append("failed")},
+                    )
+                else:
+                    await harness.session.prompt(text, {"streamingBehavior": queue})
+
+        pi.on("tool_result", after_tool)
+        if queue == "cancelled-mail":
+            async def wait_during_settlement(_event, _ctx):
+                await harness.session.sendCustomMessage(
+                    {"customType": "agent-messages", "content": "Deferred during settlement", "display": True},
+                    {"triggerTurn": True, "_deliveryId": "settled-delivery",
+                     "_onError": lambda _: delivered.append("deferred failed")},
+                )
+                settling.set()
+                await asyncio.Event().wait()
+
+            pi.on("agent_settled", wait_during_settlement)
+
+    def answer_queued(*_args):
+        count = len(delivered) if receipted else len(getUserTexts(harness)) - 1
+        observed.append((tasks.get(con, tid)["status"], count))
+        return fauxAssistantMessage("Answered the queued follow-up.")
+
+    sessions = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    async with createHarness(parts=[part], initialActiveToolNames=["misaka_card_complete"], sessionManager=sessions,
+                             extensionFactories=[extension]) as harness:
+        harness.session.setSteeringMode(mode)
+        harness.session.setFollowUpMode(mode)
+        harness.setResponses([fauxAssistantMessage(fauxToolCall("misaka_card_complete", {"summary": "verified"}),
+                                                    {"stopReason": stop_reason}), *([answer_queued] * 2)])
+        if queue == "cancelled-mail":
+            run = asyncio.create_task(harness.session.prompt("Finish the card"))
+            await asyncio.wait_for(settling.wait(), timeout=5)
+            run.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run
+            assert delivered == ["failed", "failed", "deferred failed"]
+            assert not harness.session.agent.hasQueuedMessages()
+            assert observed == []
+            part._con = None
+            return
+        await harness.session.prompt("Finish the card")
+        assert observed == [("done", count) for count in batch_sizes]
+        if receipted:
+            assert delivered == ["saved", "saved"]
+        else:
+            assert getUserTexts(harness) == ["Finish the card", "Queued while completing 0", "Queued while completing 1"]
+        assert con.execute("SELECT COUNT(*) FROM events WHERE task_id=? AND kind='submitted'", (tid,)).fetchone()[0] == 1
+        part._con = None  # keep the fixture connection owned by request teardown
+
+
+@pytest.mark.parametrize("interruption", [None, "aborted", "failed_receipt", "lost_claim", "no_termination", "mixed",
+                                          "duplicate", "before_settle_failure"])
+async def test_bounded_completion_uses_a_successful_settled_tool_end(tmp_path, monkeypatch, request, interruption):
+    from misaka.core.subagent import extension as subagent
+
+    con, tid, out = _board(tmp_path, request)
+    part = _part(monkeypatch, con, tid, bounded_card=True)
+    (out / "choson-tusol-genealogy.md").write_text("# result\n", encoding="utf-8")
+    reply = await _tool(part, "misaka_card_complete").execute("complete", {"summary": "verified result"}, None, None, None)
+    assert reply["terminate"] is True
+    end = _terminal_end(is_error=interruption == "failed_receipt", terminated=interruption != "no_termination")
+    if interruption in {"mixed", "duplicate"}:
+        name = "misaka_card_note" if interruption == "mixed" else "misaka_card_complete"
+        end["messages"][0]["content"].append({"type": "toolCall", "id": "other", "name": name})
+        end["messages"].append({"role": "toolResult", "toolName": name, "toolCallId": "other", "isError": False})
+    await part.agent_end(end)
+    assert tasks.get(con, tid)["status"] == "running"
+    if interruption == "lost_claim":
+        con.execute("UPDATE tasks SET claim_lock='lock2' WHERE id=?", (tid,))
+
+    background = True
+
+    async def wait_for_background():
+        nonlocal background
+        assert tasks.get(con, tid)["status"] == "running"
+        background = False
+
+    monkeypatch.setattr(subagent, "has_background_tasks", lambda: background)
+    monkeypatch.setattr(subagent, "wait_for_background_tasks", wait_for_background)
+    monkeypatch.setattr(subagent, "has_async_hooks", lambda: False)
+    await part.agent_settled({"aborted": interruption == "aborted", "interrupted": interruption == "before_settle_failure"})
+    if interruption is None:
+        assert not background
+        assert tasks.get(con, tid)["status"] == "done"
+        assert '"summary": "verified result"' in tasks.latest_payload(con, tid, "submitted")
+    else:
+        assert tasks.get(con, tid)["status"] == "running"
+        assert tasks.latest_payload(con, tid, "submitted") is None
+    if interruption in {"aborted", "mixed", "no_termination"}:
+        await _end_turn(part, "Progress update")
+        assert tasks.latest_payload(con, tid, "submitted") is None
+        await part.agent_start()
+        await _tool(part, "misaka_card_complete").execute("complete", {"summary": "retried correctly"}, None, None, None)
+        await part.agent_end(_terminal_end())
+        await part.agent_settled()
+        assert '"summary": "retried correctly"' in tasks.latest_payload(con, tid, "submitted")
+
+
+@pytest.mark.parametrize("change", [None, "artifact", "expired", "new_claim"])
+async def test_reconciler_only_reuses_frozen_terminal_completion(tmp_path, monkeypatch, request, change):
+    from misaka.core.network import dispatch
+
+    con, tid, out = _board(tmp_path, request)
+    part = _part(monkeypatch, con, tid, bounded_card=True)
+    artifact = out / "choson-tusol-genealogy.md"
+    artifact.write_text("# result\n", encoding="utf-8")
+    await _tool(part, "misaka_card_complete").execute("complete", {"summary": "verified result"}, None, None, None)
+    await part.agent_end(_terminal_end())
+    original_accept = dispatch.accept_state
+
+    def interrupt(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    with monkeypatch.context() as m:
+        m.setattr(dispatch, "accept_state", interrupt)
+        with pytest.raises(asyncio.CancelledError):
+            await part.agent_settled()
+    assert dispatch.accept_state is original_accept
+    if change == "expired":
+        con.execute("UPDATE tasks SET claim_expires=0 WHERE id=?", (tid,))
+    abandoned = tasks.get(con, tid)
+    if change == "new_claim":
+        con.execute("UPDATE tasks SET claim_lock='lock2' WHERE id=?", (tid,))
+    if change == "artifact":
+        artifact.write_text("# changed after completion\n", encoding="utf-8")
+    expected = {"new_claim": None, "artifact": "reclaimed"}.get(change, "submitted")
+    assert dispatch.finish_abandoned(con, abandoned) == expected
+    assert bool(tasks.latest_payload(con, tid, "submitted")) == (expected == "submitted")
+    assert dispatch.finish_abandoned(con, abandoned) is None
+
+
+@pytest.mark.parametrize("change", [None, "artifact", "busy"])
+async def test_attached_supervisor_recovers_only_a_matching_checkpoint(tmp_path, request, monkeypatch, change):
+    import sqlite3
+
+    from misaka.core.network import dispatch, sister_runtime
+
+    con, tid, out = _board(tmp_path, request)
+    evidence = out / "choson-tusol-genealogy.md"
+    evidence.write_text("# verified", encoding="utf-8")
+    row = tasks.get(con, tid)
+    worker.declare_completion(con, row, "verified")
+    prepared = dispatch.prepare_submission(row, worker.build_submission(con, row, "verified"))
+    assert dispatch.record_terminal_submission(con, row, prepared)
+    if change == "artifact":
+        evidence.write_text("# changed after checkpoint", encoding="utf-8")
+
+    recover = dispatch.recover_terminal_submission
+    attempts = []
+
+    def recover_after_contention(connection, observed):
+        attempts.append(observed["claim_lock"])
+        if change == "busy" and len(attempts) == 1:
+            error = sqlite3.OperationalError("database is locked")
+            error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+            raise error
+        return recover(connection, observed)
+
+    monkeypatch.setattr(dispatch, "recover_terminal_submission", recover_after_contention)
+    monkeypatch.setattr(sister_runtime, "_OUTPUT_POLL_SECONDS", 0.01)
+
+    runner = asyncio.get_running_loop().create_future()
+    runner.set_result(None)
+    runtime = sister_runtime.SisterRuntime(None, lambda: con, dict)
+    runtime._notify = AsyncMock()
+    manager = SimpleNamespace(close=AsyncMock())
+    agent = SimpleNamespace(runner=runner, status="failed", error="Sister exited", retry_stop=None,
+                            current_output=lambda: "verified")
+    handle = sister_runtime.SisterHandle(tid, "10032", manager, agent, None, claim_lock="lock1")
+    runtime._handles[tid] = handle
+    runtime._owned_claims.add("lock1")
+    await asyncio.wait_for(runtime._supervise(handle, handle.run_token, handle.done), timeout=3)
+
+    assert handle.done.is_set()
+    assert tasks.get(con, tid)["status"] == ("ready" if change == "artifact" else "done")
+    assert attempts == ["lock1"] * (2 if change == "busy" else 1)
+    events = con.execute("SELECT kind FROM events WHERE task_id=? AND kind IN ('sister_result','submitted') "
+                         "ORDER BY id", (tid,)).fetchall()
+    expected = ["sister_result"] if change == "artifact" else ["sister_result", "submitted"]
+    assert [event["kind"] for event in events] == expected
 
 
 async def test_completion_does_not_carry_into_a_turn_that_did_not_end_cleanly(tmp_path, monkeypatch, request):

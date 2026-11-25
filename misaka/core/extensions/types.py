@@ -1022,6 +1022,7 @@ class AgentStartEvent(TypedDict):
 class AgentEndEvent(TypedDict):
     type: Literal["agent_end"]
     messages: list[AgentMessage]
+    toolBatchTerminated: NotRequired[bool]
 
 
 class AgentSettledEvent(TypedDict):
@@ -1031,6 +1032,8 @@ class AgentSettledEvent(TypedDict):
     type: Literal["agent_settled"]
     # Whether the run ended because it was aborted, for example with Escape.
     aborted: bool
+    # Session work failed or was cancelled before the normal settlement boundary.
+    interrupted: NotRequired[bool]
 
 
 class AgentEndEventResult(TypedDict, total=False):

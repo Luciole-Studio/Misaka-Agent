@@ -255,6 +255,19 @@ def find_session(session_id):
     return saved
 
 
+def saved_session_candidates(session_ids):
+    """Find paths for the requested IDs in one pass, verifying each session header."""
+    matches = {}
+    if session_ids:
+        for file in _index_dir().glob("*.json"):
+            record = _object(file)
+            session_id, path = record.get("id"), record.get("path")
+            if (isinstance(session_id, str) and session_id in session_ids and isinstance(path, str)
+                    and readSessionHeader(path).get("id") == session_id):
+                matches.setdefault(session_id, set()).add(os.path.realpath(path))
+    return matches
+
+
 def spaces_in_use():
     """Every panel space some session still belongs to."""
     return {value["space"] for value in map(_object, _index_dir().glob("*.json")) if value.get("space")}

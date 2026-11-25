@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import sys
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, fields
 from types import SimpleNamespace
@@ -222,9 +221,6 @@ def createFindToolDefinition(
                 args.append("--full-path")
                 if not pattern.startswith("/") and not pattern.startswith("**/") and pattern != "**":
                     effectivePattern = f"**/{pattern}"
-                # fd matches full paths using native separators on Windows.
-                if sys.platform == "win32":
-                    effectivePattern = effectivePattern.replace("/", r"[/\\]")
             args.extend(["--", effectivePattern, searchPath])
 
             try:

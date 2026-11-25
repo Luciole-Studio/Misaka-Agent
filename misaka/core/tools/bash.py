@@ -519,7 +519,10 @@ def createShellToolDefinition(
                 if str(err) == "aborted":
                     raise RuntimeError(appendStatus(text, "Command aborted")) from None
                 if str(err).startswith("timeout:"):
+                    from misaka.ai.runtime_observation import observe
+
                     timeoutSecs = str(err).split(":")[1]
+                    observe("tool_timeout", call_id=_toolCallId, status="timeout")
                     raise RuntimeError(appendStatus(text, f"Command timed out after {timeoutSecs} seconds")) from None
                 raise
 

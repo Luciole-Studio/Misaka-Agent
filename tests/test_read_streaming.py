@@ -138,3 +138,53 @@ async def test_a_large_file_pages_without_being_held_whole(tmp_path, monkeypatch
     result = await createReadToolDefinition(str(tmp_path)).execute("call", {"path": "big.log", "offset": 150_000, "limit": 2})
     assert result.content[0].text.startswith("line 149999\nline 150000\n\n[50000 more lines")
     assert requested and all(0 < size <= read_module._SCAN_CHUNK_CHARS for size in requested)
+
+
+async def _read_pages(tmp_path, data, line_count, limit):
+    path = tmp_path / "一份长文.txt"
+    path.write_bytes(data)
+    tool = createReadToolDefinition(str(tmp_path))
+    pages = []
+    for offset in range(1, line_count + 1, limit):
+        result = await tool.execute("page", {"path": path.name, "offset": offset, "limit": limit})
+        text = result.content[0].text
+        next_offset = offset + limit
+        if next_offset <= line_count:
+            remaining = line_count - next_offset + 1
+            footer = f"\n\n[{remaining} more lines in file. Use offset={next_offset} to continue.]"
+            assert text.endswith(footer)
+            text = text.removesuffix(footer)
+        pages.append(text)
+    return "\n".join(pages).encode("utf-8")
+
+
+async def test_successive_read_pages_reassemble_a_large_multibyte_file(tmp_path):
+    lines = [f"第 {index:04d} 行：" + "中文和 emoji 🎉 " * 12 for index in range(480)]
+    data = "\n".join(lines).encode("utf-8")
+    assert len(data) > DEFAULT_MAX_BYTES
+
+    assert await _read_pages(tmp_path, data, len(lines), 120) == data
+
+
+@pytest.mark.parametrize("boundary", [8191, 8192, 8193])
+async def test_read_paging_keeps_unicode_at_byte_boundaries(tmp_path, boundary):
+    lines = ["x" * (boundary - 1) + "汉🧪|end", *[f"第 {i:05d} 行：🙂" for i in range(4000)]]
+    data = "\n".join(lines).encode("utf-8")
+
+    assert await _read_pages(tmp_path, data, len(lines), 100) == data
+
+
+@pytest.mark.parametrize(("seed", "line_count", "max_width"), [
+    (71, 1, 0), (97, 37, 110), (191, 150, 800), (263, 280, 1800),
+])
+async def test_read_round_trips_seeded_unicode_and_file_sizes(tmp_path, seed, line_count, max_width):
+    rng = random.Random(seed)
+    lines = []
+    for _ in range(line_count):
+        points = [rng.randrange(0x20, 0x10F800) for _ in range(rng.randint(0, max_width))]
+        # Sample Unicode scalar values without generating surrogate code points.
+        line = "".join(chr(point + 0x800 if point >= 0xD800 else point) for point in points)
+        lines.append(line + ("\r" if rng.randrange(4) == 0 else ""))
+    data = "\n".join(lines).encode("utf-8")
+
+    assert await _read_pages(tmp_path, data, line_count, rng.randint(2, 7)) == data

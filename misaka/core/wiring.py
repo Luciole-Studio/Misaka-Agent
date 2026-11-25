@@ -39,6 +39,7 @@ from misaka.config import profiles
 
 if TYPE_CHECKING:
     from misaka.core.extensions.types import ToolDefinition
+    from misaka.core.network.worker import CardFileScope
 
 type SessionKind = Literal["foreground", "dm", "card", "child", "beast", "bare"]
 
@@ -64,6 +65,7 @@ class SessionSpec:
     sister_catalog: tuple[dict[str, Any], ...] | None = None
     workflow_context: bool = False
     overrides: tuple[tuple[str, Any], ...] = ()
+    card_file_scope: CardFileScope | None = None
 
 
 TOOL_MODULES: tuple[str, ...] = (

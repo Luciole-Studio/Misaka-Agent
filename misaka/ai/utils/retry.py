@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
+import random
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from misaka.ai.runtime_observation import observe
 from misaka.ai.types import AssistantMessage
-from misaka.utils.js import addAbortListener, jsIsSafeInteger
+from misaka.utils.js import addAbortListener
 from misaka.utils.values import maybe_await, signal_aborted
 
 
@@ -42,7 +45,9 @@ _NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = _buildProviderErrorPattern(
         # Sign in with ChatGPT: the subscription's shared usage limit, which resets
         # after hours rather than seconds.
         "subscription_sharing_usage_limit_exceeded",
-        "token_cap reached",
+        "usage_limit_reached",
+        "usage_not_included",
+        "token_cap[_ ]reached",
     ]
 )
 
@@ -67,6 +72,7 @@ _RETRYABLE_PROVIDER_ERROR_PATTERN = _buildProviderErrorPattern(
         "service.?(?:is.?)?(?:temporarily.?)?unavailable",
         "server.?error",
         "internal.?error",
+        "temporarily_unavailable",
         # Wrapper/provider text for transient upstream failures, including OpenRouter
         # "Provider returned error" responses (#2264) and gateway wording such as
         # "The upstream provider returned an error" (#10842).
@@ -115,9 +121,6 @@ _RETRYABLE_PROVIDER_ERROR_PATTERN = _buildProviderErrorPattern(
         "connection.?reset",
         "connection.?aborted",
         "WinError 1005[34]",
-        # Provider-requested retry delay cap failures should flow through the outer
-        # retry policy so callers can surface/abort the backoff (#1123).
-        "retry delay",
         # Explicit retry guidance emitted mid-stream by OpenAI Responses and Bedrock
         # stream exceptions (#6019).
         "you can retry your request",
@@ -145,9 +148,9 @@ class RetryPolicy:
     # Max retry attempts (0 = no retries). The initial call never counts as a retry.
     maxRetries: int
     # Base delay in ms. Per-attempt delay is `baseDelayMs * 2^(attempt-1)` before jitter.
-    baseDelayMs: int
+    baseDelayMs: float
     # Optional cap for agent-level retry delays in ms. Defaults to 60 seconds.
-    maxAgentDelayMs: int | None = None
+    maxAgentDelayMs: float | None = None
 
 
 DEFAULT_MAX_AGENT_RETRY_DELAY_MS = 60_000
@@ -156,11 +159,27 @@ _MAX_SAFE_INTEGER = 2**53 - 1
 
 def retryDelayMs(policy: Any, attempt: int) -> int:
     delay = policy.baseDelayMs * 2 ** max(0, attempt - 1)
-    safeDelay = delay if jsIsSafeInteger(delay) else _MAX_SAFE_INTEGER
-    return min(
-        safeDelay,
-        policy.maxAgentDelayMs if policy.maxAgentDelayMs is not None else DEFAULT_MAX_AGENT_RETRY_DELAY_MS,
-    )
+    safeDelay = delay if -_MAX_SAFE_INTEGER <= delay <= _MAX_SAFE_INTEGER else _MAX_SAFE_INTEGER
+    cap = policy.maxAgentDelayMs if policy.maxAgentDelayMs is not None else DEFAULT_MAX_AGENT_RETRY_DELAY_MS
+    return math.floor(min(safeDelay, cap))
+
+
+def fullJitterMs(ceiling: float) -> int:
+    return random.randint(0, math.floor(max(0, ceiling)))
+
+
+def retryDelayLimitMessage(delay_ms: float, cap_ms: float, detail: str | None) -> str:
+    reason = f"Server requested {math.ceil(delay_ms / 1000)}s retry delay (max: {math.ceil(cap_ms / 1000)}s)."
+    return f"{reason} {detail}" if detail else reason
+
+
+def assistantRetryDelay(message: AssistantMessage, policy: RetryPolicy, attempt: int) -> tuple[float | None, str]:
+    if message.retryAfterMs is None:
+        return fullJitterMs(retryDelayMs(policy, attempt)), "jitter"
+    cap = policy.maxAgentDelayMs if policy.maxAgentDelayMs is not None else DEFAULT_MAX_AGENT_RETRY_DELAY_MS
+    if 0 < cap < message.retryAfterMs:
+        return None, "server"
+    return message.retryAfterMs, "server"
 
 
 @dataclass(slots=True)
@@ -168,7 +187,7 @@ class RetryCallbacks:
     """Optional callbacks emitted by `retryAssistantCall` around each retry."""
 
     # Emitted before the backoff sleep of each retry attempt (1-indexed).
-    onRetryScheduled: Callable[[int, int, int, str], Awaitable[None] | None] | None = None
+    onRetryScheduled: Callable[[int, int, float, str], Awaitable[None] | None] | None = None
     # Emitted after the backoff sleep, immediately before the retried call starts.
     onRetryAttemptStart: Callable[[], Awaitable[None] | None] | None = None
     # Emitted once when the loop ends: success if a later call completed normally.
@@ -290,9 +309,17 @@ async def retryAssistantCall(
                 )
             return response
 
+        delayMs, source = assistantRetryDelay(response, policy, attempt + 1)
+        if delayMs is None:
+            observe("provider_retry_stopped", reason="retry_delay_limit", retry_source=source, delay_ms=response.retryAfterMs)
+            if lastRetry is not None:
+                await _invoke_finished_callback(
+                    callbacks.onRetryFinished if callbacks else None, False, lastRetry["attempt"], response.errorMessage
+                )
+            return response
         attempt += 1
         lastRetry = {"attempt": attempt, "errorMessage": response.errorMessage or "Unknown error"}
-        delayMs = retryDelayMs(policy, attempt)
+        observe("provider_retry", retry_number=attempt, retry_source=source, delay_ms=delayMs, reason="assistant")
         await _invoke_callback(
             callbacks.onRetryScheduled if callbacks else None, attempt, maxAttempts, delayMs, lastRetry["errorMessage"]
         )
@@ -322,7 +349,13 @@ def isRetryableAssistantError(message: AssistantMessage) -> bool:
     """
     if message.stopReason != "error" or not message.errorMessage:
         return False
+    if message.retryStop is not None:
+        return False
+    if message.retryTransient:
+        return True
     errorMessage = message.errorMessage
+    if re.search(r"(?:\b(?:HTTP|error code|status(?: code)?)\s*[:(]?\s*|^)(?:400|413)\b", errorMessage, re.IGNORECASE):
+        return False
     if _NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.search(errorMessage):
         return False
     return bool(_RETRYABLE_PROVIDER_ERROR_PATTERN.search(errorMessage))

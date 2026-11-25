@@ -21,6 +21,7 @@ from misaka.core.subagent.tool_policy import (
 from misaka.utils.values import read_field
 
 FORK_TAG = "fork-boilerplate"
+FORK_SEED_END = "subagent_fork_seed_end"
 PLACEHOLDER = "Fork started — processing in background"
 
 
@@ -91,9 +92,11 @@ def snapshot_path(task: Any) -> Path:
 
 
 def capture(task: Any, session: Any, *, seed: bool) -> None:
+    from misaka.core.session_export import serializeSessionBranch
     from misaka.core.session_manager import SessionManager
     from misaka.core.subagent.runtime import _atomic_text
     from misaka.modes.json_event import to_jsonable
+    from misaka.utils import atomic
 
     if seed and task.transcript.exists():
         raise ValueError("Fork seed transcript already exists")
@@ -127,10 +130,12 @@ def capture(task: Any, session: Any, *, seed: bool) -> None:
     }
     _atomic_text(snapshot_path(task), json.dumps(payload, ensure_ascii=False))
     if seed:
-        writer = SessionManager(task.cwd, str(task.transcript.parent), str(task.transcript), True)
+        writer = SessionManager.inMemory(task.cwd)
         for message in history:
             writer.appendMessage(message)
-        writer._rewriteFile()
+        writer.appendCustomEntry(FORK_SEED_END, {"parentSessionId": task.parent_session_id})
+        # Publish the copied history and its boundary in the same atomic write.
+        atomic.write_text(task.transcript, serializeSessionBranch(writer), mode=0o600)
     task.definition = definition(session)
 
 

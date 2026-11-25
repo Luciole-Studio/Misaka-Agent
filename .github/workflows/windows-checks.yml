@@ -31,3 +31,20 @@ jobs:
           uv run python -m pytest -q -p no:cacheprovider
           tests/test_loop_watchdog.py tests/test_mcp_server_env.py
           tests/test_windows_orphan_reclaim.py tests/test_token_cap.py tests/test_research_cli_in_pane.py
+          tests/test_doc_read_entry.py tests/test_durable_env_line_scan.py
+          tests/test_read_streaming.py tests/test_research_dialogue.py
+          tests/test_runtime_trace.py tests/test_runtime_trace_entrypoints.py
+          tests/test_research_migration_v18.py::test_trace_reads_v18_board_submissions_without_migrating_it
+          tests/test_runtime_trace_interruption.py tests/test_research_process_recovery.py
+          tests/test_agent_loop.py tests/test_card_completion.py tests/test_card_first_attempt.py
+          tests/test_research_local_work.py tests/test_research_board_tool_guard.py tests/test_board_boundary.py
+          tests/test_card_pane_reuse.py::test_panel_watcher_recovers_a_dead_workers_prepared_submission
+          tests/test_card_pane_reuse.py::test_old_daemon_is_not_reused_after_checkpoint_protocol_change
+          tests/test_openai_runtime_observation.py tests/test_research_usage.py
+          tests/test_ai_retry.py tests/test_ai_provider_retry.py tests/test_ai_openai_codex_stream.py
+          tests/test_agent_session_retry.py tests/test_agent_session_retry_events.py
+          tests/test_subagent_native_startup.py::test_admission_failure_does_not_reuse_previous_turn_retry_stop
+          tests/web/test_web_evidence.py::test_saved_page_urls_distinguish_trailing_slashes
+          tests/web/test_web_evidence.py::test_saved_page_index_survives_undecodable_file
+          tests/test_retry_circuit.py
+          tests/test_research_node_routine.py::test_circuit_stopped_card_waits_for_explicit_resume_when_another_card_fails

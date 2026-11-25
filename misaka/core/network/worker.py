@@ -4,10 +4,17 @@ import json
 import logging
 import os
 import re
+import sqlite3
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from misaka.config import profiles
-from misaka.core.network.card_contract import Finding
+from misaka.core.network.card_contract import (
+    Finding,
+    LocalWork,
+    local_deliverable,
+    local_output,
+)
 from misaka.core.platform import owners
 from misaka.core.platform import tasks as task_store
 from misaka.core.platform.prompt_guard import untrusted
@@ -34,10 +41,10 @@ def budget_cap_reason():
     return f"{budget.EXHAUSTED_MESSAGE}; the card stays ready"
 
 
-def stopped_at_cap(error):
+def stopped_at_cap(error, *, retry_stop=None):
     """Whether a run ended because a request did not fit under the token cap."""
     from misaka.core.platform import budget
-    return budget.EXHAUSTED_MESSAGE in str(error or "")
+    return not task_store.is_retry_stop(retry_stop) and budget.EXHAUSTED_MESSAGE in str(error or "")
 
 
 COMPLETION_INSTRUCTIONS = """
@@ -55,6 +62,99 @@ COMPLETION_INSTRUCTIONS = """
 """
 
 
+@dataclass(frozen=True)
+class CardFileScope:
+    inputs: tuple[str, ...]
+    output: str
+    tools: tuple[str, ...]
+
+    def allows_read(self, path):
+        return Path(path) in map(Path, (*self.inputs, self.output))
+
+    def readable_paths(self):
+        return frozenset(map(Path, (*self.inputs, self.output)))
+
+
+class InvalidLocalWork(ValueError):
+    """The card's local work contract or evidence could not be verified."""
+
+
+def _local_work_record(con, task) -> tuple[LocalWork | dict | None, str | None]:
+    from misaka.core.platform import cards
+
+    task_id, workspace = task["id"], task["workspace"]
+    created = task_store.latest_payload(con, task_id, "created")
+    try:
+        recorded = json.loads(created) if created is not None else {}
+    except (TypeError, ValueError) as error:
+        raise InvalidLocalWork(f"Card {task_id}: its created event is unreadable.") from error
+    if not isinstance(recorded, dict):
+        raise InvalidLocalWork(f"Card {task_id}: its created event is invalid.")
+    authoritative = "local_work" in recorded
+    if authoritative and recorded["local_work"] is None:
+        return None, None
+    owner, context = owners.card(con, task_id) if not authoritative else (None, None)
+    requires_mirror = authoritative or (owner is not None and owner.requires_card_file(context))
+    if not workspace:
+        if requires_mirror:
+            raise InvalidLocalWork(f"Card {task_id}: local work requires a project folder.")
+        return None, None
+    path = Path(cards.card_path(workspace, task_id))
+    try:
+        regular = path.resolve() == path and path.is_file()
+    except (OSError, RuntimeError, ValueError):
+        regular = False
+    card = cards.try_read(str(path)) if regular else None
+    if card is None:
+        if requires_mirror or path.exists():
+            raise InvalidLocalWork(f"Card {task_id}: its local work mirror could not be read.")
+        return None, None
+    mirror = card["fields"].get("local_work")
+    if mirror is None and not authoritative:
+        return None, None
+    try:
+        name = contract_deliverable({"body": card["body"]})
+        contract_data = recorded["local_work"] if authoritative else mirror
+        expected = LocalWork.model_validate(contract_data)
+        if (card["fields"].get("id") != task_id
+                or (authoritative and LocalWork.model_validate(mirror) != expected)
+                or name != contract_deliverable(task)
+                or (authoritative and name != recorded.get("local_deliverable"))):
+            raise ValueError("the card file and the Board disagree")
+        if authoritative:
+            root = Path(workspace).resolve(strict=True)
+            if tuple(map(Path, expected.resolve_inputs(workspace))) != tuple(root / item for item in expected.input_paths):
+                raise ValueError("a declared input now points to a different file")
+    except (OSError, RuntimeError, ValueError) as error:
+        raise InvalidLocalWork(f"Card {task_id}: its local work mirror does not match the Board. {error}") from error
+    return expected, name
+
+
+def load_card_file_scope(con, task):
+    """Read the Board contract for submission, evidence and bundle consumers."""
+    local_work, name = _local_work_record(con, task)
+    return card_file_scope({**dict(task), "_local_work": local_work, "_local_deliverable": name}, task["workspace"])
+
+
+def card_file_scope(task, workspace):
+    """Resolve the Board's local-work contract anew when a native card session opens."""
+    if reason := task.get("_local_work_error"):
+        raise InvalidLocalWork(reason)
+    local_work = task.get("_local_work")
+    if local_work is None:
+        return None
+    try:
+        contract = local_work if isinstance(local_work, LocalWork) else LocalWork.model_validate(local_work)
+        inputs = contract.resolve_inputs(workspace)
+        name = local_deliverable(task.get("_local_deliverable") or contract_deliverable(task))
+        if not task.get("output_dir"):
+            raise ValueError("Local work requires a card output directory.")
+        output = local_output(workspace, task["output_dir"], name, inputs)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise InvalidLocalWork(str(error)) from error
+    return CardFileScope(inputs, str(output), contract.tool_names())
+
+
 class IncompleteSubmission(ValueError):
     """The turn ended without what the card's kind requires; the model can supply it."""
 
@@ -68,6 +168,37 @@ def _card_field(task, key):
         return task[key]
     except (KeyError, IndexError, TypeError):
         return None
+
+
+def card_trace(con, task, *, attempt_id=None):
+    """Bind this worker to its card owner's trace scope."""
+    card_id = _card_field(task, "id")
+    if con is None or not card_id:
+        return contextlib.nullcontext()
+
+    try:
+        if name := _card_field(task, "_owner"):
+            owner, context = owners.named(name), _card_field(task, "_owner_context")
+        else:
+            owner, context = owners.card(con, card_id)
+        if owner is not None and context is not None:
+            return owner.card_trace(con, context, card_id=card_id, generation=_card_field(task, "generation"),
+                                    attempt_id=attempt_id or _card_field(task, "current_run_id"))
+    except sqlite3.Error:
+        logger.warning("Card trace is incomplete: the owning run could not be read")
+    return contextlib.nullcontext()
+
+
+def load_card_trace(board, task, *, attempt_id=None):
+    """Resolve trace settings in a standalone card process before its session opens."""
+    try:
+        with contextlib.closing(task_store.connect(board)) as con:
+            row = task_store.get(con, task) if isinstance(task, str) else task
+            if row is not None:
+                return card_trace(con, row, attempt_id=attempt_id)
+    except sqlite3.Error:
+        logger.warning("Card trace is incomplete: the board could not be opened")
+    return contextlib.nullcontext()
 
 
 def contract_deliverable(task):
@@ -324,7 +455,18 @@ def card_extras(con, task, cfg=None, *, include_materials=True):
         if owner is not None:
             extras["_owner_context"], extras["_owner"] = context, owner.name
             extras["_session_overrides"] = owner.session_overrides(con, context)
-    if include_materials:
+    if "output_dir" in dict(task):
+        try:
+            local_work, name = _local_work_record(con, task)
+        except InvalidLocalWork as error:
+            extras["_local_work_error"] = str(error)
+        else:
+            if local_work is not None:
+                # Card extras can cross a process boundary and use a dictionary payload.
+                if isinstance(local_work, LocalWork):
+                    local_work = local_work.model_dump()
+                extras.update(_local_work=local_work, _local_deliverable=name)
+    if include_materials and "_local_work" not in extras and "_local_work_error" not in extras:
         extras["_materials"] = materials_on_hand(task["workspace"])
     return extras
 
@@ -341,7 +483,7 @@ def _delivers_there(task):
         return True
 
 
-def card_prompt(task):
+def card_prompt(task, *, file_scope=None):
     """Build the durable card contract shared by foreground and Sister runtimes."""
     body = task.get("body") or task.get("title") or ""
     if review_feedback := task.get("review_feedback"):
@@ -359,15 +501,20 @@ def card_prompt(task):
         body += ("\n\n## Handoff from parent cards\n"
                  "This card waited for these cards; their results are its starting point.\n\n"
                  + "\n\n".join(sections))
-    if attachments := task.get("_attachments"):
+    if not file_scope and (attachments := task.get("_attachments")):
         lines = []
         for item in attachments:
             target = item.get("path") or item.get("source") or item.get("name")
             lines.append(f"- Attachment: `{target}`")
         body += "\n\n## Task attachments\n" + "\n".join(lines)
-    if materials := task.get("_materials"):
+    if not file_scope and (materials := task.get("_materials")):
         body += "\n\n## Materials already in this workspace\n" + materials
-    if (output_dir := task.get("output_dir")) and _delivers_there(task):
+    if file_scope:
+        body += "\n\n## Local input files\n" + "\n".join(f"- `{path}`" for path in file_scope.inputs)
+        body += f"\n\n## Deliverable location\n`{file_scope.output}`"
+        if deliverable_path(task, Path(file_scope.output).name):
+            body += "\nThis deliverable already exists. Read and verify it before rewriting it."
+    elif (output_dir := task.get("output_dir")) and _delivers_there(task):
         body += (
             "\n\n## Deliverable location\n"
             f"Write every new deliverable under `{output_dir}`. Files there are recorded automatically.\n"
@@ -376,14 +523,20 @@ def card_prompt(task):
             "or reading report others should find under `reports/`, and working files in any other folder."
         )
     if failure := task.get("last_failure_error"):
+        finish = ("by itself" if file_scope else "and end this turn with the plain-text summary")
         body += (
             "\n\n## Previous attempt\n"
             f"The previous attempt on this card failed: {failure}\n"
             f"Consecutive failures so far: {int(task.get('consecutive_failures') or 0)} of "
             f"{task_store.FAILURE_LIMIT} allowed. If the work is already complete, verify it, call "
-            "`misaka_card_complete`, and end this turn with the plain-text summary. A session that ends without that call "
+            f"`misaka_card_complete` {finish}. A session that ends without that call "
             "counts as another failure regardless of what it did."
         )
+    if file_scope:
+        return body + ("\n\n## Completion\nUse the named input files and write the exact deliverable. "
+                       "Record findings and concrete uncertainties with `misaka_card_note`. "
+                       "When finished, call `misaka_card_complete` by itself with a concise summary. "
+                       "The runtime submits the card from that call.")
     prompt = body + COMPLETION_INSTRUCTIONS
     if task.get("beast"):
         from misaka.core.platform import budget as _b
@@ -451,6 +604,90 @@ def _output_snapshot(task, root):
     return snapshot
 
 
+def _scoped_snapshot(scope, root):
+    import stat
+
+    from misaka.utils.paths import file_revision_from_stat
+
+    try:
+        target = Path(scope.output)
+        if target.resolve() != target:
+            raise InvalidLocalWork(f"Local work deliverable moved to a different path: {target}")
+        info = target.lstat()
+    except FileNotFoundError:
+        return {}
+    if not stat.S_ISREG(info.st_mode):
+        return {}
+    return {posix_relpath(target, root): list(file_revision_from_stat(info))}
+
+
+def scoped_artifacts(con, task, artifacts, *, scope=None):
+    """A bounded card publishes its exact deliverable as its sole artifact."""
+    if scope is None:
+        scope = load_card_file_scope(con, task)
+    if scope is None:
+        return artifacts
+    relative = posix_relpath(scope.output, task["workspace"])
+    return [relative] if any(value == relative for value in artifacts or ()) else []
+
+
+def _scoped_source(path, root, scope):
+    from misaka.core.documents.workspace import project_file
+
+    for base in (root, Path(scope.output).parent):
+        candidate = base / path
+        if not candidate.is_relative_to(root) or ".." in candidate.parts:
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if not scope.allows_read(resolved):
+            continue
+        real = project_file(resolved, str(root))
+        if real is not None:
+            return posix_relpath(real, root)
+    return None
+
+
+def scoped_findings(con, task, findings, *, scope=None):
+    """Validate every evidence locator before recording or ingesting a bounded card's findings."""
+    if scope is None:
+        scope = load_card_file_scope(con, task)
+    if scope is None:
+        return findings
+    from misaka.core.documents.workspace import doc_source
+    from misaka.core.web.evidence import saved_page_url_key, saved_pages
+
+    root = Path(task["workspace"]).resolve(strict=True)
+    pages = None
+    checked = []
+    for finding in findings:
+        try:
+            finding = Finding.model_validate(finding).model_dump(exclude_none=True)
+        except ValueError as error:
+            raise InvalidLocalWork(f"Invalid local work finding: {error}") from error
+        source = finding.get("source_file")
+        doc_id = finding.get("doc_id")
+        if doc_id and not scope.allows_read(doc_source(doc_id, root) or ""):
+            raise InvalidLocalWork(f"Document {doc_id!r} does not resolve to a declared local input or the deliverable.")
+        if source and source.startswith("doc:"):
+            if not scope.allows_read(doc_source(source[4:].split("#", 1)[0], root) or ""):
+                raise InvalidLocalWork(f"Evidence {source!r} does not resolve to a declared local input or the deliverable.")
+        elif source and source.startswith(("http://", "https://")):
+            if pages is None:
+                pages, _titles = saved_pages(str(root), allowed=scope.readable_paths())
+            if not scope.allows_read(pages.get(saved_page_url_key(source)) or ""):
+                raise InvalidLocalWork(f"Evidence {source!r} does not resolve to a declared local input or the deliverable.")
+        elif source:
+            resolved = _scoped_source(source, root, scope)
+            if resolved is None:
+                raise InvalidLocalWork(f"Evidence {source!r} does not resolve to a declared local input or the deliverable.")
+            finding = {**finding, "source_file": resolved}
+        checked.append(finding)
+    return checked
+
+
 def _source_artifact(root, output_dir, value, artifacts):
     """Resolve evidence aliases only to files already collected for this card."""
     if path := _artifact(root, value):
@@ -481,11 +718,12 @@ def record_output_baseline(con, task):
     ).fetchone():
         return
     root = Path(task["workspace"]).resolve(strict=True)
+    scope = load_card_file_scope(con, task)
     task_store.add_event(
         con,
         task["id"],
         "artifact_baseline",
-        {"files": _output_snapshot(task, root)},
+        {"files": _output_snapshot(task, root) if scope is None else _scoped_snapshot(scope, root)},
         generation=task["generation"],
         claim_lock=task["claim_lock"],
     )
@@ -498,10 +736,11 @@ def build_submission(con, task, summary):
     if not root.is_dir():
         raise ValueError("card workspace is not a directory")
 
+    scope = load_card_file_scope(con, task)
     artifacts = []
     output_dir = task.get("output_dir")
     if output_dir:
-        current = _output_snapshot(task, root)
+        current = _output_snapshot(task, root) if scope is None else _scoped_snapshot(scope, root)
         baseline_row = con.execute(
             "SELECT payload FROM events WHERE task_id=? AND kind='artifact_baseline' "
             "AND generation=? ORDER BY id LIMIT 1",
@@ -515,17 +754,18 @@ def build_submission(con, task, summary):
             raise ValueError("output directory baseline is missing for this generation")
         artifacts.extend(path for path, revision in current.items() if baseline.get(path) != revision)
 
-    for event in con.execute(
-        "SELECT payload FROM events WHERE task_id=? AND kind='artifact_written' "
-        "AND generation=? ORDER BY id",
-        (task["id"], task["generation"]),
-    ):
-        try:
-            value = json.loads(event["payload"] or "{}").get("path")
-        except (AttributeError, TypeError, ValueError):
-            continue
-        if path := _artifact(root, value):
-            artifacts.append(path)
+    if scope is None:
+        for event in con.execute(
+            "SELECT payload FROM events WHERE task_id=? AND kind='artifact_written' "
+            "AND generation=? ORDER BY id",
+            (task["id"], task["generation"]),
+        ):
+            try:
+                value = json.loads(event["payload"] or "{}").get("path")
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if path := _artifact(root, value):
+                artifacts.append(path)
     if path := _contract_artifact(task, root):
         artifacts.append(path)
 
@@ -538,10 +778,14 @@ def build_submission(con, task, summary):
         findings.extend(Finding.model_validate(item).model_dump(exclude_none=True)
                         for item in evidence.get("findings", []))
         uncertain.extend(evidence.get("uncertain", []))
-    for finding in findings:
-        if path := _source_artifact(root, output_dir, finding.get("source_file"), artifacts):
-            finding["source_file"] = path
-            artifacts.append(path)
+    if scope is None:
+        for finding in findings:
+            if path := _source_artifact(root, output_dir, finding.get("source_file"), artifacts):
+                finding["source_file"] = path
+                artifacts.append(path)
+    else:
+        findings = scoped_findings(con, task, findings, scope=scope)
+        artifacts = scoped_artifacts(con, task, artifacts, scope=scope)
 
     submission = {
         "summary": str(summary or task.get("title") or "Task completed.").strip(),
@@ -562,8 +806,9 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
     os.makedirs(workspace, exist_ok=True)
     state_dir = task_store.task_state_dir(task["id"])
     os.makedirs(state_dir, exist_ok=True)
-    beast = isinstance(task, dict) and task.get("beast")
-    prompt = card_prompt(task)
+    file_scope = card_file_scope(task, workspace)
+    beast = file_scope is None and bool(task.get("beast"))
+    prompt = card_prompt(task, file_scope=file_scope)
 
     role = profiles.role_of(profile_dir)
     from misaka.config import sessions as session_roots
@@ -582,6 +827,8 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         else:
             flags += ["-nt"]
         flags.append("--no-mcp")
+    elif file_scope is not None:
+        flags += ["-t", ",".join(file_scope.tools), "--no-mcp"]
     assembly = assemble(SessionSpec(
         profile_dir=profile_dir,
         role=role,
@@ -590,7 +837,9 @@ def card_session_setup(task, workspace, profile_dir, provider, default_model):
         sender=sender,
         receive_messages=True,
         task_id=task.get("id"),
-        tool_ceiling=MANAGEMENT_TOOLS if beast and delegates else None,
+        tool_ceiling=(file_scope.tools if file_scope is not None
+                      else MANAGEMENT_TOOLS if beast and delegates else None),
+        card_file_scope=file_scope,
         workflow_context=bool(task.get("_owner_context")),
         overrides=spec_overrides(task.get("_session_overrides")),
     ))
@@ -662,18 +911,21 @@ def run_card(
             env["MISAKA_USAGE_CLAIM_LOCK"] = str(usage_claim_lock)
     if over_cap(usage_db, task_id, usage_token_cap):
         return {"ok": False, "reason": budget_cap_reason(), "exit_code": 0, "budget_stop": True}
-    r = run_coro(run_session(flags, prompt, workspace, on_event=on_event, timeout=None,
-                             assembly=assembly, env=env))
+    with card_trace(con, task):
+        r = run_coro(run_session(flags, prompt, workspace, on_event=on_event, timeout=None,
+                                 assembly=assembly, env=env))
 
     row = task_store.get(con, task_id) if con is not None and task_id else None
     if row is not None and row["status"] != "running":
         return {"ok": True, "settled": True, "exit_code": 0}
     reason = r["error"] or "session exited before the card was finalized"
-    if stopped_at_cap(r["error"]):
+    retry_stop = r.get("retry_stop")
+    if stopped_at_cap(r["error"], retry_stop=retry_stop):
         return {"ok": False, "reason": reason, "exit_code": 0, "budget_stop": True}
     return {
         "ok": False,
         "reason": reason,
         "exit_code": 1 if r["error"] else 0,
         "stderr_tail": r["error"] or "",
+        "retry_stop": retry_stop,
     }

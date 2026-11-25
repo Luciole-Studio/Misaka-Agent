@@ -64,6 +64,22 @@ def wholeDecode(data: bytes, ignoreBOM: bool = False) -> str:
 
 
 class TestStreamDecoder:
+    @pytest.mark.parametrize("boundary", [8191, 8192, 8193])
+    @pytest.mark.parametrize("character", ["é", "汉", "𠀀", "🧪"])
+    def test_multibyte_character_split_at_the_byte_boundary(self, boundary, character):
+        encoded = character.encode("utf-8")
+        tail = "国\r\n𠀀".encode()
+        for split in range(1, len(encoded)):
+            prefix = b"a" * (boundary - split)
+            raw = prefix + encoded + tail
+            decoder = StreamDecoder()
+
+            first = decoder.decode(raw[:boundary])
+            second = decoder.decode(raw[boundary:])
+
+            assert first == prefix.decode("ascii")
+            assert first + second + decoder.decode() == raw.decode("utf-8")
+
     def test_keeps_a_u_feff_that_does_not_start_the_stream(self):
         # Node's streaming TextDecoder with BOM handling dropped this U+FEFF, which follows an invalid sequence.
         data = bytes([0xE2, 0x82, 0xEF, 0xBB, 0xBF, 0x61])

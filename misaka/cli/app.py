@@ -112,9 +112,11 @@ def _parser(extension_commands=None):
                     help="With --say-file: a finished card answering a message (no claim; the card stays)")
     sub.add_parser("ally-bridge", help="Internal: the MCP server lending an ally its card's tools")
 
-    sub.add_parser("panel", help="Open the Misaka Network panel (default in a terminal)")
+    pn = sub.add_parser("panel", help="Open the Misaka Network panel (default in a terminal)")
+    pn.add_argument("--diagnostics", action="store_true", help="Record detailed traces for new chat panes")
     ch = sub.add_parser("chat", help="Chat with Last Order, or with a Sister via --as")
     ch.add_argument("--model", help="Override the model")
+    ch.add_argument("--diagnostics", action="store_true", help="Record a detailed trace for this chat")
     ch.add_argument("-s", "--skills", action="append", help="Preload Skill names; repeat or separate with commas")
     ch.add_argument("--as", dest="as_agent", metavar="SISTER",
                     help="Chat with this Sister instead of Last Order")
@@ -130,11 +132,13 @@ def _parser(extension_commands=None):
                     help="Show existing session records without starting an agent")
 
     us = sub.add_parser("usage", help="What research runs spent: tokens and money, by conversation and by model")
+    sub.add_parser("trace", help="Read local runtime records (trace last or trace show RUN_ID)")
     us.add_argument("--run", metavar="RUN_ID", help="One run, by conversation and by model")
     us.add_argument("--limit", type=int, default=10, help="How many recent runs to list without --run (default: 10)")
 
     rs = sub.add_parser("research", help="Run the Research Workflow on a question")
     rs.add_argument("goal", nargs="?", help="Research question for a new run")
+    rs.add_argument("--diagnostics", action="store_true", help="Record a detailed trace for a new Research run")
     rs.add_argument("--resume", metavar="RUN_ID", help="Resume an existing research run")
     rs.add_argument("--tell", metavar="RUN_ID",
                     help="Say GOAL (the message) to a running node's Last Order, the root's unless --to names a node")
@@ -258,13 +262,14 @@ def _cmd_chat(args):
     from misaka.cli import chat
     return chat.launch(args.as_agent, model=args.model, cont=args.cont, pick=args.pick,
                        session=args.session, read_only=args.read_only, catalog=args.catalog, attach=args.attach,
+                       **({"diagnostics": True} if getattr(args, "diagnostics", False) else {}),
                        **({"skills": args.skills} if args.skills else {}))
 
 
 def _cmd_panel(args):
     from misaka.ui.panel import panel
     try:
-        panel.launch()
+        panel.launch(**({"diagnostics": True} if getattr(args, "diagnostics", False) else {}))
     except RuntimeError as error:
         print(f"The panel could not start: {error}", file=sys.stderr)
         print("`misaka chat` opens plain chat with Last Order in the meantime.", file=sys.stderr)
@@ -468,14 +473,15 @@ def _cmd_usage(args):
         run = runs.get(con, args.run)
         if not run:
             sys.exit(f"Research run not found: {args.run}")
-        scope = {run["id"], *(task["id"] for task in runs.tasks(con, run["id"]))}
-        print(usage.report(con, run, ledger_tokens=budget.spent(con, task_ids=scope)))
+        print(usage.report(con, run, board_budget=usage.research_budget_summary(con, run["id"])))
         return
     recent = con.execute("SELECT * FROM research_runs ORDER BY created_at DESC LIMIT ?", (max(1, args.limit),)).fetchall()
     for run in recent:
-        spent = usage.run_usage(con, run)["total"]
+        spent = usage.run_usage(con, run)
+        total = spent["total"]
         print(f"{run['id']}  {time.strftime('%Y-%m-%d', time.localtime(run['created_at']))}  {run['status']:<8} "
-              f"{spent['tokens']:>13,} tokens  {usage.money(spent):<10}  {' '.join(run['question'].split())[:50]}")
+              f"{total['tokens']:>13,} tokens  {usage.money(total):<10}{usage.panel_usage_note(spent)}  "
+              f"{' '.join(run['question'].split())[:50]}")
     if not recent:
         print("No research runs yet.")
     cap = int(cfg.get("token_cap") or 0)
@@ -489,6 +495,9 @@ def _cmd_research(args):
 
     from misaka.core.research import node as research_node
     from misaka.core.research import planner, runs, workflow
+    diagnostics = getattr(args, "diagnostics", False)
+    if diagnostics and (args.resume or args.tell or args.limits or args.node):
+        sys.exit("--diagnostics applies when starting a new Research run; an existing run keeps its original mode.")
     if args.node:
         sys.exit(research_node.main(*args.node, runner_key=args.runner_key))
     cfg = current_config()
@@ -544,7 +553,7 @@ def _cmd_research(args):
         if not args.goal:
             sys.exit("A new research run requires a question; use --resume RUN_ID to continue one.")
         try:
-            limits = runs.normalize_limits(chosen_limits())
+            limits = runs.normalize_limits({**chosen_limits(), **({"diagnostics": True} if diagnostics else {})})
         except ValueError as error:
             sys.exit(str(error))
         from misaka.core.platform import cards as card_files
@@ -931,6 +940,10 @@ def main(argv=None):
     if "--offline" in argv[:end]:
         argv = [arg for index, arg in enumerate(argv) if not (index < end and arg == "--offline")]
         os.environ["MISAKA_OFFLINE"] = "1"
+    if argv[:1] == ["trace"]:
+        from misaka.cli import trace
+
+        return trace.run(argv[1:])
     bootstrap.install(check_settings=argv[:1] not in (["setup"], ["update"], ["uninstall"]))
     from misaka.config import env as env_file
     from misaka.config.engine import configure_logging

@@ -456,7 +456,9 @@ async def test_abort_during_start_with_a_queued_notification(tmp_path):
         box["release"].set()
         await aborted
         await _settle(s)
-        # once its lease expires the outbox redelivers B
+        assert b not in queued(s)
+        assert board.sub("W2")["failure_count"] == 1
+        # The outbox can redeliver B on its next poll.
         board.expire_lease("W2")
         board.poll("W2")
         await _settle(s)

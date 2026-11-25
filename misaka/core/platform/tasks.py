@@ -150,7 +150,8 @@ CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id);
 TASK_SCHEMA_VERSION = 10
 MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 FAILURE_LIMIT = 3
-TERMINAL_FAILURE_KINDS = frozenset({"auth_or_quota", "configuration"})
+RETRY_STOP_FAILURE_KINDS = frozenset({"circuit_open", "retry_delay_limit", "provider_terminal"})
+TERMINAL_FAILURE_KINDS = frozenset({"auth_or_quota", "configuration"}) | RETRY_STOP_FAILURE_KINDS
 RETRY_BASE_SECONDS = 30
 RETRY_CAP_SECONDS = 900
 HEARTBEAT_STALE_SECONDS = 3600
@@ -416,7 +417,7 @@ def card_output_dir(workspace, task_id):
 @_serialized
 def create_task(con, title, body="", assignee="", model=None, priority=0,
                 reviewer=None, workspace=None, output_dir=None,
-                origin_session=None):
+                origin_session=None, *, local_work=None, local_deliverable=None):
     """Insert a card, record its ``created`` event, and return the new id.
 
     ``workspace`` is the project folder the card belongs to; there is no default.
@@ -446,9 +447,11 @@ def create_task(con, title, body="", assignee="", model=None, priority=0,
                 raise
             continue
         break
-    add_event(con, tid, "created", {"title": title, "assignee": assignee,
-                                    "reviewer": reviewer,
-                                    "workspace": workspace})
+    created = {"title": title, "assignee": assignee, "reviewer": reviewer,
+               "workspace": workspace, "local_work": local_work}
+    if local_work is not None:
+        created["local_deliverable"] = local_deliverable
+    add_event(con, tid, "created", created)
     return tid
 
 
@@ -1199,6 +1202,8 @@ def _terminal_transition(
 
 
 _FAILURE_KINDS = (
+    ("circuit_open", re.compile(r"model route circuit is open:")),
+    ("retry_delay_limit", re.compile(r"server requested \d+s retry delay \(max: \d+s\)")),
     ("auth_or_quota", re.compile(
         r"authentication|unauthori[sz]ed|unauthenticated|permission[ _]error|permission_denied"
         r"|permissiondeniederror|\b40[13] (?:forbidden|unauthorized)|invalid[ _-]?(?:x-)?(?:api[ _-]?key|token)"
@@ -1229,6 +1234,10 @@ def classify_failure(reason):
     return "failure"
 
 
+def is_retry_stop(kind):
+    return isinstance(kind, str) and kind in RETRY_STOP_FAILURE_KINDS
+
+
 def retry_delay(kind, failures):
     """Seconds to hold a card back after its ``failures``-th consecutive failure of ``kind``."""
     if kind == "protocol_violation":
@@ -1247,14 +1256,24 @@ def _owner_clauses(task_id, generation, claim_lock, now):
     return " AND ".join(clauses), values
 
 
+def _rate_limit_exhausted(con, task_id, limit):
+    previous = con.execute(
+        "SELECT status,failure_kind FROM task_runs WHERE task_id=? "
+        "AND generation=(SELECT generation FROM tasks WHERE id=?) AND phase='worker' AND status!='running' "
+        "ORDER BY attempt DESC LIMIT ?", (task_id, task_id, limit - 1),
+    ).fetchall()
+    return len(previous) == limit - 1 and all(tuple(row) == ("deferred", "rate_limit") for row in previous)
+
+
 @_serialized
 def mark_failed(
     con, task_id, generation=None, claim_lock=None,
-    *, failure_kind=None, reason=None,
+    *, failure_kind=None, reason=None, retry_stop=None,
 ):
     """Record one failed attempt under the card's ownership fence.
 
-    A rate limit defers the card and counts nothing. Any other failure counts against
+    A rate limit defers the card. Its owner may set a limit on consecutive deferrals
+    in one generation. Other failures count against
     ``FAILURE_LIMIT``: below it the card returns to ready after a backoff, keeping the error for
     the next attempt; at it, or for a kind a retry cannot fix, the card stays failed.
     """
@@ -1265,19 +1284,35 @@ def mark_failed(
         except (ValueError, AttributeError, TypeError):
             reason = raw
     reason = redact(reason)
-    kind = failure_kind or classify_failure(reason)
+    if is_retry_stop(retry_stop):
+        kind = retry_stop
+    else:
+        kind = failure_kind or classify_failure(reason)
     fingerprint = (hashlib.sha256(str(reason).encode()).hexdigest()[:16]
                    if reason else None)
     summary = str(reason)[:1000] if reason else None
     now = int(time.time())
     where, values = _owner_clauses(task_id, generation, claim_lock, now)
     if kind == "rate_limit":
+        from misaka.core.platform import owners
+
         previous = con.execute(
             "SELECT COUNT(*) FROM task_runs WHERE task_id=? AND failure_kind='rate_limit'",
             (task_id,),
         ).fetchone()[0]
         delay = min(RETRY_CAP_SECONDS, RETRY_BASE_SECONDS * (2 ** min(5, int(previous))))
         with _write_txn(con):
+            owner, _context = owners.card(con, task_id)
+            limit = owner.rate_limit_max_attempts if owner is not None else None
+            if limit and _rate_limit_exhausted(con, task_id, limit):
+                if not _terminal_transition(con, task_id, "failed", generation, claim_lock,
+                                            failure_kind=kind, failure_fingerprint=fingerprint, summary=summary):
+                    return False
+                con.execute("UPDATE tasks SET next_attempt_at=NULL,last_failure_error=? WHERE id=?",
+                            (summary or kind, task_id))
+                add_event(con, task_id, "gave_up", {"failure_kind": kind, "failures": limit,
+                          "limit": limit, "reason": "consecutive_rate_limits"}, generation=generation)
+                return True
             cur = con.execute(
                 "UPDATE tasks SET status='ready',next_attempt_at=?,completed_at=NULL,"
                 "worker_pid=NULL,worker_identity=NULL,claim_lock=NULL,claim_expires=NULL "

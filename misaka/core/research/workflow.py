@@ -29,6 +29,7 @@ from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 
 from misaka import workspace as workspace_index
+from misaka.core.network import worker as card_worker
 from misaka.core.platform import budget, prompt_guard
 from misaka.core.platform import cards as card_files
 from misaka.core.platform import tasks as task_store
@@ -236,7 +237,7 @@ def _followup_tool(con, cfg, run, node, round):
         description=f"Last Order: assign a follow-up round of research cards (round {round + 1}) on this node",
         model=commands.Plan,
         validate=lambda value: planner.validate_plan(value, planner._roster({**cfg, "workspace": run["workspace"]}),
-                                                     red_team_required=False),
+                                                     red_team_required=False, workspace=run["workspace"]),
         session_dir=planner._lo_session(run, node),
         session_file=planner.lo_session_file(run, current),
         supersede=True,
@@ -350,6 +351,7 @@ async def _submit_tasks(con, run, node, specs, *, kind, progress=None, round=1, 
                 planner.task_body(spec, run_id=run["id"], node=node, siblings=specs, previous=previous,
                                   lo_session=planner.lo_session_file(run, node)),
                 spec["assignee"], priority=spec.get("priority", 0),
+                local_work=spec.get("local_work"),
                 needs=[local_to_task[dep] for dep in spec.get("dependencies") or []],
                 after_row=lambda tid, spec=spec: runs.link_task(
                     con, run["id"], tid, kind=kind, node=node, round=round,
@@ -536,7 +538,8 @@ def _check_plan_change(con, run, node, round, roster, change):
                                 "assignee_reason": item["assignee_reason"]} for item in change["reassign"]],
                   "cancel": [{"local_id": unstarted(item["card"], "cancelled"), "reason": item["reason"]}
                              for item in change["cancel"]]}
-    checked = planner._validate_tasks(_changed_tasks(tasks, [normalized]), roster_ids | {t["assignee"] for t in tasks})
+    checked = planner._validate_tasks(_changed_tasks(tasks, [normalized]), roster_ids | {t["assignee"] for t in tasks},
+                                      workspace=run["workspace"])
     added = {task["local_id"] for task in change["add"]}
     normalized["add"] = [task for task in checked if task["local_id"] in added]
     return normalized
@@ -785,14 +788,22 @@ def _register_task_artifacts(con, run, task, submitted):
     if not link or not task["workspace"]:
         return
     node = runs.node(con, link["branch_id"])
+    scope = card_worker.load_card_file_scope(con, task)
     digests = submitted.get("artifact_digests")
     if not isinstance(digests, dict):
+        if scope is not None:
+            raise ArtifactDrift(task["id"], [posix_relpath(scope.output, task["workspace"])])
         raise ValueError(f"Card {task['id']}: its submission carries no artifact digests.")  # noqa: TRY004 - a bad submission, not a bad type
     generation = int(dict(task).get("generation") or 1)
     workspace = Path(run["workspace"]).resolve()
     output_dir = dict(task).get("output_dir")
     own = Path(output_dir).resolve() if output_dir else None
-    placed = bundle.placed_before(str(own / bundle.MANIFEST), str(own), str(workspace)) if own else None
+    artifacts = submitted.get("artifacts") or []
+    if scope is not None:
+        artifacts = card_worker.scoped_artifacts(con, task, artifacts, scope=scope)
+        if not artifacts:
+            raise ArtifactDrift(task["id"], [posix_relpath(scope.output, workspace)])
+    placed = bundle.placed_before(str(own / bundle.MANIFEST), str(own), str(workspace)) if own and scope is None else None
     accepted, drifted = [], []
 
     def refuse(rel, derived):
@@ -801,8 +812,10 @@ def _register_task_artifacts(con, run, task, submitted):
         else:
             drifted.append(str(rel))
 
-    for rel in submitted.get("artifacts") or []:
+    for rel in artifacts:
         source = Path(task["workspace"], str(rel)).resolve()
+        if scope is not None and source != Path(scope.output):
+            raise ArtifactDrift(task["id"], [str(rel)])
         try:
             inside = source.relative_to(workspace)
         except ValueError as error:
@@ -936,9 +949,13 @@ def settle_done_tasks(con, *, run_id, reopen_drift=True):
             submitted = _submitted_payload(con, current)
             _clear_task_outputs(con, run["id"], task["id"])
             try:
+                if submitted.get("findings"):
+                    findings = card_worker.scoped_findings(con, current, submitted["findings"])
+                    submitted = {**submitted, "findings": findings}
                 _register_task_artifacts(con, run, current, submitted)
-            except ArtifactDrift as drift:
-                task_store.add_event(con, task["id"], "research_artifact_drift", {"paths": drift.paths},
+            except (ArtifactDrift, card_worker.InvalidLocalWork) as drift:
+                payload = {"paths": drift.paths} if isinstance(drift, ArtifactDrift) else {"reason": str(drift)}
+                task_store.add_event(con, task["id"], "research_artifact_drift", payload,
                                      generation=generation)
                 _LOG.warning("Research %s: %s", run_id, drift)
                 if reopen_drift:
@@ -1384,12 +1401,17 @@ async def _expand_owned(con, cfg, runner, worker, run, node, *, context, tool_ca
                     if row["id"] in scope and (row["status"] in ("failed", "stopped") or runs.parked(con, row))]
             if outcome != "failed" or not lost:
                 return outcome
-            await _progress(progress, "cards_failed", f"{_label(node)}: {len(lost)} card(s) failed; its Last Order "
+            retryable = [row for row in lost if not runs.card_retry_stopped(con, row)]
+            if not retryable:
+                await _progress(progress, "cards_failed", f"{_label(node)}: model retry limits stopped the remaining "
+                                "cards. Resume the run explicitly after the service recovers.", run, node=nid)
+                return "failed"
+            await _progress(progress, "cards_failed", f"{_label(node)}: {len(retryable)} card(s) failed; its Last Order "
                             "decides whether to retry them, go on without them, or fail.", run, node=nid,
                             **{ANNOUNCES_PHASE: True})
             try:
                 decision = await asyncio.to_thread(planner.cards_failed, con, run, cfg, worker, node,
-                                                   kind=kind, lost=lost)
+                                                   kind=kind, lost=retryable)
             except Exception as error:  # noqa: BLE001 - the decision is a chance to go on, not a new way to fail
                 await _progress(progress, "cards_failed", f"{_label(node)}: no decision ({error}); the node fails.",
                                 run, node=nid)
@@ -1835,7 +1857,7 @@ async def _await_approval(con, cfg, runner, worker, run, node, *, poll_seconds, 
         con, run, current, session_file=session_file, round=round, forks=forks,
         validate=lambda value: planner.validate_plan(value, roster, decisions_allowed=forks,
                                                      root=runs.is_root(node) and round <= 1,
-                                                     red_team_required=round <= 1))
+                                                     red_team_required=round <= 1, workspace=run["workspace"]))
     plan = runs.action(con, run["id"], nid, runs.plan_key(round))
     if runs.is_root(node) and not getattr(worker, "headless", False):
         where = "in this window"
@@ -2532,6 +2554,29 @@ async def run(con, cfg, spawner, *, run_id, poll_seconds=POLL_SECONDS, progress=
     run = runs.get(con, run_id)
     if not run:
         raise ValueError(f"Research run not found: {run_id}")
+    from misaka.core.runtime_trace import scope_event, trace_scope
+
+    with trace_scope(run_id, runs.diagnostics_enabled(run)):
+        scope_event("research_started", status="resumed" if resume else "started")
+        status = "failed"
+        try:
+            result = await _drive_run(con, cfg, spawner, run, poll_seconds=poll_seconds, progress=progress,
+                                      resume=resume, clarification=clarification, origin_session=origin_session,
+                                      session=session)
+            reason = result.get("reason")
+            status = reason if reason in {"done", "waiting_input", "stopped", "failed"} else "unknown"
+            return result
+        except asyncio.CancelledError:
+            status = "cancelled"
+            raise
+        finally:
+            scope_event("research_finished", status=status)
+
+
+async def _drive_run(con, cfg, spawner, run, *, poll_seconds, progress, resume, clarification, origin_session, session):
+    from misaka.core.runtime_trace import scope_event
+
+    run_id = run["id"]
     if not os.path.isdir(run["workspace"]):
         raise RuntimeError(f"The research run's project folder no longer exists: {run['workspace']}")
     driver_lock = f"driver:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(3)}"
@@ -2554,6 +2599,8 @@ async def run(con, cfg, spawner, *, run_id, poll_seconds=POLL_SECONDS, progress=
 
     async def partial(reason, *, status="stopped"):
         check_active(allow_stop=True)
+        if reason == halts["budget"]:
+            scope_event("budget_refused", status="budget", reason="token_cap")
         try:
             await run_in_thread(settle_done_tasks, con, run_id=run_id, reopen_drift=False)
         except Exception:  # noqa: BLE001 - the partial report is what a halt owes the user

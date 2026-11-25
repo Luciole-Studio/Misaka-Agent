@@ -163,9 +163,11 @@ class _PendingMessageQueue:
         return len(self._messages) > 0
 
     def peek(self) -> list[AgentMessage]:
+        first = self._messages[0] if self._messages else None
+        if first is not None and self.together is not None and self.together(first):
+            return [message for message in self._messages if self.together(message)]
         if self.mode == "all":
             return self._messages[:]
-        first = self._messages[0] if self._messages else None
         return [first] if first is not None else []
 
     def drain(self) -> list[AgentMessage]:
@@ -362,13 +364,16 @@ class Agent:
         self.clearSteeringQueue()
 
     @overload
-    async def prompt(self, message: AgentMessage | Sequence[AgentMessage]) -> None: ...
+    async def prompt(self, message: AgentMessage | Sequence[AgentMessage], *,
+                     skipInitialSteeringPoll: bool = False) -> None: ...
 
     @overload
-    async def prompt(self, input: str, images: Sequence[ImageContent] | None = None) -> None: ...
+    async def prompt(self, input: str, images: Sequence[ImageContent] | None = None, *,
+                     skipInitialSteeringPoll: bool = False) -> None: ...
 
     async def prompt(
-        self, input: str | AgentMessage | Sequence[AgentMessage], images: Sequence[ImageContent] | None = None
+        self, input: str | AgentMessage | Sequence[AgentMessage], images: Sequence[ImageContent] | None = None,
+        *, skipInitialSteeringPoll: bool = False,
     ) -> None:
         """Start a new prompt from text, a single message, or a batch of messages."""
         if self._activeRun is not None:
@@ -376,7 +381,7 @@ class Agent:
                 "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
             )
         messages = self._normalizePromptInput(input, images)
-        await self._runPromptMessages(messages)
+        await self._runPromptMessages(messages, skipInitialSteeringPoll=skipInitialSteeringPoll)
 
     async def continue_(self) -> None:
         """Continue from the current transcript. The last message must be a user or tool-result message.

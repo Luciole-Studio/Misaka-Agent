@@ -623,7 +623,12 @@ def _install(harn, runtime):
             when = ("the ally reads it between turns: at once if it is idle, otherwise when its current turn ends"
                     if ally else "her session reads it at its next tool boundary")
             return _text(f"Message #{mid} queued for card {params.task_id} (attempt {row['generation']}); {when}.")
-        if row["status"] != "running" and (in_panel or pane or help_reply or ally):
+        continue_in_pane = in_panel or pane or help_reply or ally
+        if row["status"] != "running" and not continue_in_pane:
+            from misaka.core.network import worker
+
+            continue_in_pane = worker.card_extras(_con(), row, include_materials=False).get("_local_work") is not None
+        if row["status"] != "running" and continue_in_pane:
             if not (params.confirmed or help_reply):
                 return _text(f"Card {params.task_id} is {row['status']}; continuing it starts a new "
                              "model turn. Ask the user, then call again with confirmed=true.")

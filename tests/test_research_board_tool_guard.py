@@ -121,3 +121,22 @@ async def test_research_continuation_preserves_confirmation_and_generation(board
         await board.call("misaka_sister_message", task_id=board.research, message="Stale reply",
                          summary="Fixture", generation=2, confirmed=True)
     assert len(sent) == int(starts)
+
+
+async def test_headless_message_keeps_local_research_on_the_scoped_runner(board, tmp_path, monkeypatch):
+    from misaka.ui.panel import client as net
+
+    (tmp_path / "input.txt").write_text("input", encoding="utf-8")
+    tid = cards.create(board.con, str(tmp_path), "Scoped", "## deliverable\nnotes.md", "10033",
+                       local_work={"input_paths": ["input.txt"]})
+    run = runs.create(board.con, workspace=str(tmp_path), question="Scoped work")
+    runs.link_task(board.con, run["id"], tid, kind="research", node=runs.root(board.con, run["id"]))
+    board.con.execute("UPDATE tasks SET status='stopped' WHERE id=?", (tid,))
+    monkeypatch.setattr(network, "_pane_for_card", lambda *_: None)
+    monkeypatch.setattr(net, "ensure", lambda: None)
+    sent = []
+    monkeypatch.setattr(net, "request", lambda *args: sent.append(args) or {"pane_id": "fixture"})
+    await board.call("misaka_sister_message", task_id=tid, message="Resume", summary="Resume",
+                     generation=1, confirmed=True)
+    assert sent and sent[0][0] == "pane.continue_card" and sent[0][1]["task_id"] == tid
+    board.runtime.message.assert_not_called()

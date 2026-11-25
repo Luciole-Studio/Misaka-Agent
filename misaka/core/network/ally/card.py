@@ -210,6 +210,12 @@ class Attempt:
         row = await asyncio.to_thread(self._owned)
         if row is None:
             raise _Over
+        try:
+            scope = await asyncio.to_thread(worker.load_card_file_scope, self.con, row)
+        except worker.InvalidLocalWork as error:
+            raise _Failed(str(error), "configuration") from error
+        if scope is not None:
+            raise _Failed("Local work requires a native Sister.", "configuration")
         from misaka.core.session_manager import SessionManager
 
         session_dir = session_roots.card_session_dir(self.task)

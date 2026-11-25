@@ -7,7 +7,8 @@ SESSION_KINDS = {"card", "beast"}
 def part(spec):
     if not spec.task_id:
         return None
-    result = todo.TodoPart(spec.task_id, spec.sender or spec.role.rsplit("/", 1)[-1])
+    result = todo.TodoPart(spec.task_id, spec.sender or spec.role.rsplit("/", 1)[-1],
+                           bounded_card=spec.card_file_scope is not None)
     if spec.kind == "beast":
         result.tools = []
     return result

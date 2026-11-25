@@ -1088,10 +1088,13 @@ async def test_codex_error_events_read_the_nested_code():
 
 
 def test_codex_terminal_rate_limits_are_not_retried():
-    from misaka.ai.api import openai_codex_responses as codex
+    from misaka.ai.utils.provider_retry import (
+        ProviderResponseError,
+        providerRetryDisposition,
+    )
 
-    assert codex._isRetryableError(429, "rate limit") is True
-    assert codex._isRetryableError(429, "insufficient_quota: add billing") is False
+    assert providerRetryDisposition(ProviderResponseError("rate limit", status=429)) == "transient"
+    assert providerRetryDisposition(ProviderResponseError("insufficient_quota: add billing", status=429)) == "provider_terminal"
 
 
 async def test_codex_sse_parses_a_final_frame_without_a_blank_line():
@@ -1628,12 +1631,13 @@ def test_no_proxy_matching_follows_upstream(no_proxy, host, port, proxied):
 
 
 def test_retry_after_reads_a_leading_number_like_parse_float():
-    from types import SimpleNamespace
+    from misaka.ai.utils.provider_retry import (
+        ProviderResponseError,
+        providerRetryAfterMs,
+    )
 
-    from misaka.ai.utils.provider_retry import _getRetryDelayMs
-
-    assert _getRetryDelayMs(SimpleNamespace(headers={"retry-after": "5s"}), 0, None) == 5000
-    assert _getRetryDelayMs(SimpleNamespace(headers={"retry-after-ms": "250ms"}), 0, None) == 250
+    assert providerRetryAfterMs(ProviderResponseError("busy", headers={"retry-after": "5s"})) == 5000
+    assert providerRetryAfterMs(ProviderResponseError("busy", headers={"retry-after-ms": "250ms"})) == 250
 
 
 def test_uuidv7_is_monotonic_within_a_millisecond_and_keeps_a_supplied_timestamp():
@@ -1650,18 +1654,20 @@ def test_uuidv7_is_monotonic_within_a_millisecond_and_keeps_a_supplied_timestamp
 # --- B1b follow-up: pi 1.0.0 ------------------------------------------------------------------
 
 
-def test_retry_after_without_a_finite_delay_falls_back_to_exponential_backoff():
-    from types import SimpleNamespace
+@pytest.mark.parametrize("headers", [
+    {"retry-after-ms": "Infinity"}, {"retry-after": "Infinity"}, {"retry-after": "not a date"},
+])
+async def test_retry_after_without_a_finite_delay_falls_back_to_exponential_backoff(monkeypatch, headers):
+    from misaka.ai.utils import provider_retry
 
-    from misaka.ai.utils.provider_retry import _getRetryDelayMs
+    error = provider_retry.ProviderResponseError("busy", status=503, headers=headers)
+    request = AsyncMock(side_effect=[error, "ok"])
+    sleep = AsyncMock()
+    monkeypatch.setattr(provider_retry, "_abortableSleep", sleep)
 
-    for headers in (
-        {"retry-after-ms": "Infinity"},
-        {"retry-after": "Infinity"},
-        {"retry-after": "not a date"},
-    ):
-        delay = _getRetryDelayMs(SimpleNamespace(headers=headers), 0, None)
-        assert 375 <= delay <= 500, headers
+    assert await provider_retry.retryProviderRequest(request, {"maxRetries": 1}) == "ok"
+    sleep.assert_awaited_once()
+    assert 0 <= sleep.await_args.args[0] <= 500
 
 
 def test_overflow_detects_the_zai_cn_endpoint_prompt_exceeds_max_length_error():

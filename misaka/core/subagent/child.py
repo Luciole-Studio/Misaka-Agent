@@ -9,6 +9,7 @@ and gives the parent an explicit ready/accepted handshake.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import json
 import os
@@ -352,6 +353,35 @@ async def amain() -> int:
         await asyncio.gather(parent_watch, return_exceptions=True)
         return 2
 
+    trace = contextlib.nullcontext()
+    card_id = os.environ.get("MISAKA_SISTER_OWNER_TASK_ID")
+    board = os.environ.get("MISAKA_SISTER_OWNER_DB")
+    file_scope = None
+    if card_id and board:
+        from misaka.core.network import worker
+        from misaka.core.platform import tasks
+
+        try:
+            with contextlib.closing(tasks.connect(board)) as con:
+                row = tasks.get(con, card_id)
+                if row is None:
+                    raise ValueError(f"Card {card_id} is no longer on the Board.")
+                file_scope = worker.load_card_file_scope(con, row)
+                if file_scope is not None and Path(row["workspace"]).resolve() != Path.cwd().resolve():
+                    raise ValueError(f"Card {card_id}: the Sister process opened outside its project folder.")
+        except (OSError, ValueError) as error:
+            _emit({"type": "child_error", "error": str(error)})
+            parent_watch.cancel()
+            await asyncio.gather(parent_watch, return_exceptions=True)
+            return 2
+        trace = worker.load_card_trace(board, card_id)
+    with trace:
+        if file_scope is None:
+            return await _run_attached(parent_watch)
+        return await _run_attached(parent_watch, file_scope=file_scope)
+
+
+async def _run_attached(parent_watch, *, file_scope=None) -> int:
     from misaka.core.platform import session as engine_session
     from misaka.core.subagent import hooks as subagent_hooks
     from misaka.core.subagent import policy as subagent_policy
@@ -438,6 +468,8 @@ async def amain() -> int:
     subagent_policy.set_async_hook_broker(submit_async_hook)
 
     flags, max_turns = _runtime_flags(sys.argv[1:])
+    if file_scope is not None:
+        flags += ["-t", ",".join(file_scope.tools), "--no-mcp"]
     profile_dir = os.environ.get("MISAKA_PROFILE_DIR") or ""
     role = os.environ.get("MISAKA_WHO") or ""
     workspace = os.environ.get("MISAKA_WORKSPACE") or os.getcwd()
@@ -457,6 +489,8 @@ async def amain() -> int:
             mcp_role=mcp_role,
             receive_messages=bool(card),
             task_id=card,
+            card_file_scope=file_scope,
+            tool_ceiling=file_scope.tools if file_scope is not None else None,
             workflow_context=bool(card) and os.environ.get("MISAKA_WORKFLOW_CONTEXT") == "1",
             overrides=spec_overrides(session_overrides.from_env()) if card else (),
         )),
@@ -522,7 +556,7 @@ async def amain() -> int:
 
     install_effort_adapter(session.agent, os.environ)
 
-    if os.environ.get("MISAKA_SUBAGENT_INHERIT_ALL_TOOLS") == "1":
+    if file_scope is None and os.environ.get("MISAKA_SUBAGENT_INHERIT_ALL_TOOLS") == "1":
         session.setActiveToolsByName(inherited_tool_names(session, card=bool(card), fork=fork_snapshot is not None))
 
     async def evaluate_model_hook(
@@ -872,8 +906,14 @@ async def amain() -> int:
                 active_messages = None
 
         terminal_error = _terminal_error(messages)
+        retry_stop = None
         if terminal_error:
             turn_error = f"{turn_error}; {terminal_error}" if turn_error else terminal_error
+            if card:
+                last = next((item for item in reversed(session.state.messages)
+                             if read_field(item, "role") == "assistant"), None)
+                if read_field(last, "stopReason") == "error":
+                    retry_stop = read_field(last, "retryStop")
 
         if progress_jobs:
             await asyncio.gather(*progress_jobs, return_exceptions=True)
@@ -899,6 +939,7 @@ async def amain() -> int:
                 "turnId": turn_id,
                 "messagesFile": messages_file,
                 "error": turn_error,
+                **({"retryStop": retry_stop} if retry_stop else {}),
             }
         )
         if active_turn_id == turn_id:

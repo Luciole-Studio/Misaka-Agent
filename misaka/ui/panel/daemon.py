@@ -49,7 +49,7 @@ else:
 # Wire protocol version (strict equality, as in herdr). Bump it whenever *server
 # behaviour* changes, not only method/event shapes: an unbumped behaviour change
 # once let a stale daemon slip through the version gate.
-PROTOCOL = 56   # 56: a card's continuation message reaches the program in its pane as a file (`--say-file`), never on its command line -- a daemon from before it starts card-shell/ally-card with a `--say` they no longer take (issue #13); 55: pane.consult_card -- a message to a finished card is a consultation (a run, not an attempt: the card stays as it is; R40), pane.continue_card drops "consult", panes.list says "consulting"; 54: pane.continue_card takes {"consult": true}: a message wakes a finished card without sending its dependents back to todo; 53: panes.list takes {"tab_of": pane_id}, the panes of that pane's tab (Last Order's pane tools); 52: spaces have durable ids (state/spaces.json), a pane's program carries MISAKA_NET_SPACE, place {"space": id} reopens a remembered space, layout.get lists dormant spaces; 51: screen frames carry the program's content revision, a pane's OSC 52 copy reaches the panel, idle scrollback is compressed; 50: one home, one layout table -- a daemon from before it serves the old paths; 49: panes.list says which pane holds a card's claim, and a card is continued in the pane it already has; 48: pane.send/pane.input drain through a per-pane write queue and wait for delivery; 47: drag resizes are fire-and-forget (id=None, no reply) and the layout is persisted at drag end, so the divider never blocks on a busy daemon; 46: a drag resizes the program as fast as it repaints; 44: reflow held until repaint; 43: libghostty-vt; 42: panes.resize acknowledged first; 40: shown frame in a sync block; 38: input state, extract, kitty
+PROTOCOL = 57   # 57: recover prepared card submissions before releasing a stopped worker claim; 56: a card's continuation message reaches the program in its pane as a file (`--say-file`), never on its command line -- a daemon from before it starts card-shell/ally-card with a `--say` they no longer take (issue #13); 55: pane.consult_card -- a message to a finished card is a consultation (a run, not an attempt: the card stays as it is; R40), pane.continue_card drops "consult", panes.list says "consulting"; 54: pane.continue_card takes {"consult": true}: a message wakes a finished card without sending its dependents back to todo; 53: panes.list takes {"tab_of": pane_id}, the panes of that pane's tab (Last Order's pane tools); 52: spaces have durable ids (state/spaces.json), a pane's program carries MISAKA_NET_SPACE, place {"space": id} reopens a remembered space, layout.get lists dormant spaces; 51: screen frames carry the program's content revision, a pane's OSC 52 copy reaches the panel, idle scrollback is compressed; 50: one home, one layout table -- a daemon from before it serves the old paths; 49: panes.list says which pane holds a card's claim, and a card is continued in the pane it already has; 48: pane.send/pane.input drain through a per-pane write queue and wait for delivery; 47: drag resizes are fire-and-forget (id=None, no reply) and the layout is persisted at drag end, so the divider never blocks on a busy daemon; 46: a drag resizes the program as fast as it repaints; 44: reflow held until repaint; 43: libghostty-vt; 42: panes.resize acknowledged first; 40: shown frame in a sync block; 38: input state, extract, kitty
 RING_CAP = 256 * 1024          # output tail kept per pane
 SEND_TIMEOUT = 8.0             # pane.send: how long a message may take to enter the pane before it counts as undelivered (under the client's 10 s request timeout)
 INPUT_TIMEOUT = 1.0            # pane.input: keystrokes and pastes wait this long, then stay queued (typing must not block the panel)
@@ -2043,6 +2043,7 @@ class Daemon:
         board's own statements stay inline (single indexed CAS updates on a WAL connection,
         and keeping them here keeps every mutation of pane state on one thread).
         """
+        from misaka.core.network import dispatch
         from misaka.core.platform import tasks as db
 
         def still_ours(pane):
@@ -2069,6 +2070,17 @@ class Daemon:
                     pane.claim_lock = None          # ownership changed: observe only, never touch state
                     continue
                 if not pane.alive():
+                    try:
+                        recovered = await asyncio.to_thread(dispatch.recover_terminal_submission, con, row)
+                    except Exception:
+                        logging.getLogger(__name__).exception("Could not recover card %s after pane exit", row["id"])
+                        # A failed lookup cannot establish that the worker left no prepared submission.
+                        continue
+                    if not still_ours(pane) or pane.claim_lock != row["claim_lock"] or pane.generation != row["generation"]:
+                        continue
+                    if recovered:
+                        pane.claim_lock = None
+                        continue
                     exit_code = (
                         pane.exit_code
                         if pane.exit_code is not None
